@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -88,6 +89,29 @@ class RejectionSampler(nn.Module):
                 device=device,
             )
         self.synthetic_mode = self.synthetic_conditional_rates is not None
+
+        # Genesis P82 (gfx908, opt-in, default OFF): SGLang-style acceptance
+        # threshold OR-clause. In addition to standard rejection sampling, also
+        # accept a draft token when the target model assigns it probability
+        # >= threshold. This is LOSSY (it emits draft tokens strict sampling
+        # would reject) and trades output exactness for higher acceptance length
+        # -- intended to rescue high-n MTP where deep drafts rarely pass strict
+        # rejection. Set VLLM_GFX908_MTP_ACCEPT_THRESHOLD to a float in (0, 1];
+        # unset/<=0/>=1 disables it (mutually exclusive with synthetic mode).
+        self.p82_threshold: float | None = None
+        _p82 = os.environ.get("VLLM_GFX908_MTP_ACCEPT_THRESHOLD", "").strip()
+        if _p82 and not self.synthetic_mode:
+            try:
+                _t = float(_p82)
+            except ValueError:
+                _t = 0.0
+            if 0.0 < _t < 1.0:
+                self.p82_threshold = _t
+                logger.info(
+                    "Genesis P82 acceptance-threshold OR-clause ENABLED "
+                    "(threshold=%.3f). Speculative decoding is now LOSSY.",
+                    _t,
+                )
 
     def forward(
         self,
@@ -182,6 +206,7 @@ class RejectionSampler(nn.Module):
             synthetic_mode=self.synthetic_mode,
             synthetic_conditional_rates=self.synthetic_conditional_rates,
             use_fp64_gumbel=self.use_fp64_gumbel,
+            p82_threshold=self.p82_threshold,
         )
 
         logprobs_tensors = None
@@ -409,6 +434,7 @@ def rejection_sample(
     synthetic_mode: bool = False,
     synthetic_conditional_rates: torch.Tensor | None = None,
     use_fp64_gumbel: bool = False,
+    p82_threshold: float | None = None,
 ) -> torch.Tensor:
     assert draft_token_ids.ndim == 1
     assert draft_probs is None or draft_probs.ndim == 2
@@ -450,6 +476,16 @@ def rejection_sample(
             device,
         )
 
+    # Genesis P82: the greedy kernel's OR-clause needs target probabilities
+    # (the standard greedy path only computes the argmax). Materialize the
+    # softmax up front when P82 is on so both kernels can read target_prob.
+    p82_mode = p82_threshold is not None
+    p82_threshold_val = p82_threshold if p82_mode else 0.0
+    target_probs: torch.Tensor | None = None
+    if p82_mode:
+        target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
+        assert target_probs.is_contiguous()
+
     if not sampling_metadata.all_random:
         # Rejection sampling for greedy sampling requests.
         target_argmax = target_logits.argmax(dim=-1)
@@ -463,13 +499,18 @@ def rejection_sample(
             max_spec_len,
             uniform_probs,
             synthetic_conditional_rates,
+            target_probs,
+            vocab_size,
+            p82_threshold_val,
             SYNTHETIC_MODE=synthetic_mode,
+            P82_MODE=p82_mode,
         )
         if sampling_metadata.all_greedy:
             return output_token_ids
 
     # Compute probability distribution from target logits.
-    target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
+    if target_probs is None:
+        target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
     assert target_probs.is_contiguous()
 
     # Sample recovered tokens for each position.
@@ -501,8 +542,10 @@ def rejection_sample(
         max_spec_len,
         vocab_size,
         synthetic_conditional_rates,
+        p82_threshold_val,
         NO_DRAFT_PROBS=draft_probs is None,
         SYNTHETIC_MODE=synthetic_mode,
+        P82_MODE=p82_mode,
     )
     return output_token_ids
 
@@ -711,7 +754,7 @@ def sample_recovered_tokens(
 
 
 # NOTE(woosuk): Avoid specialization to prevent unnecessary recompilation.
-@triton.jit(do_not_specialize=["max_spec_len"])
+@triton.jit(do_not_specialize=["max_spec_len", "p82_threshold"])
 def rejection_greedy_sample_kernel(
     output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
     cu_num_draft_tokens_ptr,  # [batch_size]
@@ -722,7 +765,11 @@ def rejection_greedy_sample_kernel(
     max_spec_len,
     uniform_probs_ptr,  # [num_tokens] or None (synthetic mode only)
     synthetic_conditional_rates_ptr,  # [num_speculative_tokens] or None
+    target_probs_ptr,  # [num_tokens, vocab_size] or None (P82 mode only)
+    vocab_size,
+    p82_threshold,
     SYNTHETIC_MODE: tl.constexpr,
+    P82_MODE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     # FIXME(woosuk): Because is_greedy_ptr is not None at profiling run,
@@ -752,6 +799,20 @@ def rejection_greedy_sample_kernel(
                 accepted = (uniform_prob < rate) and draft_token_id >= 0
                 token_id = draft_token_id if accepted else target_argmax_id
                 rejected = not accepted
+            elif P82_MODE:
+                # Genesis P82 OR-clause: accept the draft token if it is the
+                # greedy argmax OR the target assigns it probability >=
+                # threshold (lossy -- emits a non-argmax draft token).
+                target_prob_draft = tl.load(
+                    target_probs_ptr
+                    + (start_idx + pos) * vocab_size
+                    + draft_token_id
+                )
+                accepted = (draft_token_id == target_argmax_id) or (
+                    target_prob_draft >= p82_threshold
+                )
+                token_id = draft_token_id if accepted else target_argmax_id
+                rejected = not accepted
             else:
                 token_id = target_argmax_id
                 rejected = draft_token_id != target_argmax_id
@@ -770,7 +831,7 @@ def rejection_greedy_sample_kernel(
 
 
 # NOTE(woosuk): Avoid specialization to prevent unnecessary recompilation.
-@triton.jit(do_not_specialize=["max_spec_len"])
+@triton.jit(do_not_specialize=["max_spec_len", "p82_threshold"])
 def rejection_random_sample_kernel(
     output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
     cu_num_draft_tokens_ptr,  # [batch_size]
@@ -784,8 +845,10 @@ def rejection_random_sample_kernel(
     max_spec_len,
     vocab_size,
     synthetic_conditional_rates_ptr,  # [num_speculative_tokens] or None
+    p82_threshold,
     NO_DRAFT_PROBS: tl.constexpr,
     SYNTHETIC_MODE: tl.constexpr,
+    P82_MODE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     is_greedy = tl.load(is_greedy_ptr + req_idx)
@@ -827,6 +890,10 @@ def rejection_random_sample_kernel(
                 # NOTE(woosuk): While the draft probability should never be 0,
                 # we check it to avoid NaNs. If it happens to be 0, we reject.
                 accepted = draft_prob > 0 and target_prob / draft_prob >= uniform_prob
+                if P82_MODE:
+                    # Genesis P82 OR-clause: also accept when the target assigns
+                    # the draft token probability >= threshold (lossy).
+                    accepted = accepted or (target_prob >= p82_threshold)
             if accepted:
                 token_id = draft_token_id
             else:
