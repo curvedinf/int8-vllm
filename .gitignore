@@ -268,3 +268,7 @@ docs/mi100_decode_opt/stage5k_inductor_trace/
 
 logs/
 .uv/
+# gfx908 kernel-tuning build snapshots (reproducible, ~100MB each)
+vllm/_C.abi3.so.*
+# Stale local build dirs
+build.stale*
