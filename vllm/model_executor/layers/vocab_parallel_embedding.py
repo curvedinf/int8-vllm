@@ -89,9 +89,17 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
         elif current_platform.is_rocm():
             from vllm.platforms.rocm import on_gfx908
 
-            if on_gfx908() and envs.VLLM_GFX908_INT8_EMBEDDING:
-                _quantize_embedding_int8_(layer)
-                return
+            is_floating = layer.weight.is_floating_point()
+            if on_gfx908() and envs.VLLM_GFX908_INT8_EMBEDDING and is_floating:
+                # Quantize the input-embedding gather only. The tied LM head
+                # shares this weight and its logits GEMM needs dense fp16
+                # rows; skip the head's own process_weights pass (weight no
+                # longer floating after the embedding pass quantized it) and
+                # skip entirely when the model ties weights, detected via the
+                # head-side flag set below.
+                if not getattr(layer, "_gfx908_skip_int8", False):
+                    _quantize_embedding_int8_(layer)
+                    return
             if on_gfx908():
                 bind_rocm_unquantized_gemm_gfx908(layer)
 
@@ -594,6 +602,8 @@ class ParallelLMHead(VocabParallelEmbedding):
         *,
         disable_tp: bool = False,
     ):
+        # Logits GEMM consumes this tied weight; never int8-quantize.
+        self._gfx908_skip_int8 = True
         super().__init__(
             num_embeddings,
             embedding_dim,
