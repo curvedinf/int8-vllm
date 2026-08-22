@@ -4,11 +4,35 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig, replace
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
     _should_share,
     get_target_lm_head,
 )
+
+logger = init_logger(__name__)
+
+
+def _resolve_dflash_attention_backend(
+    draft_backend: AttentionBackendEnum | None,
+    target_backend: AttentionBackendEnum | None,
+) -> AttentionBackendEnum | None:
+    if draft_backend is not None:
+        return draft_backend
+    # DFlash draft pages are unified with the target's in one KV cache, so the
+    # drafter's backend must be able to index the target's page layout. Inherit
+    # the target's backend instead of platform auto-selection, which can pick a
+    # backend that cannot index KV pages by block stride (e.g. ROCM_ATTN on
+    # gfx908) and fails page-size unification.
+    if target_backend is not None:
+        logger.info_once(
+            "Using the target model's %s attention backend for the DFlash "
+            "drafter.",
+            target_backend.name,
+        )
+    return target_backend
 
 
 def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
@@ -33,7 +57,10 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
         attention_config=replace(
             vllm_config.attention_config,
             use_non_causal=dflash_has_any_non_causal(draft_model_config.hf_config),
-            backend=speculative_config.attention_backend,
+            backend=_resolve_dflash_attention_backend(
+                speculative_config.attention_backend,
+                vllm_config.attention_config.backend,
+            ),
         ),
         cache_config=(
             replace(

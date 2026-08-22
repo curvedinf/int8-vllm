@@ -374,7 +374,13 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # which adds a per-call output allocation and (for dim != 0) an extra
         # copy on every step. This is on the hot path for TP forward passes, so
         # keep ROCm on the base-class collective to avoid a decode regression.
-        if current_platform.is_rocm():
+        # While capturing a CUDA graph, use pynccl instead: ProcessGroupNCCL
+        # tracks each collective with an event its watchdog polls, and querying
+        # an event recorded on a capturing stream raises
+        # hipErrorStreamCaptureUnsupported on gfx908 and kills the worker (e.g.
+        # a DFlash drafter's vocab-parallel top-k all-gathers captured in its
+        # decode graph).
+        if current_platform.is_rocm() and not torch.cuda.is_current_stream_capturing():
             return super().all_gather(input_, dim)
 
         input_size = input_.size()

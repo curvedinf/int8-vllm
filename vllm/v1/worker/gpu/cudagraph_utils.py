@@ -129,6 +129,12 @@ class CudaGraphManager:
 
         self.graphs: dict[BatchExecutionDescriptor, torch.cuda.CUDAGraph] = {}
         self.pool = current_platform.get_global_graph_pool() if cudagraph_mode else None
+        # Capture error mode passed to torch.cuda.graph. "global" forbids any
+        # unsafe CUDA API call process-wide for the duration of the capture;
+        # managers whose capture overlaps background CUDA threads (e.g. a
+        # speculator capturing while PyTorch lazily initializes an NCCL
+        # communicator on another thread) relax it to "thread_local".
+        self.capture_error_mode = "global"
 
         self._graphs_captured = False
 
@@ -362,7 +368,11 @@ class CudaGraphManager:
                             set_graph_pool_id(self.pool)
                         else:
                             set_graph_pool_id(current_platform.graph_pool_handle())
-                        with torch.cuda.graph(graph, self.pool):
+                        with torch.cuda.graph(
+                            graph,
+                            self.pool,
+                            capture_error_mode=self.capture_error_mode,
+                        ):
                             forward_fn(CUDAGraphMode.NONE)
                             # Join offloader's copy stream after forward to avoid
                             # unjoined stream error. The last layer's start_prefetch

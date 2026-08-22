@@ -76,6 +76,18 @@ class DFlashCudaGraphManager(CudaGraphManager):
     """DFlash CudaGraphManager for the parallel-drafting query forward,
     building its own attention metadata from scratch."""
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # The drafter's vocab-parallel top-k all-gathers may be the first
+        # torch.distributed collectives on the TP device group. PyTorch then
+        # lazily initializes its NCCL communicator on a background thread,
+        # whose event polls / allocations are unsafe CUDA calls under a
+        # "global"-mode capture and kill the workers on ROCm
+        # (hipErrorStreamCaptureUnsupported). "thread_local" keeps the capture
+        # validated on the capturing thread while allowing those background
+        # threads to proceed.
+        self.capture_error_mode = "thread_local"
+
     def capture(
         self,
         forward_fn: Callable,
