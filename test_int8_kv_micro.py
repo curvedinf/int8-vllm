@@ -225,6 +225,70 @@ def run_decode(num_seqs, seq_lens, num_heads, num_kv_heads, head_size, block_siz
     return ok
 
 
+def run_noncausal():
+    """Non-causal (DFlash-draft-style) int8 PTH read/write path check.
+
+    The unified kernel treats causality as a runtime flag; INT8 PTH scales
+    are applied identically. This guards that combination.
+    """
+    num_heads, num_kv_heads, head_size, block_size = 6, 1, 256, 32
+    seq_len = 512
+    # unified_attention non-causal: query attends to all KV including future
+    q = torch.randn(seq_len, num_heads, head_size, dtype=torch.float16, device="cuda")
+    k = torch.randn(seq_len, num_kv_heads, head_size, dtype=torch.float16, device="cuda")
+    v = torch.randn(seq_len, num_kv_heads, head_size, dtype=torch.float16, device="cuda")
+
+    k_q, k_sc = quantize_per_token_head(k)
+    v_q, v_sc = quantize_per_token_head(v)
+
+    from vllm.v1.attention.ops.triton_unified_attention import unified_attention
+    from vllm.v1.kv_cache_interface import KVQuantMode
+
+    num_blocks = seq_len // block_size
+    # kernel reads block_size=v.shape[1], nkv=k.shape[2] -> expects
+    # [num_blocks, block_size, num_kv_heads, head_size] (NHD)
+    kc = k_q.reshape(num_blocks, block_size, num_kv_heads, head_size).contiguous()
+    vc = v_q.reshape(num_blocks, block_size, num_kv_heads, head_size).contiguous()
+    ksc = k_sc.reshape(num_blocks, block_size, num_kv_heads).contiguous()
+    vsc = v_sc.reshape(num_blocks, block_size, num_kv_heads).contiguous()
+
+    # logical packed cache: (B, H, N, 2*hs) -> the impl passes split views
+    out = torch.empty_like(q)
+    cu = torch.tensor([0, seq_len], dtype=torch.int32, device="cuda")
+    seqused = torch.tensor([seq_len], dtype=torch.int32, device="cuda")
+    bt = torch.arange(num_blocks, dtype=torch.int32, device="cuda")[None]
+
+    unified_attention(
+        q=q, k=kc, v=vc, out=out,
+        cu_seqlens_q=cu, max_seqlen_q=seq_len,
+        seqused_k=seqused, max_seqlen_k=seq_len,
+        causal=False,
+        block_table=bt,
+        softmax_scale=head_size ** -0.5,
+        window_size=(-1, -1), softcap=0.0,
+        q_descale=None, k_descale=None, v_descale=None,
+        kv_quant_mode=KVQuantMode.INT8_PER_TOKEN_HEAD,
+        k_scale_cache=ksc.contiguous(), v_scale_cache=vsc.contiguous(),
+    )
+    # reference: dequantized non-causal attention
+    k_full = (k_q.float() * k_sc.unsqueeze(-1))
+    v_full = (v_q.float() * v_sc.unsqueeze(-1))
+    ref = torch.nn.functional.scaled_dot_product_attention(
+        q.unsqueeze(1),  # [1, H?] no — build [1, num_heads, L, D]
+        q=None, key=None, attn_mask=None,
+    ) if False else torch.zeros(1)  # placeholder replaced below
+    # proper reference
+    qs = q.permute(1, 0, 2).float()  # [H, L, D]
+    ks = k_full.permute(1, 0, 2)
+    vs = v_full.permute(1, 0, 2).repeat_interleave(num_heads, dim=0)
+    ks_r = ks.repeat_interleave(num_heads, dim=0)
+    ref = torch.nn.functional.scaled_dot_product_attention(qs, ks_r, vs)
+    ref = ref.permute(1, 0, 2).to(torch.float16)
+    max_diff = (out - ref).abs().max().item()
+    print(f"noncausal_int8_pth: max_diff={max_diff:.4e}")
+    return max_diff < 5e-2
+
+
 def main():
     torch.manual_seed(0)
     all_ok = True
@@ -258,6 +322,7 @@ def main():
         block_size=32,
         name="mixed",
     )
+    all_ok &= run_noncausal()
     print("OVERALL:", "PASS" if all_ok else "FAIL")
     return 0 if all_ok else 1
 
