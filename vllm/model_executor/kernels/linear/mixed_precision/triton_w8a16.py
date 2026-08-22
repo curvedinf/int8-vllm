@@ -242,16 +242,118 @@ def triton_w8a16_gemm_kernel(
     tl.store(c_ptrs, c, mask=mask_c)
 
 
-def _pick_block_sizes(M: int, N: int, K: int, group_size: int):
-    """Per-arch block-size heuristics for W8A16 decode.
+@triton.jit
+def triton_w8a8_gemm_kernel(
+    a_ptr,          # [M, K] int8 activations (per-128-block quantized)
+    b_ptr,          # [K, N//4] int32 GPTQ-packed weights
+    a_scales_ptr,   # [M, K//128] fp16 per-block activation scales
+    b_scales_ptr,   # [K//G, N] fp16 weight scales
+    zeros_ptr,      # packed zeros or None
+    c_ptr,          # [M, N] fp16 out
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ask,     # a_scales row stride (K//128)
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    group_size,
+    HAS_ZP: tl.constexpr,
+    ZP_BIAS: tl.constexpr,
+    ZERO_OFFSET: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,   # must equal group_size (== 128) — one scale pair per tile
+):
+    """True INT8 GEMM: C = (A_q * as) @ (B_q - z)^T * bs per K-block.
 
-    On gfx908 the GPTQ-8 dense path is HBM-bandwidth bound at decode M=1,
-    not arithmetic-bound. Tile choice optimizes for:
-      - Enough N-tiles to keep the 120 CUs busy (avoid <60 tiles)
-      - BLOCK_K = 32 (forced by group_size=32 in our checkpoint anyway)
-      - BLOCK_M = 16 (smallest MFMA tile; pads M=1 with 15/16 wasted compute,
-        which is fine when memory-bound)
+    Both A and B carry one scale per 128-wide K block. With BLOCK_K == 128 ==
+    group_size, each K-tile needs exactly one A-block scale and one B-group
+    scale; the int8xint8 dot accumulates exactly one block of products, so
+    descaling once per tile is exact (no cross-block integer overflow: max
+    |sum| = 128 * 127 * 128 < 2^31).
     """
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_bn = pid_n * (BLOCK_N // 4) + tl.arange(0, BLOCK_N // 4)
+    offs_sn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+
+    shifts_row = tl.arange(0, 4) * 8
+    shifts_1d_2d = tl.broadcast_to(shifts_row[None, :], (BLOCK_N // 4, 4))
+    shifts_1d = tl.reshape(shifts_1d_2d, (BLOCK_N,))
+    shifts = tl.broadcast_to(shifts_1d[None, :], (BLOCK_K, BLOCK_N))
+
+    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    for k_start in range(0, tl.cdiv(K, BLOCK_K)):
+        offs_k = k_start * BLOCK_K + tl.arange(0, BLOCK_K)
+        mask_k = offs_k < K
+
+        # A: int8 activations [BLOCK_M, BLOCK_K]
+        a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :]
+        mask_a = (offs_m[:, None] < M) & mask_k[None, :]
+        a_q = tl.load(a_ptrs, mask=mask_a, other=0)
+
+        # B: packed weights [BLOCK_K, BLOCK_N//4] -> int8 [BLOCK_K, BLOCK_N]
+        b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn
+        mask_b = mask_k[:, None] & (offs_bn[None, :] < N // 4)
+        b_packed = tl.load(b_ptrs, mask=mask_b, other=0)
+        b_q = tl.interleave(b_packed, b_packed)
+        b_q = tl.interleave(b_q, b_q)
+        b_q = (b_q >> shifts) & 0xFF
+        b_q = (b_q - ZP_BIAS).to(tl.int8) if not HAS_ZP else b_q
+
+        g_idx = k_start  # BLOCK_K == group_size -> tile index == group index
+
+        # zeros (if symmetric-with-bias layout: uint8b128, w = q - 128)
+        if HAS_ZP:
+            zero_offset = g_idx * (N // 4) + offs_bn
+            zero_mask = offs_bn < N // 4
+            z_packed = tl.load(zeros_ptr + zero_offset, mask=zero_mask, other=0)
+            z = tl.interleave(z_packed, z_packed)
+            z = tl.interleave(z, z)
+            z = ((z >> shifts_1d) & 0xFF) + ZERO_OFFSET
+            z = tl.broadcast_to(z[None, :], (BLOCK_K, BLOCK_N))
+            b_q = (b_q - z).to(tl.int8)
+
+        # per-block scales: A [BLOCK_M], B [BLOCK_N]
+        a_s = tl.load(
+            a_scales_ptr + offs_m * stride_ask + g_idx,
+            mask=offs_m < M, other=1.0,
+        )  # [BLOCK_M]
+        b_s = tl.load(
+            b_scales_ptr + g_idx * N + offs_sn,
+            mask=offs_sn < N, other=1.0,
+        )  # [BLOCK_N]
+
+        acc_i32 = tl.dot(a_q, b_q, out_dtype=tl.int32)  # exact int8xint8
+        accumulator += acc_i32.to(tl.float32) * (a_s[:, None] * b_s[None, :])
+
+    c = accumulator.to(c_ptr.type.element_ty)
+    c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+    mask_c = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+    tl.store(c_ptrs, c, mask=mask_c)
+
+
+def _quantize_activation_per_block(x: torch.Tensor, block_k: int = 128):
+    """Dynamic per-row per-128-K-block int8 quantization (matches sweep sim).
+
+    Returns (x_q [M,K] int8, scales [M, K//block_k] fp16)."""
+    M, K = x.shape
+    assert K % block_k == 0
+    xb = x.reshape(M, K // block_k, block_k)
+    absmax = xb.abs().amax(dim=-1, keepdim=True)
+    scale = torch.where(absmax > 0, absmax / 127.0, torch.ones_like(absmax))
+    x_q = (xb / scale).clamp_(-128, 127).round_().to(torch.int8)
+    return x_q.reshape(M, K), scale.squeeze(-1).to(torch.float16)
+
+
+def _pick_block_sizes(M: int, N: int, K: int, group_size: int):
     if current_platform.is_rocm():
         from vllm.platforms.rocm import on_gfx1x
 
@@ -426,6 +528,57 @@ def triton_w8a16_gemm(
     return c
 
 
+def triton_w8a8_gemm(
+    a: torch.Tensor,          # [M, K] fp16 raw activations
+    b_q: torch.Tensor,        # [K, N//4] int32 packed weights
+    scales: torch.Tensor,     # [K//G, N] weight scales
+    qzeros: torch.Tensor | None,
+    group_size: int,          # must be 128 (or K for -1)
+    zp_bias: int = 128,
+    zero_offset: int = 0,
+) -> torch.Tensor:
+    """A8W8: dynamic per-128-block activation quant + true int8xint8 dot.
+
+    Requires group_size == 128 (kernel assumes one weight group + one
+    activation block per BLOCK_K=128 tile)."""
+    assert group_size == 128, f"W8A8 requires gs=128, got {group_size}"
+    M, K = a.shape
+    N = b_q.shape[1] * 4
+    a_q, a_s = _quantize_activation_per_block(a, block_k=128)
+
+    c = torch.empty((M, N), dtype=a.dtype, device=a.device)
+    has_zp = qzeros is not None
+    zeros_ptr = qzeros if has_zp else b_q
+
+    # int8 dot wants BLOCK_M/BLOCK_N >= 16; large-M prefill only.
+    BLOCK_M, BLOCK_N = 64, 128
+    BLOCK_K = 128
+    grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
+
+    triton_w8a8_gemm_kernel[grid](
+        a_q, b_q, a_s, scales, zeros_ptr, c,
+        M, N, K,
+        a_q.stride(0), a_s.stride(0),
+        b_q.stride(0), b_q.stride(1),
+        c.stride(0), c.stride(1),
+        group_size=group_size,
+        HAS_ZP=has_zp,
+        ZP_BIAS=zp_bias,
+        ZERO_OFFSET=zero_offset,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        BLOCK_K=BLOCK_K,
+    )
+    return c
+
+
+_W8A8_DISPATCH_MIN_M = 256  # decode (M<256) stays on W8A16 (bandwidth-bound)
+# W8A8 only wins on the fat GEMMs (microbench 2026-08-22: 17408-wide MLP up/gate
+# 1.62x, 5120-wide 0.81-0.95x, small-N 0.61x). Gate on N too — the win scales
+# with arithmetic intensity, and narrow GEMMs pay the quant overhead back.
+_W8A8_DISPATCH_MIN_N = 8192
+
+
 class TritonW8A16LinearKernel(MPLinearKernel):
     """Triton W8A16 GEMM kernel for ROCm (gfx908 / gfx942)."""
 
@@ -559,6 +712,23 @@ class TritonW8A16LinearKernel(MPLinearKernel):
                 w_zp,
                 w_s,
                 self.use_v2_format,
+            )
+        elif (
+            x_2d.shape[0] >= _W8A8_DISPATCH_MIN_M
+            and w_q.shape[1] * 4 >= _W8A8_DISPATCH_MIN_N
+            and group_size == 128
+            and current_platform.is_rocm()
+        ):
+            # Large-M prefill: true int8xint8 compute (2x MFMA rate at half
+            # the activation bandwidth). Decode stays on the paths above —
+            # it's bandwidth-bound, so activation quant only adds overhead.
+            output = triton_w8a8_gemm(
+                a=x_2d,
+                b_q=w_q,
+                scales=w_s,
+                qzeros=w_zp,
+                group_size=group_size,
+                zp_bias=zp_bias,
             )
         else:
             output = triton_w8a16_gemm(
