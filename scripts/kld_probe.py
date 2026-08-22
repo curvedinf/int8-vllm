@@ -97,7 +97,7 @@ def run_model(model_dir: str, need_logprobs: bool):
 
     llm = LLM(
         model=model_dir,
-        tensor_parallel_size=4,
+        tensor_parallel_size=2,
         dtype="half",
         max_model_len=8192,
         gpu_memory_utilization=0.92,
