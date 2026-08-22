@@ -14,9 +14,9 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path("/home/curved/vllm-gfx908")
+ROOT = Path.home() / "vllm-gfx908"
 VENV = ROOT / ".venv"
-MODEL_DIR = "/home/curved/models/Qwen3.6-27B-GPTQ-8bit-MTP2"
+MODEL_DIR = str(Path.home() / "models" / "Qwen3.6-27B-GPTQ-8bit-MTP2")
 SERVED_MODEL_NAME = "qwen3.6-27b-gptq8"
 API_KEY_FILE = "/etc/llama/llama-api.key"
 HOST = "127.0.0.1"
@@ -116,8 +116,8 @@ def main():
             "BUILD_TARGET": "rocm",
             "MAX_JOBS": "48",
             "LD_LIBRARY_PATH": f"/opt/rocm/lib:{env.get('LD_LIBRARY_PATH', '')}",
-            "PYTHONPATH": f"{ROOT}/python_startup:{ROOT}:/home/curved/aiter:{env.get('PYTHONPATH', '')}",
-            "HF_HOME": "/home/curved/.cache/huggingface",
+            "PYTHONPATH": f"{ROOT}/python_startup:{ROOT}:{Path.home() / 'aiter'}:{env.get('PYTHONPATH', '')}",
+            "HF_HOME": str(Path.home() / ".cache" / "huggingface"),
             "OMP_NUM_THREADS": "48",
             "MKL_NUM_THREADS": "48",
             "OPENBLAS_NUM_THREADS": "48",

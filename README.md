@@ -72,11 +72,11 @@ All three repos are maintained as sibling forks, synced to upstream:
 
 | Repo | Branch | Base |
 |---|---|---|
-| `curvedinf/vllm-gfx908` | `mi100-optimized` (prod), `mi100-optimized-sync` (this update) | vllm-project/vllm main @ 2026-08 |
-| `curvedinf/aiter-gfx908` | `mi100-optimized-sync` (`e0b64a642`) | ROCm/aiter main @ 2026-08; carries int8 unified-attention + gfx908 tunings |
-| `curvedinf/flash-attention` | `gfx908-sync` (`d279da4`) | Dao-AILab/flash-attention main @ 2026-08; `third_party/aiter` submodule → the aiter fork above |
+| `<your-org>/vllm-gfx908` | `mi100-optimized` (prod), `mi100-optimized-sync` (this update) | vllm-project/vllm main @ 2026-08 |
+| `<your-org>/aiter-gfx908` | `mi100-optimized-sync` (`e0b64a642`) | ROCm/aiter main @ 2026-08; carries int8 unified-attention + gfx908 tunings |
+| `<your-org>/flash-attention` | `gfx908-sync` (`d279da4`) | Dao-AILab/flash-attention main @ 2026-08; `third_party/aiter` submodule → the aiter fork above |
 
-The aiter checkout is consumed at runtime via `PYTHONPATH=/home/curved/aiter`;
+The aiter checkout is consumed at runtime via `PYTHONPATH=~/aiter`;
 flash-attention 2.8.4 (pure-python, Triton AMD backend from the aiter fork) is
 installed in the serving venv. The CK FA backend does not apply to gfx908
 (uses gfx90a+ ISA) and is not built.
@@ -94,9 +94,9 @@ Fork-specific code that matters: Triton W8A16 kernel + repacked HIP GEMM
 - **Qwen3.8-27B-GPTQ-8bit** (int8, this fork's target model):
   **[HF upload — coming soon]** <!-- TODO: replace with the HF model URL after upload -->
 - Qwen3.6-27B-GPTQ-8bit-MTP2 (previous production model): local
-  `/home/curved/models/Qwen3.6-27B-GPTQ-8bit-MTP2`
+  `~/models/Qwen3.6-27B-GPTQ-8bit-MTP2`
 - DFlash 2 drafter: `z-lab/Qwen3.8-27B-DFlash2` (BF16, ungated)
-- Quantization recipe: `/home/curved/models/quantize_qwen38_27b_gptq8.py`
+- Quantization recipe: `~/models/quantize_qwen38_27b_gptq8.py`
   (GPTQModel 7.3.4; bits=8, group_size=32, sym, true-sequential; 512 mixed
   code+C4 calibration samples binned 256–2048)
 
@@ -131,7 +131,7 @@ is int8 per-token-head).
 
 ```bash
 # int8 KV micro-correctness (AITER unified-attention path)
-PYTHONPATH=/home/curved/aiter .venv/bin/python test_int8_kv_micro.py
+PYTHONPATH=~/aiter .venv/bin/python test_int8_kv_micro.py
 
 # post-sync battery: int8 KV at production shapes (hdim 256, GQA 6:1),
 # FA 2.8.4 interface, boot-import chain, GEMM whitelist

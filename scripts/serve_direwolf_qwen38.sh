@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="/home/curved/vllm-gfx908"
+ROOT_DIR="${HOME}/vllm-gfx908"
 VENV="${ROOT_DIR}/.venv"
-MODEL_DIR="/home/curved/models/Qwen3.8-27B-GPTQ-8bit"
+MODEL_DIR="${HOME}/models/Qwen3.8-27B-GPTQ-8bit"
 SERVED_MODEL_NAME="qwen3.8-27b-gptq8"
 LOG_DIR="${ROOT_DIR}/logs/serve_direwolf_qwen38"
 PID_FILE="${LOG_DIR}/server.pid"
@@ -25,8 +25,8 @@ COMMON_ENV=(
   BUILD_TARGET="rocm"
   MAX_JOBS="48"
   LD_LIBRARY_PATH="/opt/rocm/lib:${LD_LIBRARY_PATH:-}"
-  PYTHONPATH="${ROOT_DIR}/python_startup:${ROOT_DIR}:/home/curved/aiter:${PYTHONPATH:-}"
-  HF_HOME="/home/curved/.cache/huggingface"
+  PYTHONPATH="${ROOT_DIR}/python_startup:${ROOT_DIR}:${HOME}/aiter:${PYTHONPATH:-}"
+  HF_HOME="${HOME}/.cache/huggingface"
   OMP_NUM_THREADS="48"
   MKL_NUM_THREADS="48"
   OPENBLAS_NUM_THREADS="48"
@@ -51,7 +51,7 @@ COMMON_ENV=(
   RCCL_LOG_LEVEL="INFO"
 )
 
-DRAFT_MODEL_DIR="/home/curved/.cache/huggingface/hub/models--z-lab--Qwen3.8-27B-DFlash2/snapshots/50307d4c4cde6860d4eee73e2547cd786fe8e8a4"
+DRAFT_MODEL_DIR="${HOME}/.cache/huggingface/hub/models--z-lab--Qwen3.8-27B-DFlash2/snapshots/50307d4c4cde6860d4eee73e2547cd786fe8e8a4"
 
 ARGS=(
   serve "${MODEL_DIR}"

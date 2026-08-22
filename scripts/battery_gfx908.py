@@ -15,11 +15,12 @@ Usage: HIP_VISIBLE_DEVICES=<idle gpu> python battery_gfx908.py
 """
 
 import re
+import os
 import sys
 import traceback
 
-sys.path.insert(0, "/home/curved/aiter")
-sys.path.insert(0, "/home/curved/vllm-gfx908")
+sys.path.insert(0, os.path.expanduser("~/aiter"))
+sys.path.insert(0, os.path.expanduser("~/vllm-gfx908"))
 
 import torch
 

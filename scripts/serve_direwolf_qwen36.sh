@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="/home/curved/vllm-gfx908"
+ROOT_DIR="${HOME}/vllm-gfx908"
 VENV="${ROOT_DIR}/.venv"
-MODEL_DIR="/home/curved/models/Qwen3.6-27B-GPTQ-8bit-MTP2"
+MODEL_DIR="${HOME}/models/Qwen3.6-27B-GPTQ-8bit-MTP2"
 SERVED_MODEL_NAME="qwen3.6-27b-gptq8"
 LOG_DIR="${ROOT_DIR}/logs/serve_direwolf_qwen36"
 PID_FILE="${LOG_DIR}/server.pid"
@@ -25,8 +25,8 @@ COMMON_ENV=(
   BUILD_TARGET="rocm"
   MAX_JOBS="48"
   LD_LIBRARY_PATH="/opt/rocm/lib:${LD_LIBRARY_PATH:-}"
-  PYTHONPATH="${ROOT_DIR}/python_startup:${ROOT_DIR}:/home/curved/aiter:${PYTHONPATH:-}"
-  HF_HOME="/home/curved/.cache/huggingface"
+  PYTHONPATH="${ROOT_DIR}/python_startup:${ROOT_DIR}:${HOME}/aiter:${PYTHONPATH:-}"
+  HF_HOME="${HOME}/.cache/huggingface"
   OMP_NUM_THREADS="48"
   MKL_NUM_THREADS="48"
   OPENBLAS_NUM_THREADS="48"

@@ -543,7 +543,7 @@ Rolled back:
 
 **Learning:** AITER's default CDNA prefill tile size of 64 is a poor fit for MI100/gfx908 on this workload. A 32-token tile dramatically improves prefill efficiency. This is now the committed baseline for further AITER int8 optimization.
 
-**Action:** Committed TILE_SIZE=32 for gfx908 in `aiter/ops/triton/attention/unified_attention.py` and pushed to `curvedinf/aiter-gfx908:mi100-optimized`.
+**Action:** Committed TILE_SIZE=32 for gfx908 in `aiter/ops/triton/attention/unified_attention.py` and pushed to `<org>/aiter-gfx908:mi100-optimized`.
 
 ---
 
@@ -889,7 +889,7 @@ Rolled back:
   - mean_TTFT:             22728.87 -> 25410.63 ms (+11.8%, first-run JIT overhead)
   - mean_TPOT:             183.88 -> 134.01 ms (-27.1%)
   - bench_elapsed_sec:     97.29 -> 85.54 s
-- Commit: `1f37f3851` on `mi100-optimized`, pushed to `curvedinf/vllm-gfx908`.
+- Commit: `1f37f3851` on `mi100-optimized`, pushed to `<org>/vllm-gfx908`.
 - New baseline: `aiter_w8a16_linear`.
 - Notes: AITER a16w8_blockscale kernel JIT-compiled during the first inference,
   so TTFT includes compile time; decode latency still improved substantially.
@@ -916,7 +916,7 @@ Rolled back:
 - Change: added `_warmup` to `AiterW8A16LinearKernel`, called from
   `process_weights_after_loading`. It launches the four BLOCK_SIZE_M configs
   (M=1,17,33,65) per unique (N,K,group_size) with a per-process cache.
-- Commit: `b19e86514` on `mi100-optimized`, pushed to `curvedinf/vllm-gfx908`.
+- Commit: `b19e86514` on `mi100-optimized`, pushed to `<org>/vllm-gfx908`.
 - Full benchmark vs baseline `aiter_w8a16_linear_warmrun`:
   - output_token_throughput: 34.34 -> 35.34 tok/s (+2.9%)
   - total_token_throughput:  721.18 -> 742.16 tok/s (+2.9%)
@@ -940,7 +940,7 @@ Rolled back:
   num_stages=2, difference was small).
 - Change: for M>64, use BLOCK_SIZE_M=128, BLOCK_SIZE_N=128, num_warps=8,
   num_stages=1, waves_per_eu=1; keep decode (M<=64) configs unchanged.
-- Commit: `61e36b006` on `mi100-optimized`, pushed to `curvedinf/vllm-gfx908`.
+- Commit: `61e36b006` on `mi100-optimized`, pushed to `<org>/vllm-gfx908`.
 - Full benchmark vs baseline `aiter_w8a16_warmup`:
   - output_token_throughput: 35.34 -> 38.46 tok/s (+8.8%)
   - total_token_throughput:  742.16 -> 807.76 tok/s (+8.8%)
@@ -971,7 +971,7 @@ Rolled back:
   `waves_per_eu = 1` in the non-GFX12 (gfx908) branch of `select_3d_config`.
 - Validation: `test_int8_kv_micro.py` PASS (prefill/decode/mixed).
 - Commit: `86de211c7` on `mi100-optimized` in `../aiter`, pushed to
-  `curvedinf/aiter-gfx908` (remote corrected to `github-curvedinf`).
+  `<org>/aiter-gfx908` (remote corrected to the GitHub SSH remote).
 - Full benchmark vs baseline `aiter_w8a16_prefill_cfg`:
   - output_token_throughput: 38.46 -> 40.37 tok/s (+5.0%)
   - total_token_throughput:  807.76 -> 847.74 tok/s (+4.9%)
@@ -1042,7 +1042,7 @@ Rolled back:
 - Change: added `forward_hip` to vLLM `RMSNorm` that calls AITER Triton
   `rms_norm` / `rmsnorm2d_fwd_with_add` for M>=256 and falls back to native
   for smaller inputs. Correctness verified vs native (max diff ~4e-3).
-- Commit: `8bae23d39` on `mi100-optimized`, pushed to `curvedinf/vllm-gfx908`.
+- Commit: `8bae23d39` on `mi100-optimized`, pushed to `<org>/vllm-gfx908`.
 - Full benchmark vs baseline `aiter_attn_wpe1_warmrun`:
   - output_token_throughput: 41.77 -> 43.82 tok/s (+4.9%)
   - total_token_throughput:  877.25 -> 920.16 tok/s (+4.9%)
@@ -1147,7 +1147,7 @@ PASS.
 was never actually used before because (a) GemmaRMSNorm had no forward_hip and
 (b) the custom op was disabled by default on gfx908.
 
-**Commit:** `74b760253` on `mi100-optimized`, pushed to `curvedinf/vllm-gfx908`.
+**Commit:** `74b760253` on `mi100-optimized`, pushed to `<org>/vllm-gfx908`.
 
 **New best baseline:** `gemma_rmsnorm_aiter_enabled_warm`.
 
