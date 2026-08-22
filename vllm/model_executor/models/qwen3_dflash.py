@@ -486,8 +486,20 @@ class DFlashQwen3Model(nn.Module):
     ) -> None:
         self._hidden_norm_weight = self.hidden_norm.weight.data
 
-        # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
-        kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
+        # KV projection weights: [num_layers * 2 * kv_size, hidden_size].
+        # A quantized drafter (GPTQ int8) stores packed int8 + scales; the
+        # fused projection below runs raw F.linear, so dequantize the sliced
+        # K/V rows HERE (checkpoint layout — no repack/transposition to undo).
+        # Mirrors the #51581 fix class from the upstream PR thread.
+        def _dense_kv_rows(attn) -> torch.Tensor:
+            w = attn.qkv_proj.weight[attn.q_size :]
+            qm = getattr(attn.qkv_proj, "quant_method", None)
+            deq = getattr(qm, "dequant_kv_rows", None)
+            if deq is not None:
+                return deq(w)
+            return w
+
+        kv_weights = [_dense_kv_rows(a) for a in layers_attn]
         self._fused_kv_weight = torch.cat(kv_weights, dim=0)
         if has_bias:
             kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]

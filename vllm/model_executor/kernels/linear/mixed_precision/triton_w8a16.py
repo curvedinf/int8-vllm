@@ -641,6 +641,28 @@ class TritonW8A16LinearKernel(MPLinearKernel):
         Kernel needs:
           [K, N//4]  int32  K at dim 0, N packed at dim 1
         """
+        self._process_gptq_layout(layer)
+
+        # #51581-class fix hook: consumers that slice raw rows off
+        # layer.weight (DFlash's fused context-KV projection) need a dense
+        # dequant of the kernel-layout packed weights. Computed lazily once,
+        # cached on the layer; int8 bias (uint8b128) folded in.
+        def _dequant_rows(w_packed_or_param) -> torch.Tensor:
+            w_q, w_s, w_zp, _ = self._get_weight_params(layer)
+            # w_q: [K, N//4] int32 (kernel layout), w_s: [K//G, N]
+            K, N4 = w_q.shape
+            N = N4 * 4
+            shifts = torch.arange(4, device=w_q.device, dtype=torch.int32) * 8
+            w = ((w_q.unsqueeze(-1) >> shifts) & 0xFF).reshape(K, N)  # [K, N]
+            w = w.to(torch.int16) - 128  # uint8b128 bias
+            gs = self.config.group_size if self.config.group_size != -1 else K
+            w = w.view(K // gs, gs, N).to(w_s.dtype)
+            w = w * w_s.unsqueeze(1)  # [K//G, 1, N] broadcasts over gs
+            return w.reshape(K, N).t().contiguous()  # dense [N, K]
+
+        layer.dequant_kv_rows = _dequant_rows
+
+    def _process_gptq_layout(self, layer: torch.nn.Module) -> None:
 
         def repack_w_q(x: BasevLLMParameter) -> BasevLLMParameter:
             # Bring to [N, K//4] (output at dim 0, K packed at dim 1)
