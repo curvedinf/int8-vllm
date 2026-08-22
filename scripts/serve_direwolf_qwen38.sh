@@ -67,7 +67,6 @@ ARGS=(
   --compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["+gemma_rms_norm","+silu_and_mul","+rms_norm_gated","+rotary_embedding","+apply_rotary_emb","none"]}'
   --language-model-only
   --skip-mm-profiling
-  --disable-custom-all-reduce
   --disable-log-stats
   --disable-uvicorn-access-log
   --enable-auto-tool-choice
