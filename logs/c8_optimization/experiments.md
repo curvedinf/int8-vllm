@@ -1408,3 +1408,56 @@ concern is empirically unfounded at 8-bit for this model.
 Decision: bake gs128 + lm_head=True checkpoint (embedding int8 is the
 runtime Phase-1c path, not a GPTQ artifact property). A8W8 enable gated on
 the measured perf bench per plan.
+
+## 2026-08-22 — AITER-UA int8 state corruption: NOT reproduced post-merge
+
+Original note (pre-sync): AITER UA corrupts state after ~200 requests with
+prefix reuse, prod pinned TRITON_ATTN. Post-merge investigation:
+
+1. Suspect #1 — `_ensure_scale_caches` fill_(1.0) re-initialization racing
+   live scales: the guard (`if self._k_scale_cache is not None: return`)
+   makes re-init once-only per impl instance; the pre-sync bug class was the
+   re-derived packed-layout views (merge commit c4074aea0 context), not a
+   runtime race.
+2. Soak tests (60 iterations each, prefix-reuse pattern — cache slots
+   rewritten then read; decode [T=1] and prefill [multi-token q] paths
+   through aiter unified_attention with int8 PTH caches + fresh-cache
+   reference each iteration):
+   - decode soak: max drift 0.00006 (fp16 epsilon)
+   - prefill soak: max drift 0.00330 (quantization noise, consistent)
+   Verdict: NO corruption reproduced on the merged stack (e0b64a642 + sync).
+
+UA remains prod-off pending a 500-request live-server soak (queued after
+bakes complete — GPU-serial discipline). The micro-soaks bound the bug to
+either (a) fixed-by-merge, or (b) scheduler/cudagraph interaction not
+present in kernel-level tests.
+
+## 2026-08-22 — Full-int8 stack first light (gs128 + W8A8 + int8 embed + int8 mamba state)
+
+Server: gs128 bake, W8A8 dispatch (M>=256, N>=8192), int8 embedding (untied
+gather path; tied lm_head kept fp16 — fixed boot crash), int8_per_token_head KV,
+int8 mamba state (--mamba-ssm-cache-dtype int8, first live run).
+
+- Boot: ready; coherent greedy output.
+- Single-stream (3x256 tok): **22.88 tok/s** vs gs32 no-spec 22.1-24.9 — parity
+  (decode is bandwidth-bound; int8 weights/KV/state already in baseline).
+- C8 (8x, in 32/out 1000): **128.0 tok/s**, TTFT 3576ms (gs32: 128.0 tok/s,
+  TTFT 4133ms) — parity throughput, **-13.5% TTFT** from W8A8 prefill GEMMs.
+
+Fixed en route: int8 embedding on tied weights crashed the head GEMM
+(fp16 x int8); ParallelLMHead now sets _gfx908_skip_int8 (commit 941e8421f).
+
+## 2026-08-22 — DFlash2 drafter on the int8 stack (dequantized-dense drafter)
+
+Drafter E2E integration (5 boot fixes: tokenizer-less GPTQModel load, HF arch-tag
+mangling, vLLM weight-prefix/layout mismatch, quant-config propagation to draft,
+OOM at 0.95 util): server boots with DFlash2 spec ns=7, 0.90 util.
+
+Result: **11.7 tok/s single-stream vs 22.9 no-spec** (0.51x) — same compute-bound
+verdict as the BF16 drafter (0.52x). Drafter weights dequantized to dense fp16
+(GPTQ storage rejected by the draft model loader; calibration benefit retained
+bit-exact in the dequant, verified 0.0000 rel err vs source). The #51541-class
+dequant_kv_rows hook remains in the code for future quantized drafters.
+
+Verdict: DFlash2 stays OFF in production on gfx908 regardless of drafter precision
+— the target's verify batch dominates. No-spec remains the shipping config.

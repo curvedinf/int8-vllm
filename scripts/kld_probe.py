@@ -121,10 +121,10 @@ def run_model(model_dir: str, need_logprobs: bool):
             [
                 {
                     int(tid): float(lp.logprob)
-                    for tid, lp in (pos.logprobs or {0: None}).items()
+                    for tid, lp in (pos or {}).items()
                     if lp is not None
                 }
-                for pos in o.logprobs  # per generated position (None for first)
+                for pos in o.outputs[0].logprobs  # per generated position (None for first)
                 if pos is not None
             ]
             for o in lp_out
