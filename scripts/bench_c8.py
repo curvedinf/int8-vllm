@@ -109,6 +109,8 @@ def main():
         env = os.environ.copy()
         env.update({
             "PATH": f"{VENV}/bin:{env.get('PATH', '')}",
+            # Match prod serve script: AITER W8A16 garbles outputs on gfx908.
+            "VLLM_DISABLED_KERNELS": "AiterW8A16LinearKernel",
             "ROCM_PATH": "/opt/rocm",
             "HIP_PATH": "/opt/rocm",
             "GPU_ARCHS": "gfx908",
