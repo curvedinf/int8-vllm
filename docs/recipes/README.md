@@ -89,3 +89,14 @@ non-discriminative at 27B scale — don't use it as the gate.
 - DFlash2 spec throughput was 0.51× in the FIRST measurement — that path was
   unoptimized and the user has ruled it stays ON; the optimization pass is
   the next phase of work, not a reason to disable it
+
+## Next-session optimization queue (do not lose)
+
+1. **AITER_CUSTOM all-reduce on gfx908**: port `module_custom_all_reduce`
+   past the fp8-conversion-insts build failure in the aiter fork
+   (scalar fallbacks under `#if defined(__gfx908__)`, same pattern as the
+   fork's existing patches). Then benchmark AITER_CUSTOM vs vLLM
+   CustomAllreduce on ROCm 7.14 — aiter was upgraded since the last -17%
+   measurement; that number is stale.
+2. Spec-path tuning pass (ns sweep, verify-batch cost profile) — DFlash2
+   stays ON regardless; make it win.
