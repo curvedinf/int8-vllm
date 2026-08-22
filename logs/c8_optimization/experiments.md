@@ -1310,3 +1310,101 @@ attn_stages=1`.
 
 
 
+
+## 2026-08-22 — Post-upstream-sync regression check (qwen3.6 canary)
+
+Stack: vllm `mi100-optimized-sync` f9da7a95b (upstream main merge; 84 fork
+commits re-applied per audit) + aiter `mi100-optimized-sync` e0b64a642 +
+flash-attn 2.8.4 python-only + rebuilt HIP extensions.
+
+Run 1 (`post_sync_regression_q36_int8pth_mtp`): boot failed — upstream merge
+dropped `TQFullAttentionSpec` while `platforms/interface.py` still imports it.
+Fixed by restoring the 26-line fork class (commit "Restore
+TQFullAttentionSpec lost in upstream merge").
+
+Run 2 (`post_sync_regression_q36_int8pth_mtp_v2`): INVALID comparison —
+bench_c8.py did not set `VLLM_DISABLED_KERNELS`, so the engine selected
+`AiterW8A16LinearKernel` (the kernel known to garble outputs on gfx908).
+114.02 out tok/s recorded for reference only. Harness fixed to force
+`AiterW8A16LinearKernel` off, matching the prod serve script.
+
+Run 3 (`post_sync_regression_q36_int8pth_mtp_v3`, TritonW8A16 confirmed):
+- Output: **118.41 tok/s** (baseline iter3 int8-KV: 129.92) → **−8.9%**
+- Total: 122.19 tok/s; mean TPOT 54.8 ms; mean TTFT 8.38 s
+
+Verdict: upstream sync costs ~9% on C8 decode despite perf patches
+re-applied. Prime suspects: upstream attention refactor (#44455/#51704
+packed-KV layout) interacting with gfx908 tuning (TILE_SIZE=32, adaptive
+split-K), and the MTP draft-decode path now running upstream's #46849
+multi-step graph code (fork's FULL_DECODE_ONLY patch dropped as superseded).
+Follow-up: attention re-tune bench day. Not blocking the Qwen3.8 + DFlash2
+rollout; both old and new stacks measured on the same harness.
+
+## 2026-08-22 — Qwen3.8-27B GPTQ8 + DFlash2 first light
+
+Stack: same post-sync tree (f9da7a95b + c4074aea0 DFlash2 gfx908 fixes) +
+~/models/Qwen3.8-27B-GPTQ-8bit (gptqmodel 7.3.4, bits=8 gs=32 sym, 512
+mixed code+C4 samples, single-GPU ~2h45m) + z-lab/Qwen3.8-27B-DFlash2
+drafter (unquantized, draft KV float16 via SpeculativeConfig.kv_cache_dtype,
+num_spec=7). Target KV int8_per_token_head. TP4 XGMI.
+
+Boot fixes needed (commit c4074aea0):
+1. Draft attention backend must inherit the target's (TRITON_ATTN) — platform
+   auto-selection picked ROCM_ATTN which lacks get_kv_cache_stride_order →
+   int8-PTH (520B) vs draft-fp16 (512B) pages cannot unify.
+2. ROCm: vocab-parallel all_gather inside draft graph capture → route through
+   pynccl while capturing.
+3. DFlash2 graphs capture with capture_error_mode="thread_local" (NCCL
+   watchdog / lazy comm-init on background threads vs "global" mode).
+
+Results:
+- Boot: ready; DFlash2 graphs captured 8/8; KV cache 529,621 tokens.
+- Correctness: coherent greedy output (palindrome fn correct, capital QA
+  correct); tests/v1/spec_decode/test_dflash_causality.py 13 pass,
+  test_dflash2.py 5 pass.
+- C8 random (8x, in 32/out 1000): **64.0 tok/s** output, TTFT 688ms —
+  random tokens => near-zero acceptance; DFlash2 pays full draft+verify
+  overhead. Expected worst case (matches DFlash v1 gfx908 result shape).
+- Single-stream realistic (3 prompts x 256 tok, greedy): **12.4-12.7 tok/s**.
+  No-spec control measured separately (row below when complete).
+
+## 2026-08-22 — Qwen3.8-27B DFlash2 vs no-spec A/B (same stack, same day)
+
+| Workload | no-spec | DFlash2 (ns=7) | ratio |
+|---|---|---|---|
+| Single-stream realistic (3 prompts x 256 tok, greedy) | 22.1-24.9 tok/s | 12.4-12.7 tok/s | **0.52x** |
+| C8 random (8x, in 32 / out 1000) | 128.0 tok/s | 64.0 tok/s | **0.50x** |
+
+Verdict mirrors DFlash v1 on gfx908 (BENCH_DFLASH_GFX908): DFlash2 is
+functionally correct with coherent output on the int8-native stack, but
+net-negative in throughput on every workload measured — CDNA1 compute-bound
+decode cannot absorb the wider verify batch + draft forward, and acceptance
+on random tokens collapses. Production recommendation: serve Qwen3.8-27B
+GPTQ8 with speculation OFF (serve script comment documents how); keep the
+DFlash2 plumbing — it is now the only spec-decode path validated on this
+stack, and a future bandwidth-bound config (or lighter ns) may flip the
+trade. Both rows measured on identical harness/stack.
+
+## 2026-08-22 — Fake-quant precision sweep (teacher-forced KLD, 64-prompt corpus)
+
+Reference = simulated gs-32 RTN (matches prod W8A16 weights view). Variants
+scored teacher-forced on identical reference-generated sequences (25,300
+positions). RTN upper-bounds GPTQ error (Hessian compensation only improves).
+
+| config | KLD | agree@16tok | verdict |
+|---|---:|---:|---|
+| gs128 (weights only) | 0.0109 | 74.4% | pass (kld) |
+| gs128 + act quant | 0.0141 | 64.6% | pass |
+| gs128 + act + lm_head | 0.0142 | 64.6% | pass |
+| gs128 + act + embed | 0.0163 | 61.5% | pass |
+| **gs128 + act + lm_head + embed** | **0.0163** | **61.5%** | **SHIP (winner)** |
+
+Free-rollout 256-token agreement (20-33%) is non-discriminative for a 27B
+(0.011 KLD already compounds to median-23-token divergence) — replaced by
+agree@16/32 for the secondary metric. Activation quant at gs=128 adds only
++0.0032 KLD; lm_head adds +0.0001; embedding +0.0022. The A16-necessity
+concern is empirically unfounded at 8-bit for this model.
+
+Decision: bake gs128 + lm_head=True checkpoint (embedding int8 is the
+runtime Phase-1c path, not a GPTQ artifact property). A8W8 enable gated on
+the measured perf bench per plan.
