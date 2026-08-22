@@ -74,8 +74,8 @@ ARGS=(
   --tool-call-parser qwen3_coder
   --default-chat-template-kwargs '{"enable_thinking":false}'
   --override-generation-config '{"temperature":0.6,"top_p":0.95,"top_k":20,"min_p":0.0,"presence_penalty":0.0,"repetition_penalty":1.0}'
-  --kv-cache-dtype int8_per_token_head
-  # Target: int8 per-token-head KV. DFlash2 spec ON (int8 drafter, int8 draft KV):
+  --kv-cache-dtype int8_per_token_head --mamba-ssm-cache-dtype int8
+  # Target: int8 KV + int8 mamba state. DFlash2 spec ON (int8 drafter, int8 draft KV):
   # the earlier 0.5x was an unoptimized path; spec gets its own tuning pass.
   --speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":7,"kv_cache_dtype":"int8_per_token_head"}'
 )
