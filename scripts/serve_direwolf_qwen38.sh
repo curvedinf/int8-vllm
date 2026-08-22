@@ -51,7 +51,7 @@ COMMON_ENV=(
   RCCL_LOG_LEVEL="INFO"
 )
 
-DRAFT_MODEL_DIR="${HOME}/.cache/huggingface/hub/models--z-lab--Qwen3.8-27B-DFlash2/snapshots/50307d4c4cde6860d4eee73e2547cd786fe8e8a4"
+DRAFT_MODEL_DIR="${HOME}/.cache/huggingface/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit"
 
 ARGS=(
   serve "${MODEL_DIR}"
@@ -62,7 +62,7 @@ ARGS=(
   --dtype half
   --max-model-len 65536
   --max-num-seqs 8
-  --gpu-memory-utilization 0.95
+  --gpu-memory-utilization 0.90
   --attention-backend TRITON_ATTN
   --compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["+gemma_rms_norm","+silu_and_mul","+rms_norm_gated","+rotary_embedding","+apply_rotary_emb","none"]}'
   --language-model-only
@@ -75,16 +75,9 @@ ARGS=(
   --default-chat-template-kwargs '{"enable_thinking":false}'
   --override-generation-config '{"temperature":0.6,"top_p":0.95,"top_k":20,"min_p":0.0,"presence_penalty":0.0,"repetition_penalty":1.0}'
   --kv-cache-dtype int8_per_token_head
-  # Target: int8 per-token-head KV (W8A16 GPTQ int8 weights, fp16 activations).
-  #
-  # DFlash2 speculative decoding: measured NET-NEGATIVE on MI100 (2026-08-22
-  # A/B: 128 -> 64 tok/s C8, 22-25 -> 12-13 single-stream; CDNA1 decode is
-  # compute-bound and cannot absorb the wider verify batch). Default OFF.
-  # To enable: uncomment the block below. Method "dflash" (DFlash2 is
-  # auto-detected from the draft architecture); draft KV must be float16 —
-  # quantized drafters are broken upstream (#51581) and no non-causal backend
-  # implements per-token-head int8 writes.
-  # --speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":7,"kv_cache_dtype":"float16"}'
+  # Target: int8 per-token-head KV. DFlash2 spec ON (int8 drafter, int8 draft KV):
+  # the earlier 0.5x was an unoptimized path; spec gets its own tuning pass.
+  --speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":7,"kv_cache_dtype":"int8_per_token_head"}'
 )
 
 usage() {
