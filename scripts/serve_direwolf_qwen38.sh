@@ -76,11 +76,15 @@ ARGS=(
   --override-generation-config '{"temperature":0.6,"top_p":0.95,"top_k":20,"min_p":0.0,"presence_penalty":0.0,"repetition_penalty":1.0}'
   --kv-cache-dtype int8_per_token_head
   # Target: int8 per-token-head KV (W8A16 GPTQ int8 weights, fp16 activations).
-  # Draft: DFlash2 must run float16/unquantized KV (upstream #51581 forbids
-  # quantized drafters; and no non-causal backend implements per-token-head
-  # int8 writes). Method is "dflash" — DFlash2 is auto-detected from the
-  # draft's DFlash2DraftModel architecture.
-  --speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":7,"kv_cache_dtype":"float16"}'
+  #
+  # DFlash2 speculative decoding: measured NET-NEGATIVE on MI100 (2026-08-22
+  # A/B: 128 -> 64 tok/s C8, 22-25 -> 12-13 single-stream; CDNA1 decode is
+  # compute-bound and cannot absorb the wider verify batch). Default OFF.
+  # To enable: uncomment the block below. Method "dflash" (DFlash2 is
+  # auto-detected from the draft architecture); draft KV must be float16 —
+  # quantized drafters are broken upstream (#51581) and no non-causal backend
+  # implements per-token-head int8 writes.
+  # --speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":7,"kv_cache_dtype":"float16"}'
 )
 
 usage() {

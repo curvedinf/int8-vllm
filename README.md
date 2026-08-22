@@ -7,11 +7,13 @@ specifically for 4x AMD Instinct MI100 (gfx908 / CDNA1) over XGMI. MI100 gets
 bandwidth — so this branch treats **int8 as the native dtype** across the
 whole model surface and exploits it everywhere it wins.
 
-> **Optimized configuration:** Qwen3.8-27B (GPTQ int8) + DFlash 2 speculative
-> decoding + FlashAttention 2 (Triton) + int8 per-token-head KV cache + TP4
-> with XGMI custom all-reduce. Most other combinations (other models, TP1/TP2,
-> fp16/bf16 KV, no speculation, MTP) work but are not tuned; only the
-> configuration above is optimized.
+> **Optimized configuration:** Qwen3.8-27B (GPTQ int8) + FlashAttention 2
+> (Triton) + int8 per-token-head KV cache + TP4 with XGMI. Most other
+> combinations (other models, TP1/TP2, fp16/bf16 KV, MTP) work but are not
+> tuned; only the configuration above is optimized. DFlash 2 speculative
+> decoding is wired and validated but OFF by default — it is net-negative on
+> this compute-bound GPU (see performance section); enable per the serve
+> script when a workload justifies it.
 
 ## Performance
 
@@ -42,15 +44,22 @@ Kernel-level gains recorded during tuning: attention `waves_per_eu=1` +8.7%
 output, decode `num_warps=4/num_stages=1` −6.2% TPOT, AITER lm_head GEMM
 small-M config 1.74x vs rocBLAS.
 
-### Qwen3.8-27B + DFlash 2 (this branch's target config)
+### Qwen3.8-27B (this branch's target model)
 
-| Workload | Output tok/s | Notes |
-|---|---:|---|
-| C8 (8 conc, in 32 / out 1000) | *pending* | post-upstream-sync re-measure |
-| Acceptance length (DFlash2, k=7) | *pending* | vs MTP-2 ≈ 2.0 |
-| 20:1 PP:TG (in 5000 / out 250) | *pending* | |
+Measured 2026-08-22 on the post-sync stack, same harness, same day:
 
-*(Rows will be filled from `scripts/bench_c8.py` A/B vs the Qwen3.6 service.)*
+| Workload | no-spec | DFlash2 (ns=7) |
+|---|---:|---:|
+| C8 (8 conc, in 32 / out 1000, random) | **128.0 tok/s** | 64.0 tok/s |
+| Single-stream realistic (greedy, 256 tok) | **22.1–24.9 tok/s** | 12.4–12.7 tok/s |
+
+DFlash2 is functionally correct on gfx908 (coherent greedy output, causal
+tests pass) but net-negative in throughput: CDNA1 decode is compute-bound and
+cannot absorb the wider verify batch — the same shape as DFlash v1's result.
+**Production default: no speculation** (the serve script documents the
+spec-on override). The DFlash2 path is kept and validated for when a
+bandwidth-bound config flips the trade; full A/B in
+`logs/c8_optimization/experiments.md`.
 
 ## Int8 doctrine — what runs where
 
@@ -103,7 +112,8 @@ Fork-specific code that matters: Triton W8A16 kernel + repacked HIP GEMM
 ## Serving
 
 ```bash
-# Qwen3.8-27B int8 + DFlash2 (target config)
+# Qwen3.8-27B int8 (target config, no speculation by default;
+# see the DFLASH spec-on override documented inside the script)
 scripts/serve_direwolf_qwen38.sh {start|stop|restart|status}
 
 # systemd
