@@ -6,6 +6,16 @@ upstream contribution rules (appendix below) still apply to anything destined
 for vllm-project/vllm — but this repo is a deployment fork and is not
 upstreamed directly.
 
+## THE BASELINE (read first)
+
+`docs/recipes/README.md` is the canonical baseline. Every feature listed there
+(gs128 int8 checkpoint, W8A8/W8A16 dispatch, int8 KV/mamba/embedding, DFlash2
+spec ON with the int8 drafter) is load-bearing and measured. Do NOT disable
+them — especially DFlash2 speculative decoding, which stays ON by explicit
+user directive even where older notes suggested otherwise. Historical
+experiments are archived (`~/archived-logs-20260822.tar.gz`, git history);
+the experiment ledger lives on from this point under `logs/` fresh.
+
 ## The one paragraph you must internalize
 
 This is the fastest vLLM branch for 4x AMD Instinct MI100 (gfx908 / CDNA1,
@@ -103,7 +113,7 @@ service.
 
 ## Testing ladder (run in this order after any stack change)
 
-1. **Micro** (idle GPU ok): `PYTHONPATH=~/aiter .venv/bin/python test_int8_kv_micro.py`
+1. **Micro** (idle GPU ok): `PYTHONPATH=~/aiter .venv/bin/python scripts/test_int8_kv_micro.py`
    — int8 per-token-head attention vs fp16 reference.
 2. **Battery** (idle GPU ok): `HIP_VISIBLE_DEVICES=<idle> .venv/bin/python scripts/battery_gfx908.py`
    — production shapes (hdim 256, GQA 6:1), FA 2.8.4 interface, boot import
