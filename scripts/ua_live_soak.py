@@ -48,7 +48,9 @@ SALAD = re.compile(r"(.)\1{12,}")
 def check_reply(text: str) -> str | None:
     if not text or not text.strip():
         return "empty reply"
-    if len(text.strip()) < 8:
+    if SALAD.search(text):
+        return "character salad (single char x13+)"
+    if len(text.strip()) < 3:
         return "suspiciously short reply"
     if SALAD.search(text):
         return "character salad (single char x13+)"
@@ -82,7 +84,9 @@ def one_request(url: str, key: str, model: str, prompt: str, max_tokens: int, se
     )
     with urllib.request.urlopen(req, timeout=180) as r:
         out = json.loads(r.read())
-    return out["choices"][0]["message"].content or ""
+    msg = out["choices"][0]["message"]
+    content = msg.get("reasoning_content") or msg.get("content") or ""
+    return content if isinstance(content, str) else str(content)
 
 
 def main():

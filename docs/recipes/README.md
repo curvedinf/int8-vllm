@@ -66,6 +66,16 @@ retired qwen36 unit).
 3. `scripts/kld_probe.py capture|compare` — real-artifact KLD gate
    (needs `NCCL_ALGO=Ring NCCL_PROTO=Simple` env; TP small when a server is up)
 4. Coherence curl against the booted server
+5. `.venv/bin/python scripts/ua_live_soak.py -n 500` — live correctness soak
+   (2026-08-23: **500/500 coherent** on the SPEC=1 AR=0 baseline — true
+   GPTQ-int8 drafter, float16 draft KV, RCCL all-reduce)
+
+## Baseline status (2026-08-23)
+
+The coherent spec-on int8 baseline is: target GPTQ-int8 gs128 + int8 PTH KV
++ int8 mamba state + DFlash2 spec (int8 drafter, float16 draft KV) + TP4
+XGMI + AR via RCCL. Known-open items: aiter-CAR race (see landmines),
+aiter-UA re-test on this clean baseline, FA2 fork wiring.
 
 ## KLD gate reference numbers (2026-08-22 sweep, teacher-forced)
 
