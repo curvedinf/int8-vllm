@@ -38,6 +38,13 @@ COMMON_ENV=(
   VLLM_TARGET_DEVICE="rocm"
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="1800"
   VLLM_ROCM_USE_AITER="1"
+  # aiter CAR disabled in serving: a cross-rank race in the CAR kernels
+  # corrupts output under the serving scheduler (nondeterministic; kernel
+  # fix 117602333 removed the graph-capture variant but eager-prefill ARs
+  # still corrupt). Track: aiter fork test_car_graph_repro.py. Until fixed,
+  # AR falls through to RCCL/PYNCCL (custom-all-reduce fully disabled).
+  # vLLM's own CustomAllreduce is NOT used (user directive).
+  VLLM_ROCM_USE_AITER_CUSTOM_AR="0"
   VLLM_ROCM_USE_AITER_TRITON_GEMM="1"
   VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION="0"
   # AITER a16w8_blockscale/a8w8_blockscale for GPTQ 8-bit on gfx908 produces
@@ -51,7 +58,7 @@ COMMON_ENV=(
   RCCL_LOG_LEVEL="INFO"
 )
 
-DRAFT_MODEL_DIR="${HOME}/.cache/huggingface/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit"
+DRAFT_MODEL_DIR="${DRAFT_MODEL_DIR:-${HOME}/.cache/huggingface/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit}"
 
 ARGS=(
   serve "${MODEL_DIR}"
@@ -62,7 +69,7 @@ ARGS=(
   --dtype half
   --max-model-len 65536
   --max-num-seqs 8
-  --gpu-memory-utilization 0.90
+  --gpu-memory-utilization 0.86
   --attention-backend TRITON_ATTN
   --compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["+gemma_rms_norm","+silu_and_mul","+rms_norm_gated","+rotary_embedding","+apply_rotary_emb","none"]}'
   --language-model-only
@@ -74,10 +81,25 @@ ARGS=(
   --default-chat-template-kwargs '{"enable_thinking":false}'
   --override-generation-config '{"temperature":0.7,"top_p":0.80,"top_k":20,"min_p":0.0,"presence_penalty":1.5,"repetition_penalty":1.0}'
   --kv-cache-dtype int8_per_token_head --mamba-ssm-cache-dtype int8
-  # Target: int8 KV + int8 mamba state. DFlash2 spec ON (int8 drafter, int8 draft KV):
-  # the earlier 0.5x was an unoptimized path; spec gets its own tuning pass.
-  --speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":7,"kv_cache_dtype":"int8_per_token_head"}'
 )
+
+# Target: int8 KV + int8 mamba state. DFlash2 spec is the production default;
+# SPEC=0 boots no-spec, AR=0 disables custom all-reduce (bisection toggles).
+SPEC="${SPEC:-1}"
+AR="${AR:-0}" # default: RCCL all-reduce (aiter CAR pending race fix; vLLM CAR excluded)
+ARFUSE="${ARFUSE:-1}"
+if [[ "${SPEC}" == "1" ]]; then
+  ARGS+=(
+    --speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":7,"kv_cache_dtype":"float16"}'
+  )
+fi
+if [[ "${AR}" != "1" ]]; then
+  ARGS+=(--disable-custom-all-reduce)
+fi
+if [[ "${ARFUSE}" != "1" ]]; then
+  # keep custom AR but disable the AR+RMS(+quant) compiler fusion (bisection)
+  ARGS+=(--compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["+gemma_rms_norm","+silu_and_mul","+rms_norm_gated","+rotary_embedding","+apply_rotary_emb","none"],"pass_config":{"fuse_allreduce_rms":false}}')
+fi
 
 usage() {
   printf 'usage: %s {start|stop|restart|status|supervise}\n' "$0"

@@ -52,13 +52,14 @@ retired qwen36 unit).
   `--group-size 128` (single GPU, ~3h; `--lm-head` OOMs on 32GB — deferred)
 - Drafter: `~/models/quantize_dflash2_int8.py` (GPU0, ~3h) **then remap**
   (`docs/recipes/drafter_remap.py`): gptqmodel saves with a `model.` prefix,
-  mangles the arch tag to `Qwen3ForCausalLM`, and quantizes conv/selector
-  params that must stay dense. The remap fixes all three and restores
-  `DFlash2DraftModel`.
+  mangles the arch tag to `Qwen3ForCausalLM`, quantizes conv/selector
+  params that must stay dense, and re-restores dense `.weight` for modules
+  that carry GPTQ tensors (two loader sources). The remap fixes all four
+  and restores `DFlash2DraftModel`.
 
 ## Validation gates (run these, in order, after any stack change)
 
-1. `PYTHONPATH=~/aiter .venv/bin/python test_int8_kv_micro.py` — int8 PTH
+1. `PYTHONPATH=~/aiter .venv/bin/python scripts/test_int8_kv_micro.py` — int8 PTH
    attention incl. non-causal (2.4e-4)
 2. `HIP_VISIBLE_DEVICES=<idle> .venv/bin/python scripts/battery_gfx908.py`
    — prod shapes, FA interface, boot imports, gemm whitelist (4/4)
@@ -92,11 +93,12 @@ non-discriminative at 27B scale — don't use it as the gate.
 
 ## Next-session optimization queue (do not lose)
 
-1. **AITER_CUSTOM all-reduce on gfx908**: port `module_custom_all_reduce`
-   past the fp8-conversion-insts build failure in the aiter fork
-   (scalar fallbacks under `#if defined(__gfx908__)`, same pattern as the
-   fork's existing patches). Then benchmark AITER_CUSTOM vs vLLM
-   CustomAllreduce on ROCm 7.14 — aiter was upgraded since the last -17%
-   measurement; that number is stale.
+1. **AITER_CUSTOM vs vLLM CustomAllreduce bench on ROCm 7.14**: the aiter
+   fork build is DONE — `module_custom_all_reduce` builds on gfx908
+   (bda53078d) plus fused AR+RMSNorm+per-group INT8 quant-out (527da7d1d,
+   bit-exact vs vLLM `_quantize_activation_per_block` semantics; test in
+   `op_tests/multigpu_tests/test_fused_ar_rms_int8_quant.py`). Remaining:
+   wire the vLLM consumer + benchmark both ARs (the old -17% number is from
+   ROCm 7.2, stale).
 2. Spec-path tuning pass (ns sweep, verify-batch cost profile) — DFlash2
    stays ON regardless; make it win.

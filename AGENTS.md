@@ -98,9 +98,12 @@ scripts/serve_direwolf_qwen36.sh ...                                    # Qwen3.
 Non-negotiable flags in the qwen38 script (edit only with bench data):
 `--tensor-parallel-size 4 --dtype half --attention-backend TRITON_ATTN
 --kv-cache-dtype int8_per_token_head` and the speculative config
-`{"method":"dflash2","num_speculative_tokens":7,"kv_cache_dtype":"fp16"}`
-— the draft's KV **must** stay fp16 (non-causal attention has no
-per-token-head int8 write path; inheriting int8 silently corrupts).
+`{"method":"dflash","num_speculative_tokens":7,"kv_cache_dtype":"float16"}`
+— the draft's KV **must** stay fp16 with TRITON_ATTN: the non-causal draft
+write path has no per-token-head int8 support there, and inheriting int8
+corrupts output (verified live 2026-08-23: int8 draft KV → target salad;
+fp16 draft KV → coherent). The aiter-UA non-causal int8 READ test
+(`scripts/test_int8_kv_micro.py`) does not cover this write path.
 `VLLM_DISABLED_KERNELS=AiterW8A16LinearKernel` is required — the AITER W8A16
 blockscale kernel garbles outputs on gfx908; the Triton W8A16 kernel is the
 correct one. `VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=0` in prod (state
@@ -124,12 +127,11 @@ service.
 4. **E2E**: qwen3.8 + DFlash2 via the serve script; greedy-equivalence vs
    no-spec; DFlash2 acceptance length; C8 throughput.
 
-Validation doctrine: `logs/c8_optimization/experiments.md` is the single
-source of truth for perf claims. Every optimization lands with an A/B row
-there. Headline baselines: C8 fp8+no-MTP 112.35 → int8 KV 129.92 tok/s;
-20:1 long-context TRITON_ATTN 28.09 out tok/s (TPOT 166.9 ms), AITER-UA int8
-experimental track 54.81 (TPOT 75.7 ms). If a change has no A/B row, it did
-not happen.
+Validation doctrine: `docs/recipes/README.md` is the baseline record for
+this "get it working" pass; the historical A/B ledger was archived to git
+history (see `logs/` before the fresh-slate commit). Optimization passes
+should re-establish an A/B ledger there before tuning. No perf claim
+without a reproducible A/B row.
 
 ## Quantizing a model
 
