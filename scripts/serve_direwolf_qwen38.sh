@@ -75,7 +75,6 @@ ARGS=(
   --compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["+gemma_rms_norm","+silu_and_mul","+rms_norm_gated","+rotary_embedding","+apply_rotary_emb","none"]}'
   --language-model-only
   --skip-mm-profiling
-  --disable-log-stats
   --disable-uvicorn-access-log
   --enable-auto-tool-choice
   --tool-call-parser qwen3_coder
@@ -90,15 +89,25 @@ UA="${UA:-0}"
 if [[ "${UA}" != "1" ]]; then
   ARGS+=(--attention-backend TRITON_ATTN)
 fi
+# LOGSTATS=1 enables periodic engine/spec-decode stat logging
+# (default off: --disable-log-stats).
+if [[ "${LOGSTATS:-0}" != "1" ]]; then
+  ARGS+=(--disable-log-stats)
+fi
 
 # Target: int8 KV + int8 mamba state. DFlash2 spec is the production default;
 # SPEC=0 boots no-spec, AR=0 disables custom all-reduce (bisection toggles).
 SPEC="${SPEC:-1}"
 AR="${AR:-0}" # default: RCCL all-reduce (aiter CAR pending race fix; vLLM CAR excluded)
 ARFUSE="${ARFUSE:-1}"
+# Spec-decode token budget: default stays 2048 — swept 8192 (dd9a2b5ef's
+# MTP n=3 value) on 2026-08-23: TTFT 1308->600ms but TPOT 107->124ms, C8
+# flat. Net-negative for C8 decode-bound; MNBT env remains for re-sweeps.
+MNBT="${MNBT:-2048}"
+ARGS+=(--max-num-batched-tokens "${MNBT}")
 if [[ "${SPEC}" == "1" ]]; then
   ARGS+=(
-    --speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":7,"kv_cache_dtype":"float16"}'
+    --speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":'"${NS:-7}"',"kv_cache_dtype":"float16"}'
   )
 fi
 if [[ "${AR}" != "1" ]]; then
