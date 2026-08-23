@@ -29,10 +29,14 @@ def remap(dequant: bool):
         if any(s in k for s in SKIP_DENSE):
             continue
         out[base] = v
-    # restore dense params from bf16 source
+    # restore dense params from bf16 source (skip modules that carry GPTQ
+    # tensors — restoring their dense .weight leaves the loader two sources)
     bf16 = load_file(os.path.expanduser(
         '~/models/dflash2-bf16-with-tokenizer/model.safetensors'))
+    quantized = {k.rsplit('.', 1)[0] for k in out if k.endswith('.qweight')}
     for k, v in bf16.items():
+        if k.endswith('.weight') and k[:-len('.weight')] in quantized:
+            continue
         out.setdefault(k, v)
     if dequant:
         prefixes = {k.rsplit('.', 1)[0] for k in out if k.endswith('.qweight')}

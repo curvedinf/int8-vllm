@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import io
+import re
 from collections.abc import Iterable
 
 import torch
@@ -53,6 +54,39 @@ logger = init_logger(__name__)
 
 
 _SLIDING_ATTENTION = "sliding_attention"
+
+
+def _shift_draft_quant_modules(
+    quant_config: QuantizationConfig | None, start_layer_id: int
+) -> None:
+    """The GPTQ checkpoint names draft layers draft-relative (layers.0..N),
+    but the draft model is constructed with absolute prefixes
+    (layers.{start_layer_id}..) so target and draft layers never collide.
+    Rewrite AutoGPTQConfig.modules_in_block_to_quantize in place so the
+    layer-skip logic matches the constructed prefixes. Also attach the fused
+    linear mapping, which is normally only wired up by the target loader."""
+    if quant_config is None:
+        return
+    packed_mapping = getattr(quant_config, "packed_modules_mapping", None)
+    if not packed_mapping:
+        from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
+
+        if isinstance(quant_config, AutoGPTQConfig):
+            quant_config.packed_modules_mapping = {
+                "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+                "gate_up_proj": ["gate_proj", "up_proj"],
+            }
+    modules = getattr(quant_config, "modules_in_block_to_quantize", None)
+    if not modules:
+        return
+
+    def shift(name: str) -> str:
+        def bump(m: re.Match) -> str:
+            return f"{m.group(1)}{int(m.group(2)) + start_layer_id}"
+
+        return re.sub(r"^(.*layers\.)(\d+)(?=\.)", bump, name)
+
+    quant_config.modules_in_block_to_quantize = [shift(m) for m in modules]
 
 
 def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
@@ -408,6 +442,7 @@ class DFlashQwen3Model(nn.Module):
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
         self.quant_config = get_draft_quant_config(vllm_config)
+        _shift_draft_quant_modules(self.quant_config, start_layer_id)
 
         drafter_config = getattr(self.config, "eagle_config", {})
         drafter_config.update(getattr(self.config, "dflash_config", {}))
@@ -492,12 +527,12 @@ class DFlashQwen3Model(nn.Module):
         # K/V rows HERE (checkpoint layout — no repack/transposition to undo).
         # Mirrors the #51581 fix class from the upstream PR thread.
         def _dense_kv_rows(attn) -> torch.Tensor:
-            w = attn.qkv_proj.weight[attn.q_size :]
-            qm = getattr(attn.qkv_proj, "quant_method", None)
-            deq = getattr(qm, "dequant_kv_rows", None)
+            # TritonW8A16 attaches the dequant hook to the layer itself
+            # (see process_weights_after_loading), not to quant_method.
+            deq = getattr(attn.qkv_proj, "dequant_kv_rows", None)
             if deq is not None:
-                return deq(w)
-            return w
+                return deq(None)[attn.q_size :]  # full dense [N, K], keep KV rows
+            return attn.qkv_proj.weight[attn.q_size :]
 
         kv_weights = [_dense_kv_rows(a) for a in layers_attn]
         self._fused_kv_weight = torch.cat(kv_weights, dim=0)
@@ -866,6 +901,12 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         mapper = WeightsMapper(orig_to_new_substr=orig_to_new_substr)
         loader = AutoWeightsLoader(self)
         loader.load_weights(model_weights.items(), mapper=mapper)
+
+    def process_weights_after_loading(self) -> None:
+        # Model-level post-load hook (called by the loader after per-layer
+        # quant finalize): TritonW8A16 attaches layer.dequant_kv_rows and
+        # repacks to kernel layout in its own process_weights_after_loading,
+        # so the fused context-KV buffers must be built only after that.
         self.model._build_fused_kv_buffers()
 
     def _read_mask_embedding(self) -> torch.Tensor | None:
