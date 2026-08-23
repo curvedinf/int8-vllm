@@ -69,6 +69,13 @@ retired qwen36 unit).
 5. `.venv/bin/python scripts/ua_live_soak.py -n 500` — live correctness soak
    (2026-08-23: **500/500 coherent** on the SPEC=1 AR=0 baseline — true
    GPTQ-int8 drafter, float16 draft KV, RCCL all-reduce)
+6. UA leg (`UA=1 SPEC=0`): **500/500 coherent** (2026-08-23) — the gfx908
+   UA state-corruption bug is FIXED by the Aug-21 aiter upstream sync
+   (confirms btbtyler09's eval on our stack). UA also ~1.76x faster than
+   TRITON on the identical soak workload (1590s vs 2793s wall). UA+spec is
+   currently blocked by mixed-KV page unification (draft layer 64 float16
+   KV vs target int8 PTH — `unify_kv_cache_spec_page_size` raises); needs
+   per-layer backend selection or matching draft KV dtype.
 
 ## Baseline status (2026-08-23)
 

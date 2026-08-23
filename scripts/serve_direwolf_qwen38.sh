@@ -46,7 +46,9 @@ COMMON_ENV=(
   # vLLM's own CustomAllreduce is NOT used (user directive).
   VLLM_ROCM_USE_AITER_CUSTOM_AR="0"
   VLLM_ROCM_USE_AITER_TRITON_GEMM="1"
-  VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION="0"
+  # UA leg (UA=1): per btbtyler09's eval the 439-commit aiter sync fixed the
+  # gfx908 UA corruption; our Aug-21 sync is newer. Re-testing on this stack.
+  VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION="${UA:-0}"
   # AITER a16w8_blockscale/a8w8_blockscale for GPTQ 8-bit on gfx908 produces
   # garbled / truncated outputs. Force the Triton W8A16 (A16W8) kernel instead.
   VLLM_DISABLED_KERNELS="AiterW8A16LinearKernel"
@@ -70,7 +72,6 @@ ARGS=(
   --max-model-len 65536
   --max-num-seqs 8
   --gpu-memory-utilization 0.86
-  --attention-backend TRITON_ATTN
   --compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["+gemma_rms_norm","+silu_and_mul","+rms_norm_gated","+rotary_embedding","+apply_rotary_emb","none"]}'
   --language-model-only
   --skip-mm-profiling
@@ -82,6 +83,13 @@ ARGS=(
   --override-generation-config '{"temperature":0.7,"top_p":0.80,"top_k":20,"min_p":0.0,"presence_penalty":1.5,"repetition_penalty":1.0}'
   --kv-cache-dtype int8_per_token_head --mamba-ssm-cache-dtype int8
 )
+
+# UA=1 routes attention through aiter unified attention (drop the explicit
+# TRITON_ATTN backend so platform selection applies).
+UA="${UA:-0}"
+if [[ "${UA}" != "1" ]]; then
+  ARGS+=(--attention-backend TRITON_ATTN)
+fi
 
 # Target: int8 KV + int8 mamba state. DFlash2 spec is the production default;
 # SPEC=0 boots no-spec, AR=0 disables custom all-reduce (bisection toggles).
