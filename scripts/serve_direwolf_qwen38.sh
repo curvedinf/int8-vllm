@@ -72,7 +72,7 @@ ARGS=(
   --max-model-len 65536
   --max-num-seqs 8
   --gpu-memory-utilization 0.86
-  --compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["+gemma_rms_norm","+silu_and_mul","+rms_norm_gated","+rotary_embedding","+apply_rotary_emb","none"]}'
+  --compilation-config '{"mode":3,"cudagraph_mode":"'"${CGMODE:-FULL_AND_PIECEWISE}"'","custom_ops":["+gemma_rms_norm","+silu_and_mul","+rms_norm_gated","+rotary_embedding","+apply_rotary_emb","none"]}'
   --language-model-only
   --skip-mm-profiling
   --disable-uvicorn-access-log
@@ -188,6 +188,8 @@ start_server() {
     exec setsid taskset -c "${CPUSET}" env -u HSA_OVERRIDE_GFX_VERSION \
       VLLM_API_KEY="${api_key}" \
       "${COMMON_ENV[@]}" \
+      VLLM_SPEC_DEBUG_DUMP="${VLLM_SPEC_DEBUG_DUMP:-}" \
+      VLLM_DFLASH_DRAFT_EAGER="${VLLM_DFLASH_DRAFT_EAGER:-}" \
       "${VENV}/bin/vllm" "${ARGS[@]}"
   ) >"${LOG_DIR}/server.log" 2>&1 </dev/null &
 

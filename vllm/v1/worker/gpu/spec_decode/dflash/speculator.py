@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 from typing import Any
 
+import os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -124,6 +125,13 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self._speculator_name,
                 self.attn_cg_support.min_cg_attn_backend,
             )
+        # Debug/bisect lever: force the draft forward fully eager.
+        if os.environ.get("VLLM_DFLASH_DRAFT_EAGER"):
+            logger.info(
+                "%s draft CUDA graphs disabled via VLLM_DFLASH_DRAFT_EAGER.",
+                self._speculator_name,
+            )
+            wants_full = False
         # PIECEWISE cudagraphs are not supported for dflash.
         if wants_full and supports_full:
             cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
@@ -483,6 +491,14 @@ class DFlashSpeculator(DraftModelSpeculator):
                 cudagraph_runtime_mode=batch_desc.cg_mode,
             )
 
+        if os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not torch.cuda.is_current_stream_capturing():
+            dt = self.draft_tokens[:num_reqs]
+            print(
+                f"[SPEC-DBG7] reqs={num_reqs} draft[0]={dt[0].cpu().tolist()} "
+                f"uniq={dt[0].unique().numel()} in_ids[:4]="
+                f"{self.input_buffers.input_ids[:4].cpu().tolist()}",
+                flush=True,
+            )
         return self.draft_tokens[:num_reqs]
 
 

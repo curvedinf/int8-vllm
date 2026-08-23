@@ -1,3 +1,4 @@
+import os
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
@@ -1093,6 +1094,33 @@ def rejection_sample(
     num_sampled = sampled.new_empty(num_reqs, dtype=torch.int32)
     target_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
     draft_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
+    if os.environ.get("VLLM_SPEC_DEBUG_DUMP"):
+        # Greedy alignment probe: global target argmax (from the block stats)
+        # vs draft_sampled at the SAME logit row and at +1 (the kernel's
+        # convention: row i predicts the token verified by draft_sampled[i+1]).
+        tam = target_local_argmax.view(num_logits, -1).argmax(dim=-1)
+        gmax = target_local_max.view(num_logits, -1).max(dim=-1).values
+        tam = tam.where(
+            gmax.view(num_logits, 1) == target_local_max.view(num_logits, -1)
+        ).sum(dim=-1).to(torch.int64) if False else tam  # block argmax idx only
+        # recover global argmax id: need per-block argmax *within* winning block
+        blk_idx = target_local_max.view(num_logits, -1).argmax(dim=-1)
+        tam = (
+            target_local_argmax.view(num_logits, -1)
+            .gather(1, blk_idx.view(-1, 1))
+            .view(-1)
+        )
+        n = min(num_logits, 64)
+        d = draft_sampled[:n].to(torch.int64).cpu()
+        a = tam[:n].cpu()
+        m0 = int((d == a).sum())
+        m1 = int((d[1:] == a[:-1]).sum()) if n > 1 else 0
+        print(
+            f"[SPEC-DBG2] logits={num_logits} reqs={num_reqs} same={m0}/{n} "
+            f"d[i+1]vs_a[i]={m1}/{n-1} draft[:8]={d[:8].tolist()} "
+            f"tam[:8]={a[:8].tolist()}",
+            flush=True,
+        )
     _rejection_kernel[(num_reqs,)](
         sampled,
         sampled.stride(0),

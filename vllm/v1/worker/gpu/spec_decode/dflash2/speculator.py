@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from typing import Any
 
 import torch
@@ -196,6 +197,15 @@ class DFlash2Speculator(DFlashSpeculator):
         hidden_states = last_hidden_states[self.sample_indices[:num_sample]].view(
             num_reqs, self.num_speculative_steps, -1
         )
+        if os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not torch.cuda.is_current_stream_capturing():
+            hs = hidden_states[0, 0]
+            print(
+                f"[SPEC-DBG4] hs[0,0] nan={int(hs.isnan().sum())}/{hs.numel()} "
+                f"absmax={hs.abs().max().item():.3f} "
+                f"in_ids[:6]={self.input_buffers.input_ids[:6].cpu().tolist()} "
+                f"full_hs_nan={int(last_hidden_states.isnan().sum())}/{last_hidden_states.numel()}",
+                flush=True,
+            )
         candidate_ids, unary_logits = self.model.compute_candidates(
             hidden_states.flatten(0, 1)
         )
@@ -204,6 +214,16 @@ class DFlash2Speculator(DFlashSpeculator):
         )
         unary_logits = unary_logits.view_as(candidate_ids)
         anchor_token_ids = self.input_buffers.input_ids[self._anchor_indices[:num_reqs]]
+        if os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not torch.cuda.is_current_stream_capturing():
+            n = min(num_reqs, 4)
+            print(
+                f"[SPEC-DBG3] reqs={num_reqs} cand[0,0,:6]="
+                f"{candidate_ids[0,0,:6].cpu().tolist()} "
+                f"cand[0,1,:6]={candidate_ids[0,1,:6].cpu().tolist()} "
+                f"unary[0,0,:4]={unary_logits[0,0,:4].float().cpu().tolist()} "
+                f"anchor[:4]={anchor_token_ids[:n].view(-1)[:4].cpu().tolist() if anchor_token_ids.numel() else 'none'}",
+                flush=True,
+            )
         scores = self.model.model.candidate_selector(
             candidate_ids,
             unary_logits,

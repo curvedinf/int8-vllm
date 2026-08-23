@@ -3,6 +3,7 @@
 
 import io
 import re
+import os
 from collections.abc import Iterable
 
 import torch
@@ -665,6 +666,22 @@ class DFlashQwen3Model(nn.Module):
         hd = self._head_dim
         nkv = self._num_kv_heads
 
+        if os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not torch.cuda.is_current_stream_capturing():
+            csm = context_slot_mapping
+            if csm is not None and not isinstance(csm, list):
+                csm_val = csm[:8].cpu().tolist()
+            elif isinstance(csm, list) and csm and csm[0] is not None:
+                csm_val = csm[0][:8].cpu().tolist()
+            else:
+                csm_val = "none"
+            logger.info(
+                "[SPEC-DBG6] ctx_states nan=%d/%d absmax=%.4f pos[:4]=%s csm[:8]=%s",
+                int(context_states.isnan().sum()), context_states.numel(),
+                float(context_states.abs().max()),
+                context_positions[:4].cpu().tolist(),
+                csm_val,
+            )
+
         all_k, all_v = self._project_context_kv(context_states, num_ctx, L, nkv, hd)
         all_k_normed = self._normalize_context_k(all_k)
 
@@ -908,6 +925,14 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         # repacks to kernel layout in its own process_weights_after_loading,
         # so the fused context-KV buffers must be built only after that.
         self.model._build_fused_kv_buffers()
+        if os.environ.get("VLLM_SPEC_DEBUG_DUMP"):
+            w = self.model._fused_kv_weight
+            hs = self.model._hidden_norm_weight
+            logger.info(
+                "[SPEC-DBG5] fused_kv nan=%d/%d absmax=%.4f hidden_norm nan=%d/%d",
+                int(w.isnan().sum()), w.numel(), float(w.abs().max()),
+                int(hs.isnan().sum()), hs.numel(),
+            )
 
     def _read_mask_embedding(self) -> torch.Tensor | None:
         """Checks for an override mask embedding in `mask_embedding.pt` and returns it.
