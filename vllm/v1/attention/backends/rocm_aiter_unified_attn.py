@@ -24,6 +24,7 @@ from vllm.v1.attention.backends.rocm_attn import (
     RocmAttentionMetadata,
     RocmAttentionMetadataBuilder,
 )
+from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash_per_token_head_quant,
 )
@@ -47,6 +48,25 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
         "fp8_e5m2",
         "int8_per_token_head",
     ]
+
+    @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        # Mirrors TritonAttentionBackend: the UA kernels read the cache
+        # through the tensor's own strides (see _ensure_scale_caches /
+        # get_kv_cache_shape — logical (B, H, N, 2*hs) with num_blocks as the
+        # outermost physical dim), so declaring the layout here enables
+        # indexes_kv_by_block_stride and with it page-size padding for mixed
+        # spec-decode KV specs (int8-PTH target + fp16 draft).
+        cache_layout = get_kv_cache_layout()
+        if cache_layout == "NHD" and include_num_layers_dimension:
+            return (1, 0, 3, 2, 4)
+        elif cache_layout == "NHD":
+            return (0, 2, 1, 3)
+        elif cache_layout == "HND" and include_num_layers_dimension:
+            return (1, 2, 0, 3, 4)
+        return (0, 1, 2, 3)
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
