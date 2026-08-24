@@ -433,6 +433,10 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 window_size=self.sliding_window,
                 block_table=block_table,
                 softcap=self.logits_soft_cap,
+                # Without this the kernel defaults to KVQuantMode.NONE and
+                # reads an int8-PTH cache as raw bytes (no scale load) —
+                # the DFlash2 noncausal draft collapses to garbage scores.
+                kv_quant_mode=self._kv_quant_mode,
                 q_descale=q_descale,
                 k_descale=(
                     k_descale.expand(descale_shape)
