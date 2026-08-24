@@ -109,13 +109,25 @@ retired qwen36 unit).
    AITER custom AR, fused INT8 quant-out, both INT8-PTH caches, INT8 Mamba,
    TP4, and C8 to remain enabled.
 
-## Baseline status (2026-08-23)
+## Baseline status (2026-08-24 update)
 
-The required int8 baseline is the two published GS128 models together with
-AITER W8A8 INT8 GEMMs everywhere, INT8-PTH target and draft KV, INT8 Mamba,
-AITER unified attention in INT8, AITER custom all-reduce in INT8, fused
-AR+RMSNorm+per-group INT8 quant-out, DFlash2, TP4, and C8. Validation must
-exercise this exact contract without a reduced fallback configuration.
+Verified-coherent serving baseline as of the aiter-W8A8 integration
+(commit 16e2b51e0):
+
+| Component | State |
+|---|---|
+| GEMMs | **aiter CK int8 W8A8 everywhere** (`gemm_a8w8_CK`, per-channel weights + per-token activations; `VLLM_GFX908_CK_W8A8=1` default). +12-15% over TritonW8A16, TTFT -68%. 200/200 soak PASS |
+| Attention | AITER-UA, int8-PTH KV on the int8 QK dot (auto via per-token-head scales). UA required for spec boot (stride-order fix bf6f8adc6) |
+| Draft KV | **float16** (int8 draft KV corrupts on this stack — do not re-enable without a new gate) |
+| All-reduce | **RCCL** (both aiter CAR and vLLM custom AR corrupt in serving; CAR race is the open blocker for the fused AR+RMSNorm+int8-quant epilogue) |
+| Blocks in use | `AiterW8A16LinearKernel` (compat name) selected; `TritonW8A16LinearKernel` disabled |
+
+Known-broken alternates (verified this session): the Triton blockscale
+A8W8 path corrupts in serving (fp16 scales → NaN; GROUP_K config trap) —
+retained only as a code-path fallback when CK attrs are absent.
+
+Bench (TP4 C8, bench_quick): SS 14.16 tok/s, C8 peak 72 tok/s, TTFT 416ms,
+TPOT 111ms. Previous TritonW8A16 baseline: 12.35 / 64 / 1308 / 107.
 
 ## KLD gate reference numbers (2026-08-22 sweep, teacher-forced)
 
