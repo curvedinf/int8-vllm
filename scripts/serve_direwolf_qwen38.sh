@@ -38,12 +38,14 @@ COMMON_ENV=(
   VLLM_TARGET_DEVICE="rocm"
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="1800"
   VLLM_ROCM_USE_AITER="1"
-  # CAR default OFF by bench: both paths are now CORRECT (graph fix aiter
-  # 6914400f5: captures route through the pre-registered pool, vLLM-style;
-  # 299/300 soak clean), but RCCL wins the A/B at C8 shapes:
-  #   CAR:  SS 14.55, C8 64,  TPOT 130.7, TTFT 520
-  #   RCCL: SS 15.81, C8 72,  TPOT 117.6, TTFT 455
-  # CAR=1 re-enables for future tuning (decode-sized kernels are untuned). 
+  # CAR default OFF after an auditable 2026-08-24 TP4/C8 rerun. Median
+  # sustained output throughput over three deterministic repeats:
+  #   vLLM CUSTOM (CAR=0, AR=1): 63.49 tok/s, TPOT 105.00 ms
+  #   AITER CAR   (CAR=1, AR=1): 58.34 tok/s, TPOT 114.27 ms
+  #   PYNCCL      (CAR=0, AR=0): 53.04 tok/s, TPOT 133.89 ms
+  # AITER CAR is coherent after the graph repair, but its gfx908 path still
+  # forces the naive kernel with generic launch defaults. CAR=1 remains a
+  # tuning control; CAR=0/AR=1 selects the current fastest vLLM CUSTOM path.
   VLLM_ROCM_USE_AITER_CUSTOM_AR="${CAR:-0}"
   VLLM_ROCM_USE_AITER_TRITON_GEMM="1"
   VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION="${UA:-1}"
@@ -89,15 +91,15 @@ if [[ "${LOGSTATS:-0}" != "1" ]]; then
 fi
 
 # C8 means eight concurrent sequences. The target and DFlash2 draft are both
-# GPTQ INT8 GS128 and both use int8 per-token-head KV. AITER custom AR,
-# AITER unified attention, DFlash2, and AR+RMSNorm+per-group INT8 quant-out
-# fusion are mandatory in this production script, not runtime toggles.
+# GPTQ INT8 GS128. The actual runtime selections are reported in the startup
+# log; do not infer AITER CAR, fused quant-out, or draft INT8 KV from this
+# contract comment.
 # Spec-decode token budget; MNBT and NS remain tuning controls only.
 MNBT="${MNBT:-2048}"
 ARGS+=(--max-num-batched-tokens "${MNBT}")
-# AR=0 fully disables custom all-reduce (RCCL path); AR=1 leaves whatever
-# VLLM_ROCM_USE_AITER_CUSTOM_AR selects. Default 0: both aiter CAR (race)
-# and vLLM CAR corrupt on this stack.
+# AR=0 fully disables custom all-reduce (PYNCCL/RCCL path); AR=1 leaves the
+# selected custom backend enabled. With the defaults CAR=0/AR=1, vLLM CUSTOM
+# is selected ahead of PYNCCL.
 AR="${AR:-1}"
 if [[ "${AR}" != "1" ]]; then
   ARGS+=(--disable-custom-all-reduce)

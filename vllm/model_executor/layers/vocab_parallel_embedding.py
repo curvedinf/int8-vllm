@@ -38,6 +38,21 @@ from vllm.platforms import current_platform
 DEFAULT_VOCAB_PADDING_SIZE = 64
 
 
+def _int8_embedding_gather(
+    input_: torch.Tensor,
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+) -> torch.Tensor:
+    """Gather INT8 rows before dequantizing them.
+
+    Casting ``weight`` before the lookup materializes the complete embedding
+    table in the activation dtype. Keep the table in INT8 and cast only the
+    selected rows instead.
+    """
+    rows = F.embedding(input_, weight)
+    return rows.to(scale.dtype) * scale[input_].unsqueeze(-1)
+
+
 def _quantize_embedding_int8_(layer: torch.nn.Module) -> None:
     """In-place int8 conversion of an embedding table (gfx908 int8 doctrine).
 
@@ -117,11 +132,9 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
 
     def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
         if getattr(layer, "_int8_embedding", False):
-            # int8 rows + per-row fp16 scale, dequant fused into the gather
-            w_q = layer.weight
-            return F.embedding(
-                input_, w_q.to(layer._int8_embedding_scale.dtype)
-            ) * layer._int8_embedding_scale[input_].unsqueeze(-1)
+            return _int8_embedding_gather(
+                input_, layer.weight, layer._int8_embedding_scale
+            )
         return F.embedding(input_, layer.weight)
 
     def tie_weights(
