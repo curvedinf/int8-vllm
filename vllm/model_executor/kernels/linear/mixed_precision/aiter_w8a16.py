@@ -265,6 +265,32 @@ class AiterW8A16LinearKernel(MPLinearKernel):
         # the first real inference does not pay JIT compilation latency.
         self._warmup(layer)
 
+        # With the CK copy live and warmed, the GS128 originals are dead
+        # GPU weight (several GiB per rank across the target) — except QKV
+        # layers, whose dequant_kv_rows hook reads live params for the
+        # DFlash fused ctx-KV build, and layers without _ck_q (blockscale
+        # fallback). Free the rest; the memory returns to KV cache.
+        if (
+            hasattr(layer, "_ck_q")
+            and not hasattr(layer, "q_size")
+            and os.environ.get("VLLM_GFX908_CK_FREE_GS128", "1") == "1"
+        ):
+            for pname in (
+                self.w_q_name,
+                self.w_s_name,
+                self.w_zp_name,
+                self.w_gidx_name,
+            ):
+                if pname is not None and getattr(layer, pname, None) is not None:
+                    replace_parameter(
+                        layer,
+                        pname,
+                        torch.nn.Parameter(
+                            torch.empty(0, device=layer._ck_q.device),
+                            requires_grad=False,
+                        ),
+                    )
+
     def _warmup(self, layer: torch.nn.Module) -> None:
         """JIT-compile the production AITER A8W8 configs.
 
