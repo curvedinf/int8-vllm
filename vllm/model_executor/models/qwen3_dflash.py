@@ -568,6 +568,13 @@ class DFlashQwen3Model(nn.Module):
             else self.embed_tokens.weight.dtype
         )
         self._fused_kv_weight = torch.cat(kv_weights, dim=0).to(draft_dtype)
+        # NOTE: an int8 W8A8 variant of this projection was gated on
+        # 2026-08-24 and REJECTED: acceptance dropped 71.2 -> 66.0% at NS=15
+        # (the projection's K output feeds attention after norm+RoPE, so its
+        # quantization noise lands directly in every draft scoring step).
+        # The fused context-KV GEMM stays dense-fp — the sanctioned float
+        # exception alongside the selector codebooks.
+        self._fused_kv_q = None
         if has_bias:
             kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
             self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
@@ -639,9 +646,25 @@ class DFlashQwen3Model(nn.Module):
             self._hidden_norm_weight,
             self._rms_norm_eps,
         )
-        all_kv_flat = F.linear(
-            normed_context_states, self._fused_kv_weight, self._fused_kv_bias
-        )
+        if getattr(self, "_fused_kv_q", None) is not None:
+            flat = normed_context_states.reshape(
+                -1, normed_context_states.shape[-1]
+            ).to(torch.float16)
+            x_q, x_s = torch.ops.vllm.rocm_aiter_pertoken_quant_int8(flat)
+            out_dtype = (
+                normed_context_states.dtype
+                if normed_context_states.dtype in (torch.float16, torch.bfloat16)
+                else torch.float16
+            )
+            all_kv_flat = torch.ops.vllm.rocm_aiter_gemm_a8w8_ck(
+                x_q, self._fused_kv_q, x_s, self._fused_kv_s, out_dtype
+            )
+            if self._fused_kv_bias is not None:
+                all_kv_flat = all_kv_flat + self._fused_kv_bias.to(out_dtype)
+        else:
+            all_kv_flat = F.linear(
+                normed_context_states, self._fused_kv_weight, self._fused_kv_bias
+            )
         # Single contiguous copy that separates K/V and transposes to
         # layer-major layout.  Result: [2, L, num_ctx, nkv, hd] contiguous.
         # Indexing dim-0 gives contiguous [L, num_ctx, nkv, hd] for K and V.
