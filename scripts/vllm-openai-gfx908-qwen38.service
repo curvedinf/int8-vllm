@@ -1,5 +1,5 @@
 [Unit]
-Description=vLLM Direwolf Qwen 3.8 GPTQ8 DFlash2 API server (TP4)
+Description=Direwolf Qwen3.8+DFlash2 AITER W8A8 INT8 API (TP4 C8)
 Wants=network-online.target
 After=network-online.target
 Conflicts=llama-api-4x64k.service vllm-openai-gfx908.service

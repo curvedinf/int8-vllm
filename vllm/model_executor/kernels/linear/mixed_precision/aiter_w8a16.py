@@ -1,6 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""AITER Triton W8A16/W8A8 dynamic blockscale kernel for ROCm gfx908."""
+"""AITER W8A8 INT8 dynamic blockscale kernel for ROCm gfx908.
+
+The public class keeps its historical ``AiterW8A16LinearKernel`` name for
+kernel-registry compatibility. GPTQ GS128 layers use AITER A8W8 at every M;
+the A16W8 implementation remains only as a compatibility fallback for other
+group sizes.
+"""
+
+import os
 
 import torch
 
@@ -23,9 +31,9 @@ from aiter.ops.triton.gemm.basic.gemm_a8w8_blockscale import (
 _AITER_W8A16_SUPPORTED_QUANT_TYPES = [scalar_types.uint8b128]
 _AITER_W8A16_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128, 256]
 
-# Dynamic dispatch threshold: microbenchmarks show AITER W8A8 is ~2.5x faster
-# than W8A16 for large-M prefill, while W8A16 is better for small-M decode.
-_W8A8_DISPATCH_MIN_M = 256
+# The Direwolf production contract is AITER W8A8 at every batch shape.
+# Keep this named threshold for compatibility with existing probes.
+_W8A8_DISPATCH_MIN_M = 1
 
 
 def _get_aiter_w8a8_config(M: int, N: int, K: int, group_size: int):
@@ -107,7 +115,10 @@ def _get_aiter_w8a16_config(M: int, N: int, K: int, group_size: int):
 
 
 class AiterW8A16LinearKernel(MPLinearKernel):
-    """AITER Triton a16w8_blockscale W8A16 kernel for ROCm (gfx908)."""
+    """AITER A8W8 selector for GPTQ GS128 on ROCm (gfx908).
+
+    The class name is retained for registry and blocklist compatibility.
+    """
 
     SUPPORTED_QUANT_TYPES = _AITER_W8A16_SUPPORTED_QUANT_TYPES
 
@@ -134,7 +145,7 @@ class AiterW8A16LinearKernel(MPLinearKernel):
             return False, "Only float16/bfloat16 activations are supported"
 
         if c.zero_points:
-            return False, "Zero points are not supported by AITER a16w8_blockscale"
+            return False, "Zero points are not supported by the AITER blockscale path"
 
         if c.has_g_idx:
             return False, "Activation reordering (g_idx) not supported"
@@ -158,7 +169,7 @@ class AiterW8A16LinearKernel(MPLinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        """Convert GPTQ packed weights to AITER a16w8_blockscale layout.
+        """Convert GPTQ packed weights to the AITER blockscale layout.
 
         Checkpoint layout from create_weights:
           qweight: [K//4, N] int32  (input_dim=0, output_dim=1, packed_dim=0)
@@ -198,12 +209,56 @@ class AiterW8A16LinearKernel(MPLinearKernel):
         self._transform_param(layer, self.w_q_name, repack_w_q)
         self._transform_param(layer, self.w_s_name, repack_w_s)
 
-        # Pre-compile the Triton kernels for the shapes this layer will see so
+        # DFlash fused context-KV consumer: same contract as
+        # TritonW8A16LinearKernel — dense dequant of the AITER-layout
+        # weights ([N, K] int8 x [N, K//G] scales), rows sliceable.
+        def _dequant_rows(_unused) -> torch.Tensor:
+            w_q, w_s, _, _ = self._get_weight_params(layer)
+            # w_q: [N, K] int8 (already de-biased), w_s: [N, K//G]
+            gs = self.config.group_size
+            if gs == -1:
+                return (w_q.float() * w_s.float()).to(torch.float16).contiguous()
+            return (
+                (w_q.float().view(N_local, K_local // gs, gs)
+                 * w_s.float().unsqueeze(-1))
+                .reshape(N_local, K_local)
+                .to(torch.float16)
+                .contiguous()
+            )
+
+        N_local, K_local = self._get_weight_params(layer)[0].shape
+        layer.dequant_kv_rows = _dequant_rows
+
+        # CK per-channel requant (gfx908): per-token x scales pair with
+        # [N,1] weight scales in gemm_a8w8_CK. Skipped for TP-sharded
+        # row-parallel layers where input_size_per_partition != input_size
+        # (the CK contract needs whole-K per rank; sharded rows keep the
+        # blockscale path).
+        if (
+            os.environ.get("VLLM_GFX908_CK_W8A8", "1") == "1"
+            and current_platform.is_rocm()
+        ):
+            try:
+                dense = _dequant_rows(None).float()
+                wmax = dense.abs().amax(dim=1, keepdim=True).clamp(min=1e-12)
+                layer._ck_s = (wmax / 127.0).to(torch.float32).contiguous()
+                layer._ck_q = (
+                    (dense / layer._ck_s).round().clamp(-127, 127).to(torch.int8).contiguous()
+                )
+            except Exception:
+                layer.__dict__.pop("_ck_q", None)
+                layer.__dict__.pop("_ck_s", None)
+
+        # Pre-compile the AITER kernels for the shapes this layer will see so
         # the first real inference does not pay JIT compilation latency.
         self._warmup(layer)
 
     def _warmup(self, layer: torch.nn.Module) -> None:
-        """JIT-compile AITER a16w8_blockscale and a8w8_blockscale configs."""
+        """JIT-compile the production AITER A8W8 configs.
+
+        Non-GS128 layers retain the compatibility A16W8 warmup and fallback,
+        but both published Direwolf checkpoints are GS128.
+        """
 
         w_q, w_s, _, _ = self._get_weight_params(layer)
         N, K = w_q.shape
@@ -211,36 +266,12 @@ class AiterW8A16LinearKernel(MPLinearKernel):
         device = w_q.device
         dtype = self.config.act_type
 
-        # Decode / small-M path: a16w8_blockscale.
-        for M in (1, 17, 33, 65):
-            key = ("a16w8", M, N, K, gs)
-            if key in self._WARMUP_CACHE:
-                continue
-            self._WARMUP_CACHE.add(key)
+        if gs == 128:
+            warmup_shapes = (1, 17, 33, 65, 256, 1024, 4096)
+        else:
+            warmup_shapes = ()
 
-            x = torch.empty((M, K), dtype=dtype, device=device)
-            cfg = _get_aiter_w8a16_config(M, N, K, gs)
-
-            try:
-                gemm_a16w8_blockscale(
-                    x,
-                    w_q,
-                    w_s,
-                    dtype=dtype,
-                    config=cfg,
-                )
-            except Exception as e:
-                import warnings
-
-                warnings.warn(
-                    f"AITER W8A16 warmup failed for (M={M}, N={N}, K={K}, gs={gs}): {e}"
-                )
-
-        # Large-M prefill path: a8w8_blockscale (only valid for 128-block scales).
-        if gs != 128:
-            return
-
-        for M in (256, 1024, 4096):
+        for M in warmup_shapes:
             key = ("a8w8", M, N, K, gs)
             if key in self._WARMUP_CACHE:
                 continue
@@ -266,6 +297,34 @@ class AiterW8A16LinearKernel(MPLinearKernel):
                     f"AITER W8A8 warmup failed for (M={M}, N={N}, K={K}, gs={gs}): {e}"
                 )
 
+        if gs == 128:
+            return
+
+        for M in (1, 17, 33, 65):
+            key = ("a16w8", M, N, K, gs)
+            if key in self._WARMUP_CACHE:
+                continue
+            self._WARMUP_CACHE.add(key)
+
+            x = torch.empty((M, K), dtype=dtype, device=device)
+            cfg = _get_aiter_w8a16_config(M, N, K, gs)
+
+            try:
+                gemm_a16w8_blockscale(
+                    x,
+                    w_q,
+                    w_s,
+                    dtype=dtype,
+                    config=cfg,
+                )
+            except Exception as e:
+                import warnings
+
+                warnings.warn(
+                    f"AITER W8A16 compatibility warmup failed for "
+                    f"(M={M}, N={N}, K={K}, gs={gs}): {e}"
+                )
+
     def apply_weights(
         self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
@@ -278,20 +337,35 @@ class AiterW8A16LinearKernel(MPLinearKernel):
         M, K = x_2d.shape
         N = w_q.shape[0]
 
-        # Large-M prefill uses true INT8 compute (A8W8); decode stays on A16W8
-        # because microbenchmarks show W8A8 is no faster and sometimes slower
-        # for small M, while W8A16 avoids the activation quantization overhead.
-        if M >= _W8A8_DISPATCH_MIN_M and c.group_size == 128:
-            x_q, x_s = _quantize_activation_per_block(x_2d, block_k=128)
-            cfg = _get_aiter_w8a8_config(M, N, K, c.group_size)
-            output = gemm_a8w8_blockscale(
-                x_q,
-                w_q,
-                x_s,
-                w_s,
-                dtype=x_2d.dtype,
-                config=cfg,
-            )
+        # The published target and DFlash2 checkpoints are GS128, so every
+        # decode and prefill shape uses true AITER INT8 A8W8 compute.
+        # Dispatch: the CK kernel (gemm_a8w8_CK, per-token scales) measured
+        # 1.2-3.4x faster than the Triton blockscale at every M on gfx908,
+        # but requires per-channel weight scales — the per-128-group
+        # checkpoint scales are preserved for the blockscale fallback and
+        # the fused context-KV dequant. We requantize per-channel at load
+        # (cached) only when the CK path is enabled.
+        if c.group_size == 128:
+            if hasattr(layer, "_ck_q"):
+                from aiter import pertoken_quant
+
+                x_q, x_s = pertoken_quant(x_2d.to(torch.float16), quant_dtype=torch.int8)
+                from aiter import gemm_a8w8_CK
+
+                output = gemm_a8w8_CK(
+                    x_q, layer._ck_q, x_s, layer._ck_s, None, x_2d.dtype
+                )
+            else:
+                x_q, x_s = _quantize_activation_per_block(x_2d, block_k=128)
+                cfg = _get_aiter_w8a8_config(M, N, K, c.group_size)
+                output = gemm_a8w8_blockscale(
+                    x_q,
+                    w_q,
+                    x_s,
+                    w_s,
+                    dtype=x_2d.dtype,
+                    config=cfg,
+                )
         else:
             cfg = _get_aiter_w8a16_config(M, N, K, c.group_size)
             output = gemm_a16w8_blockscale(

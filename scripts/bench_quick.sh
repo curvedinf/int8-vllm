@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Quick perf gate: single-stream + C8 against a RUNNING server on :8020.
+# Quick perf gate: single-stream + C8 against the canonical RUNNING Direwolf
+# server on :8020. Results count only when that server was launched by
+# serve_direwolf_qwen38.sh with the target+DFlash2 GS128 pair, AITER W8A8
+# everywhere, INT8 KV/Mamba/UA/custom-AR/quant-out, TP4, and max-num-seqs=8.
 # Usage: scripts/bench_quick.sh <model_dir> <tag> [api_key]
 set -euo pipefail
 

@@ -9,10 +9,11 @@ upstreamed directly.
 ## THE BASELINE (read first)
 
 `docs/recipes/README.md` is the canonical baseline. Every feature listed there
-(gs128 int8 checkpoint, W8A8/W8A16 dispatch, int8 KV/mamba/embedding, DFlash2
-spec ON with the int8 drafter) is load-bearing and measured. Do NOT disable
-them — especially DFlash2 speculative decoding, which stays ON by explicit
-user directive even where older notes suggested otherwise. Historical
+(the two GS128 checkpoints, AITER W8A8 INT8 GEMMs everywhere, int8 KV/Mamba,
+AITER unified attention, AITER custom all-reduce, fused
+AR+RMSNorm+per-group INT8 quant-out, DFlash2, TP4, and C8) is mandatory. Do
+not substitute W8A16, the fork-local Triton GEMM, TRITON_ATTN, RCCL, fp16 KV,
+no-spec, another TP size, or another concurrency in the target recipe. Historical
 experiments are archived (`~/archived-logs-20260822.tar.gz`, git history);
 the experiment ledger lives on from this point under `logs/` fresh.
 
@@ -21,15 +22,14 @@ the experiment ledger lives on from this point under `logs/` fresh.
 This is the fastest vLLM branch for 4x AMD Instinct MI100 (gfx908 / CDNA1,
 32GB, XGMI full mesh). MI100 int8 matrix rate is 2x every dtype except fp16
 (equal) at half the bandwidth — so **int8 is the native dtype** of this stack:
-GPTQ 8-bit weights (uint8b128, group_size 32) through a fork-custom Triton
-W8A16 kernel + repacked HIP GEMM, int8 **per-token-head** KV cache
+GPTQ 8-bit weights (uint8b128, group_size 128) use AITER W8A8 INT8 GEMMs for
+every decode and prefill shape, plus int8 **per-token-head** KV cache
 (`--kv-cache-dtype int8_per_token_head`, block 32, f32 inline scales), int8
-Q@K attention dot on the AITER path. fp16 activations between kernels (W8A8
-was measured 2x slower at gs=32 — do not revisit without new data). The
-**only sanctioned unquantized path** is the DFlash2 draft model (quantized
-drafters are broken upstream, vllm#51581). The optimized configuration is
-Qwen3.8-27B GPTQ8 + DFlash2 + FlashAttention 2 (Triton) + int8 KV + TP4/XGMI;
-other combos work but are untuned.
+Mamba state, and AITER unified attention. The DFlash2 draft is also GPTQ INT8
+GS128, and both target and draft KV use `int8_per_token_head`. Collectives use
+AITER custom all-reduce with fused AR+RMSNorm+per-group INT8 quant-out. The
+optimized configuration is the Qwen3.8 target + DFlash2 pair at TP4/C8 over XGMI;
+do not derive an alternate production configuration from archival material.
 
 ## Repository layout (three sibling forks, all required)
 
@@ -81,7 +81,7 @@ export PYTORCH_ROCM_ARCH=gfx908 GPU_ARCHS=gfx908 VLLM_TARGET_DEVICE=rocm \
 rebuild, smoke-check:
 
 ```bash
-.venv/bin/python -c "import vllm, vllm._rocm_C; from vllm import _custom_ops as o; print(o.gptq_w8a16_repacked_gemm)"
+.venv/bin/python -c "import vllm, vllm._rocm_C; from vllm.model_executor.kernels.linear.mixed_precision.aiter_w8a16 import AiterW8A16LinearKernel; print(AiterW8A16LinearKernel)"
 ```
 
 aiter JIT modules (`~/aiter/aiter/jit/module_*.so`) rebuild lazily on first
@@ -92,22 +92,22 @@ changes move the stale `.so` aside once.
 
 ```bash
 scripts/serve_direwolf_qwen38.sh {start|stop|restart|status|supervise}   # Qwen3.8 + DFlash2 (target config)
-scripts/serve_direwolf_qwen36.sh ...                                    # Qwen3.6 + MTP (legacy)
 ```
 
-Non-negotiable flags in the qwen38 script (edit only with bench data):
-`--tensor-parallel-size 4 --dtype half --attention-backend TRITON_ATTN
---kv-cache-dtype int8_per_token_head` and the speculative config
-`{"method":"dflash","num_speculative_tokens":7,"kv_cache_dtype":"float16"}`
-— the draft's KV **must** stay fp16 with TRITON_ATTN: the non-causal draft
-write path has no per-token-head int8 support there, and inheriting int8
-corrupts output (verified live 2026-08-23: int8 draft KV → target salad;
-fp16 draft KV → coherent). The aiter-UA non-causal int8 READ test
-(`scripts/test_int8_kv_micro.py`) does not cover this write path.
-`VLLM_DISABLED_KERNELS=AiterW8A16LinearKernel` is required — the AITER W8A16
-blockscale kernel garbles outputs on gfx908; the Triton W8A16 kernel is the
-correct one. `VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=0` in prod (state
-corruption after ~200 reqs); TRITON_ATTN is the stable default.
+Non-negotiable settings in the qwen38 script:
+`VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_CUSTOM_AR=1
+VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1`, AITER W8A8 for every GS128 GEMM,
+`--tensor-parallel-size 4 --max-num-seqs 8
+--kv-cache-dtype int8_per_token_head --mamba-ssm-cache-dtype int8`, compiler
+pass `fuse_allreduce_rms=true`, and the speculative config
+`{"method":"dflash","num_speculative_tokens":7,"kv_cache_dtype":"int8_per_token_head"}`.
+The nested dtype is explicit and applies to the draft; the top-level
+`--kv-cache-dtype int8_per_token_head` applies to the target. Do not replace
+the draft dtype with float16. The non-causal INT8-PTH path is covered by
+`scripts/test_int8_kv_micro.py`; E2E validation must also exercise this exact
+all-INT8-KV serving configuration. `AiterW8A16LinearKernel` is a legacy class
+name only; for these GS128 models it must dispatch AITER A8W8 for all M.
+`TritonW8A16LinearKernel` is blocklisted by the launcher.
 
 systemd: unit template at `scripts/vllm-openai-gfx908-qwen38.service` (`%h`
 paths). Install: copy to `/etc/systemd/system/`, `daemon-reload`,
@@ -116,16 +116,16 @@ service.
 
 ## Testing ladder (run in this order after any stack change)
 
-1. **Micro** (idle GPU ok): `PYTHONPATH=~/aiter .venv/bin/python scripts/test_int8_kv_micro.py`
+1. **Micro** (idle GPU ok): `PYTHONPATH="$PWD:$HOME/aiter" .venv/bin/python scripts/test_int8_kv_micro.py`
    — int8 per-token-head attention vs fp16 reference.
 2. **Battery** (idle GPU ok): `HIP_VISIBLE_DEVICES=<idle> .venv/bin/python scripts/battery_gfx908.py`
    — production shapes (hdim 256, GQA 6:1), FA 2.8.4 interface, boot import
    chain against merged aiter, AITER gemm whitelist. Expect `4/4 PASS`.
-3. **Serving regression** (all 4 GPUs): qwen3.6 model on the new stack via
-   `scripts/bench_c8.py --kv-cache-dtype int8_per_token_head --mtp` — compare
-   against ledger baselines before switching models.
-4. **E2E**: qwen3.8 + DFlash2 via the serve script; greedy-equivalence vs
-   no-spec; DFlash2 acceptance length; C8 throughput.
+3. **Serving regression** (all 4 GPUs): boot the qwen38 production script and
+   verify its startup report names AITER W8A8, AITER unified attention, AITER
+   custom AR, both INT8 caches, INT8 Mamba, TP4, C8, and DFlash2.
+4. **E2E**: qwen3.8 + DFlash2 via the serve script; check coherence, DFlash2
+   acceptance length, and C8 throughput without changing the target contract.
 
 Validation doctrine: `docs/recipes/README.md` is the baseline record for
 this "get it working" pass; the historical A/B ledger was archived to git
@@ -136,38 +136,22 @@ without a reproducible A/B row.
 ## Quantizing a model
 
 Recipe lives at `~/models/quantize_qwen38_27b_gptq8.py`. Params that matter:
-`bits=8, group_size=32, sym, true_sequential, lm_head=False` (lm_head stays
-fp16 — also required for DFlash2's shared-head path), 512 mixed
+`bits=8, group_size=128, sym, true_sequential, lm_head=False`, 512 mixed
 evol-codealpaca + C4 samples binned 256-2048.
 **Run mode**: single GPU (`HIP_VISIBLE_DEVICES=0`), `offload_to_disk=False`,
 `auto_forward_data_parallel=False`. The other combos are known-bad here:
 disk-offload crawls at ~60MB/s page-cache streaming; multi-GPU AFDP crashes
 with `hipErrorIllegalAddress` in gptqmodel 7.3.4 on gfx908. Expect ~1-2h
 total; verify output = 9-shard safetensors + quantize_config.json (bits 8,
-gs 32) before serving.
+gs 128) before serving.
 
 ## Model assets
 
-- `Qwen/Qwen3.8-27B` base + `z-lab/Qwen3.8-27B-DFlash2` drafter: HF cache
-  (the drafter is referenced by its **snapshot path** in the serve script —
-  an HF cache repo root is not a model dir).
-- GPTQ8 output: `~/models/Qwen3.8-27B-GPTQ-8bit` (HF upload target: see the
-  README Models section placeholder).
-- Previous prod model: `~/models/Qwen3.6-27B-GPTQ-8bit-MTP2`.
-
-## gfx908 gotchas (learned the hard way)
-
-- `hipErrorIllegalAddress` in gptqmodel multi-GPU forward (see above).
-- AITER W8A16/a8w8 blockscale kernels garble output on gfx908 → disabled.
-- AITER UA attention: fastest kernels but corrupts state after ~200 requests
-  with prefix reuse → prod off; the int8 port lives in aiter's
-  `ops/triton/attention/unified_attention.py` (scale caches + true-int8 Q@K).
-- `import vllm` can succeed with stale compiled ops (lazy loading) — always
-  rebuild before trusting a smoke test after merges.
-- GPU node order in `rocm-smi` != HIP device order on this box (rocm-smi
-  device 3 was HIP 0); trust `HIP_VISIBLE_DEVICES`, not labels.
-- fp8 KV is NOT the int8 path — the plain `int8` alias was dropped in the
-  2026-08 upstream sync; always `int8_per_token_head`.
+- Published target: `curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128`, deployed at
+  `~/models/Qwen3.8-27B-GPTQ-8bit-gs128`.
+- Published DFlash2 companion: `curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128`,
+  deployed at `~/.cache/huggingface/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit`.
+  It is not standalone and is designed for the target above.
 
 ## What "done" means here
 

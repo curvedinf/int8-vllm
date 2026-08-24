@@ -9,11 +9,11 @@ agreement. Exit code 0 = pass, 2 = marginal (see thresholds), 3 = fail.
 Usage:
   # capture baseline (run against the current prod config once)
   HIP_VISIBLE_DEVICES=0,1,2,3 python scripts/kld_probe.py capture \
-      --model ~/models/Qwen3.8-27B-GPTQ-8bit --out ~/models/kld/q38_gs32.npz
+      --model ~/models/Qwen3.8-27B-GPTQ-8bit-gs128 --out ~/models/kld/q38_gs128.npz
 
   # evaluate a variant
   HIP_VISIBLE_DEVICES=0,1,2,3 python scripts/kld_probe.py compare \
-      --model ~/models/Qwen3.8-27B-GPTQ-8bit-gs128 --base ~/models/kld/q38_gs32.npz
+      --model ~/models/Qwen3.8-27B-GPTQ-8bit-gs128 --base ~/models/kld/q38_gs128.npz
 
 Gate (from the int8-native program plan): KLD <= 0.02 and agreement >= 85%
 passes; KLD in (0.02, 0.05] passes only with a measured perf gain >= 5%

@@ -24,6 +24,8 @@ Checkpoint layout from GPTQ create_weights (PackedvLLMParameter):
   qzeros:  [K//G, N//4]  int32 (output_dim=1, packed_dim=1)
 """
 
+import os
+
 import torch
 
 from vllm import _custom_ops as ops
@@ -550,8 +552,14 @@ def triton_w8a8_gemm(
     has_zp = qzeros is not None
     zeros_ptr = qzeros if has_zp else b_q
 
-    # int8 dot wants BLOCK_M/BLOCK_N >= 16; large-M prefill only.
-    BLOCK_M, BLOCK_N = 64, 128
+    # int8 dot wants BLOCK_M/BLOCK_N >= 16. Decode (M<=16) pads to one
+    # BLOCK_M=16 tile: the wasted rows cost ~nothing on the MFMA pipe while
+    # halving the activation read vs W8A16; narrow-N shapes keep BLOCK_N=64
+    # for CU occupancy on gfx908's 120 CUs.
+    if M <= 16:
+        BLOCK_M, BLOCK_N = 16, 128
+    else:
+        BLOCK_M, BLOCK_N = 64, 128
     BLOCK_K = 128
     grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
 
@@ -662,6 +670,32 @@ class TritonW8A16LinearKernel(MPLinearKernel):
 
         layer.dequant_kv_rows = _dequant_rows
 
+        if (
+            os.environ.get("VLLM_GFX908_CK_W8A8", "1") == "1"
+            and current_platform.is_rocm()
+            and layer.__class__.__name__ not in ("RowParallelLinear",)
+            and getattr(layer, "input_size_per_partition", 0)
+            == layer.input_size  # unsharded only: CK path is per-rank whole-K
+        ):
+            # aiter CK int8 W8A8 (gfx908): requantize the GPTQ weight from
+            # per-128-K-group scales to per-output-channel int8 + [N,1] fp32
+            # scales — the gemm_a8w8_CK contract (x side is per-token [M,1],
+            # quantized at runtime by the same pertoken semantics). The
+            # per-channel requant strictly coarsens the weight quant; KLD-gate
+            # before making this the default off the sweep values.
+            try:
+                dense = _dequant_rows(None).float()  # [N, K]
+                wmax = dense.abs().amax(dim=1, keepdim=True).clamp(min=1e-12)
+                w_s_ch = (wmax / 127.0).to(torch.float32)
+                w_q_ch = (dense / w_s_ch).round().clamp(-127, 127).to(torch.int8)
+                layer._ck_w8a8_q = w_q_ch.contiguous()
+                layer._ck_w8a8_s = w_s_ch.contiguous()
+            except Exception:
+                # Never break the dequant hook / normal serving over an
+                # optional requant.
+                layer.__dict__.pop("_ck_w8a8_q", None)
+                layer.__dict__.pop("_ck_w8a8_s", None)
+
     def _process_gptq_layout(self, layer: torch.nn.Module) -> None:
 
         def repack_w_q(x: BasevLLMParameter) -> BasevLLMParameter:
@@ -722,6 +756,29 @@ class TritonW8A16LinearKernel(MPLinearKernel):
         zp_bias = c.weight_type.bias if c.weight_type.has_bias() else 0
 
         if (
+            os.environ.get("VLLM_GFX908_CK_W8A8", "1") == "1"
+            and x_2d.shape[0] <= 64
+            and hasattr(layer, "_ck_w8a8_q")
+            and current_platform.is_rocm()
+        ):
+            # aiter CK int8 (gfx908): per-token activation quant + per-channel
+            # weight; the 6.8x @ M=8 microbench lives here. Weights were
+            # requantized per-channel in process_weights_after_loading.
+            from aiter import gemm_a8w8_CK
+            from aiter.ops.quant import pertoken_quant
+
+            a_q, a_s = pertoken_quant(
+                x_2d.to(torch.float16), quant_dtype=torch.int8
+            )
+            output = gemm_a8w8_CK(
+                a_q,
+                layer._ck_w8a8_q,
+                a_s,
+                layer._ck_w8a8_s,
+                None,
+                x_2d.dtype,
+            )
+        elif (
             x_2d.shape[0] <= 8
             and x_2d.dtype == torch.float16
             and c.weight_type == scalar_types.uint8b128

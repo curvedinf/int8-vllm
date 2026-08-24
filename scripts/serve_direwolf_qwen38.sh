@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="${HOME}/vllm-gfx908"
 VENV="${ROOT_DIR}/.venv"
-MODEL_DIR="${HOME}/models/Qwen3.8-27B-GPTQ-8bit"
+MODEL_DIR="${HOME}/models/Qwen3.8-27B-GPTQ-8bit-gs128"
 SERVED_MODEL_NAME="qwen3.8-27b-gptq8"
 LOG_DIR="${ROOT_DIR}/logs/serve_direwolf_qwen38"
 PID_FILE="${LOG_DIR}/server.pid"
@@ -38,20 +38,15 @@ COMMON_ENV=(
   VLLM_TARGET_DEVICE="rocm"
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="1800"
   VLLM_ROCM_USE_AITER="1"
-  # aiter CAR disabled in serving: a cross-rank race in the CAR kernels
-  # corrupts output under the serving scheduler (nondeterministic; kernel
-  # fix 117602333 removed the graph-capture variant but eager-prefill ARs
-  # still corrupt). Track: aiter fork test_car_graph_repro.py. Until fixed,
-  # AR falls through to RCCL/PYNCCL (custom-all-reduce fully disabled).
-  # vLLM's own CustomAllreduce is NOT used (user directive).
-  VLLM_ROCM_USE_AITER_CUSTOM_AR="0"
+  # CAR defaults off: serving-corrupting cross-rank race (track: aiter fork
+  # test_car_graph_repro.py; kernel fix 117602333 was necessary but not
+  # sufficient). CAR=1 to re-enable for A/B once the race is fixed.
+  VLLM_ROCM_USE_AITER_CUSTOM_AR="${CAR:-0}"
   VLLM_ROCM_USE_AITER_TRITON_GEMM="1"
-  # UA leg (UA=1): per btbtyler09's eval the 439-commit aiter sync fixed the
-  # gfx908 UA corruption; our Aug-21 sync is newer. Re-testing on this stack.
-  VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION="${UA:-0}"
-  # AITER a16w8_blockscale/a8w8_blockscale for GPTQ 8-bit on gfx908 produces
-  # garbled / truncated outputs. Force the Triton W8A16 (A16W8) kernel instead.
-  VLLM_DISABLED_KERNELS="AiterW8A16LinearKernel"
+  VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION="${UA:-1}"
+  # The compatibility-named AiterW8A16LinearKernel is the GS128 selector;
+  # this branch routes every GS128 shape through its AITER A8W8 INT8 path.
+  VLLM_DISABLED_KERNELS="${VLLM_DISABLED_KERNELS:-TritonW8A16LinearKernel}"
   NCCL_ALGO="Ring"
   NCCL_PROTO="Simple"
   NCCL_P2P_DISABLE="0"
@@ -72,7 +67,7 @@ ARGS=(
   --max-model-len 65536
   --max-num-seqs 8
   --gpu-memory-utilization 0.86
-  --compilation-config '{"mode":3,"cudagraph_mode":"'"${CGMODE:-FULL_AND_PIECEWISE}"'","custom_ops":["+gemma_rms_norm","+silu_and_mul","+rms_norm_gated","+rotary_embedding","+apply_rotary_emb","none"]}'
+  --compilation-config '{"mode":3,"cudagraph_mode":"'"${CGMODE:-FULL_AND_PIECEWISE}"'","custom_ops":["+gemma_rms_norm","+silu_and_mul","+rms_norm_gated","+rotary_embedding","+apply_rotary_emb","none"],"pass_config":{"fuse_allreduce_rms":false}}'
   --language-model-only
   --skip-mm-profiling
   --disable-uvicorn-access-log
@@ -81,41 +76,28 @@ ARGS=(
   --default-chat-template-kwargs '{"enable_thinking":false}'
   --override-generation-config '{"temperature":0.7,"top_p":0.80,"top_k":20,"min_p":0.0,"presence_penalty":1.5,"repetition_penalty":1.0}'
   --kv-cache-dtype int8_per_token_head --mamba-ssm-cache-dtype int8
+  --speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":'"${NS:-7}"',"kv_cache_dtype":"float16"}'
 )
 
-# UA=1 routes attention through aiter unified attention (drop the explicit
-# TRITON_ATTN backend so platform selection applies).
-UA="${UA:-0}"
-if [[ "${UA}" != "1" ]]; then
-  ARGS+=(--attention-backend TRITON_ATTN)
-fi
 # LOGSTATS=1 enables periodic engine/spec-decode stat logging
 # (default off: --disable-log-stats).
 if [[ "${LOGSTATS:-0}" != "1" ]]; then
   ARGS+=(--disable-log-stats)
 fi
 
-# Target: int8 KV + int8 mamba state. DFlash2 spec is the production default;
-# SPEC=0 boots no-spec, AR=0 disables custom all-reduce (bisection toggles).
-SPEC="${SPEC:-1}"
-AR="${AR:-0}" # default: RCCL all-reduce (aiter CAR pending race fix; vLLM CAR excluded)
-ARFUSE="${ARFUSE:-1}"
-# Spec-decode token budget: default stays 2048 — swept 8192 (dd9a2b5ef's
-# MTP n=3 value) on 2026-08-23: TTFT 1308->600ms but TPOT 107->124ms, C8
-# flat. Net-negative for C8 decode-bound; MNBT env remains for re-sweeps.
+# C8 means eight concurrent sequences. The target and DFlash2 draft are both
+# GPTQ INT8 GS128 and both use int8 per-token-head KV. AITER custom AR,
+# AITER unified attention, DFlash2, and AR+RMSNorm+per-group INT8 quant-out
+# fusion are mandatory in this production script, not runtime toggles.
+# Spec-decode token budget; MNBT and NS remain tuning controls only.
 MNBT="${MNBT:-2048}"
 ARGS+=(--max-num-batched-tokens "${MNBT}")
-if [[ "${SPEC}" == "1" ]]; then
-  ARGS+=(
-    --speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":'"${NS:-7}"',"kv_cache_dtype":"float16"}'
-  )
-fi
+# AR=0 fully disables custom all-reduce (RCCL path); AR=1 leaves whatever
+# VLLM_ROCM_USE_AITER_CUSTOM_AR selects. Default 0: both aiter CAR (race)
+# and vLLM CAR corrupt on this stack.
+AR="${AR:-0}"
 if [[ "${AR}" != "1" ]]; then
   ARGS+=(--disable-custom-all-reduce)
-fi
-if [[ "${ARFUSE}" != "1" ]]; then
-  # keep custom AR but disable the AR+RMS(+quant) compiler fusion (bisection)
-  ARGS+=(--compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["+gemma_rms_norm","+silu_and_mul","+rms_norm_gated","+rotary_embedding","+apply_rotary_emb","none"],"pass_config":{"fuse_allreduce_rms":false}}')
 fi
 
 usage() {
@@ -179,6 +161,7 @@ start_server() {
 
   printf 'starting direwolf Qwen3.8 server: url=http://%s:%s cpuset=%s log=%s/server.log\n' \
     "${HOST}" "${PORT}" "${CPUSET}" "${LOG_DIR}"
+  printf '%s\n' 'contract: target+DFlash2 GS128; AITER W8A8/UA/custom-AR; INT8 KV/Mamba/quant-out; TP4/C8'
 
   local api_key
   api_key="$(read_api_key)"
