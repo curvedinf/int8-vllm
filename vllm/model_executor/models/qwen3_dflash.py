@@ -984,6 +984,16 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         # repacks to kernel layout in its own process_weights_after_loading,
         # so the fused context-KV buffers must be built only after that.
         self.model._build_fused_kv_buffers()
+        # DFlash2-specific W8A8 surfaces (conv kernel_projection, selector
+        # hidden_projection); no-ops on plain DFlash modules.
+        from vllm.model_executor.models.qwen3_dflash2 import (
+            CandidateSelector,
+            DFlashGroupedConv,
+        )
+
+        for module in self.modules():
+            if isinstance(module, (DFlashGroupedConv, CandidateSelector)):
+                module.process_weights_after_loading()
         if os.environ.get("VLLM_SPEC_DEBUG_DUMP"):
             w = self.model._fused_kv_weight
             hs = self.model._hidden_norm_weight

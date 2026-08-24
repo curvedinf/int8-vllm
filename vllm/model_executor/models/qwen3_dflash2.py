@@ -78,6 +78,38 @@ class DFlashGroupedConv(nn.Module):
             return_bias=False,
         )
 
+    def process_weights_after_loading(self) -> None:
+        """W8A8 (gfx908 int8 doctrine) for the projection.
+
+        The conv coefficients this GEMM produces multiply the residual
+        stream; per-channel weight quant at the 1/254 bound perturbs them
+        far below the bf16 conv arithmetic's own rounding.
+        """
+        if os.environ.get("VLLM_GFX908_DF2_W8A8", "1") != "1":
+            return
+        from vllm.model_executor.layers.quantization.utils import replace_parameter
+
+        w = self.kernel_projection.weight.data.float()
+        wmax = w.abs().amax(dim=1, keepdim=True).clamp(min=1e-12)
+        self._kp_s = (wmax / 127.0).to(torch.float32).contiguous()
+        self._kp_q = (
+            (w / self._kp_s).round_().clamp_(-127, 127).to(torch.int8).contiguous()
+        )
+
+    def _project(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if hasattr(self, "_kp_q"):
+            flat = hidden_states.reshape(-1, hidden_states.shape[-1]).to(
+                torch.float16
+            )
+            x_q, x_s = torch.ops.vllm.rocm_aiter_pertoken_quant_int8(flat)
+            out = torch.ops.vllm.rocm_aiter_gemm_a8w8_ck(
+                x_q, self._kp_q, x_s, self._kp_s, flat.dtype
+            )
+            return out.reshape(*hidden_states.shape[:-1], -1).to(
+                self.base_kernel.dtype
+            )
+        return self.kernel_projection(hidden_states)
+
     def _convolve(
         self, hidden_states: torch.Tensor, delta: torch.Tensor, side: int
     ) -> torch.Tensor:
@@ -92,7 +124,7 @@ class DFlashGroupedConv(nn.Module):
         )
 
     def prepare(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        coefficients = self.kernel_projection(hidden_states).reshape(
+        coefficients = self._project(hidden_states).reshape(
             hidden_states.shape[0], 2, self.taps, self.num_groups
         )
         return self._convolve(hidden_states, coefficients[:, 0], 0), coefficients[:, 1]
@@ -234,6 +266,22 @@ class CandidateSelector(nn.Module):
             return_bias=False,
         )
 
+    def process_weights_after_loading(self) -> None:
+        """W8A8 for the hidden projection (codebooks stay float — audited).
+
+        The 5120->256 projection runs once per drafted step; the codebooks
+        it feeds are candidate-row gathers whose ranking drives acceptance
+        and remain bf16 per the audit's explicit exception.
+        """
+        if os.environ.get("VLLM_GFX908_DF2_W8A8", "1") != "1":
+            return
+        w = self.hidden_projection.weight.data.float()
+        wmax = w.abs().amax(dim=1, keepdim=True).clamp(min=1e-12)
+        self._hp_s = (wmax / 127.0).to(torch.float32).contiguous()
+        self._hp_q = (
+            (w / self._hp_s).round_().clamp_(-127, 127).to(torch.int8).contiguous()
+        )
+
     def forward(
         self,
         candidate_ids: torch.Tensor,
@@ -241,7 +289,18 @@ class CandidateSelector(nn.Module):
         hidden_states: torch.Tensor,
         anchor_token_ids: torch.Tensor,
     ) -> torch.Tensor:
-        hidden = self.hidden_projection(hidden_states)
+        if hasattr(self, "_hp_q"):
+            flat = hidden_states.reshape(-1, hidden_states.shape[-1]).to(
+                torch.float16
+            )
+            x_q, x_s = torch.ops.vllm.rocm_aiter_pertoken_quant_int8(flat)
+            hidden = torch.ops.vllm.rocm_aiter_gemm_a8w8_ck(
+                x_q, self._hp_q, x_s, self._hp_s, flat.dtype
+            ).reshape(*hidden_states.shape[:-1], -1).to(
+                self.predecessor_codebook.dtype
+            )
+        else:
+            hidden = self.hidden_projection(hidden_states)
         return _score_edges(
             self.predecessor_codebook,
             self.successor_codebook,

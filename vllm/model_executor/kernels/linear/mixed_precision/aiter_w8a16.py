@@ -370,13 +370,26 @@ class AiterW8A16LinearKernel(MPLinearKernel):
                 gemm_op = getattr(torch.ops.vllm, "rocm_aiter_gemm_a8w8_ck", None)
                 if quant_op is not None and gemm_op is not None:
                     x_q, x_s = quant_op(x_f16)
-                    output = gemm_op(x_q, layer._ck_q, x_s, layer._ck_s, x_2d.dtype)
+                    # The CK kernel supports fp16/bf16 outputs only; the
+                    # profile dummy run feeds fp32 activations whose dtype
+                    # would otherwise flow through as Y (unsupported).
+                    out_dtype = (
+                        x_2d.dtype
+                        if x_2d.dtype in (torch.float16, torch.bfloat16)
+                        else torch.float16
+                    )
+                    output = gemm_op(x_q, layer._ck_q, x_s, layer._ck_s, out_dtype)
                 else:
                     from aiter import gemm_a8w8_CK, pertoken_quant
 
                     x_q, x_s = pertoken_quant(x_f16, quant_dtype=torch.int8)
+                    out_dtype = (
+                        x_2d.dtype
+                        if x_2d.dtype in (torch.float16, torch.bfloat16)
+                        else torch.float16
+                    )
                     output = gemm_a8w8_CK(
-                        x_q, layer._ck_q, x_s, layer._ck_s, None, x_2d.dtype
+                        x_q, layer._ck_q, x_s, layer._ck_s, None, out_dtype
                     )
                 if os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not (
                     torch.cuda.is_current_stream_capturing()
