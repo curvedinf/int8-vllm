@@ -9,11 +9,11 @@ whole model surface and exploits it everywhere it wins.
 
 > **Optimized configuration:** [Qwen3.8-27B GPTQ INT8 W8A8 GS128](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128)
 > + its matching [DFlash2 GPTQ INT8 W8A8 GS128 draft](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128)
-> + AITER W8A8 INT8 GEMMs at every decode/prefill shape + AITER unified
-> attention in INT8 + INT8 Mamba state + INT8 per-token-head target and draft
-> KV + AITER custom all-reduce with fused AR+RMSNorm+per-group INT8 quant-out
-> + TP4/C8 over XGMI. This complete pair and runtime contract is the sole
-> production recipe; DFlash2 speculative decoding is always enabled.
+> + AITER CK W8A8 INT8 GEMMs at every decode/prefill shape + INT8 lm_head
+> + AITER unified attention in INT8 + INT8 per-token-head target and draft
+> KV + DFlash2 speculative decoding at NS=15 + TP4/C8 over XGMI. This
+> complete pair and runtime contract is the sole production recipe;
+> DFlash2 speculative decoding is always enabled.
 
 ## Performance
 
@@ -34,16 +34,23 @@ small-M config 1.74x vs rocBLAS.
 
 ## Int8 doctrine — what runs where
 
+Measured as of 2026-08-24 (INT8_AUDIT_RESULTS.md reconciled). The recipe is
+int8-native everywhere the acceptance gate passes; every exception below is a
+measured decision, not an aspiration.
+
 | Component | dtype | Notes |
 |---|---|---|
-| GEMMs | **AITER W8A8 INT8** | GPTQ 8-bit weights (uint8b128, group_size 128) and dynamically quantized INT8 activations at every decode and prefill M; W8A16 is not part of the target run |
-| KV cache | **int8** | per-token-head quantized, f32 inline scales, block 32 |
-| Attention | **AITER unified attention, int8** | Q quantized per-row in-kernel; K/V use the int8 per-token-head cache |
-| Mamba/GDN state | **int8** | `--mamba-ssm-cache-dtype int8` |
+| Target GEMMs | **W8A8 int8 (CK)** | per-channel weight requant at load + per-token activation quant; `gemm_a8w8_CK` |
+| lm_head | **W8A8 int8 (CK)** | `VLLM_GFX908_INT8_LM_HEAD=1`; gated 65.6→65.6% acceptance (neutral), halves head memory |
+| KV cache (target) | **int8 per-token-head** | f32 inline scales, block 32 |
+| Draft KV | **int8 per-token-head** | after the UA noncausal `kv_quant_mode` fix; acceptance 76.3→79.7% vs bf16 |
+| DFlash2 drafter | **GPTQ int8 GS128 → CK W8A8** | conv `kernel_projection` + selector `hidden_projection` W8A8 (`VLLM_GFX908_DF2_W8A8`) |
 | Attention P@V | fp16 | V dequantized with scale folded into P |
-| DFlash2 drafter | **GPTQ int8 GS128** | matching published DFlash2 checkpoint; int8 per-token-head draft KV |
+| Selector codebooks | bf16 | audited exception: candidate-row gathers, ranking-sensitive |
+| Draft ctx-KV projection | **bf16 dense** | dtype ladder measured: bf16 71.2% > fp16 69.2% > int8 66.0% acceptance |
+| Mamba/GDN recurrent state | **fp16** | unscaled int8 store measured invalid; scaled kernel is future work |
+| All-reduce | vLLM CUSTOM (fp16 payload) | AITER CAR is coherent but 8.8% slower unfused; fused epilogue blocked by Inductor corruption |
 | Tensor parallel / concurrency | **TP4 / C8** | `--tensor-parallel-size 4 --max-num-seqs 8` |
-| Collective epilogue | **AITER INT8** | AITER custom all-reduce plus fused AR+RMSNorm+per-group INT8 quant-out |
 
 Both target and DFlash2 draft use `int8_per_token_head` KV. The draft setting
 is explicit inside the speculative-config JSON so it cannot silently inherit
@@ -96,17 +103,19 @@ sudo systemctl daemon-reload && sudo systemctl enable --now vllm-openai-gfx908-q
 ```
 
 The launcher fixes `VLLM_ROCM_USE_AITER=1`,
-`VLLM_ROCM_USE_AITER_CUSTOM_AR=1`, and
-`VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1`; it blocks the fork-local Triton
-mixed-precision selector so the GS128 weights use AITER W8A8 at every M. Key
-flags are `--tensor-parallel-size 4 --max-num-seqs 8
---kv-cache-dtype int8_per_token_head --mamba-ssm-cache-dtype int8
---compilation-config '{"pass_config":{"fuse_allreduce_rms":true},...}'` and
+`VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1`, and
+`VLLM_GFX908_INT8_LM_HEAD=1`; it blocks the fork-local Triton
+mixed-precision selector so the GS128 weights use AITER W8A8 at every M.
+The all-reduce is vLLM `CUSTOM` (`CAR=0 AR=1`) — measured fastest
+sustained; AITER CAR remains available via `CAR=1` for tuning. Key flags
+are `--tensor-parallel-size 4 --max-num-seqs 8
+--kv-cache-dtype int8_per_token_head --mamba-ssm-cache-dtype float16` and
 `--speculative-config
-'{"method":"dflash","model":"curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128","num_speculative_tokens":7,"kv_cache_dtype":"int8_per_token_head"}'`.
-The top-level flag applies to the target; the nested field applies to the
-draft, so both KV caches use int8 per-token-head. The production script has
-no no-spec, RCCL, TRITON_ATTN, W8A16, or fusion-off mode.
+'{"method":"dflash","num_speculative_tokens":15,"kv_cache_dtype":"int8_per_token_head"}'`
+(NS=15 measured best TG; NS=17 collapses — see INT8_AUDIT_RESULTS.md).
+The draft dtype resolves from its checkpoint (bf16) — forcing the target's
+fp16 overflows the draft residual stream (fixed 2026-08-24). The
+production script has no no-spec, RCCL, TRITON_ATTN, or W8A16 mode.
 
 ## Hardware / software
 
