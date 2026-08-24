@@ -28,6 +28,8 @@ from aiter.ops.triton.gemm.basic.gemm_a8w8_blockscale import (
     gemm_a8w8_blockscale,
 )
 
+from vllm.model_executor.layers.rms_norm_int8_quant import PREQUANT_ATTR
+
 _AITER_W8A16_SUPPORTED_QUANT_TYPES = [scalar_types.uint8b128]
 _AITER_W8A16_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128, 256]
 
@@ -270,9 +272,11 @@ class AiterW8A16LinearKernel(MPLinearKernel):
         # layers, whose dequant_kv_rows hook reads live params for the
         # DFlash fused ctx-KV build, and layers without _ck_q (blockscale
         # fallback). Free the rest; the memory returns to KV cache.
+        # QKVParallelLinear carries head_size; q_size lives on the parent
+        # attention module, not the linear itself.
         if (
             hasattr(layer, "_ck_q")
-            and not hasattr(layer, "q_size")
+            and not hasattr(layer, "head_size")
             and os.environ.get("VLLM_GFX908_CK_FREE_GS128", "1") == "1"
         ):
             for pname in (
@@ -395,7 +399,23 @@ class AiterW8A16LinearKernel(MPLinearKernel):
                 )
                 gemm_op = getattr(torch.ops.vllm, "rocm_aiter_gemm_a8w8_ck", None)
                 if quant_op is not None and gemm_op is not None:
-                    x_q, x_s = quant_op(x_f16)
+                    # The fused-norm path stashes (q, scale) on the normed
+                    # tensor; consume it instead of re-quantizing. Opaque to
+                    # dynamo: the compiled path fuses at the graph level
+                    # (GFX908RMSNormInt8QuantFusionPass) instead.
+                    prequant = (
+                        None
+                        if torch.compiler.is_compiling()
+                        else getattr(x, PREQUANT_ATTR, None)
+                    )
+                    if (
+                        prequant is not None
+                        and prequant[0].shape == x_2d.shape
+                        and x_2d.dtype in (torch.float16, torch.bfloat16)
+                    ):
+                        x_q, x_s = prequant
+                    else:
+                        x_q, x_s = quant_op(x_f16)
                     # The CK kernel supports fp16/bf16 outputs only; the
                     # profile dummy run feeds fp32 activations whose dtype
                     # would otherwise flow through as Y (unsupported).
