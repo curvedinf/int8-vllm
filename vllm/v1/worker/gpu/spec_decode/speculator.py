@@ -95,7 +95,10 @@ class DraftModelSpeculator(BaseSpeculator):
         hc_mult = getattr(self.draft_model_config.hf_config, "hc_mult", 1)
         self.hidden_size = self.hidden_size * hc_mult
         self.vocab_size = self.draft_model_config.get_vocab_size()
-        self.dtype = vllm_config.model_config.dtype
+        # The drafter's buffers must match the DRAFT checkpoint dtype: a
+        # bf16-trained DFlash drafter served under an fp16 target overflows
+        # fp16 in its residual stream otherwise.
+        self.dtype = self.draft_model_config.dtype
         self.use_fp64_gumbel = vllm_config.model_config.use_fp64_gumbel
         self.use_local_argmax_reduction = (
             self.speculative_config.use_local_argmax_reduction

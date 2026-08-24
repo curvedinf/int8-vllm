@@ -216,13 +216,25 @@ class AiterW8A16LinearKernel(MPLinearKernel):
             w_q, w_s, _, _ = self._get_weight_params(layer)
             # w_q: [N, K] int8 (already de-biased), w_s: [N, K//G]
             gs = self.config.group_size
+            # Emit the model dtype, not the checkpoint scale dtype: GPTQ
+            # scales are commonly stored fp16 even for bf16 models, and a
+            # bf16-trained DFlash drafter must not round its dense KV rows
+            # through fp16 (overflow at |w| > 65504/scale granularity).
+            from vllm.config import get_current_vllm_config
+
+            spec_cfg = get_current_vllm_config().speculative_config
+            out_dtype = (
+                spec_cfg.draft_model_config.dtype
+                if spec_cfg is not None and spec_cfg.draft_model_config is not None
+                else self.config.act_type
+            )
             if gs == -1:
-                return (w_q.float() * w_s.float()).to(torch.float16).contiguous()
+                return (w_q.float() * w_s.float()).to(out_dtype).contiguous()
             return (
                 (w_q.float().view(N_local, K_local // gs, gs)
                  * w_s.float().unsqueeze(-1))
                 .reshape(N_local, K_local)
-                .to(torch.float16)
+                .to(out_dtype)
                 .contiguous()
             )
 
@@ -366,9 +378,35 @@ class AiterW8A16LinearKernel(MPLinearKernel):
                     output = gemm_a8w8_CK(
                         x_q, layer._ck_q, x_s, layer._ck_s, None, x_2d.dtype
                     )
+                if os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not (
+                    torch.cuda.is_current_stream_capturing()
+                ):
+                    print(
+                        f"[SPEC-DBGC] ck M={M} N={N} K={K} "
+                        f"in_abs={x_2d.abs().max().item():.3f} "
+                        f"xq_abs={x_q.abs().max().item()} "
+                        f"xs_abs={x_s.abs().max().item():.4f} "
+                        f"wq_abs={layer._ck_q.abs().max().item()} "
+                        f"ws_abs={layer._ck_s.abs().max().item():.4f} "
+                        f"out_abs={output.abs().max().item():.3f}",
+                        flush=True,
+                    )
             else:
                 x_q, x_s = _quantize_activation_per_block(x_2d, block_k=128)
                 cfg = _get_aiter_w8a8_config(M, N, K, c.group_size)
+                if os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not (
+                    torch.cuda.is_current_stream_capturing()
+                ):
+                    print(
+                        f"[SPEC-DBGC] blockscale M={M} N={N} K={K} "
+                        f"in_abs={x_2d.abs().max().item():.3f} "
+                        f"xq_abs={x_q.abs().max().item()} "
+                        f"xs_abs={x_s.abs().max().item():.4f} "
+                        f"wq_abs={w_q.abs().max().item()} "
+                        f"ws_abs={w_s.abs().max().item():.4f} "
+                        f"out_abs={float('nan')}",
+                        flush=True,
+                    )
                 output = gemm_a8w8_blockscale(
                     x_q,
                     w_q,

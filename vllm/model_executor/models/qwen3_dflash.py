@@ -318,7 +318,23 @@ class DFlashQwen3Attention(nn.Module):
 
         q, k = self.rotary_emb(positions, q, k)
 
+        if os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not (
+            torch.cuda.is_current_stream_capturing()
+        ):
+            print(
+                f"[SPEC-DBGD] {self.layer_name} q_abs={q.abs().max().item():.3f} "
+                f"k_abs={k.abs().max().item():.3f} impl={type(self.attn.impl).__name__}",
+                flush=True,
+            )
         attn_output = self.attn(q, k, v)
+        if os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not (
+            torch.cuda.is_current_stream_capturing()
+        ):
+            print(
+                f"[SPEC-DBGD] {self.layer_name} attn_out_abs="
+                f"{attn_output.abs().max().item():.6f}",
+                flush=True,
+            )
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -468,7 +484,10 @@ class DFlashQwen3Model(nn.Module):
         # and substitute it for embed_tokens[mask_token_id] when computing embeddings.
         self.mask_token_id = drafter_config.get("mask_token_id")
         self.mask_embedding = nn.Parameter(
-            torch.zeros(self.config.hidden_size, dtype=vllm_config.model_config.dtype),
+            torch.zeros(
+                self.config.hidden_size,
+                dtype=vllm_config.speculative_config.draft_model_config.dtype,
+            ),
             requires_grad=False,
         )
         self.has_separate_mask_embedding = False
@@ -493,7 +512,7 @@ class DFlashQwen3Model(nn.Module):
                 ),
                 output_size=self.config.hidden_size,
                 bias=False,
-                params_dtype=vllm_config.model_config.dtype,
+                params_dtype=vllm_config.speculative_config.draft_model_config.dtype,
                 quant_config=self.quant_config,
                 prefix=maybe_prefix(prefix, "fc"),
                 return_bias=False,
@@ -536,7 +555,19 @@ class DFlashQwen3Model(nn.Module):
             return attn.qkv_proj.weight[attn.q_size :]
 
         kv_weights = [_dense_kv_rows(a) for a in layers_attn]
-        self._fused_kv_weight = torch.cat(kv_weights, dim=0)
+        # The fused projection runs against the speculator's hidden-state
+        # buffer (draft dtype); the shared target embedding is fp16 when the
+        # target is, so derive the dtype from the draft config instead of the
+        # (possibly shared) embedding weights.
+        from vllm.config import get_current_vllm_config as _get_cfg
+
+        _spec = _get_cfg().speculative_config
+        draft_dtype = (
+            _spec.draft_model_config.dtype
+            if _spec is not None and _spec.draft_model_config is not None
+            else self.embed_tokens.weight.dtype
+        )
+        self._fused_kv_weight = torch.cat(kv_weights, dim=0).to(draft_dtype)
         if has_bias:
             kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
             self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
@@ -733,15 +764,40 @@ class DFlashQwen3Model(nn.Module):
         if input_embeds is None:
             input_embeds = self.embed_input_ids(input_ids)
 
-        hidden_states = input_embeds
+        # The embedding may be shared with the target (fp16 when the target
+        # is); upcast to the drafter's dtype so the first layer's conv
+        # projection and norms see a uniform dtype. Lossless for bf16 drafts.
+        hidden_states = input_embeds.to(self.norm.weight.dtype)
+
+        if os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not (
+            torch.cuda.is_current_stream_capturing()
+        ):
+            ids = input_ids[:8]
+            print(
+                f"[SPEC-DBG8] embed nan={int(hidden_states.isnan().sum())}/"
+                f"{hidden_states.numel()} absmax={float(hidden_states.abs().max()):.3f} "
+                f"ids[:8]={ids.cpu().tolist()} pos[:8]={positions[:8].cpu().tolist()}",
+                flush=True,
+            )
 
         residual = None
-        for layer in self.layers:
+        for layer_idx, layer in enumerate(self.layers):
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
             )
+            if os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not (
+                torch.cuda.is_current_stream_capturing()
+            ):
+                hs8 = hidden_states[:8].reshape(8, -1)
+                print(
+                    f"[SPEC-DBG9] L{layer_idx} nan={int(hidden_states.isnan().sum())}/"
+                    f"{hidden_states.numel()} absmax={float(hidden_states.abs().max()):.3f} "
+                    f"row0[:4]={hs8[0, :4].cpu().tolist()} "
+                    f"row1[:4]={hs8[1, :4].cpu().tolist()}",
+                    flush=True,
+                )
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
@@ -872,7 +928,10 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
                 "means the draft model's target_layer_ids reference layers that "
                 "do not exist in the target model (incompatible draft/target pair)."
             )
-        result = self.model.fc(hidden_states)
+        # The target emits its own dtype (fp16 target + bf16 draft is a
+        # supported mix); cast to the drafter's dtype at the boundary. The
+        # upcast is lossless.
+        result = self.model.fc(hidden_states.to(self.model.fc.weight.dtype))
         if needs_squeeze:
             result = result.squeeze(0)
         return result

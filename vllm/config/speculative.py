@@ -923,7 +923,20 @@ class SpeculativeConfig:
                     trust_remote_code=self.target_model_config.trust_remote_code,
                     allowed_local_media_path=self.target_model_config.allowed_local_media_path,
                     allowed_media_domains=self.target_model_config.allowed_media_domains,
-                    dtype=self.target_model_config.dtype,
+                    # A DFlash drafter runs its own deep stack over the fc-
+                    # combined aux states, whose magnitudes are set by the
+                    # draft checkpoint's training dtype. Forcing the target's
+                    # fp16 onto a bf16-trained drafter overflows the fp16
+                    # residual stream within a few layers (observed: L0
+                    # residual ~30k, L2 hits 65504 -> inf -> NaN drafts ->
+                    # near-zero acceptance). Honor the draft checkpoint's
+                    # declared dtype for DFlash methods; other drafters keep
+                    # inheriting the target dtype.
+                    dtype=(
+                        "auto"
+                        if self.method in ("dflash", "dspark")
+                        else self.target_model_config.dtype
+                    ),
                     seed=self.target_model_config.seed,
                     revision=self.revision,
                     code_revision=self.code_revision,

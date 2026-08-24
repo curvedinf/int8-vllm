@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -129,7 +131,7 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
             group_size=int(draft_config["conv_group_size"]),
             # Query tokens per request: the bonus token plus the mask tokens.
             block_size=1 + speculative_config.num_speculative_tokens,
-            params_dtype=vllm_config.model_config.dtype,
+            params_dtype=speculative_config.draft_model_config.dtype,
         )
         self.attention_conv = DFlashGroupedConv(
             **conv_args, prefix=maybe_prefix(prefix, "attention_conv")
@@ -150,14 +152,33 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
+        dbg = os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not (
+            torch.cuda.is_current_stream_capturing()
+        )
+
+        def _dbg(tag, t):
+            if dbg:
+                print(
+                    f"[SPEC-DBGA] {id(self) % 1000} {tag} "
+                    f"nan={int(t.isnan().sum())}/{t.numel()} "
+                    f"absmax={float(t.abs().max()):.3f}",
+                    flush=True,
+                )
+
         hidden_states, coefficients = self.attention_conv.prepare(hidden_states)
+        _dbg("attn_conv_prep", hidden_states)
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
+        _dbg("attn_out", hidden_states)
         hidden_states = self.attention_conv.finish(hidden_states, coefficients)
+        _dbg("attn_conv_fin", hidden_states)
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states, coefficients = self.mlp_conv.prepare(hidden_states)
+        _dbg("mlp_conv_prep", hidden_states)
         hidden_states = self.mlp(hidden_states)
+        _dbg("mlp_out", hidden_states)
         hidden_states = self.mlp_conv.finish(hidden_states, coefficients)
+        _dbg("mlp_conv_fin", hidden_states)
         return hidden_states, residual
 
 
@@ -258,7 +279,7 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
                 vocab_size=self.config.vocab_size,
                 rank=int(draft_config["selector_rank"]),
                 top_k=int(draft_config["selector_top_k"]),
-                params_dtype=vllm_config.model_config.dtype,
+                params_dtype=vllm_config.speculative_config.draft_model_config.dtype,
                 prefix=maybe_prefix(prefix, "candidate_selector"),
             )
 
