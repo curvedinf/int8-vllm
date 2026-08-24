@@ -567,13 +567,15 @@ class DFlashQwen3Model(nn.Module):
             if _spec is not None and _spec.draft_model_config is not None
             else self.embed_tokens.weight.dtype
         )
+        # NOTE: dtype ladder measured 2026-08-24 at TP4/C8 NS=15 —
+        #   bf16 (checkpoint dtype): 71.2% acceptance, 11.68 acc len
+        #   fp16 dense:               69.2% acceptance, 11.38 acc len
+        #   int8 W8A8:                66.0% acceptance, 10.90 acc len
+        # The projection's K output feeds attention after norm+RoPE, so any
+        # rounding below the checkpoint's bf16 lands in every draft scoring
+        # step. Stays checkpoint-dtype; sanctioned float exception (with the
+        # selector codebooks).
         self._fused_kv_weight = torch.cat(kv_weights, dim=0).to(draft_dtype)
-        # NOTE: an int8 W8A8 variant of this projection was gated on
-        # 2026-08-24 and REJECTED: acceptance dropped 71.2 -> 66.0% at NS=15
-        # (the projection's K output feeds attention after norm+RoPE, so its
-        # quantization noise lands directly in every draft scoring step).
-        # The fused context-KV GEMM stays dense-fp — the sanctioned float
-        # exception alongside the selector codebooks.
         self._fused_kv_q = None
         if has_bias:
             kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
