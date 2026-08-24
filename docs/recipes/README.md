@@ -141,3 +141,40 @@ TPOT 111ms. Previous TritonW8A16 baseline: 12.35 / 64 / 1308 / 107.
 
 Gate: KLD ≤ 0.02 primary. 256-token free-rollout agreement is
 non-discriminative at 27B scale — don't use it as the gate.
+
+## AR+RMS+per-token-int8-quant fused epilogue (2026-08-24, status: kernel DONE, production enable BLOCKED)
+
+**aiter `ec90fc933`**: `fused_ar_rms_int8_per_token_quant` — AR + residual +
+RMSNorm + per-token int8 quant producing exactly the CK W8A8 activation
+format (int8 [M,K] + fp32 [M,1] scales, `pertoken_quant` numerics with
+exact-rsqrts and trunc-toward-zero payload). 2-rank suite
+(`op_tests/multigpu_tests/test_fused_ar_rms_int8_quant.py --suite
+per_token`): payload **bit-exact** vs the unfused chain at every production
+shape; scales within reduction-order ULP ties only (≤3.5e-07 rel).
+
+**vLLM `89e808d3e`**: custom ops (`rocm_aiter_pertoken_quant_int8`,
+`rocm_aiter_fused_allreduce_rmsnorm_quant_per_token_int8`) + AR-fusion
+patterns registered ahead of the FP8 variants, gated on
+`supports_per_token_int8_quant`. gfx908 capture uses the pool-staging path
+(`registered=False` under capture), per the graph-coherence fix.
+
+**Why it is NOT enabled in production**: the fusion runs only under
+torch.compile, and this session bisected **torch.compile itself as an
+output corruptor** on this stack (greedy smoke: factual self-contradictions,
+degenerate repetition) with CAR off, ARFUSE off, RCCL — i.e. independent of
+everything new. That is why the platform hook (rocm.py:1052) disables
+compile on gfx908; the July cache predates the current stack. Boot blockers
+on the compile path were fixed and landed (`199db5876`: CK gemm custom op —
+aiter-JIT config lookup was dynamo-skip-marked; `input_guard` device_index
+nullcontext) so the day Inductor-on-gfx908 is fixed, the fusion activates
+with zero further work (set `VLLM_MI100_TORCH_COMPILE=1 CAR=1 ARFUSE=true
+CGMODE=FULL_DECODE_ONLY`; PIECEWISE graphs still hang at TP>1).
+
+Alternative activation route (not built): an eager AR+norm+quant seam in
+`Qwen3NextDecoderLayer.forward` — the AR fires inside
+`RowParallelLinear.forward` while the norm+quant consumer sits in the
+decoder layer, so eager fusion requires model-file surgery per layer type.
+Deferred: large diff, decode-graph capture interactions untested.
+
+Per-group int8 variant (fp16-scale format for the Triton blockscale path)
+remains available for the fallback path only.
