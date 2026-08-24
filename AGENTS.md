@@ -95,18 +95,25 @@ scripts/serve_direwolf_qwen38.sh {start|stop|restart|status|supervise}   # Qwen3
 ```
 
 Non-negotiable settings in the qwen38 script:
-`VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_CUSTOM_AR=1
-VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1`, AITER W8A8 for every GS128 GEMM,
+`VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1
+VLLM_GFX908_INT8_LM_HEAD=1`, AITER CK W8A8 for every GS128 GEMM,
 `--tensor-parallel-size 4 --max-num-seqs 8
---kv-cache-dtype int8_per_token_head --mamba-ssm-cache-dtype int8`, compiler
-pass `fuse_allreduce_rms=true`, and the speculative config
-`{"method":"dflash","num_speculative_tokens":7,"kv_cache_dtype":"int8_per_token_head"}`.
+--kv-cache-dtype int8_per_token_head --mamba-ssm-cache-dtype float16`,
+and the speculative config
+`{"method":"dflash","num_speculative_tokens":15,"kv_cache_dtype":"int8_per_token_head"}`.
 The nested dtype is explicit and applies to the draft; the top-level
-`--kv-cache-dtype int8_per_token_head` applies to the target. Do not replace
-the draft dtype with float16. The non-causal INT8-PTH path is covered by
-`scripts/test_int8_kv_micro.py`; E2E validation must also exercise this exact
-all-INT8-KV serving configuration. `AiterW8A16LinearKernel` is a legacy class
-name only; for these GS128 models it must dispatch AITER A8W8 for all M.
+`--kv-cache-dtype int8_per_token_head` applies to the target. The draft
+MODEL dtype resolves from its checkpoint (bf16) — forcing the target's
+fp16 onto it overflows its residual stream (fixed 2026-08-24; do not
+regress). Measured float exceptions (do not quantize without re-gating):
+selector codebooks, draft ctx-KV projection (bf16 > fp16 > int8 ladder),
+GDN recurrent state (fp16 until a scaled kernel exists). All-reduce is
+vLLM CUSTOM (`CAR=0 AR=1`) — measured fastest; AITER CAR is coherent and
+available via `CAR=1` for tuning. Any dtype change on a draft surface
+requires the acceptance gate: TP4/C8 greedy bench, acceptance within
+±1pt of the current baseline (see INT8_AUDIT_RESULTS.md for method).
+`AiterW8A16LinearKernel` is a legacy class name only; for these GS128
+models it must dispatch AITER CK W8A8 for all M.
 `TritonW8A16LinearKernel` is blocklisted by the launcher.
 
 systemd: unit template at `scripts/vllm-openai-gfx908-qwen38.service` (`%h`
