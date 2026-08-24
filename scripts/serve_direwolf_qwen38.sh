@@ -38,9 +38,11 @@ COMMON_ENV=(
   VLLM_TARGET_DEVICE="rocm"
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="1800"
   VLLM_ROCM_USE_AITER="1"
-  # CAR defaults off: serving-corrupting cross-rank race (track: aiter fork
-  # test_car_graph_repro.py; kernel fix 117602333 was necessary but not
-  # sufficient). CAR=1 to re-enable for A/B once the race is fixed.
+  # CAR default OFF: eager path is clean but SLOWER than RCCL at serving
+  # shapes (aiter cd16c8a45 bench: SS 6.74 vs 14.16, TPOT 131 vs 111), and
+  # the CUDA-graph path still corrupts (registered-input capture; first
+  # decode token correct, replays salad). CAR=1 + CGMODE=NONE is the only
+  # coherent CAR combination today.
   VLLM_ROCM_USE_AITER_CUSTOM_AR="${CAR:-0}"
   VLLM_ROCM_USE_AITER_TRITON_GEMM="1"
   VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION="${UA:-1}"
@@ -67,7 +69,7 @@ ARGS=(
   --max-model-len 65536
   --max-num-seqs 8
   --gpu-memory-utilization 0.86
-  --compilation-config '{"mode":3,"cudagraph_mode":"'"${CGMODE:-FULL_AND_PIECEWISE}"'","custom_ops":["+gemma_rms_norm","+silu_and_mul","+rms_norm_gated","+rotary_embedding","+apply_rotary_emb","none"],"pass_config":{"fuse_allreduce_rms":false}}'
+  --compilation-config '{"mode":3,"cudagraph_mode":"'"${CGMODE:-FULL_AND_PIECEWISE}"'","custom_ops":["+gemma_rms_norm","+silu_and_mul","+rms_norm_gated","+rotary_embedding","+apply_rotary_emb","none"],"pass_config":{"fuse_allreduce_rms":'"${ARFUSE:-false}"'}}'
   --language-model-only
   --skip-mm-profiling
   --disable-uvicorn-access-log
@@ -95,7 +97,7 @@ ARGS+=(--max-num-batched-tokens "${MNBT}")
 # AR=0 fully disables custom all-reduce (RCCL path); AR=1 leaves whatever
 # VLLM_ROCM_USE_AITER_CUSTOM_AR selects. Default 0: both aiter CAR (race)
 # and vLLM CAR corrupt on this stack.
-AR="${AR:-0}"
+AR="${AR:-1}"
 if [[ "${AR}" != "1" ]]; then
   ARGS+=(--disable-custom-all-reduce)
 fi
