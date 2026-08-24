@@ -1238,6 +1238,36 @@ def _rocm_aiter_pertoken_quant_int8_fake(
     )
 
 
+def _rocm_aiter_gemm_a8w8_ck_impl(
+    x_q: torch.Tensor,
+    w_q: torch.Tensor,
+    x_s: torch.Tensor,
+    w_s: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    """AITER CK int8 W8A8 GEMM, opaque to dynamo.
+
+    The aiter-JIT config lookup inside ``gemm_a8w8_CK`` is untraceable under
+    fullgraph compile; registering the call as a custom op keeps the CK path
+    usable when torch.compile is enabled (VLLM_MI100_TORCH_COMPILE=1).
+    """
+    from aiter import gemm_a8w8_CK
+
+    return gemm_a8w8_CK(x_q, w_q, x_s, w_s, None, out_dtype)
+
+
+def _rocm_aiter_gemm_a8w8_ck_fake(
+    x_q: torch.Tensor,
+    w_q: torch.Tensor,
+    x_s: torch.Tensor,
+    w_s: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    return torch.empty(
+        x_q.shape[:-1] + (w_q.shape[0],), dtype=out_dtype, device=x_q.device
+    )
+
+
 def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
     x: torch.Tensor,
     residual: torch.Tensor,
@@ -2317,6 +2347,13 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_gemm_a8w8_ck",
+                op_func=_rocm_aiter_gemm_a8w8_ck_impl,
+                fake_impl=_rocm_aiter_gemm_a8w8_ck_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_sparse_attn_indexer",
                 op_func=rocm_aiter_sparse_attn_indexer,
                 mutates_args=["topk_indices_buffer"],
@@ -2432,6 +2469,10 @@ class rocm_aiter_ops:
     @staticmethod
     def get_triton_rotary_embedding_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default
+
+    @staticmethod
+    def get_gemm_a8w8_ck_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_gemm_a8w8_ck.default
 
     @staticmethod
     def get_fused_allreduce_rmsnorm_op() -> OpOverload:

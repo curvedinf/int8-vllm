@@ -345,26 +345,27 @@ class AiterW8A16LinearKernel(MPLinearKernel):
         # checkpoint scales are preserved for the blockscale fallback and
         # the fused context-KV dequant. We requantize per-channel at load
         # (cached) only when the CK path is enabled. The activation quant
-        # goes through the registered rocm_aiter_pertoken_quant_int8 custom
-        # op (wraps the same aiter pertoken_quant call) so torch.compile
-        # pattern matchers can see and fuse it.
+        # and the CK gemm go through registered custom ops (wrapping the
+        # same aiter calls) so torch.compile pattern matchers can see the
+        # quant, and the aiter-JIT config lookup inside gemm_a8w8_CK
+        # stays opaque to fullgraph tracing.
         if c.group_size == 128:
             if hasattr(layer, "_ck_q"):
                 x_f16 = x_2d.to(torch.float16)
                 quant_op = getattr(
                     torch.ops.vllm, "rocm_aiter_pertoken_quant_int8", None
                 )
-                if quant_op is not None:
+                gemm_op = getattr(torch.ops.vllm, "rocm_aiter_gemm_a8w8_ck", None)
+                if quant_op is not None and gemm_op is not None:
                     x_q, x_s = quant_op(x_f16)
+                    output = gemm_op(x_q, layer._ck_q, x_s, layer._ck_s, x_2d.dtype)
                 else:
-                    from aiter import pertoken_quant
+                    from aiter import gemm_a8w8_CK, pertoken_quant
 
                     x_q, x_s = pertoken_quant(x_f16, quant_dtype=torch.int8)
-                from aiter import gemm_a8w8_CK
-
-                output = gemm_a8w8_CK(
-                    x_q, layer._ck_q, x_s, layer._ck_s, None, x_2d.dtype
-                )
+                    output = gemm_a8w8_CK(
+                        x_q, layer._ck_q, x_s, layer._ck_s, None, x_2d.dtype
+                    )
             else:
                 x_q, x_s = _quantize_activation_per_block(x_2d, block_k=128)
                 cfg = _get_aiter_w8a8_config(M, N, K, c.group_size)

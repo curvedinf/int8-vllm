@@ -106,7 +106,14 @@ def input_guard(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
                     tensor = value
                     break
 
-        if tensor is not None:
+        # torch.accelerator.device_index is marked skip-on-trace by dynamo;
+        # only enter it when the tensor actually lives on another device
+        # (never the case inside a vLLM worker, whose inputs are always on
+        # the current device — a condition dynamo constant-folds).
+        if tensor is not None and tensor.device.index not in (
+            None,
+            torch.cuda.current_device(),
+        ):
             ctx = torch.accelerator.device_index(tensor.device.index)
         else:
             ctx = contextlib.nullcontext()
