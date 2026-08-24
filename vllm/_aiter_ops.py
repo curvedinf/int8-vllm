@@ -1088,6 +1088,78 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_fake(
     return quant_out, residual_out, scale_out, bf16_norm_out
 
 
+def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_token_int8_impl(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fused AllReduce + RMSNorm + per-token int8 quant.
+
+    Mirrors the eligibility logic of ``_rocm_aiter_fused_allreduce_rmsnorm_impl``
+    for the 1-stage vs 2-stage AITER kernel dispatch (both variants run inside
+    AITER, the only choice we make here is the launcher to call into).
+    """
+    aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
+    assert aiter_ar is not None, "aiter allreduce must be initialized"
+    ca = aiter_ar.aiter_ca
+
+    total_bytes = input_.numel() * input_.element_size()
+    hidden_dim = input_.shape[-1]
+    token_num = input_.numel() // hidden_dim
+    if input_.dtype in (torch.bfloat16, torch.float16):
+        pack_size = 16 // input_.element_size()
+        hidden_ok = hidden_dim % pack_size == 0 and hidden_dim // pack_size <= 1024
+    else:
+        hidden_ok = False
+    token_ok = token_num <= 80
+    world_size = ca.world_size
+    full_nvlink = ca.fully_connected
+
+    if world_size == 2:
+        size_ok = True
+    elif full_nvlink and world_size <= 4:
+        size_ok = total_bytes < 256 * 1024
+    elif full_nvlink and world_size <= 8:
+        size_ok = total_bytes < 128 * 1024
+    else:
+        size_ok = False
+
+    use_1stage = hidden_ok and token_ok and size_ok
+
+    # gfx908: captured ARs must stage through the pre-registered pool with
+    # the copy captured in-graph; binding the input directly bakes a
+    # cached-memory IPC view into the graph and replays incoherently (the
+    # same workaround the plain-AR path applies, aiter 6914400f5).
+    from vllm.platforms.rocm import on_gfx908
+
+    registered = torch.cuda.is_current_stream_capturing() and not on_gfx908()
+    result = ca.fused_ar_rms_int8_per_token_quant(
+        input_,
+        residual,
+        w=weight,
+        eps=epsilon,
+        registered=registered,
+        use_1stage=use_1stage,
+    )
+    assert result is not None
+    return result[0], result[1], result[2]
+
+
+def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_token_int8_fake(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    quant_out = torch.empty(input_.shape, dtype=torch.int8, device=input_.device)
+    residual_out = torch.empty_like(residual)
+    scale_out = torch.empty(
+        input_.shape[:-1] + (1,), dtype=torch.float32, device=input_.device
+    )
+    return quant_out, residual_out, scale_out
+
+
 def _rocm_aiter_per_tensor_quant_impl(
     out: torch.Tensor,
     x: torch.Tensor,
@@ -1141,6 +1213,28 @@ def _rocm_aiter_per_token_quant_fake(
     return (
         torch.empty(x.shape, dtype=quant_dtype, device=x.device),
         torch.empty((*out_shape[:-1], 1), dtype=torch.float32, device=x.device),
+    )
+
+
+def _rocm_aiter_pertoken_quant_int8_impl(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-token dynamic int8 quant via AITER ``pertoken_quant``.
+
+    Wraps the exact call the gfx908 CK W8A8 path uses so the registered op is
+    numerically identical to the previously inlined aiter call.
+    """
+    from aiter import pertoken_quant
+
+    return pertoken_quant(x, quant_dtype=torch.int8)
+
+
+def _rocm_aiter_pertoken_quant_int8_fake(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return (
+        torch.empty(x.shape, dtype=torch.int8, device=x.device),
+        torch.empty(x.shape[:-1] + (1,), dtype=torch.float32, device=x.device),
     )
 
 
@@ -2216,6 +2310,13 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_pertoken_quant_int8",
+                op_func=_rocm_aiter_pertoken_quant_int8_impl,
+                fake_impl=_rocm_aiter_pertoken_quant_int8_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_sparse_attn_indexer",
                 op_func=rocm_aiter_sparse_attn_indexer,
                 mutates_args=["topk_indices_buffer"],
@@ -2266,6 +2367,12 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_fused_allreduce_rmsnorm_quant_per_token_int8",
+                op_func=_rocm_aiter_fused_allreduce_rmsnorm_quant_per_token_int8_impl,
+                fake_impl=_rocm_aiter_fused_allreduce_rmsnorm_quant_per_token_int8_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="fused_mla_dual_rms_norm",
                 op_func=_fused_mla_dual_rms_norm_impl,
                 mutates_args=[],
@@ -2307,6 +2414,10 @@ class rocm_aiter_ops:
         return torch.ops.vllm.rocm_aiter_per_token_quant.default
 
     @staticmethod
+    def get_pertoken_quant_int8_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_pertoken_quant_int8.default
+
+    @staticmethod
     def get_group_quant_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_group_fp8_quant.default
 
@@ -2333,6 +2444,10 @@ class rocm_aiter_ops:
     @staticmethod
     def get_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_op() -> OpOverload:  # noqa: E501
         return torch.ops.vllm.rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm.default  # noqa: E501
+
+    @staticmethod
+    def get_fused_allreduce_rmsnorm_quant_per_token_int8_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_fused_allreduce_rmsnorm_quant_per_token_int8.default  # noqa: E501
 
     @staticmethod
     def get_fused_mla_dual_rms_norm_op() -> OpOverload:

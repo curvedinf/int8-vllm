@@ -93,3 +93,22 @@ class AiterCustomAllreduce:
     @property
     def supports_per_group_quant(self) -> bool:
         return self.build_supports_per_group_quant()
+
+    @staticmethod
+    def build_supports_per_token_int8_quant() -> bool:
+        """True if the running AITER build exposes the per-token int8
+        AR+RMS+quant kernel (gfx908 aiter fork).
+
+        The pattern registration in ``RocmAiterAllReduceFusionPass`` keys off
+        this so vLLM degrades to the FP8 per-group / AR+RMS-only fusions when
+        run against an aiter that lacks the per-token int8 launcher.
+        """
+        from aiter.dist.device_communicators.custom_all_reduce import (
+            CustomAllreduce as _AiterCustomAllreduce,
+        )
+
+        return hasattr(_AiterCustomAllreduce, "fused_ar_rms_int8_per_token_quant")
+
+    @property
+    def supports_per_token_int8_quant(self) -> bool:
+        return self.build_supports_per_token_int8_quant()

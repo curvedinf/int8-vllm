@@ -344,12 +344,22 @@ class AiterW8A16LinearKernel(MPLinearKernel):
         # but requires per-channel weight scales — the per-128-group
         # checkpoint scales are preserved for the blockscale fallback and
         # the fused context-KV dequant. We requantize per-channel at load
-        # (cached) only when the CK path is enabled.
+        # (cached) only when the CK path is enabled. The activation quant
+        # goes through the registered rocm_aiter_pertoken_quant_int8 custom
+        # op (wraps the same aiter pertoken_quant call) so torch.compile
+        # pattern matchers can see and fuse it.
         if c.group_size == 128:
             if hasattr(layer, "_ck_q"):
-                from aiter import pertoken_quant
+                x_f16 = x_2d.to(torch.float16)
+                quant_op = getattr(
+                    torch.ops.vllm, "rocm_aiter_pertoken_quant_int8", None
+                )
+                if quant_op is not None:
+                    x_q, x_s = quant_op(x_f16)
+                else:
+                    from aiter import pertoken_quant
 
-                x_q, x_s = pertoken_quant(x_2d.to(torch.float16), quant_dtype=torch.int8)
+                    x_q, x_s = pertoken_quant(x_f16, quant_dtype=torch.int8)
                 from aiter import gemm_a8w8_CK
 
                 output = gemm_a8w8_CK(
