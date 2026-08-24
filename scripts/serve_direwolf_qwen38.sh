@@ -81,10 +81,11 @@ ARGS=(
   --default-chat-template-kwargs '{"enable_thinking":false}'
   --override-generation-config '{"temperature":0.7,"top_p":0.80,"top_k":20,"min_p":0.0,"presence_penalty":1.5,"repetition_penalty":1.0}'
   --kv-cache-dtype int8_per_token_head --mamba-ssm-cache-dtype int8
-  # NS=11 default per the 2026-08-24 sweep (best TPOT). Draft KV int8-PTH:
-  # full-W8A8 doctrine; acceptance 79.7% / 9.76 accepted length / 11.65 ms
-  # TPOT measured after the UA noncausal kv_quant_mode fix.
-  --speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":'"${NS:-11}"',"kv_cache_dtype":"int8_per_token_head"}'
+  # NS=15 default per the 2026-08-24 W8A8-stack sweep: TG 770 tok/s / 9.61 ms
+  # median TPOT / 71.2% acceptance / 11.68 accepted length. NS=17 collapses
+  # (29.7% acceptance — under investigation, suspected mechanical limit).
+  # Draft KV int8-PTH: full-W8A8 doctrine.
+  --speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":'"${NS:-15}"',"kv_cache_dtype":"int8_per_token_head"}'
 )
 
 # LOGSTATS=1 enables periodic engine/spec-decode stat logging
