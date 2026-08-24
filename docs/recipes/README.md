@@ -119,7 +119,7 @@ Verified-coherent serving baseline as of the aiter-W8A8 integration
 | GEMMs | **aiter CK int8 W8A8 everywhere** (`gemm_a8w8_CK`, per-channel weights + per-token activations; `VLLM_GFX908_CK_W8A8=1` default). +12-15% over TritonW8A16, TTFT -68%. 200/200 soak PASS |
 | Attention | AITER-UA, int8-PTH KV on the int8 QK dot (auto via per-token-head scales). UA required for spec boot (stride-order fix bf6f8adc6) |
 | Draft KV | **float16** (int8 draft KV corrupts on this stack — do not re-enable without a new gate) |
-| All-reduce | **RCCL** (both aiter CAR and vLLM custom AR corrupt in serving; CAR race is the open blocker for the fused AR+RMSNorm+int8-quant epilogue) |
+| All-reduce | **RCCL by bench**. aiter CAR is now CORRECT on both paths (eager: uncached input pool fixes peer-L2 staleness — aiter 96fe7bf36; graph: captures route through the pre-registered pool, vLLM-style — aiter 6914400f5; 299/300 soak). A/B at C8: RCCL SS 15.81 / C8 72 / TPOT 117.6 beats CAR 14.55 / 64 / 130.7. CAR=1 to re-enable (decode kernels untuned) |
 | Blocks in use | `AiterW8A16LinearKernel` (compat name) selected; `TritonW8A16LinearKernel` disabled |
 
 Known-broken alternates (verified this session): the Triton blockscale

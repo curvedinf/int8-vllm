@@ -38,11 +38,12 @@ COMMON_ENV=(
   VLLM_TARGET_DEVICE="rocm"
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="1800"
   VLLM_ROCM_USE_AITER="1"
-  # CAR default OFF: eager path is clean but SLOWER than RCCL at serving
-  # shapes (aiter cd16c8a45 bench: SS 6.74 vs 14.16, TPOT 131 vs 111), and
-  # the CUDA-graph path still corrupts (registered-input capture; first
-  # decode token correct, replays salad). CAR=1 + CGMODE=NONE is the only
-  # coherent CAR combination today.
+  # CAR default OFF by bench: both paths are now CORRECT (graph fix aiter
+  # 6914400f5: captures route through the pre-registered pool, vLLM-style;
+  # 299/300 soak clean), but RCCL wins the A/B at C8 shapes:
+  #   CAR:  SS 14.55, C8 64,  TPOT 130.7, TTFT 520
+  #   RCCL: SS 15.81, C8 72,  TPOT 117.6, TTFT 455
+  # CAR=1 re-enables for future tuning (decode-sized kernels are untuned). 
   VLLM_ROCM_USE_AITER_CUSTOM_AR="${CAR:-0}"
   VLLM_ROCM_USE_AITER_TRITON_GEMM="1"
   VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION="${UA:-1}"
