@@ -80,7 +80,10 @@ ARGS=(
   --tool-call-parser qwen3_coder
   --default-chat-template-kwargs '{"enable_thinking":false}'
   --override-generation-config '{"temperature":0.7,"top_p":0.80,"top_k":20,"min_p":0.0,"presence_penalty":1.5,"repetition_penalty":1.0}'
-  --kv-cache-dtype int8_per_token_head --mamba-ssm-cache-dtype int8
+  # GDN recurrent state fp16 (audit: the bare int8 store is unscaled — invalid
+  # quality; a scaled int8 recurrence kernel is future work). Target + draft KV
+  # int8-PTH above is unaffected.
+  --kv-cache-dtype int8_per_token_head --mamba-ssm-cache-dtype float16
   # NS=15 default per the 2026-08-24 W8A8-stack sweep: TG 770 tok/s / 9.61 ms
   # median TPOT / 71.2% acceptance / 11.68 accepted length. NS=17 collapses
   # (29.7% acceptance — under investigation, suspected mechanical limit).
