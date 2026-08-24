@@ -152,6 +152,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_GFX908_INT8_EMBEDDING: bool = True
+    VLLM_GFX908_INT8_LM_HEAD: bool = False
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
@@ -1351,6 +1352,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_GFX908_INT8_EMBEDDING": lambda: (
         os.getenv("VLLM_GFX908_INT8_EMBEDDING", "True").lower() in ("true", "1")
+    ),
+    # Untied LM head -> per-channel int8 + CK W8A8 GEMM. Default off: the
+    # head feeds logits directly, so it carries its own acceptance/KLD gate.
+    "VLLM_GFX908_INT8_LM_HEAD": lambda: (
+        os.getenv("VLLM_GFX908_INT8_LM_HEAD", "False").lower() in ("true", "1")
     ),
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING": lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),

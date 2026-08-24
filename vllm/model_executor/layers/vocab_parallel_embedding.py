@@ -70,6 +70,42 @@ def _quantize_embedding_int8_(layer: torch.nn.Module) -> None:
     layer._int8_embedding_scale = scale.squeeze(-1).contiguous()
 
 
+def _quantize_lm_head_w8a8_(layer: torch.nn.Module) -> None:
+    """Per-channel INT8 requant of an untied LM head (gfx908 W8A8 doctrine).
+
+    The head's logits GEMM is the full-vocab projection executed for every
+    drafted candidate and every verify position. Store int8 weights with one
+    fp32 scale per output row (the `_ck_q/_ck_s` contract used by
+    gemm_a8w8_CK); activations are per-token quantized at apply time.
+    """
+    w = layer.weight.data.float()
+    wmax = w.abs().amax(dim=1, keepdim=True).clamp(min=1e-12)
+    layer._ck_s = (wmax / 127.0).to(torch.float32).contiguous()
+    layer._ck_q = (
+        (w / layer._ck_s).round_().clamp_(-127, 127).to(torch.int8).contiguous()
+    )
+    layer._gfx908_w8a8_head = True
+
+
+def _apply_w8a8_head(
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """CK W8A8 GEMM for the quantized LM head shard.
+
+    Routes through the registered custom ops so the activation quant and the
+    CK GEMM stay opaque to any compiled consumer. Output dtype follows the
+    activation input (fp16 serving).
+    """
+    flat = x.reshape(-1, x.shape[-1]).to(torch.float16)
+    x_q, x_s = torch.ops.vllm.rocm_aiter_pertoken_quant_int8(flat)
+    out = torch.ops.vllm.rocm_aiter_gemm_a8w8_ck(
+        x_q, layer._ck_q, x_s, layer._ck_s, flat.dtype
+    )
+    return out.reshape(*x.shape[:-1], -1)
+
+
 class UnquantizedEmbeddingMethod(QuantizeMethodBase):
     """Unquantized method for embeddings."""
 
@@ -116,6 +152,17 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
                     _quantize_embedding_int8_(layer)
                     return
             if on_gfx908():
+                # Untied head, still floating: per-channel INT8 + per-token
+                # activation quant served by the CK W8A8 GEMM (gfx908 int8
+                # doctrine). Head output feeds logits directly, so this stays
+                # behind its own gate for acceptance/KLD validation.
+                if (
+                    getattr(layer, "_gfx908_skip_int8", False)
+                    and is_floating
+                    and envs.VLLM_GFX908_INT8_LM_HEAD
+                ):
+                    _quantize_lm_head_w8a8_(layer)
+                    return
                 bind_rocm_unquantized_gemm_gfx908(layer)
 
     def apply(
@@ -126,6 +173,9 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
     ) -> torch.Tensor:
         if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda_alike():
             return linear_batch_invariant(x, layer.weight, bias)
+        if getattr(layer, "_gfx908_w8a8_head", False):
+            assert bias is None, "W8A8 head path does not support bias"
+            return _apply_w8a8_head(layer, x)
         if (op := getattr(layer, "_vllm_unquantized_gemm", None)) is not None:
             return op(layer, x, layer.weight, bias)
         return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
