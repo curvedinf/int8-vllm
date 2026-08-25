@@ -77,6 +77,12 @@ class RMSNorm(CustomOp):
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
+        if (
+            envs.VLLM_GFX908_FUSED_NORM_QUANT
+            and not torch.compiler.is_compiling()
+            and self._fused_norm_quant_ok(x)
+        ):
+            return self._forward_native_fused_int8(x, residual)
         if residual is None:
             return ir.ops.rms_norm(
                 x,
@@ -92,6 +98,50 @@ class RMSNorm(CustomOp):
                 self.variance_epsilon,
                 self.variance_size_override,
             )
+
+    def _fused_norm_quant_ok(self, x: torch.Tensor) -> bool:
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_rocm():
+            return False
+        if self.variance_size_override is not None or not self.pass_weight:
+            return False
+        if x.dim() != 2 or x.dtype not in (torch.float16, torch.bfloat16):
+            return False
+        return (1 << (x.shape[-1] - 1).bit_length()) * x.element_size() <= 65536
+
+    def _forward_native_fused_int8(
+        self, x: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Eager gfx908 fast path: one launch for norm + per-token int8 quant.
+
+        The gfx908 serving stack runs eager (torch.compile is platform-
+        disabled), so this is the production seam: the quant that CK W8A8
+        linears would recompute is emitted here and stashed on the returned
+        tensor. Native numerics keep the normed values within tl.sum
+        reduction order of the ir-native chain.
+        """
+        from vllm.model_executor.layers.rms_norm_int8_quant import (
+            PREQUANT_ATTR,
+            rms_norm_int8_quant,
+        )
+
+        weight = self.weight.data
+        if residual is None:
+            out, q, scale = rms_norm_int8_quant(
+                x, weight, self.variance_epsilon, native_numerics=True
+            )
+            setattr(out, PREQUANT_ATTR, (q, scale))
+            return out
+        out, res_out, q, scale = rms_norm_int8_quant(
+            x,
+            weight,
+            self.variance_epsilon,
+            residual=residual,
+            native_numerics=True,
+        )
+        setattr(out, PREQUANT_ATTR, (q, scale))
+        return out, res_out
 
     def forward_cuda(
         self,
@@ -132,6 +182,11 @@ class RMSNorm(CustomOp):
         inductor-native path for prefill-sized inputs (M>=~512) and only
         slightly slower for tiny decode inputs. We dispatch on M to avoid any
         decode regression.
+
+        With VLLM_GFX908_FUSED_NORM_QUANT (default on), the large-M path
+        additionally emits the per-token int8 quant of the normed output in
+        the same launch and stashes (q, scale) on the returned tensor for
+        CK W8A8 linear consumers.
         """
         from aiter.ops.triton.normalization.rmsnorm import (
             rms_norm as aiter_rms_norm,
@@ -149,6 +204,35 @@ class RMSNorm(CustomOp):
 
         weight = self.weight.data
         eps = self.variance_epsilon
+
+        if envs.VLLM_GFX908_FUSED_NORM_QUANT and x_2d.dtype in (
+            torch.float16,
+            torch.bfloat16,
+        ):
+            from vllm.model_executor.layers.rms_norm_int8_quant import (
+                PREQUANT_ATTR,
+                rms_norm_int8_quant,
+            )
+
+            if (1 << (x_2d.shape[-1] - 1).bit_length()) * x_2d.element_size() <= 65536:
+                residual_2d = (
+                    residual.reshape(-1, orig_shape[-1]).contiguous()
+                    if residual is not None
+                    else None
+                )
+                if residual_2d is None:
+                    out_2d, q, scale = rms_norm_int8_quant(x_2d, weight, eps)
+                    out = out_2d.reshape(orig_shape)
+                else:
+                    out_2d, res_out_2d, q, scale = rms_norm_int8_quant(
+                        x_2d, weight, eps, residual=residual_2d
+                    )
+                    out = out_2d.reshape(orig_shape)
+                    res_out_2d = res_out_2d.reshape(residual.shape)
+                setattr(out, PREQUANT_ATTR, (q, scale))
+                if residual_2d is None:
+                    return out
+                return out, res_out_2d
 
         if residual is None:
             out_2d = aiter_rms_norm(x_2d, weight, eps)

@@ -153,6 +153,11 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_GFX908_INT8_EMBEDDING: bool = True
     VLLM_GFX908_INT8_LM_HEAD: bool = False
+    # Fused RMSNorm+int8 kernel: default OFF — the 2026-08-25 serving gate
+    # measured a 24.7pt acceptance drop (71.2 -> 46.5% at NS=15) traced to
+    # the draft-side quantization boundary; the kernel and eager seam remain
+    # available for a numerics fix under the env flag.
+    VLLM_GFX908_FUSED_NORM_QUANT: bool = False
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
@@ -1357,6 +1362,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # head feeds logits directly, so it carries its own acceptance/KLD gate.
     "VLLM_GFX908_INT8_LM_HEAD": lambda: (
         os.getenv("VLLM_GFX908_INT8_LM_HEAD", "False").lower() in ("true", "1")
+    ),
+    # Fuse RMSNorm + per-token int8 quant into one Triton launch for the
+    # CK W8A8 stack (eager forward_native/forward_hip side-channel +
+    # compiled-graph fusion pass).
+    "VLLM_GFX908_FUSED_NORM_QUANT": lambda: (
+        os.getenv("VLLM_GFX908_FUSED_NORM_QUANT", "False").lower() in ("true", "1")
     ),
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING": lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),

@@ -158,6 +158,16 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
             if self.pass_config.eliminate_noops:
                 self.passes += [NoOpEliminationPass(config)]
 
+            if envs.VLLM_GFX908_FUSED_NORM_QUANT and current_platform.is_rocm():
+                from vllm.platforms.rocm import on_gfx908
+
+                if on_gfx908():
+                    from .fusion.gfx908_rms_norm_int8_quant_fusion import (
+                        GFX908RMSNormInt8QuantFusionPass,
+                    )
+
+                    self.passes += [GFX908RMSNormInt8QuantFusionPass(config)]
+
             if self.pass_config.enable_sp:
                 self.passes += [SequenceParallelismPass(config)]
                 if self.pass_config.fuse_gemm_comms:

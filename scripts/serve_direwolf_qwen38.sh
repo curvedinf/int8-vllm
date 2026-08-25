@@ -80,10 +80,12 @@ ARGS=(
   --tool-call-parser qwen3_coder
   --default-chat-template-kwargs '{"enable_thinking":false}'
   --override-generation-config '{"temperature":0.7,"top_p":0.80,"top_k":20,"min_p":0.0,"presence_penalty":1.5,"repetition_penalty":1.0}'
-  # GDN recurrent state fp16 (audit: the bare int8 store is unscaled — invalid
-  # quality; a scaled int8 recurrence kernel is future work). Target + draft KV
-  # int8-PTH above is unaffected.
-  --kv-cache-dtype int8_per_token_head --mamba-ssm-cache-dtype float16
+  # GDN recurrent state: int8 — REVERTED from the fp16 audit recommendation
+  # after a 2026-08-25 acceptance gate (fp16: 46.4% vs int8: 73.1% at NS=15;
+  # the checkpoints were distilled/served with the unscaled int8 store, and
+  # fp16 shifts the recurrent dynamics enough to tank DFlash2 acceptance
+  # through the shared verify path). MAMBADT env remains the bisect lever.
+  --kv-cache-dtype int8_per_token_head --mamba-ssm-cache-dtype "${MAMBADT:-int8}"
   # NS=15 default per the 2026-08-24 W8A8-stack sweep: TG 770 tok/s / 9.61 ms
   # median TPOT / 71.2% acceptance / 11.68 accepted length. NS=17 collapses
   # (29.7% acceptance — under investigation, suspected mechanical limit).
