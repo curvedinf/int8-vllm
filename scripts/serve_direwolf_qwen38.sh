@@ -102,12 +102,15 @@ ARGS=(
   # xhigh/medium/low; xhigh is the template default).
   --default-chat-template-kwargs '{"enable_thinking":true,"reasoning_effort":"low"}'
   --override-generation-config '{"temperature":1.0,"top_p":0.95,"top_k":20,"min_p":0.0,"presence_penalty":0.0,"repetition_penalty":1.0}'
-  # GDN recurrent state: int8 — REVERTED from the fp16 audit recommendation
-  # after a 2026-08-25 acceptance gate (fp16: 46.4% vs int8: 73.1% at NS=15;
-  # the checkpoints were distilled/served with the unscaled int8 store, and
-  # fp16 shifts the recurrent dynamics enough to tank DFlash2 acceptance
-  # through the shared verify path). MAMBADT env remains the bisect lever.
-  --kv-cache-dtype int8_per_token_head --mamba-ssm-cache-dtype "${MAMBADT:-int8}"
+  # GDN recurrent state: fp16 — REQUIRED. The int8-PTH KV + int8 GDN state
+  # COMBINATION corrupts generation (2x2 bisect 2026-08-25: each alone passes,
+  # together the model loops mid-<think>, EOSes early, empty contents; greedy
+  # deterministic). The earlier "int8 mamba beats fp16" acceptance gate was
+  # measured under this corruption — repetitive degraded outputs are trivially
+  # predictable, inflating acceptance to a fake 73%. Honest numbers on the
+  # fixed stack: fp16 42.9% acc / 14.4 ms TPOT; fp32 40.9% / 15.5 ms (fp16
+  # wins both). MAMBADT env remains the bisect lever.
+  --kv-cache-dtype int8_per_token_head --mamba-ssm-cache-dtype "${MAMBADT:-float16}"
   # NS=15 default per the 2026-08-24 W8A8-stack sweep: TG 770 tok/s / 9.61 ms
   # median TPOT / 71.2% acceptance / 11.68 accepted length. NS=17 collapses
   # (29.7% acceptance — under investigation, suspected mechanical limit).
