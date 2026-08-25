@@ -90,6 +90,11 @@ ARGS=(
   --disable-uvicorn-access-log
   --enable-auto-tool-choice
   --tool-call-parser qwen3_coder
+  # The chat template opens <think> on every assistant turn; without a
+  # reasoning parser the think block leaks into content and clients read the
+  # scratchpad as the answer (looks like total instruction-following failure).
+  # The qwen3 engine parser splits it into reasoning_content.
+  --reasoning-parser qwen3
   # Qwen3.8-27B model-card defaults (HF): temperature 1.0 / top_p 0.95 /
   # top_k 20, no repetition or presence penalties. Thinking LOW: this
   # checkpoint's non-thinking mode is the weak one — the template's
