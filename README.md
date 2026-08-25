@@ -32,25 +32,33 @@ spec-decode counters. Current stack measured 2026-08-24/25.
 | Draft acceptance | 42.9% (7.44 accepted of 15) — honest post-fix number |
 | TTFT (32-token input) | ~440 ms |
 
-Cumulative timeline (whole-request output tok/s unless noted; pre-CK-era
-steps from `logs/c8_optimization/experiments.md`, W8A8-era from the
-2026-08-24/25 gate benches):
+TG rate = concurrency ÷ mean TPOT: pure decode throughput, prefill excluded.
+That is the project's one throughput metric. "Whole-request output
+throughput" (all output tokens ÷ total wall time incl. TTFT) is BANNED — it
+mixes prefill and decode into one meaningless number and has poisoned
+comparisons in this repo; do not compute or cite it.
 
-| Step | Config delta | Output tok/s | Notes |
+Cumulative timeline (TG rate, tok/s decode-only @ C8 unless noted; older
+steps re-derived where TPOT was recorded, else marked n/a):
+
+| Step | Config delta | TG tok/s | Notes |
 |---|---|---:|---|
-| Baseline | fp8 KV, no spec, MI300X GEMM configs | 112.35 | |
-| +1 | AITER MI100 small-M GEMM configs | 113.74 | +1.2% |
-| +2 | MTP k=2 | 117.63 | +3.4% |
-| +3 | int8-PTH KV cache | 129.92 | +10.4% |
-| +4 | AITER CK W8A8 GEMMs (vs valid W8A16) | 63.49 median | audit-era 3-repeat leg; +31.8% vs 48.17 |
-| +5 | **DFlash2 bf16-dtype fix** (was zero-acceptance) | 226.9 | 3.6× — the fp16-overflow root cause |
-| +6 | lm_head + conv/selector W8A8, NS=15 | 331.9 whole-req | acceptance figures below +7 are void (see +8) |
-| +7 | draft KV int8-PTH (UA noncausal fix) | — | 8/8 instruction-following restored at +8 |
-| +8 | **GDN state → fp16 (KV-int8 + mamba-int8 combo corruption fix)** | ~554 TG / 14.4 ms TPOT | 2x2 bisect: the +6/+7 "73-77% acceptance" was corruption-inflated; 8/8 strict-format PASS only with this fix |
+| Baseline | fp8 KV, no spec, MI300X GEMM configs | n/a | leg predates TPOT recording |
+| +1 | AITER MI100 small-M GEMM configs | n/a | leg predates TPOT recording |
+| +2 | MTP k=2 | n/a | leg predates TPOT recording |
+| +3 | int8-PTH KV cache | n/a | leg predates TPOT recording |
+| +4 | AITER CK W8A8 GEMMs (vs valid W8A16) | 63.49 median *1 | audit-era 3-repeat leg; +31.8% vs 48.17 |
+| +5 | **DFlash2 bf16-dtype fix** (was zero-acceptance) | 177 *1 | 3.6× vs +4 — the fp16-overflow root cause |
+| +6 | lm_head + conv/selector W8A8, NS=15 | 296 *1 | acceptance figures from here to +7 are void (see +8) |
+| +7 | draft KV int8-PTH (UA noncausal fix) | — | no clean leg; superseded by +8 within the hour |
+| +8 | **GDN state → fp16 (KV-int8 + mamba-int8 combo corruption fix)** | **554** | 2x2 bisect: the +6/+7 "73-77% acceptance" was corruption-inflated; 8/8 strict-format PASS only with this fix |
 
-Reference points: native MTP2 one-run (audit): 252.2 whole-request tok/s /
-28.18 ms TPOT — DFlash2 at NS=15 beats it 2.6× on TPOT. No-spec
-historical: ~128 tok/s. MTP2's TPOT-derived TG ≈ 284 tok/s vs DFlash2's 770.
+*1 Single-stream legs measured at concurrency 1; TG here = the leg's own
+concurrency ÷ its TPOT. Cross-concurrency comparisons are approximate.
+
+Reference points: MTP2 one-run (audit): 28.18 ms TPOT → 284 tok/s TG at C8 —
+the fixed DFlash2 stack (554) beats it ~2×. No-spec at C8: TPOT-derived
+~105 ms → ~76 tok/s TG.
 
 Kernel-level gains recorded during tuning: attention `waves_per_eu=1` +8.7%
 output, decode `num_warps=4/num_stages=1` −6.2% TPOT, AITER lm_head GEMM
