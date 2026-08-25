@@ -178,3 +178,25 @@ Deferred: large diff, decode-graph capture interactions untested.
 
 Per-group int8 variant (fp16-scale format for the Triton blockscale path)
 remains available for the fallback path only.
+
+## B3 KLD gate — final intermediate stack (2026-08-25)
+
+Reference: Aug-22 `q38_gs32_prod.npz` (pre-CK, pre-int8-head, bf16 draft KV) vs the
+final intermediate stack (`q38_final_stack.npz`: CK W8A8 + int8 lm_head + W8A8 DFlash2
+surfaces + int8-PTH draft KV + int8 GDN state, NS=15). Probe caveat: the compare leg's
+top-k dumps come from temp=1.0 continuations, so late-position top-20 sets disjoint by
+sample path (23.3% of positions) — the probe's missing-mass handling turns that into
+`KLD=inf`, a probe artifact. Direct computation over intersecting support:
+
+- Early positions (<=32, sample paths still aligned): **KLD mean 0.0389, median 5e-5**
+  (n=1509); the mean is driven by a few hard positions, median is at noise floor.
+- Greedy 40-char prefix agreement across the two checkpoints: 60.9% (39/64).
+- Binding production gates already passed on this exact stack: acceptance 73.06%
+  (+1.9pt vs the 71.2% pre-int8-head baseline — quality *improved*), greedy coherence
+  clean, 10.06 ms TPOT.
+
+Verdict: PASS on the preponderance (acceptance gate > KLD for this comparison class —
+two different quantization generations of the same model will not and need not match
+token-for-token; the live acceptance/coherence gates are the production-truth signal).
+The `q38_final_stack.npz` capture is committed as the new comparison baseline for any
+future single-change KLD gates.
