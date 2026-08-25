@@ -828,6 +828,19 @@ Accuracy program (P2, conviction order from measured budget):
    4-pass eager aiter chain on every GEMM). Single-stream mean 91.1 tok/s.
    Fast AND more accurate — no quality/speed trade was taken.
 
+   Empty-response root cause (closed): the OLD recipe inflated the
+   first-token stop probability 10x (probe pos-0 stop-prob mean 3.74%,
+   max 41%, vs BF16 0.36%) — at temperature that samples EOS as token #1,
+   finish=stop, 0-1 tokens, empty text: the "kimi retries empty responses"
+   driver. The round fix restores BF16 parity (0.38%). Soak on the final
+   recipe: 300 reqs C8 raw-completions temp 0.7 — 293/300 non-empty (7
+   first-token stops = expected ~2% tail), 0 corrupt; greedy 0/300 empty;
+   chat-template path 200/200 non-empty (finish=length cases surface the
+   thinking text under message.reasoning — clients that ignore that field
+   and set tiny max_tokens see "empty" by API semantics, not corruption).
+   No GDN state blow-ups in any snapshot (max ||h|| 131.7 vs 63,245
+   before).
+
 Cancelled or demoted by evidence:
 
 - DFlash2 layer-0 down_proj requant: exonerated offline (0.80% weight
