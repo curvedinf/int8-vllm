@@ -18,15 +18,37 @@ whole model surface and exploits it everywhere it wins.
 ## Performance
 
 C8 serving benchmark — 8 concurrent requests, TP4, input 32 / output 1000,
-`vllm bench serve` via `scripts/bench_quick.sh`. Cumulative optimization timeline
-from `logs/c8_optimization/experiments.md`:
+greedy, `vllm bench serve` fresh-boot legs. TPOT-derived TG rate is the
+primary decode metric (8 streams ÷ mean TPOT); acceptance from the server's
+spec-decode counters. Current stack measured 2026-08-24/25.
 
-| Step | Config delta | Output tok/s | Δ |
-|---|---|---:|---:|
-| Baseline | fp8 KV, no MTP, MI300X GEMM configs | 112.35 | — |
+**Current production stack** (DFlash2 W8A8, NS=15, int8 lm_head + draft KV):
+
+| Metric | Value |
+|---|---|
+| TG rate (decode-only, 8 streams) | **~770 tok/s** |
+| Mean / median TPOT | 10.06 / 9.61 ms |
+| Draft acceptance | 73.1% (11.96 accepted of 15) |
+| TTFT (32-token input) | ~440 ms |
+
+Cumulative timeline (whole-request output tok/s unless noted; pre-CK-era
+steps from `logs/c8_optimization/experiments.md`, W8A8-era from the
+2026-08-24/25 gate benches):
+
+| Step | Config delta | Output tok/s | Notes |
+|---|---|---:|---|
+| Baseline | fp8 KV, no spec, MI300X GEMM configs | 112.35 | |
 | +1 | AITER MI100 small-M GEMM configs | 113.74 | +1.2% |
-| +2 | MTP speculative decoding (k=2) | 117.63 | +3.4% |
-| +3 | **int8 per-token-head KV cache** | **129.92** | **+10.4%** |
+| +2 | MTP k=2 | 117.63 | +3.4% |
+| +3 | int8-PTH KV cache | 129.92 | +10.4% |
+| +4 | AITER CK W8A8 GEMMs (vs valid W8A16) | 63.49 median | audit-era 3-repeat leg; +31.8% vs 48.17 |
+| +5 | **DFlash2 bf16-dtype fix** (was zero-acceptance) | 226.9 | 3.6× — the fp16-overflow root cause |
+| +6 | lm_head + conv/selector W8A8, NS=15 | 331.9 whole-req / **770 TG** | acceptance 65.6→76.3% through the sweep |
+| +7 | draft KV int8-PTH (UA noncausal fix) | final stack | 73.1% acc, 10.06 ms TPOT, 500/500 soak |
+
+Reference points: native MTP2 one-run (audit): 252.2 whole-request tok/s /
+28.18 ms TPOT — DFlash2 at NS=15 beats it 2.6× on TPOT. No-spec
+historical: ~128 tok/s. MTP2's TPOT-derived TG ≈ 284 tok/s vs DFlash2's 770.
 
 Kernel-level gains recorded during tuning: attention `waves_per_eu=1` +8.7%
 output, decode `num_warps=4/num_stages=1` −6.2% TPOT, AITER lm_head GEMM
