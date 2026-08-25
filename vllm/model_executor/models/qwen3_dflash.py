@@ -567,16 +567,64 @@ class DFlashQwen3Model(nn.Module):
             if _spec is not None and _spec.draft_model_config is not None
             else self.embed_tokens.weight.dtype
         )
+        dense = torch.cat(kv_weights, dim=0).to(draft_dtype)
+        self._ckv_q: torch.Tensor | None = None
+        self._ckv_s: torch.Tensor | None = None
         # NOTE: dtype ladder measured 2026-08-24 at TP4/C8 NS=15 —
         #   bf16 (checkpoint dtype): 71.2% acceptance, 11.68 acc len
         #   fp16 dense:               69.2% acceptance, 11.38 acc len
         #   int8 W8A8:                66.0% acceptance, 10.90 acc len
         # The projection's K output feeds attention after norm+RoPE, so any
         # rounding below the checkpoint's bf16 lands in every draft scoring
-        # step. Stays checkpoint-dtype; sanctioned float exception (with the
-        # selector codebooks).
-        self._fused_kv_weight = torch.cat(kv_weights, dim=0).to(draft_dtype)
-        self._fused_kv_q = None
+        # step. Default stays checkpoint-dtype dense — the sanctioned float
+        # exception (with the selector codebooks).
+        #
+        # E8 (VLLM_GFX908_DF2_CTXKV_W8A8=1, default OFF) re-gates the int8
+        # rung: that ladder predates the round-to-nearest activation
+        # quantizer, and the trunc-toward-zero aiter quant it measured with
+        # carried a ~10x stop-prob inflation confound. E8 pairs
+        # per-channel-requantized int8 weights with pertoken_quant_rn
+        # activations on the same AITER CK W8A8 custom ops the rest of the
+        # stack uses, and must re-pass the acceptance gate (±1pt of the
+        # bf16 baseline) before it can become default. Weight requant is
+        # the exact chain from aiter_w8a16.py (AiterW8A16LinearKernel):
+        # dequant -> fp32 -> wmax = abs.amax(dim=1)/127;
+        # q = (dense/s).round().clamp(-127,127).to(int8).
+        e8 = os.environ.get("VLLM_GFX908_DF2_CTXKV_W8A8", "0") == "1"
+        gemm_op = getattr(torch.ops.vllm, "rocm_aiter_gemm_a8w8_ck", None)
+        if e8 and gemm_op is not None:
+            dense_f32 = dense.float()
+            wmax = dense_f32.abs().amax(dim=1, keepdim=True).clamp(min=1e-12)
+            self._ckv_s = (wmax / 127.0).to(torch.float32).contiguous()
+            self._ckv_q = (
+                (dense_f32 / self._ckv_s)
+                .round()
+                .clamp(-127, 127)
+                .to(torch.int8)
+                .contiguous()
+            )
+            # While _ckv_q is live the quant path owns the GEMM and nothing
+            # else reads the dense copy (the dense fallback in
+            # _project_context_kv only runs without the custom op, and op
+            # registration is process-static), so free it rather than hold
+            # both layouts; the int8+f32-scale copy is ~25x smaller.
+            logger.info(
+                "E8 ctx-KV W8A8: dense %s KV projection (%d rows, %.1f MiB) "
+                "requantized per-channel int8; dense copy freed",
+                dense.dtype,
+                dense.shape[0],
+                dense.numel() * dense.element_size() / 2**20,
+            )
+            self._fused_kv_weight = torch.empty(
+                0, device=dense.device, dtype=dense.dtype
+            )
+        else:
+            if e8:
+                logger.warning_once(
+                    "VLLM_GFX908_DF2_CTXKV_W8A8=1 but the AITER CK W8A8 "
+                    "custom op is unavailable; ctx-KV projection stays dense"
+                )
+            self._fused_kv_weight = dense
         if has_bias:
             kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
             self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
@@ -648,21 +696,27 @@ class DFlashQwen3Model(nn.Module):
             self._hidden_norm_weight,
             self._rms_norm_eps,
         )
-        if getattr(self, "_fused_kv_q", None) is not None:
+        # E8 int8 path: RN activation quant + AITER CK W8A8 (see the ladder
+        # note in _build_context_kv_buffers). Guard falls back to the dense
+        # GEMM if the custom op is unavailable; quant buffers are only
+        # built when the op exists, so the dense weight is present whenever
+        # this fallback can actually run.
+        if getattr(self, "_ckv_q", None) is not None and getattr(
+            torch.ops.vllm, "rocm_aiter_gemm_a8w8_ck", None
+        ) is not None:
+            from vllm.model_executor.kernels.linear.mixed_precision.act_quant_rn import (
+                pertoken_quant_rn,
+            )
+
             flat = normed_context_states.reshape(
                 -1, normed_context_states.shape[-1]
             ).to(torch.float16)
-            x_q, x_s = torch.ops.vllm.rocm_aiter_pertoken_quant_int8(flat)
-            out_dtype = (
-                normed_context_states.dtype
-                if normed_context_states.dtype in (torch.float16, torch.bfloat16)
-                else torch.float16
-            )
+            x_q, x_s = pertoken_quant_rn(flat)
             all_kv_flat = torch.ops.vllm.rocm_aiter_gemm_a8w8_ck(
-                x_q, self._fused_kv_q, x_s, self._fused_kv_s, out_dtype
-            )
+                x_q, self._ckv_q, x_s, self._ckv_s, torch.float16
+            ).to(normed_context_states.dtype)
             if self._fused_kv_bias is not None:
-                all_kv_flat = all_kv_flat + self._fused_kv_bias.to(out_dtype)
+                all_kv_flat = all_kv_flat + self._fused_kv_bias
         else:
             all_kv_flat = F.linear(
                 normed_context_states, self._fused_kv_weight, self._fused_kv_bias
@@ -1027,11 +1081,22 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         if os.environ.get("VLLM_SPEC_DEBUG_DUMP"):
             w = self.model._fused_kv_weight
             hs = self.model._hidden_norm_weight
-            logger.info(
-                "[SPEC-DBG5] fused_kv nan=%d/%d absmax=%.4f hidden_norm nan=%d/%d",
-                int(w.isnan().sum()), w.numel(), float(w.abs().max()),
-                int(hs.isnan().sum()), hs.numel(),
-            )
+            if w.numel():
+                logger.info(
+                    "[SPEC-DBG5] fused_kv nan=%d/%d absmax=%.4f hidden_norm nan=%d/%d",
+                    int(w.isnan().sum()), w.numel(), float(w.abs().max()),
+                    int(hs.isnan().sum()), hs.numel(),
+                )
+            else:
+                # E8 freed the dense copy; dump the int8 requant instead.
+                q = self.model._ckv_q
+                logger.info(
+                    "[SPEC-DBG5] fused_kv e8-int8 sat=%d/%d absmax=%d "
+                    "ws_absmax=%.4f hidden_norm nan=%d/%d",
+                    int((q == -127).sum()), q.numel(), int(q.abs().max()),
+                    float(self.model._ckv_s.abs().max()),
+                    int(hs.isnan().sum()), hs.numel(),
+                )
 
     def _read_mask_embedding(self) -> torch.Tensor | None:
         """Checks for an override mask embedding in `mask_embedding.pt` and returns it.

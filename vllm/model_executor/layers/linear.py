@@ -1586,6 +1586,12 @@ class RowParallelLinear(LinearBase):
 
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results
+        # E3 experiment (VLLM_GFX908_EAGER_EPILOGUE=1): when True, forward()
+        # returns the rank-local partial sum instead of all-reducing it, so
+        # the caller can fold the AR into a fused epilogue kernel (see
+        # Qwen3NextDecoderLayer.forward). Default False keeps forward()
+        # byte-identical; only that env-gated seam ever sets it.
+        self.skip_reduce = False
 
         self.quant_method.create_weights(
             layer=self,
@@ -1664,7 +1670,7 @@ class RowParallelLinear(LinearBase):
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
         output_parallel = self.quant_method.apply(self, input_parallel, bias_)
 
-        if self.reduce_results and self.tp_size > 1:
+        if self.reduce_results and self.tp_size > 1 and not self.skip_reduce:
             output = tensor_model_parallel_all_reduce(output_parallel)
         else:
             output = output_parallel

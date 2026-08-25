@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen3Next model."""
 
+import os
 from collections.abc import Iterable
 from itertools import islice
 
@@ -76,6 +77,160 @@ from .utils import (
 )
 
 KVCache = tuple[torch.Tensor, torch.Tensor]
+
+
+# ---------------------------------------------------------------------------
+# E3 experiment: eager fused (AR + residual add + RMSNorm + per-token int8
+# quant) epilogue at the attention output-projection boundary.
+#
+# Everything here is inert unless VLLM_GFX908_EAGER_EPILOGUE=1 (default OFF;
+# the decoder-layer forward below takes its original path byte-for-byte).
+#
+# THE SEAM. In every Qwen3Next decoder layer, attention (both full_attention
+# o_proj and linear_attention/GDN out_proj — both RowParallelLinear) ends
+# with a TP all-reduce *inside* the linear, then the layer does
+# ``post_attention_layernorm(hidden, residual)`` (a Gemma RMSNorm: x*(1+w)),
+# and the normed tensor's next consumer is ``mlp.gate_up_proj`` — a W8A8 CK
+# GEMM whose activation quant we can emit in the same launch. That boundary
+# is fully self-contained inside this layer, so with the env on we:
+#   1. set ``out_proj.skip_reduce = True`` so the linear returns partials,
+#   2. call the aiter fused kernel ONCE over (partials, residual, 1+w, eps),
+#   3. stash the emitted (q, scale) on the returned normed tensor via
+#      PREQUANT_ATTR — consumed by aiter_w8a16.apply_weights (line ~442)
+#      instead of re-quantizing — and skip the separate norm call.
+# This replaces three launches + one HBM round-trip of the normed activation
+# (AR -> residual+norm -> GEMM-input quant) with one kernel.
+#
+# THE AITER KERNEL, as found in the checkout
+# (~/aiter/aiter/dist/device_communicators/custom_all_reduce.py:1847):
+#
+#   CustomAllreduce.fused_ar_rms_int8_per_token_quant(
+#       inp, res_inp, *, w, eps,
+#       registered=False, use_1stage=False, emit_bf16=False,
+#   ) -> (q, res_out, scale[, normed])
+#
+#   inp/res_inp: 2D [M, K] fp16/bf16 partial sums + residual; w: [K] norm
+#   weight (no gemma flag on this variant — callers pre-add 1.0); returns
+#   q int8 [M, K] + scale fp32 [M, 1] (per-row absmax/127, trunc-toward-zero
+#   — the exact numerics of aiter ``pertoken_quant``, which the CK W8A8
+#   consumer expects), res_out fp16 [M, K] = the (AR + residual) sum rounded
+#   once to fp16 (the new residual), and with emit_bf16=True a 4th tensor:
+#   the fp16 rounding of the fp32 normed values. AR accumulates in fp32 in
+#   rank order then rounds to fp16; the 2-stage/split path adds the residual
+#   in fp16 (matching the unfused aiter rmsnorm-with-add chain), the 1-stage
+#   path adds it in fp32 feeding the norm unrounded. Usage and parity
+#   contract verified by
+#   ~/aiter/op_tests/multigpu_tests/test_fused_ar_rms_int8_quant.py
+#   (per-token suite: payload bit-exact vs pertoken_quant of the normed
+#   values on the unfused chain).
+#
+# CAPTURE FALLBACK. Decode on this stack is CUDA-graph captured, and E3 is
+# deliberately eager-prefill-only: the seam decision is made per-forward
+# (NOT fixed at init — a fixed skip flag would silently skip the AR during
+# capture), and whenever ``torch.cuda.is_current_stream_capturing()`` (or a
+# torch.compile trace is active) the layer runs the ORIGINAL unfused path
+# with the linear's AR re-enabled. The aiter fork does have a capture-safe
+# mode for this kernel (stage through the pre-registered pool, cf. the
+# registered custom-op wrapper at vllm/_aiter_ops.py:1091), so fusing
+# captured decode is a possible follow-up — not wired here.
+#
+# NUMERICS / STASH CAVEATS (acceptance gate applies before promoting this):
+#   - the stash is only consumed on the default act-quant branch; under
+#     VLLM_GFX908_ACT_QUANT=round the W8A8 path re-quantizes the normed
+#     mirror (output still correct, one extra launch),
+#   - 1-stage dispatch policy mirrors the canonical wrappers; for M<=80
+#     eager chunks the residual add moves to fp32 (per the kernel contract).
+# ---------------------------------------------------------------------------
+
+
+_E3_UNRESOLVED = object()
+_E3_AR = _E3_UNRESOLVED
+
+
+def _e3_aiter_ar():
+    """Return the underlying aiter CustomAllreduce for the TP group, or None.
+
+    None whenever the fused epilogue cannot run: AITER AR not initialized
+    (TP=1 or custom AR disabled), the communicator disabled, or the aiter
+    build predates the per-token int8 kernel. Cached after the first call —
+    the TP communicator is static after distributed init.
+    """
+    global _E3_AR
+    if _E3_AR is not _E3_UNRESOLVED:
+        return _E3_AR
+    ar = None
+    try:
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        comm = rocm_aiter_ops.get_aiter_allreduce()
+        if (
+            comm is not None
+            and not comm.disabled
+            and comm.supports_per_token_int8_quant
+        ):
+            ar = comm.aiter_ca
+    except Exception:
+        ar = None
+    _E3_AR = ar
+    return ar
+
+
+def _e3_fused_ar_rms_int8(ca, partials, residual, weight, eps):
+    """One aiter launch: AR(partials) + residual + RMSNorm + int8 quant.
+
+    Mirrors the 1-stage eligibility and gfx908 capture-registration policy of
+    the canonical wrapper ``_rocm_aiter_fused_allreduce_rmsnorm_quant_per_
+    token_int8_impl`` (vllm/_aiter_ops.py:1091), plus ``emit_bf16=True`` so
+    the caller also gets the normed activation to hand to the MLP. Returns
+    ``(normed, res_out, q, scale)``.
+    """
+    assert partials.dim() == 2 and residual.dim() == 2
+    assert partials.is_contiguous() and residual.is_contiguous()
+    assert partials.dtype in (torch.float16, torch.bfloat16)
+
+    total_bytes = partials.numel() * partials.element_size()
+    hidden_dim = partials.shape[-1]
+    token_num = partials.numel() // hidden_dim
+    if partials.dtype in (torch.bfloat16, torch.float16):
+        pack_size = 16 // partials.element_size()
+        hidden_ok = hidden_dim % pack_size == 0 and hidden_dim // pack_size <= 1024
+    else:
+        hidden_ok = False
+    token_ok = token_num <= 80
+    world_size = ca.world_size
+    full_nvlink = ca.fully_connected
+
+    if world_size == 2:
+        size_ok = True
+    elif full_nvlink and world_size <= 4:
+        size_ok = total_bytes < 256 * 1024
+    elif full_nvlink and world_size <= 8:
+        size_ok = total_bytes < 128 * 1024
+    else:
+        size_ok = False
+
+    use_1stage = hidden_ok and token_ok and size_ok
+
+    # gfx908: captured ARs must stage through the pre-registered pool with
+    # the copy captured in-graph; binding the input directly bakes a
+    # cached-memory IPC view into the graph and replays incoherently (same
+    # workaround as the plain-AR path, vllm custom_all_reduce.py:389-403).
+    # E3 never fuses under capture, so this stays False here; kept for
+    # parity with the canonical wrapper.
+    from vllm.platforms.rocm import on_gfx908
+
+    registered = torch.cuda.is_current_stream_capturing() and not on_gfx908()
+
+    q, res_out, scale, normed = ca.fused_ar_rms_int8_per_token_quant(
+        partials,
+        residual,
+        w=weight.to(partials.dtype),
+        eps=eps,
+        registered=registered,
+        use_1stage=use_1stage,
+        emit_bf16=True,
+    )
+    return normed, res_out, q, scale
 
 
 def _should_use_sequence_parallel(vllm_config: VllmConfig) -> bool:
@@ -466,6 +621,23 @@ class Qwen3NextDecoderLayer(nn.Module):
                 ),
             )
 
+        # E3 seam availability, fixed at init (see the module-level E3
+        # comment block above): env-gated, and only on configurations whose
+        # attn-output -> norm boundary is fusable. layer_scale inserts a
+        # per-channel multiply between the attn output and the norm, and the
+        # sequence-parallel MoE path reduce-scatters the attn output in
+        # between — neither can be folded into the fused kernel. The
+        # per-forward activation decision (capture/compile fallback) lives
+        # in forward().
+        self._e3_seam = (
+            os.environ.get("VLLM_GFX908_EAGER_EPILOGUE") == "1"
+            and not self.layer_scale
+            and not self.use_attn_reduce_scatter_for_moe
+        )
+        # Effective Gemma norm weight (1 + w), fp32, built lazily on first
+        # fused call (weights load after __init__).
+        self._e3_norm_weight_fp32: torch.Tensor | None = None
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -485,6 +657,28 @@ class Qwen3NextDecoderLayer(nn.Module):
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
             hidden_states = hidden_states[:full_num_tokens]
 
+        # E3 per-forward seam decision (see the module-level E3 comment
+        # block): eager-only. Decode is CUDA-graph captured on this stack,
+        # so whenever we are capturing (or a torch.compile trace is active)
+        # the layer must take the ORIGINAL path with the linear's AR back
+        # on — hence skip_reduce is (re)set on every call, in both
+        # directions; a flag fixed at init would silently leak into capture.
+        e3_ar = (
+            _e3_aiter_ar()
+            if (
+                getattr(self, "_e3_seam", False)
+                and not torch.compiler.is_compiling()
+                and not torch.cuda.is_current_stream_capturing()
+            )
+            else None
+        )
+        e3_out_proj = (
+            self.linear_attn.out_proj
+            if self.layer_type == "linear_attention"
+            else self.self_attn.o_proj
+        )
+        e3_out_proj.skip_reduce = e3_ar is not None
+
         if self.layer_type == "linear_attention":
             hidden_states = self.linear_attn(hidden_states=hidden_states)
         elif self.layer_type == "full_attention":
@@ -495,26 +689,54 @@ class Qwen3NextDecoderLayer(nn.Module):
         else:
             raise ValueError("Invalid layer_type")
 
-        if self.layer_scale:
-            if len(hidden_states.shape) == 2:
-                hidden_states = hidden_states * (
-                    self.attn_layer_scale.to(hidden_states.dtype)[0] + 1
-                )
-            else:
-                hidden_states = hidden_states * (
-                    self.attn_layer_scale.to(hidden_states.dtype) + 1
-                )
+        if e3_ar is not None:
+            # One fused launch replaces: the AR that used to fire inside
+            # out_proj + the post_attention_layernorm residual add & norm +
+            # the separate per-token int8 quant the W8A8 gate_up GEMM would
+            # run. res_out (the AR+residual sum, rounded once to fp16)
+            # becomes the new residual; (q, scale) are stashed on the normed
+            # activation via PREQUANT_ATTR for aiter_w8a16 to consume.
+            from vllm.model_executor.layers.rms_norm_int8_quant import PREQUANT_ATTR
 
-        if self.use_attn_reduce_scatter_for_moe:
-            tp_world_size = get_tensor_model_parallel_world_size()
-            # small trick using minus, eg. -17 % 8 = 7
-            sp_pad = (-hidden_states.shape[0]) % tp_world_size
-            # pad if not divisible by world size
-            hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, sp_pad))
-            hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
+            if getattr(self, "_e3_norm_weight_fp32", None) is None:
+                # Gemma norm: the kernel variant has no gemma flag, so
+                # pre-add the 1.0 exactly like GemmaRMSNorm.forward_hip.
+                ln_w = self.post_attention_layernorm.weight
+                self._e3_norm_weight_fp32 = ln_w.float() + 1.0
+            normed, residual, q, scale = _e3_fused_ar_rms_int8(
+                e3_ar,
+                hidden_states,
+                residual,
+                self._e3_norm_weight_fp32,
+                self.post_attention_layernorm.variance_epsilon,
+            )
+            setattr(normed, PREQUANT_ATTR, (q, scale))
+            hidden_states = normed
+        else:
+            if self.layer_scale:
+                if len(hidden_states.shape) == 2:
+                    hidden_states = hidden_states * (
+                        self.attn_layer_scale.to(hidden_states.dtype)[0] + 1
+                    )
+                else:
+                    hidden_states = hidden_states * (
+                        self.attn_layer_scale.to(hidden_states.dtype) + 1
+                    )
 
-        # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+            if self.use_attn_reduce_scatter_for_moe:
+                tp_world_size = get_tensor_model_parallel_world_size()
+                # small trick using minus, eg. -17 % 8 = 7
+                sp_pad = (-hidden_states.shape[0]) % tp_world_size
+                # pad if not divisible by world size
+                hidden_states = torch.nn.functional.pad(
+                    hidden_states, (0, 0, 0, sp_pad)
+                )
+                hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
+
+            # Fully Connected
+            hidden_states, residual = self.post_attention_layernorm(
+                hidden_states, residual
+            )
         if self.use_attn_reduce_scatter_for_moe:
             hidden_states = self.mlp(
                 hidden_states,
