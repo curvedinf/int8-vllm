@@ -1517,6 +1517,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 use_qk_l2norm_in_kernel=False,
             )
             # Init cache
+            from vllm import quant_audit_recorder as _qa
+
+            if _qa._enabled():
+                _qa.record_gdn_state(
+                    getattr(self, "prefix", "gdn"), last_recurrent_state[:8], 0
+                )
             ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
 
             if split_non_spec:

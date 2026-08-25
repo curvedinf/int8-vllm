@@ -406,6 +406,15 @@ class CustomAllreduce:
             # Note: outside of cuda graph context, custom allreduce incurs a
             # cost of cudaMemcpy, which should be small (<=1% of overall
             # latency) compared to the performance gain of using custom kernels
+            from vllm import quant_audit_recorder as _qa
+
+            if _qa._enabled():
+                pre = input.detach()[:1024]
+                out = self.all_reduce(input, registered=False)
+                _qa.record_ar(
+                    self.world_size, input.numel(), pre, out[:1024]
+                )
+                return out
             return self.all_reduce(input, registered=False)
 
     def should_custom_all_gather(self, inp: torch.Tensor) -> bool:

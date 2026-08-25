@@ -474,6 +474,17 @@ class AiterW8A16LinearKernel(MPLinearKernel):
                         f"out_abs={output.abs().max().item():.3f}",
                         flush=True,
                     )
+                from vllm import quant_audit_recorder as _qa
+
+                if _qa._enabled() and not torch.cuda.is_current_stream_capturing():
+                    _qa.record_gemm(
+                        getattr(layer, "prefix", type(layer).__name__),
+                        x_2d[: min(M, 64)],
+                        x_q[: min(M, 64)],
+                        x_s[: min(M, 64)],
+                        N,
+                        K,
+                    )
             else:
                 x_q, x_s = _quantize_activation_per_block(x_2d, block_k=128)
                 cfg = _get_aiter_w8a8_config(M, N, K, c.group_size)

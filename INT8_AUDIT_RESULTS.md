@@ -60,7 +60,66 @@ However, the advertised full INT8 recipe is still not the production dataflow:
 The current documentation repeatedly describes intended features as active even
 when the launcher and live log prove otherwise.
 
-## Overnight changes evaluated
+## Phase-1 replay error budget (2026-08-25, supersedes prior conviction order)
+
+Method: module I/O was recorded once under the exact production recipe
+(`bootA`: GPTQ-gs128 W8A8 + CK requant + int8 PTH KV + fp16 GDN state + DFlash2
+NS=15, TP4, CUDA graphs, recorder armed by the probe), and once under a BF16
+reference boot (`bootB`: bf16 weights, auto KV, fp32 mamba state, no spec).
+Artifacts live under `~/models/kld/quant_audit/` (not in git; ~2 GB/boot).
+Replay is offline CPU against the BF16 weights: `scripts/quant_replay_gemms.py`
+(GEMM leg decomposition), `scripts/quant_replay_state.py` (KV + GDN state +
+AR), `scripts/quant_replay_drafter.py` (draft chain). JSON results under
+`~/models/kld/quant_audit/replay/`.
+
+End-to-end KLD gate (52 prompts x 256 tokens greedy, top-20 logprobs,
+`scripts/kld_probe_v2.py`): recipe-vs-BF16 KLD mean 1.83 / median 0.097 /
+p95 11.36, greedy 40-char agreement 24/52. The median is fine; the tail is
+catastrophic. That tail is the quality bug being fixed.
+
+Error budget at GEMM output (rel-L2 vs BF16 golden, recorded rank0 inputs):
+
+| family | gptq leg | ck-requant leg | act-quant leg | total |
+|---|---|---|---|---|
+| linear_attn.in_proj_qkvz | 0.29% | 0.72% | 14.78% (p95 27.0%) | 14.80% |
+| linear_attn.out_proj | 0.62% | 0.82% | 6.85% | 6.93% |
+| mlp.down_proj | 0.69% | 0.92% | 10.80% | 10.86% |
+| mlp.gate_up_proj | 0.39% | 0.76% | 9.09% | 9.13% |
+| self_attn.o_proj | 0.61% | 0.89% | 4.67% | 4.80% |
+| self_attn.qkv_proj | 0.21% | 0.60% | 12.84% | 12.85% |
+
+Verdicts, in new conviction order:
+
+1. **Per-token int8 activation quantization is the dominant error source**
+   (10-15% mean, up to 27% p95 per GEMM), 10-30x every weight leg combined.
+   The aiter `pertoken_quant` path is absmax/127 with trunc-toward-zero on
+   heavy-tailed activations (hidden-state kurtosis 239-10,421). Fixes to
+   evaluate in replay first: rounding instead of truncation; per-token
+   percentile/clipped absmax; per-channel outlier migration folded into the
+   weights (SmoothQuant-style) so the serving GEMM stays plain CK W8A8.
+2. **GDN state blow-ups in early layers**: 17 bootA-only snapshots with
+   ||h|| up to 63,245 (bf16 ref: ~1.2) at layers 2/5/8/10 - within 4% of the
+   fp16 overflow ceiling (65,504). This is the catastrophic-tail generator.
+   The int8-native fix is the Nemotron-style scaled int8 state (block-scaled
+   + stochastic rounding, granularity swept offline); fp32 state is the
+   fallback, not the answer.
+3. **Weight quantization is exonerated**: GPTQ leg 0.2-0.7% and CK
+   per-channel requant leg 0.6-0.9% are sub-1% everywhere, including the
+   previously suspected DFlash2 layer-0 down_proj (0.80% weight rel-L2;
+   the 0.4168 in the quant log is a calibration-relative metric, not weight
+   error). The planned "DFlash2 down_proj requant" is cancelled.
+4. **Custom AR is exonerated**: recorded outputs are bitwise identical to
+   fp32-accumulate-then-round-once (mean rel err 9.6e-5, 1.5x better than
+   naive fp16 sequential sum). No AR change is warranted for accuracy.
+5. **KV int8 PTH storage is exonerated**: k 0.88% / v 0.84% mean rel-L2 per
+   token-head (p95 ~1.5%) - normal int8 SNR. Keep as is.
+
+Recorder integrity notes: 142/512 GEMM records were gated out (99 all-zero x,
+43 xq/xs from a different forward); the replay scripts gate on xs-consistency
+and report exclusions. The recorder fp16-casts float tensors on disk; replays
+recompute per-token scales from x. Proxy inputs for the drafter were assembled
+from recorded target activations where K aligns (bootA captured no draft
+hidden states; only draft KV).
 
 ### AITER CK W8A8 GEMMs: active and substantially faster than valid W8A16
 
@@ -511,6 +570,11 @@ Do not extrapolate the unfused CAR result to the dormant fused epilogue.
 
 ### 2. Run a real KLD gate for the active CK-requantized W8A8 path
 
+**Status: DONE 2026-08-25 — see "Phase-1 replay error budget" at the top.**
+KLD mean 1.83 / median 0.097 / p95 11.36, greedy 24/52 vs the BF16 reference.
+The gate now exists (`scripts/kld_probe_v2.py`) and is re-run after every
+accepted accuracy fix.
+
 **Expected effect: correctness evidence, not direct speed.**
 
 The old KLD sweep predates per-channel weight requantization. Qualitative
@@ -705,26 +769,44 @@ claim all of the following are simultaneously active:
 
 ## Updated priority order
 
-1. **Completed:** gather INT8 embedding rows before dequantization. The local
-   operation is 14.1x faster and uses 586 MiB less peak temporary allocation;
-   bracketing TP4/C8 runs show no measurable end-to-end prefill change.
-2. Add eager producer-to-INT8 seams for mode NONE: norm-to-quant,
+Revised 2026-08-25 after the Phase-1 replay error budget (see top). The
+accuracy program now leads; perf items that were already exonerated or
+convicted move down or drop out.
+
+Accuracy program (P2, conviction order from measured budget):
+
+1. Activation-quant repair: rounding + clipped/percentile absmax in the
+   per-token int8 quantizer; then per-channel outlier migration folded into
+   weights (needs one checkpoint requant only if replay proves the win).
+   Validate each variant offline in replay before any serving boot.
+2. Scaled int8 GDN state (block-scaled + stochastic rounding, granularity
+   swept offline against recorded bootA trajectories) to kill the early-layer
+   fp16-state blow-ups that generate the KLD tail.
+3. Re-run the 52-prompt KLD gate after each accepted fix; target: KLD mean
+   <= 0.2, p95 <= 1.0, greedy 40-char agreement >= 45/52 while keeping the
+   C8 TG rate within noise of the 42.9%-acceptance baseline boot.
+
+Cancelled or demoted by evidence:
+
+- DFlash2 layer-0 down_proj requant: exonerated offline (0.80% weight
+  rel-L2, no outlier structure).
+- AR backend change for accuracy: custom AR is bitwise fp32-accumulate.
+- KV int8 storage change: sub-1% per token-head, normal int8 SNR.
+
+Performance program (unchanged unless it touches the above):
+
+4. Add eager producer-to-INT8 seams for mode NONE: norm-to-quant,
    SiLU-and-mul-to-quant, and row-parallel all-reduce + residual + RMSNorm +
    quant-out. Reuse a quantized activation wherever projections consume the
    same normalized input.
-3. Tune and directly warm CK for the observed gfx908 prefill M/N/K shapes,
+5. Tune and directly warm CK for the observed gfx908 prefill M/N/K shapes,
    especially M around 2,048 and the chunk tails. Then test larger scheduler
    token budgets separately.
-4. Build a fused gfx908 GDN prefill core and fused full-attention
+6. Build a fused gfx908 GDN prefill core and fused full-attention
    QK-norm/RoPE/INT8-PTH cache-update path. Keep recurrent and attention
    accumulation floating point, and use current-chunk FP16 K/V directly.
-5. Repeat the native-MTP2 C8 decode test in an interleaved MTP2/no-spec/DFlash2
-   matrix. If its throughput, acceptance, and output correctness hold, replace
-   DFlash2 with native MTP2 in the canonical launcher.
-6. Keep the verified CK W8A8 + vLLM CUSTOM default, tune AITER CAR's
+7. Keep the verified CK W8A8 + vLLM CUSTOM default, tune AITER CAR's
    forced-naive launch geometry, then rerun the captured repeated matrix.
-7. Run a fresh KLD gate on the active per-channel-weight/per-token-activation CK
-   W8A8 path.
 8. Either fix gfx908 Inductor or build an eager seam for the implemented fused
    CAR + RMSNorm + INT8 quant-out path, then measure it at TP4/C8 rather than
    extrapolating from the unfused CAR result.
@@ -732,8 +814,6 @@ claim all of the following are simultaneously active:
    BF16 MTP sidecar for W8A8 conversion with acceptance and KLD gates.
 10. Fix noncausal DFlash2 INT8-PTH attention/cache handling and restore INT8
    draft KV only after an end-to-end acceptance/coherence gate.
-11. Replace bare GDN INT8 state with a genuinely scaled kernel or revert it to a
-   floating-point state.
-12. Explicitly pin the already-defaulted INT8 embedding path after fixing its
+11. Explicitly pin the already-defaulted INT8 embedding path after fixing its
     implementation; pinning the current default alone preserves the full-table
     cast defect.

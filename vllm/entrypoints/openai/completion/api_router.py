@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 
 from http import HTTPStatus
 
@@ -44,6 +45,11 @@ def completion(request: Request) -> OpenAIServingCompletion | None:
 @with_cancellation
 @load_aware_call
 async def create_completion(request: CompletionRequest, raw_request: Request):
+    from vllm import quant_audit_recorder as _qa
+
+    if os.environ.get("VLLM_QUANT_AUDIT") and not _qa._STATE["armed"]:
+        _qa.arm()
+        _qa._STATE["armed"] = True
     metrics_header_format = raw_request.headers.get(
         ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL, ""
     )

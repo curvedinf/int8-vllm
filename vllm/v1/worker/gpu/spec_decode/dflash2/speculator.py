@@ -197,6 +197,12 @@ class DFlash2Speculator(DFlashSpeculator):
         hidden_states = last_hidden_states[self.sample_indices[:num_sample]].view(
             num_reqs, self.num_speculative_steps, -1
         )
+        from vllm import quant_audit_recorder as _qa
+
+        if _qa._enabled() and not torch.cuda.is_current_stream_capturing():
+            _qa.record_draft(
+                last_hidden_states[:32], self.draft_tokens[:8], 0
+            )
         if os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not torch.cuda.is_current_stream_capturing():
             hs = hidden_states[0, 0]
             print(

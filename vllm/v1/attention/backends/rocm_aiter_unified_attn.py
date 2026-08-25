@@ -475,6 +475,18 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             # Pass the padded halves: the kernel writes head_size data
             # elements plus the inline scale at offset head_size within
             # each half (mirrors TritonAttentionBackend).
+            from vllm import quant_audit_recorder as _qa
+
+            if _qa._enabled() and not torch.cuda.is_current_stream_capturing():
+                _qa.record_kv(
+                    getattr(layer, "layer_name", "kv"),
+                    key[:64].float(),
+                    value[:64].float(),
+                    None,
+                    None,
+                    self._k_scale_cache,
+                    self._v_scale_cache,
+                )
             triton_reshape_and_cache_flash_per_token_head_quant(
                 key,
                 value,

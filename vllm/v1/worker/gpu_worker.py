@@ -1429,6 +1429,18 @@ def init_worker_distributed_environment(
         timeout,
     )
 
+    from vllm import quant_audit_recorder as _qa
+
+    _qa.init()
+    if _qa._STATE["dir"] is not None:
+        import os as _os
+
+        _qa._STATE["dir"] = _os.path.join(_qa._STATE["dir"], f"rank{rank}")
+        _qa._STATE["arm_file"] = _os.path.join(
+            _os.environ.get("VLLM_QUANT_AUDIT", ""), "ARMED"
+        )
+        _os.makedirs(_qa._STATE["dir"], exist_ok=True)
+
     ensure_model_parallel_initialized(
         parallel_config.tensor_parallel_size,
         parallel_config.pipeline_parallel_size,
