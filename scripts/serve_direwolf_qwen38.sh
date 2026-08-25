@@ -49,6 +49,18 @@ COMMON_ENV=(
   VLLM_ROCM_USE_AITER_CUSTOM_AR="${CAR:-0}"
   VLLM_ROCM_USE_AITER_TRITON_GEMM="1"
   VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION="${UA:-1}"
+  # Full W8A8 doctrine, gated pieces: int8 lm_head (A1 gate-passed, neutral
+  # acceptance, halves head memory) and DFlash2 conv/selector projections
+  # (A2 gate-passed, acceptance +10.7pt). Fused norm+quant stays OFF
+  # (B1 gate-failed — see envs.py comment).
+  VLLM_GFX908_INT8_LM_HEAD="${INT8HEAD:-1}"
+  VLLM_GFX908_DF2_W8A8="${DF2W8A8:-1}"
+  # Pin the remaining W8A8-stack defaults explicitly so a future env default
+  # change cannot silently regress the recipe: CK GEMM path on, dead GS128
+  # weight copies freed, int8 embedding gather.
+  VLLM_GFX908_CK_W8A8="${CKW8A8:-1}"
+  VLLM_GFX908_CK_FREE_GS128="${FREEGS128:-1}"
+  VLLM_GFX908_INT8_EMBEDDING="${INT8EMB:-1}"
   # The compatibility-named AiterW8A16LinearKernel is the GS128 selector;
   # this branch routes every GS128 shape through its AITER A8W8 INT8 path.
   VLLM_DISABLED_KERNELS="${VLLM_DISABLED_KERNELS:-TritonW8A16LinearKernel}"
