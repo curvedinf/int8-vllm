@@ -309,37 +309,61 @@ class AiterW8A16LinearKernel(MPLinearKernel):
         dtype = self.config.act_type
 
         if gs == 128:
-            warmup_shapes = (1, 17, 33, 65, 256, 1024, 4096)
+            warmup_shapes = (1, 17, 33, 65, 80, 96, 256, 1024, 2048, 4096)
         else:
             warmup_shapes = ()
 
-        for M in warmup_shapes:
-            key = ("a8w8", M, N, K, gs)
-            if key in self._WARMUP_CACHE:
-                continue
-            self._WARMUP_CACHE.add(key)
-
-            x = torch.empty((M, K), dtype=dtype, device=device)
-            cfg = _get_aiter_w8a8_config(M, N, K, gs)
-
-            try:
-                x_q, x_s = _quantize_activation_per_block(x, block_k=128)
-                gemm_a8w8_blockscale(
-                    x_q,
-                    w_q,
-                    x_s,
-                    w_s,
-                    dtype=dtype,
-                    config=cfg,
-                )
-            except Exception as e:
-                import warnings
-
-                warnings.warn(
-                    f"AITER W8A8 warmup failed for (M={M}, N={N}, K={K}, gs={gs}): {e}"
-                )
-
         if gs == 128:
+            # Warm the CK kernel (the production path), not the blockscale
+            # fallback: graph capture and first inference otherwise pay the
+            # aiter-JIT config lookup per production shape. The pertoken
+            # quant + CK gemm pair mirrors apply_weights exactly.
+            if hasattr(layer, "_ck_q"):
+                for M in warmup_shapes:
+                    key = ("ck", M, N, K, gs)
+                    if key in self._WARMUP_CACHE:
+                        continue
+                    self._WARMUP_CACHE.add(key)
+                    try:
+                        xq = torch.randint(
+                            -127, 127, (M, K), dtype=torch.int8, device=device
+                        )
+                        xs = torch.rand(M, 1, dtype=torch.float32, device=device) * 0.1
+                        from aiter import gemm_a8w8_CK
+
+                        gemm_a8w8_CK(xq, layer._ck_q, xs, layer._ck_s, None, dtype)
+                    except Exception as e:
+                        import warnings
+
+                        warnings.warn(
+                            f"CK warmup failed for (M={M}, N={N}, K={K}): {e}"
+                        )
+            else:
+                for M in warmup_shapes:
+                    key = ("a8w8", M, N, K, gs)
+                    if key in self._WARMUP_CACHE:
+                        continue
+                    self._WARMUP_CACHE.add(key)
+
+                    x = torch.empty((M, K), dtype=dtype, device=device)
+                    cfg = _get_aiter_w8a8_config(M, N, K, gs)
+
+                    try:
+                        x_q, x_s = _quantize_activation_per_block(x, block_k=128)
+                        gemm_a8w8_blockscale(
+                            x_q,
+                            w_q,
+                            x_s,
+                            w_s,
+                            dtype=dtype,
+                            config=cfg,
+                        )
+                    except Exception as e:
+                        import warnings
+
+                        warnings.warn(
+                            f"AITER W8A8 warmup failed for (M={M}, N={N}, K={K}, gs={gs}): {e}"
+                        )
             return
 
         for M in (1, 17, 33, 65):
