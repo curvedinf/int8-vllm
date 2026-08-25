@@ -90,8 +90,13 @@ ARGS=(
   --disable-uvicorn-access-log
   --enable-auto-tool-choice
   --tool-call-parser qwen3_coder
-  --default-chat-template-kwargs '{"enable_thinking":false}'
-  --override-generation-config '{"temperature":0.7,"top_p":0.80,"top_k":20,"min_p":0.0,"presence_penalty":1.5,"repetition_penalty":1.0}'
+  # Qwen3.8-27B model-card defaults (HF): temperature 1.0 / top_p 0.95 /
+  # top_k 20, no repetition or presence penalties. Thinking LOW: this
+  # checkpoint's non-thinking mode is the weak one — the template's
+  # reasoning_effort=low keeps brief thinking on (its supported levels are
+  # xhigh/medium/low; xhigh is the template default).
+  --default-chat-template-kwargs '{"enable_thinking":true,"reasoning_effort":"low"}'
+  --override-generation-config '{"temperature":1.0,"top_p":0.95,"top_k":20,"min_p":0.0,"presence_penalty":0.0,"repetition_penalty":1.0}'
   # GDN recurrent state: int8 — REVERTED from the fp16 audit recommendation
   # after a 2026-08-25 acceptance gate (fp16: 46.4% vs int8: 73.1% at NS=15;
   # the checkpoints were distilled/served with the unscaled int8 store, and
