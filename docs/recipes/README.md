@@ -200,3 +200,25 @@ two different quantization generations of the same model will not and need not m
 token-for-token; the live acceptance/coherence gates are the production-truth signal).
 The `q38_final_stack.npz` capture is committed as the new comparison baseline for any
 future single-change KLD gates.
+
+## Intermediate-optimized stage complete (2026-08-25)
+
+Final stack soak: 500/500 coherent, 0 failures (scripts/ua_live_soak.py, chat
+endpoint, production sampling params). Full component state:
+
+| Component | State |
+|---|---|
+| Target/draft GEMMs | CK W8A8 (per-channel weights, per-token activations) |
+| lm_head | int8 W8A8 (VLLM_GFX908_INT8_LM_HEAD=1 in recipe) |
+| Target + draft KV | int8-PTH |
+| DFlash2 surfaces | conv + selector projections W8A8; codebooks bf16 (audited) |
+| Draft ctx-KV projection | bf16 dense (dtype ladder: 71.2 > 69.2 > 66.0% acceptance) |
+| GDN state | int8 unscaled store (fp16 REVERTED by acceptance gate: 46.4 vs 73.1%) |
+| Fused norm+quant | landed, default OFF (acceptance gate: 71.2 -> 46.5%; numerics fix future) |
+| All-reduce | vLLM CUSTOM; AITER CAR coherent, slower unfused |
+| NS | 15 (TG 770 tok/s, 10.06 ms TPOT, 73.06% acceptance, 11.96 acc len) |
+| CK tune table | deferred (multi-hour module_gemm_a8w8_tune build; defaults measured) |
+
+Deferred with rationale: NS=17 cliff (suspected mechanical limit, needs SPEC-DBG
+probe session), scaled int8 GDN kernel, gfx908 tune table, fused-norm numerics fix,
+noncausal AITER-native attention.
