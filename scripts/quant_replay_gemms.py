@@ -27,8 +27,14 @@ from safetensors import safe_open
 
 QDIR = os.path.expanduser("~/models/Qwen3.8-27B-GPTQ-8bit-gs128")
 BDIR = os.path.expanduser("~/models/Qwen3.8-27B-bf16-ref")
-BOOT = os.path.expanduser("~/models/kld/quant_audit/bootA/rank0")
-OUT = os.path.expanduser("~/models/kld/quant_audit/replay/gemm_budget.json")
+BOOT = os.path.expanduser(
+    os.environ.get("QUANT_AUDIT_BOOT", "~/models/kld/quant_audit/bootA/rank0")
+)
+OUT = os.path.expanduser(
+    os.environ.get(
+        "QUANT_AUDIT_OUT", "~/models/kld/quant_audit/replay/gemm_budget.json"
+    )
+)
 
 NUM_LAYERS = 64
 TP = 4

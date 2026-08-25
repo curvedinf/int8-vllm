@@ -22,15 +22,10 @@ greedy, `vllm bench serve` fresh-boot legs. TPOT-derived TG rate is the
 primary decode metric (8 streams ÷ mean TPOT); acceptance from the server's
 spec-decode counters. Current stack measured 2026-08-24/25.
 
-**Current production stack** (DFlash2 W8A8, NS=15, int8 lm_head + draft KV,
-**fp16 GDN state** — see +8 below):
-
-| Metric | Value |
-|---|---|
-| TG rate (decode-only, 8 streams) | **~554 tok/s** (8 / 14.44 ms) |
-| Mean TPOT | 14.44 ms |
-| Draft acceptance | 42.9% (7.44 accepted of 15) — honest post-fix number |
-| TTFT (32-token input) | ~440 ms |
+**Current production stack** (DFlash2 W8A8, NS=15, fp32 GDN state +
+round act quant). Current numbers live in `docs/recipes/README.md`
+"Current production status" — the one source of truth for this table;
+they are not restated here.
 
 TG rate = concurrency ÷ mean TPOT: pure decode throughput, prefill excluded.
 That is the project's one throughput metric. "Whole-request output
@@ -38,55 +33,17 @@ throughput" (all output tokens ÷ total wall time incl. TTFT) is BANNED — it
 mixes prefill and decode into one meaningless number and has poisoned
 comparisons in this repo; do not compute or cite it.
 
-Cumulative timeline (TG rate, tok/s decode-only @ C8 unless noted; older
-steps re-derived where TPOT was recorded, else marked n/a):
+Optimization history and the full component-level dtype table are NOT
+restated here — `docs/recipes/README.md` (component table + current status)
+and `INT8_AUDIT_RESULTS.md` (measurement program) are the sources of truth.
+Highlights of the current stack only:
 
-| Step | Config delta | TG tok/s | Notes |
-|---|---|---:|---|
-| Baseline | fp8 KV, no spec, MI300X GEMM configs | n/a | leg predates TPOT recording |
-| +1 | AITER MI100 small-M GEMM configs | n/a | leg predates TPOT recording |
-| +2 | MTP k=2 | n/a | leg predates TPOT recording |
-| +3 | int8-PTH KV cache | n/a | leg predates TPOT recording |
-| +4 | AITER CK W8A8 GEMMs (vs valid W8A16) | 63.49 median *1 | audit-era 3-repeat leg; +31.8% vs 48.17 |
-| +5 | **DFlash2 bf16-dtype fix** (was zero-acceptance) | 177 *1 | 3.6× vs +4 — the fp16-overflow root cause |
-| +6 | lm_head + conv/selector W8A8, NS=15 | 296 *1 | acceptance figures from here to +7 are void (see +8) |
-| +7 | draft KV int8-PTH (UA noncausal fix) | — | no clean leg; superseded by +8 within the hour |
-| +8 | **GDN state → fp16 (KV-int8 + mamba-int8 combo corruption fix)** | **554** | 2x2 bisect: the +6/+7 "73-77% acceptance" was corruption-inflated; 8/8 strict-format PASS only with this fix |
-
-*1 Single-stream legs measured at concurrency 1; TG here = the leg's own
-concurrency ÷ its TPOT. Cross-concurrency comparisons are approximate.
-
-Reference points: MTP2 one-run (audit): 28.18 ms TPOT → 284 tok/s TG at C8 —
-the fixed DFlash2 stack (554) beats it ~2×. No-spec at C8: TPOT-derived
-~105 ms → ~76 tok/s TG.
-
-Kernel-level gains recorded during tuning: attention `waves_per_eu=1` +8.7%
-output, decode `num_warps=4/num_stages=1` −6.2% TPOT, AITER lm_head GEMM
-small-M config 1.74x vs rocBLAS.
-
-## Int8 doctrine — what runs where
-
-Measured as of 2026-08-24 (INT8_AUDIT_RESULTS.md reconciled). The recipe is
-int8-native everywhere the acceptance gate passes; every exception below is a
-measured decision, not an aspiration.
-
-| Component | dtype | Notes |
-|---|---|---|
-| Target GEMMs | **W8A8 int8 (CK)** | per-channel weight requant at load + per-token activation quant; `gemm_a8w8_CK` |
-| lm_head | **W8A8 int8 (CK)** | `VLLM_GFX908_INT8_LM_HEAD=1`; gated 65.6→65.6% acceptance (neutral), halves head memory |
-| KV cache (target) | **int8 per-token-head** | f32 inline scales, block 32 |
-| Draft KV | **int8 per-token-head** | after the UA noncausal `kv_quant_mode` fix; acceptance 76.3→79.7% vs bf16 |
-| DFlash2 drafter | **GPTQ int8 GS128 → CK W8A8** | conv `kernel_projection` + selector `hidden_projection` W8A8 (`VLLM_GFX908_DF2_W8A8`) |
-| Attention P@V | fp16 | V dequantized with scale folded into P |
-| Selector codebooks | bf16 | audited exception: candidate-row gathers, ranking-sensitive |
-| Draft ctx-KV projection | **bf16 dense** | dtype ladder measured: bf16 71.2% > fp16 69.2% > int8 66.0% acceptance |
-| Mamba/GDN recurrent state | **fp16** | REQUIRED: int8 KV + int8 GDN state TOGETHER corrupt generation (2x2 bisect 2026-08-25; each alone passes). The earlier pro-int8 acceptance gate was measured under that corruption and is void. A properly scaled int8 state kernel remains future work |
-| All-reduce | vLLM CUSTOM (fp16 payload) | AITER CAR is coherent but 8.8% slower unfused; fused epilogue blocked by Inductor corruption |
-| Tensor parallel / concurrency | **TP4 / C8** | `--tensor-parallel-size 4 --max-num-seqs 8` |
-
-Both target and DFlash2 draft use `int8_per_token_head` KV. The draft setting
-is explicit inside the speculative-config JSON so it cannot silently inherit
-a different target setting.
+- Int8-native: W8A8 GEMMs (CK), int8 lm_head, int8-PTH KV (target + draft),
+  int8 embedding, round-to-nearest per-token act quant.
+- Measured float exceptions (never quantize without re-gating): GDN state
+  stays fp32 (int8 corrupts with int8 KV; fp16 blew states to the fp16
+  ceiling), selector codebooks bf16, draft ctx-KV projection bf16.
+- TP4 / C8, DFlash2 NS=15, vLLM CUSTOM all-reduce.
 
 ## Dependencies
 
@@ -134,20 +91,9 @@ sudo cp scripts/vllm-openai-gfx908-qwen38.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now vllm-openai-gfx908-qwen38
 ```
 
-The launcher fixes `VLLM_ROCM_USE_AITER=1`,
-`VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1`, and
-`VLLM_GFX908_INT8_LM_HEAD=1`; it blocks the fork-local Triton
-mixed-precision selector so the GS128 weights use AITER W8A8 at every M.
-The all-reduce is vLLM `CUSTOM` (`CAR=0 AR=1`) — measured fastest
-sustained; AITER CAR remains available via `CAR=1` for tuning. Key flags
-are `--tensor-parallel-size 4 --max-num-seqs 8
---kv-cache-dtype int8_per_token_head --mamba-ssm-cache-dtype float16` and
-`--speculative-config
-'{"method":"dflash","num_speculative_tokens":15,"kv_cache_dtype":"int8_per_token_head"}'`
-(NS=15 measured best TG; NS=17 collapses — see INT8_AUDIT_RESULTS.md).
-The draft dtype resolves from its checkpoint (bf16) — forcing the target's
-fp16 overflows the draft residual stream (fixed 2026-08-24). The
-production script has no no-spec, RCCL, TRITON_ATTN, or W8A16 mode.
+The complete flag contract (env pins, dtypes, spec config, NS, levers) is
+maintained in exactly one place: `docs/recipes/README.md`. The launcher
+`scripts/serve_direwolf_qwen38.sh` is its executable form.
 
 ## Hardware / software
 

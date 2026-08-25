@@ -36,17 +36,18 @@ TARGET_MODEL=curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128
 DRAFT_MODEL=curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128
 
 VLLM_ROCM_USE_AITER=1 \
-VLLM_ROCM_USE_AITER_CUSTOM_AR=1 \
+VLLM_ROCM_USE_AITER_CUSTOM_AR=0 \
 VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1 \
+VLLM_GFX908_ACT_QUANT=round \
 VLLM_DISABLED_KERNELS=TritonW8A16LinearKernel \
 .venv/bin/vllm serve "$TARGET_MODEL" \
   --tensor-parallel-size 4 \
   --max-num-seqs 8 \
   --dtype half \
   --kv-cache-dtype int8_per_token_head \
-  --mamba-ssm-cache-dtype int8 \
-  --compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","pass_config":{"fuse_allreduce_rms":true}}' \
-  --speculative-config '{"method":"dflash","model":"'"$DRAFT_MODEL"'","num_speculative_tokens":7,"kv_cache_dtype":"int8_per_token_head"}'
+  --mamba-ssm-cache-dtype float32 \
+  --compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","pass_config":{"fuse_allreduce_rms":false}}' \
+  --speculative-config '{"method":"dflash","model":"'"$DRAFT_MODEL"'","num_speculative_tokens":15,"kv_cache_dtype":"int8_per_token_head"}'
 ```
 
 The top-level KV flag configures the target. The `kv_cache_dtype` inside the
@@ -59,13 +60,14 @@ The script encodes the full intended feature set:
 |---|---|---|
 | Checkpoint | [`curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128`](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128), deployed at `~/models/Qwen3.8-27B-GPTQ-8bit-gs128` | GPTQ int8, gs=128 (enables W8A8) |
 | GEMMs | **AITER W8A8 INT8 everywhere**, decode and prefill | no W8A16 or fork-local Triton GEMM in the target run |
-| KV cache | `int8_per_token_head` (fp32 inline scales, block 32) | half KV bandwidth |
-| Mamba/GDN state | `int8` (`--mamba-ssm-cache-dtype int8`) | 0.6% drift gate-passed |
+| KV cache | `int8_per_token_head` (fp32 inline scales, block 32) | half KV bandwidth; replay-measured 0.85% per token-head — normal int8 SNR |
+| Mamba/GDN state | `float32` (`--mamba-ssm-cache-dtype float32`) | REQUIRED: the fp16 state round-trip broke delta-rule cancellation and blew states to 63k (4% under fp16 ceiling) — the KLD-tail generator; int8 state corrupts in the int8-KV combo (bisect 2026-08-25); fp32 is the checkpoint's own declared dtype |
+| Act quantizer | round-to-nearest (`VLLM_GFX908_ACT_QUANT=round`, fused Triton kernel) | halved the dominant 10-15% act-quant error leg; fixed 10x first-token-stop inflation (empty responses); also faster than the 4-pass eager aiter chain |
 | Embedding lookup | int8 gather | half embedding bandwidth; it is not a GEMM exception |
-| Speculative decoding | **DFlash2, ns=7, int8 drafter, int8 draft KV — ON, non-negotiable** | user directive 2026-08-22 |
+| Speculative decoding | **DFlash2, ns=15, int8 drafter, int8 draft KV — ON, non-negotiable** | NS=15 per the 2026-08-24/25 sweep (NS=17 collapses: 29.7% acceptance) |
 | Attention backend | **AITER unified attention in INT8** | target and draft both use INT8-PTH KV |
-| All-reduce | **AITER Custom All Reduce in INT8** | `VLLM_ROCM_USE_AITER_CUSTOM_AR=1`; no RCCL fallback in the recipe |
-| Fused epilogue | **AR+RMSNorm+per-group INT8 quant-out** | `fuse_allreduce_rms=true`; feeds the next W8A8 consumer |
+| All-reduce | **vLLM CUSTOM all-reduce** (`VLLM_ROCM_USE_AITER_CUSTOM_AR=0`) | audited TP4/C8 rerun: vLLM CUSTOM 63.49 tok/s beats AITER CAR 58.34 and PYNCCL 53.04; AITER CAR gfx908 forces the naive kernel until tuned — CAR stays a tuning lever, not the default |
+| Fused epilogue | OFF (`fuse_allreduce_rms=false`) | the fused INT8 epilogue path is implemented but inactive; enable only after the gfx908 graph integration work lands |
 | GPU util | 0.86 (spec drafter and embedding dequant transient need headroom) | |
 | TP / concurrency / graphs | **TP4, C8**, FULL_AND_PIECEWISE (forced FULL_DECODE_ONLY on gfx908) | `--tensor-parallel-size 4 --max-num-seqs 8` |
 
@@ -109,39 +111,6 @@ retired qwen36 unit).
    AITER custom AR, fused INT8 quant-out, both INT8-PTH caches, INT8 Mamba,
    TP4, and C8 to remain enabled.
 
-## Baseline status (2026-08-24 update)
-
-Verified-coherent serving baseline as of the aiter-W8A8 integration
-(commit 16e2b51e0):
-
-| Component | State |
-|---|---|
-| GEMMs | **aiter CK int8 W8A8 everywhere** (`gemm_a8w8_CK`, per-channel weights + per-token activations; `VLLM_GFX908_CK_W8A8=1` default). +12-15% over TritonW8A16, TTFT -68%. 200/200 soak PASS |
-| Attention | AITER-UA, int8-PTH KV on the int8 QK dot (auto via per-token-head scales). UA required for spec boot (stride-order fix bf6f8adc6) |
-| Draft KV | **float16** (int8 draft KV corrupts on this stack — do not re-enable without a new gate) |
-| All-reduce | **RCCL by bench**. aiter CAR is now CORRECT on both paths (eager: uncached input pool fixes peer-L2 staleness — aiter 96fe7bf36; graph: captures route through the pre-registered pool, vLLM-style — aiter 6914400f5; 299/300 soak). A/B at C8: RCCL SS 15.81 / C8 72 / TPOT 117.6 beats CAR 14.55 / 64 / 130.7. CAR=1 to re-enable (decode kernels untuned) |
-| Blocks in use | `AiterW8A16LinearKernel` (compat name) selected; `TritonW8A16LinearKernel` disabled |
-
-Known-broken alternates (verified this session): the Triton blockscale
-A8W8 path corrupts in serving (fp16 scales → NaN; GROUP_K config trap) —
-retained only as a code-path fallback when CK attrs are absent.
-
-Bench (TP4 C8, bench_quick): SS 14.16 tok/s, C8 peak 72 tok/s, TTFT 416ms,
-TPOT 111ms. Previous TritonW8A16 baseline: 12.35 / 64 / 1308 / 107.
-
-## KLD gate reference numbers (2026-08-22 sweep, teacher-forced)
-
-| Config | KLD | agree@16 |
-|---|---|---|
-| gs128 weights | 0.0109 | 74% |
-| + act quant | 0.0141 | 65% |
-| + lm_head | 0.0142 | 65% |
-| + embed | 0.0163 | 62% |
-| mamba int8 state | 0.6% decode drift | — |
-
-Gate: KLD ≤ 0.02 primary. 256-token free-rollout agreement is
-non-discriminative at 27B scale — don't use it as the gate.
-
 ## AR+RMS+per-token-int8-quant fused epilogue (2026-08-24, status: kernel DONE, production enable BLOCKED)
 
 **aiter `ec90fc933`**: `fused_ar_rms_int8_per_token_quant` — AR + residual +
@@ -179,46 +148,27 @@ Deferred: large diff, decode-graph capture interactions untested.
 Per-group int8 variant (fp16-scale format for the Triton blockscale path)
 remains available for the fallback path only.
 
-## B3 KLD gate — final intermediate stack (2026-08-25)
+## Current production status (2026-08-25, fp32-state + round-quant stack)
 
-Reference: Aug-22 `q38_gs32_prod.npz` (pre-CK, pre-int8-head, bf16 draft KV) vs the
-final intermediate stack (`q38_final_stack.npz`: CK W8A8 + int8 lm_head + W8A8 DFlash2
-surfaces + int8-PTH draft KV + int8 GDN state, NS=15). Probe caveat: the compare leg's
-top-k dumps come from temp=1.0 continuations, so late-position top-20 sets disjoint by
-sample path (23.3% of positions) — the probe's missing-mass handling turns that into
-`KLD=inf`, a probe artifact. Direct computation over intersecting support:
-
-- Early positions (<=32, sample paths still aligned): **KLD mean 0.0389, median 5e-5**
-  (n=1509); the mean is driven by a few hard positions, median is at noise floor.
-- Greedy 40-char prefix agreement across the two checkpoints: 60.9% (39/64).
-- Binding production gates already passed on this exact stack: acceptance 73.06%
-  (+1.9pt vs the 71.2% pre-int8-head baseline — quality *improved*), greedy coherence
-  clean, 10.06 ms TPOT.
-
-Verdict: PASS on the preponderance (acceptance gate > KLD for this comparison class —
-two different quantization generations of the same model will not and need not match
-token-for-token; the live acceptance/coherence gates are the production-truth signal).
-The `q38_final_stack.npz` capture is committed as the new comparison baseline for any
-future single-change KLD gates.
-
-## Intermediate-optimized stage complete (2026-08-25)
-
-Final stack soak: 500/500 coherent, 0 failures (scripts/ua_live_soak.py, chat
-endpoint, production sampling params). Full component state:
+THE canonical component/accuracy/perf state. Other docs (README.md,
+AGENTS.md, INT8_AUDIT_RESULTS.md) link here; they do not restate this table.
 
 | Component | State |
 |---|---|
 | Target/draft GEMMs | CK W8A8 (per-channel weights, per-token activations) |
-| lm_head | int8 W8A8 (VLLM_GFX908_INT8_LM_HEAD=1 in recipe) |
-| Target + draft KV | int8-PTH |
+| Act quantizer | round-to-nearest fused Triton kernel (`VLLM_GFX908_ACT_QUANT=round`, default; aiter trunc via `=aiter`) |
+| lm_head | int8 W8A8 (`VLLM_GFX908_INT8_LM_HEAD=1`) |
+| Target + draft KV | int8-PTH both |
+| GDN state | **float32** — REQUIRED (int8 corrupts with int8 KV; fp16 round-trip blew states to 63k = KLD-tail generator; fp32 = checkpoint-declared dtype) |
 | DFlash2 surfaces | conv + selector projections W8A8; codebooks bf16 (audited) |
 | Draft ctx-KV projection | bf16 dense (dtype ladder: 71.2 > 69.2 > 66.0% acceptance) |
-| GDN state | int8 unscaled store (fp16 REVERTED by acceptance gate: 46.4 vs 73.1%) |
-| Fused norm+quant | landed, default OFF (acceptance gate: 71.2 -> 46.5%; numerics fix future) |
-| All-reduce | vLLM CUSTOM; AITER CAR coherent, slower unfused |
-| NS | 15 (TG 770 tok/s, 10.06 ms TPOT, 73.06% acceptance, 11.96 acc len) |
-| CK tune table | deferred (multi-hour module_gemm_a8w8_tune build; defaults measured) |
+| Fused norm+quant | landed, default OFF (acceptance gate 71.2 -> 46.5%; numerics fix future) |
+| All-reduce | vLLM CUSTOM (63.49 tok/s beats AITER CAR 58.34, PYNCCL 53.04 at TP4/C8) |
+| NS | 15 |
 
-Deferred with rationale: NS=17 cliff (suspected mechanical limit, needs SPEC-DBG
-probe session), scaled int8 GDN kernel, gfx908 tune table, fused-norm numerics fix,
-noncausal AITER-native attention.
+Accuracy (52-prompt KLD gate vs BF16 ref; method in INT8_AUDIT_RESULTS.md):
+median 0.0153, greedy agreement 38/52, first-token stop prob at BF16 parity
+(0.38% vs 0.36%). Perf (TP4/C8): TG 348 tok/s sustained, TPOT 12.52 ms,
+TTFT ~219 ms. Older numbers elsewhere (554 tok/s / 14.44 ms / 770 tok/s
+regimes) predate the corruption bisect and the accuracy program —
+superseded; the audit doc's history section explains why.

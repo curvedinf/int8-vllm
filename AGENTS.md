@@ -98,8 +98,9 @@ Non-negotiable settings in the qwen38 script:
 `VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1
 VLLM_GFX908_INT8_LM_HEAD=1`, AITER CK W8A8 for every GS128 GEMM,
 `--tensor-parallel-size 4 --max-num-seqs 8
---kv-cache-dtype int8_per_token_head --mamba-ssm-cache-dtype float16`,
-and the speculative config
+--kv-cache-dtype int8_per_token_head --mamba-ssm-cache-dtype float32`,
+`VLLM_GFX908_ACT_QUANT=round` (fused round-to-nearest act quant — quality
+default, see INT8_AUDIT_RESULTS.md), and the speculative config
 `{"method":"dflash","num_speculative_tokens":15,"kv_cache_dtype":"int8_per_token_head"}`.
 The nested dtype is explicit and applies to the draft; the top-level
 `--kv-cache-dtype int8_per_token_head` applies to the target. The draft
