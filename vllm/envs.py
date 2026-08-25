@@ -158,6 +158,11 @@ if TYPE_CHECKING:
     # the draft-side quantization boundary; the kernel and eager seam remain
     # available for a numerics fix under the env flag.
     VLLM_GFX908_FUSED_NORM_QUANT: bool = False
+    # Per-token act quantizer: "round" (fused Triton round-to-nearest,
+    # act_quant_rn) is the quality default — KLD gate 2026-08-25 halved the
+    # median (0.0966 -> 0.0153) and lifted greedy agreement 24 -> 38/52 vs
+    # the aiter trunc path. "aiter" retains the legacy trunc kernel.
+    VLLM_GFX908_ACT_QUANT: str = "round"
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
@@ -1369,6 +1374,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_GFX908_FUSED_NORM_QUANT": lambda: (
         os.getenv("VLLM_GFX908_FUSED_NORM_QUANT", "False").lower() in ("true", "1")
     ),
+    "VLLM_GFX908_ACT_QUANT": lambda: os.getenv("VLLM_GFX908_ACT_QUANT", "round"),
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING": lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
     # Pad the weights for the moe kernel

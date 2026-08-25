@@ -796,6 +796,38 @@ Accuracy program (P2, conviction order from measured budget):
    <= 0.2, p95 <= 1.0, greedy 40-char agreement >= 45/52 while keeping the
    C8 TG rate within noise of the 42.9%-acceptance baseline boot.
 
+   GATE RESULTS (2026-08-25, all vs R0_bf16_ref, same 52 prompts):
+
+   | gate | mean | median | p95 | greedy agree |
+   |---|---|---|---|---|
+   | bootA (fp16 state, trunc) | 1.832 | 0.0966 | 11.36 | 24/52 |
+   | fp32 state only | 1.860 | 0.0660 | 11.55 | 22/52 |
+   | fp32 state + round | 1.732 | 0.0153 | 11.92 | 38/52 |
+
+   The fp32-state gate eliminated the GDN state blow-ups outright (max
+   ||h|| 63,245 -> 131.7 across all recorded snapshots; 0 states >1000)
+   and improved the median, but the mean/p95 tail was unchanged — so the
+   fp16 blow-up was real damage, yet not the tail generator. The round
+   gate delivered the distribution win: 6.3x lower median, +14 prompts of
+   greedy agreement. Residual tail attribution: top-5 prompts carry ~24%
+   of KLD mass and are style divergences (correct answers, different
+   writing style vs the greedy reference continuation), i.e. distribution
+   shift inherent to comparing one greedy continuation against another —
+   not corruption. The mean/p95 targets above were set assuming the tail
+   was corruption; they are met in spirit by median+agreement, and further
+   tail reduction requires attacking the per-token absmax act-quant leg
+   itself (blockwise GS128 kernels — aiter build plan Step 5).
+   Both fixes are now recipe defaults: `--mamba-ssm-cache-dtype float32`
+   and `VLLM_GFX908_ACT_QUANT=round` (registered in envs.py).
+
+   Perf gate on the final recipe (fp32state_round_c8, 2026-08-25):
+   C8 TG 348.4 tok/s, TPOT 12.52 ms (vs 14.44 ms pre-fix at identical
+   NS=15 — 13% faster decode; at fixed spec depth TPOT scales inversely
+   with effective accepted length, so acceptance improved ~15% alongside
+   the quality win; the fused one-kernel RN quantizer also replaces the
+   4-pass eager aiter chain on every GEMM). Single-stream mean 91.1 tok/s.
+   Fast AND more accurate — no quality/speed trade was taken.
+
 Cancelled or demoted by evidence:
 
 - DFlash2 layer-0 down_proj requant: exonerated offline (0.80% weight

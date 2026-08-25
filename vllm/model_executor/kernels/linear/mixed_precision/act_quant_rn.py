@@ -13,7 +13,6 @@ Selected per process via ``VLLM_GFX908_ACT_QUANT=round`` in
 import torch
 import triton
 import triton.language as tl
-from triton.language.extra import libdevice
 
 
 @triton.jit
@@ -45,7 +44,7 @@ def _pertoken_quant_rn_kernel(
         offs = k0 + tl.arange(0, BLOCK)
         mask = offs < K
         x = tl.load(x_ptr + offs, mask=mask, other=0.0).to(tl.float32)
-        q = libdevice.rint(x * rcp)
+        q = tl.floor(x * rcp + 0.5)
         q = tl.minimum(tl.maximum(q, -127.0), 127.0)
         tl.store(q_ptr + offs, q.to(tl.int8), mask=mask)
 

@@ -15,25 +15,28 @@ ROOT="${HOME}/vllm-gfx908"
 AUDIT_DIR="${HOME}/models/kld/quant_audit/${TAG}"
 REF_TAG="${REF_TAG:-R0_bf16_ref}"
 
-if curl -fsS --max-time 2 http://127.0.0.1:8020/v1/models >/dev/null 2>&1; then
+KEY="${VLLM_API_KEY:-test-key-local-only}"
+CHECK="curl -fsS --max-time 2 -H \"Authorization: Bearer ${KEY}\" http://127.0.0.1:8020/v1/models"
+
+if curl -fsS --max-time 2 -H "Authorization: Bearer ${KEY}" http://127.0.0.1:8020/v1/models >/dev/null 2>&1; then
   echo "ERROR: something is already serving on 8020 — stop it first" >&2
   exit 1
 fi
 
 cd "${ROOT}"
-VLLM_QUANT_AUDIT="${AUDIT_DIR}" VLLM_API_KEY="${VLLM_API_KEY:-test-key-local-only}" \
+VLLM_QUANT_AUDIT="${AUDIT_DIR}" VLLM_API_KEY="${KEY}" \
   scripts/serve_direwolf_qwen38.sh start
 trap 'scripts/serve_direwolf_qwen38.sh stop >/dev/null 2>&1 || true' EXIT
 
 for _ in $(seq 1 180); do
-  curl -fsS --max-time 2 http://127.0.0.1:8020/v1/models >/dev/null 2>&1 && break
+  curl -fsS --max-time 2 -H "Authorization: Bearer ${KEY}" http://127.0.0.1:8020/v1/models >/dev/null 2>&1 && break
   sleep 5
 done
-curl -fsS --max-time 2 http://127.0.0.1:8020/v1/models >/dev/null 2>&1 || {
+curl -fsS --max-time 2 -H "Authorization: Bearer ${KEY}" http://127.0.0.1:8020/v1/models >/dev/null 2>&1 || {
   echo "ERROR: server did not come up" >&2
   tail -40 logs/serve_direwolf_qwen38/server.log >&2 || true
   exit 1
 }
 
-.venv/bin/python scripts/kld_probe_v2.py capture --tag "${TAG}"
+KLD_URL="http://127.0.0.1:8020" KLD_KEY="${KEY}" .venv/bin/python scripts/kld_probe_v2.py capture --tag "${TAG}"
 .venv/bin/python scripts/kld_probe_v2.py compare --tag "${TAG}" --ref-tag "${REF_TAG}"
