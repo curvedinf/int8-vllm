@@ -48,7 +48,7 @@ measured decision, not an aspiration.
 | Attention P@V | fp16 | V dequantized with scale folded into P |
 | Selector codebooks | bf16 | audited exception: candidate-row gathers, ranking-sensitive |
 | Draft ctx-KV projection | **bf16 dense** | dtype ladder measured: bf16 71.2% > fp16 69.2% > int8 66.0% acceptance |
-| Mamba/GDN recurrent state | **fp16** | unscaled int8 store measured invalid; scaled kernel is future work |
+| Mamba/GDN recurrent state | **int8 (unscaled store)** | REVERTED from fp16 by acceptance gate (46.4% -> 73.1%): checkpoints distilled/served with this store; fp16 shifts recurrent dynamics and breaks draft agreement. A properly scaled int8 kernel remains future work |
 | All-reduce | vLLM CUSTOM (fp16 payload) | AITER CAR is coherent but 8.8% slower unfused; fused epilogue blocked by Inductor corruption |
 | Tensor parallel / concurrency | **TP4 / C8** | `--tensor-parallel-size 4 --max-num-seqs 8` |
 
