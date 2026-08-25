@@ -236,6 +236,18 @@ class CustomAllreduce {
   template <typename T>
   void allreduce(cudaStream_t stream, T* input, T* output, int size,
                  int threads = 512, int block_limit = defaultBlockLimit) {
+    // gfx908 4xMI100 tuning levers (E2): override launch geometry via env,
+    // read once per process. Defaults preserve upstream behavior.
+    static const int env_threads = [] {
+      const char* t = std::getenv("VLLM_GFX908_AR_THREADS");
+      return t ? std::atoi(t) : 0;
+    }();
+    static const int env_blocks = [] {
+      const char* b = std::getenv("VLLM_GFX908_AR_BLOCKS");
+      return b ? std::atoi(b) : 0;
+    }();
+    if (env_threads > 0) threads = env_threads;
+    if (env_blocks > 0 && env_blocks <= kMaxBlocks) block_limit = env_blocks;
     auto d = packed_t<T>::P::size;
     if (size % d != 0)
       throw std::runtime_error(

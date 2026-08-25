@@ -955,8 +955,13 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             )
         # The target emits its own dtype (fp16 target + bf16 draft is a
         # supported mix); cast to the drafter's dtype at the boundary. The
-        # upcast is lossless.
-        result = self.model.fc(hidden_states.to(self.model.fc.weight.dtype))
+        # upcast is lossless. When fc carries GPTQ params (E1 fcq8) there is
+        # no .weight; the quantized path takes any float dtype and the
+        # boundary cast is unnecessary.
+        fc_weight = getattr(self.model.fc, "weight", None)
+        if fc_weight is not None:
+            hidden_states = hidden_states.to(fc_weight.dtype)
+        result = self.model.fc(hidden_states)
         if needs_squeeze:
             result = result.squeeze(0)
         return result
