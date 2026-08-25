@@ -423,23 +423,35 @@ class AiterW8A16LinearKernel(MPLinearKernel):
                 )
                 gemm_op = getattr(torch.ops.vllm, "rocm_aiter_gemm_a8w8_ck", None)
                 if quant_op is not None and gemm_op is not None:
-                    # The fused-norm path stashes (q, scale) on the normed
-                    # tensor; consume it instead of re-quantizing. Opaque to
-                    # dynamo: the compiled path fuses at the graph level
-                    # (GFX908RMSNormInt8QuantFusionPass) instead.
-                    prequant = (
-                        None
-                        if torch.compiler.is_compiling()
-                        else getattr(x, PREQUANT_ATTR, None)
-                    )
-                    if (
-                        prequant is not None
-                        and prequant[0].shape == x_2d.shape
-                        and x_2d.dtype in (torch.float16, torch.bfloat16)
-                    ):
-                        x_q, x_s = prequant
+                    # Activation quantizer selection: aiter pertoken (absmax,
+                    # trunc-toward-zero) is the default; VLLM_GFX908_ACT_QUANT=
+                    # round swaps in the fused round-to-nearest Triton kernel
+                    # (act_quant_rn) — Phase-1 replay convicted the trunc leg
+                    # at 10-15% mean rel-L2 per GEMM output.
+                    if os.environ.get("VLLM_GFX908_ACT_QUANT", "aiter") == "round":
+                        from vllm.model_executor.kernels.linear.mixed_precision.act_quant_rn import (
+                            pertoken_quant_rn,
+                        )
+
+                        x_q, x_s = pertoken_quant_rn(x_f16)
                     else:
-                        x_q, x_s = quant_op(x_f16)
+                        # The fused-norm path stashes (q, scale) on the normed
+                        # tensor; consume it instead of re-quantizing. Opaque to
+                        # dynamo: the compiled path fuses at the graph level
+                        # (GFX908RMSNormInt8QuantFusionPass) instead.
+                        prequant = (
+                            None
+                            if torch.compiler.is_compiling()
+                            else getattr(x, PREQUANT_ATTR, None)
+                        )
+                        if (
+                            prequant is not None
+                            and prequant[0].shape == x_2d.shape
+                            and x_2d.dtype in (torch.float16, torch.bfloat16)
+                        ):
+                            x_q, x_s = prequant
+                        else:
+                            x_q, x_s = quant_op(x_f16)
                     # The CK kernel supports fp16/bf16 outputs only; the
                     # profile dummy run feeds fp32 activations whose dtype
                     # would otherwise flow through as Y (unsupported).

@@ -93,16 +93,26 @@ Verdicts, in new conviction order:
 1. **Per-token int8 activation quantization is the dominant error source**
    (10-15% mean, up to 27% p95 per GEMM), 10-30x every weight leg combined.
    The aiter `pertoken_quant` path is absmax/127 with trunc-toward-zero on
-   heavy-tailed activations (hidden-state kurtosis 239-10,421). Fixes to
-   evaluate in replay first: rounding instead of truncation; per-token
-   percentile/clipped absmax; per-channel outlier migration folded into the
-   weights (SmoothQuant-style) so the serving GEMM stays plain CK W8A8.
+   heavy-tailed activations (hidden-state kurtosis 239-10,421).
+   OFFLINE SWEEP RESULT (204 recorded instances, `scripts/quant_sweep_actquant.py`,
+   `~/models/kld/quant_audit/replay/actquant_sweep.json`): round-to-nearest
+   halves the leg — mean 5.00% / p95 8.71% vs trunc 10.04% / 17.99%.
+   Clipping (99.0-99.9 pct absmax) and SmoothQuant folding (alpha 0.5-0.85)
+   are all WORSE than trunc on rel-L2 (27-98% mean) — rejected. The fix is
+   rounding only: `vllm/.../act_quant_rn.py` (fused Triton RN kernel, also
+   replaces the 4-pass eager aiter chain) selected via
+   `VLLM_GFX908_ACT_QUANT=round`.
 2. **GDN state blow-ups in early layers**: 17 bootA-only snapshots with
    ||h|| up to 63,245 (bf16 ref: ~1.2) at layers 2/5/8/10 - within 4% of the
    fp16 overflow ceiling (65,504). This is the catastrophic-tail generator.
-   The int8-native fix is the Nemotron-style scaled int8 state (block-scaled
-   + stochastic rounding, granularity swept offline); fp32 state is the
-   fallback, not the answer.
+   Mechanism (kernel mapping): decode re-stores h in fp16 EVERY token
+   (fused_sigmoid_gating_delta_rule_update); once |h|*2^-11 > beta*|v| the
+   delta-rule cancellation fails and |h| grows multiplicatively; early layers
+   carry exp(A) up to 60. The checkpoint declares mamba_ssm_dtype float32,
+   which production had overridden to fp16. FIX APPLIED: launcher default
+   --mamba-ssm-cache-dtype float32 (state is 37.7 MB/seq/rank fp32 vs 18.9
+   fp16 - cache-carried, no per-token bandwidth cost). Scaled int8 state
+   remains a future kernel project, not a requirement for quality.
 3. **Weight quantization is exonerated**: GPTQ leg 0.2-0.7% and CK
    per-channel requant leg 0.6-0.9% are sub-1% everywhere, including the
    previously suspected DFlash2 layer-0 down_proj (0.80% weight rel-L2;

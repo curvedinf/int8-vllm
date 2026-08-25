@@ -102,15 +102,17 @@ ARGS=(
   # xhigh/medium/low; xhigh is the template default).
   --default-chat-template-kwargs '{"enable_thinking":true,"reasoning_effort":"low"}'
   --override-generation-config '{"temperature":1.0,"top_p":0.95,"top_k":20,"min_p":0.0,"presence_penalty":0.0,"repetition_penalty":1.0}'
-  # GDN recurrent state: fp16 — REQUIRED. The int8-PTH KV + int8 GDN state
-  # COMBINATION corrupts generation (2x2 bisect 2026-08-25: each alone passes,
-  # together the model loops mid-<think>, EOSes early, empty contents; greedy
-  # deterministic). The earlier "int8 mamba beats fp16" acceptance gate was
-  # measured under this corruption — repetitive degraded outputs are trivially
-  # predictable, inflating acceptance to a fake 73%. Honest numbers on the
-  # fixed stack: fp16 42.9% acc / 14.4 ms TPOT; fp32 40.9% / 15.5 ms (fp16
-  # wins both). MAMBADT env remains the bisect lever.
-  --kv-cache-dtype int8_per_token_head --mamba-ssm-cache-dtype "${MAMBADT:-float16}"
+  # GDN recurrent state: fp32 — REQUIRED for quality. Phase-1 replay convicted
+  # the fp16 state round-trip: decode re-stores h in fp16 EVERY token
+  # (fused_sigmoid_gating_delta_rule_update), and once |h|*2^-11 > beta*|v| the
+  # delta-rule cancellation fails and |h| grows multiplicatively — recorded
+  # bootA states hit 63,245 (4% under the fp16 ceiling 65,504) while the BF16
+  # reference stays ~1.2 (early layers carry exp(A) up to 60). This is the
+  # generator of the KLD tail (recipe-vs-BF16 p95 11.36). The checkpoint
+  # itself declares mamba_ssm_dtype float32; int8 state remains banned
+  # (corruption bisect 2026-08-25) until a scaled-int8 kernel exists.
+  # MAMBADT env remains the bisect lever.
+  --kv-cache-dtype int8_per_token_head --mamba-ssm-cache-dtype "${MAMBADT:-float32}"
   # NS=15 default per the 2026-08-24 W8A8-stack sweep: TG 770 tok/s / 9.61 ms
   # median TPOT / 71.2% acceptance / 11.68 accepted length. NS=17 collapses
   # (29.7% acceptance — under investigation, suspected mechanical limit).
