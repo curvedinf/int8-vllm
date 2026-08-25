@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from collections.abc import Iterable
 
 import torch
 import torch.nn.functional as F
@@ -19,7 +20,7 @@ from .qwen3_dflash import (
     DFlashQwen3ForCausalLM,
     DFlashQwen3Model,
 )
-from .utils import maybe_prefix
+from .utils import AutoWeightsLoader, maybe_prefix
 
 
 def _grouped_conv(
@@ -96,6 +97,46 @@ class DFlashGroupedConv(nn.Module):
             (w / self._kp_s).round_().clamp_(-127, 127).to(torch.int8).contiguous()
         )
 
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> set[str]:
+        """Consume `base_kernel[.i8|.scale]` (E4); forward the rest unchanged.
+
+        With VLLM_GFX908_DF2_CONV_I8=1 and int8 planes shipped alongside the
+        bf16 tensor, stash `_bk_q`/`_bk_s` for dequant-on-add in `_convolve`
+        and leave the bf16 `base_kernel` param unloaded (zeroed) so the conv
+        never reads a materialized bf16 base weight. Without the flag (or
+        without the int8 tensors) the bf16 path is byte-identical to before.
+        """
+        items = dict(weights)
+        loaded: set[str] = set()
+        q = items.pop("base_kernel.i8", None)
+        scale = items.pop("base_kernel.scale", None)
+        if q is not None or scale is not None:
+            if os.environ.get("VLLM_GFX908_DF2_CONV_I8", "0") != "1":
+                # Flag off: the bf16 base_kernel loaded below is authoritative.
+                loaded |= {"base_kernel.i8", "base_kernel.scale"}
+            elif q is None or scale is None:
+                raise ValueError(
+                    "VLLM_GFX908_DF2_CONV_I8=1 needs both 'base_kernel.i8' "
+                    "and 'base_kernel.scale' in the checkpoint."
+                )
+            else:
+                shape = self.base_kernel.shape
+                if q.shape != shape or scale.shape != shape[:2]:
+                    raise ValueError(
+                        f"base_kernel.i8 {tuple(q.shape)} / .scale "
+                        f"{tuple(scale.shape)} do not match base_kernel "
+                        f"{tuple(shape)}."
+                    )
+                self._bk_q = q.to(torch.int8).contiguous()
+                self._bk_s = scale.to(torch.float32).contiguous()
+                self.base_kernel.data.zero_()
+                items.pop("base_kernel", None)
+                loaded |= {"base_kernel.i8", "base_kernel.scale"}
+        loaded |= AutoWeightsLoader(self).load_weights(items.items())
+        return loaded
+
     def _project(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if hasattr(self, "_kp_q"):
             flat = hidden_states.reshape(-1, hidden_states.shape[-1]).to(
@@ -113,10 +154,18 @@ class DFlashGroupedConv(nn.Module):
     def _convolve(
         self, hidden_states: torch.Tensor, delta: torch.Tensor, side: int
     ) -> torch.Tensor:
+        base = self.base_kernel[side]
+        if getattr(self, "_bk_q", None) is not None:
+            # E4 dequant-on-add: rebuild this side's plane from per-[side,tap]
+            # int8 + fp32 scales instead of reading a bf16 base weight.
+            base = (
+                self._bk_q[side].to(torch.float32)
+                * self._bk_s[side].unsqueeze(-1)
+            ).to(delta.dtype)
         return _grouped_conv(
             hidden_states,
             delta,
-            self.base_kernel[side],
+            base,
             self.block_size,
             self.num_groups,
             self.group_size,
