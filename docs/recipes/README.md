@@ -168,7 +168,17 @@ AGENTS.md, INT8_AUDIT_RESULTS.md) link here; they do not restate this table.
 
 Accuracy (52-prompt KLD gate vs BF16 ref; method in INT8_AUDIT_RESULTS.md):
 median 0.0153, greedy agreement 38/52, first-token stop prob at BF16 parity
-(0.38% vs 0.36%). Perf (TP4/C8): TG 348 tok/s sustained, TPOT 12.52 ms,
-TTFT ~219 ms. Older numbers elsewhere (554 tok/s / 14.44 ms / 770 tok/s
-regimes) predate the corruption bisect and the accuracy program —
-superseded; the audit doc's history section explains why.
+(0.38% vs 0.36%). Perf (TP4/C8, fast-regime boots): TPOT 12.52 ms, TTFT
+~219 ms. NUMBER DEFINITIONS (use these exactly; the project bans
+whole-request mixing):
+- **Steady-state TG rate** = concurrency / mean TPOT = 8 / 12.52 ms =
+  **639 tok/s** — the decode-only figure while all 8 streams are past TTFT.
+  This is the project's primary throughput metric.
+- **Wall-clock output throughput** (what `vllm bench serve` prints as
+  "Output token throughput": total tokens / total wall time incl. the
+  staggered finish as requests hit EOS) = **348 tok/s** on the same boot.
+  Lower by construction (concurrency decays after the first finisher);
+  comparable only against other wall-clock numbers.
+Older numbers elsewhere (554 tok/s / 14.44 ms / 770 tok/s regimes) predate
+the corruption bisect and the accuracy program — superseded; the audit
+doc's history section explains why.

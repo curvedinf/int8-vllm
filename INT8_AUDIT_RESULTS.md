@@ -117,6 +117,16 @@ MI100 DVFS ramp). TP4 decode is straggler-bound → TPOT is bimodal
 unmeasurable; legs need paired fast-regime boots (TTFT ~200 ms marks the
 fast regime; ~420+ the slow one). Clock pinning needs sudo — deferred.
 
+**Perf number definitions (do not mix):** steady-state TG rate =
+concurrency ÷ mean TPOT (e.g. 8 ÷ 12.50 ms = 640 tok/s) is the project's
+primary decode metric. `vllm bench serve`'s "Output token throughput"
+(~349 tok/s on the same boot) is wall-clock: total tokens ÷ total wall
+time including the staggered finish as requests hit EOS — concurrency
+decays after the first finisher, so it reads ~0.55× steady-state on
+8-equal-length benches by construction. Ledger TPOT deltas are comparable
+across both; tok/s numbers are only comparable within the same definition.
+See docs/recipes/README.md "Current production status".
+
 Net: the audited exceptions ARE the optimum at the current measurement
 floor. The genuinely-open items are structural: Inductor fix (E3 fusion
 in decode), blockwise GS128 kernels (act-quant leg), and the CK gfx908
