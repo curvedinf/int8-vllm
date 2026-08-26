@@ -1,11 +1,18 @@
 <!-- markdownlint-disable MD001 MD041 -->
-# vLLM for AMD Instinct MI100 (gfx908)
+# int8-vllm — vLLM with a complete INT8 serving path, tuned for 4x MI100
 
-A high-performance fork of [vLLM](https://github.com/vllm-project/vllm) tuned
-specifically for 4x AMD Instinct MI100 (gfx908 / CDNA1) over XGMI. MI100 gets
-2x int8 rate vs any dtype other than FP16 (equal), at half the memory
-bandwidth — so this branch treats **int8 as the native dtype** across the
-whole model surface and exploits it everywhere it wins.
+A fork of [vLLM](https://github.com/vllm-project/vllm) whose goal is to add
+the **complete INT8 support upstream is mostly missing**: W8A8 INT8 GEMMs at
+every decode and prefill shape, an INT8 per-token-head KV cache, INT8
+lm_head, an INT8 speculative-decoding draft path, and the glue (quantizers,
+cache writers, dispatch) to keep activations INT8 end-to-end instead of
+falling back to fp16 between ops.
+
+The stack is tested and tuned on **4x AMD Instinct MI100 (gfx908 / CDNA1,
+32GB, XGMI full mesh)**. MI100 gets 2x int8 rate vs any dtype other than
+FP16 (equal), at half the memory bandwidth — so this branch treats **int8 as
+the native dtype** across the whole model surface and exploits it everywhere
+it wins, with measured float exceptions where precision actually matters.
 
 > **Optimized configuration:** [Qwen3.8-27B GPTQ INT8 W8A8 GS128](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128)
 > + its matching [DFlash2 GPTQ INT8 W8A8 GS128 draft](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128)
@@ -48,6 +55,41 @@ Highlights of the current stack only:
   stays fp32 (int8 corrupts with int8 KV; fp16 blew states to the fp16
   ceiling), selector codebooks bf16, draft ctx-KV projection bf16.
 - TP4 / C8, DFlash2 NS=15, vLLM CUSTOM all-reduce.
+
+### History (abbreviated, 27B C8 serving)
+
+Metric column says which definition each row uses — do not compare across
+definitions. Rows 1–2 predate the INT8 conversion and ran fp16 KV.
+
+| Date | Stack | Config | Perf |
+|---|---|---|---|
+| 2026-06 early | Qwen3.6-27B GPTQ-8, TRITON_ATTN, no spec | TP4, fp16 KV | 129 tok/s wall-clock (c=8 mixed); TPOT 20.1 ms at c=1 |
+| 2026-06-11 | Qwen3.6-27B + AITER UA + MTP n=3 | TP4, fp16 KV | 212 tok/s wall-clock (c=8); +29% at 16K ctx; +15% on 4k-in/6k-out batch |
+| 2026-08-24 | Qwen3.8-27B INT8 GS128 + DFlash2 | W8A8 everywhere, int8-PTH KV both models, UA, TP4/C8 | INT8 conversion lands; NS sweep selects NS=15 (NS=17 acceptance collapses to ~30%) |
+| 2026-08-25/26 | + fp32 GDN state, round act quant (accuracy program) | current recipe | TPOT 12.52 ms → **639 tok/s TG**; 348 tok/s wall-clock; ~71% draft acceptance; KLD median 0.0153 vs BF16 |
+
+Older headline numbers (554/770 tok/s regimes) predate the corruption bisect
+and the accuracy program — superseded; see the audit doc's history section.
+
+## Other hardware this is a good baseline for
+
+The kernels here are gfx908-tuned (CK instances, Triton autotunes), so a port
+means regenerating/retuning kernels — but the **architecture transfers**:
+INT8-native surfaces, per-surface dtype ladders, and the KLD-gated audit
+method apply to any accelerator where INT8 is among the best native dtypes:
+
+- **AMD CDNA family** — MI50/MI60 (gfx906, INT8 dot4), MI210/MI250 (gfx90a).
+  Closest relatives; much of the ROCm/AITER path carries over directly.
+- **NVIDIA Turing/Ampere/Ada** — T4, A10/A30, A100, L4/L40S: INT8 tensor-core
+  rate is 2x FP16 at half the bandwidth, the same trade MI100 makes. The
+  Triton paths are largely portable; the CK GEMMs need a cuBLASLt/cutlass
+  substitute.
+- **Hopper and newer** have FP8, which usually beats INT8 there — this stack
+  is most valuable on hardware whose sweet spot is INT8.
+
+If your GPU's INT8:FP16 rate ratio is 2:1 (or INT8 is its peak dtype), this
+repo's recipe and measurement harness are a better starting point than
+stock vLLM.
 
 ## Dependencies
 
@@ -114,7 +156,7 @@ maintained in exactly one place: `docs/recipes/README.md`. The launcher
 PYTHONPATH="$PWD:$HOME/aiter" .venv/bin/python scripts/test_int8_kv_micro.py
 
 # post-sync battery: int8 KV at production shapes (hdim 256, GQA 6:1),
-# FA 2.8.4 interface, boot-import chain, GEMM whitelist
+# varlen attention interface checks, boot-import chain, GEMM whitelist
 HIP_VISIBLE_DEVICES=1 .venv/bin/python scripts/battery_gfx908.py
 ```
 
