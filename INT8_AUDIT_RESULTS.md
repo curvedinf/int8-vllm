@@ -29,7 +29,7 @@ Ranked by expected decode impact. TP4-rank figures where relevant.
 | 1 | **Draft `fc` GEMM** | `qwen3_dflash.py:509` — `ReplicatedLinear`, registered under `quant_config` but the checkpoint ships BF16 `fc.weight` (no GPTQ params), so it executes as a **dense bf16 GEMM** every draft step | 262 MB bf16, replicated per rank (NOT sharded — `ReplicatedLinear`) | compute + 4x replicated bandwidth | HIGH: quantize to GPTQ GS128 (same recipe as the rest of the draft) → CK W8A8. Halves the largest single bf16 read in the decode path and removes 4x replication of the bf16 copy |
 | 2 | **All-reduce payload (fp16 partials)** | vLLM `CUSTOM` CAR, every row-parallel layer output | fp16 [T,5120] x4 ranks per AR | bandwidth | **vLLM CAR tuned for 4x MI100 XGMI** — launch geometry, IPF/IPC staging, multi-block overlap for C8 decode sizes. Int8 collective transport (scale-carrying) is a research item only; fp16 payload stays until a scaled scheme is proven |
 | 3 | **Inter-op activation stream** | residual stream + norm outputs flow fp16 between ops; int8 exists only at GEMM inputs (each linear re-quantizes) | fp16 activations, quantized redundantly per consumer | bandwidth + launches | the fused AR+RMSNorm+int8-quant-out epilogue (kernel exists, `ec90fc933`) removes the fp16 round-trip AND the per-consumer quant; blocked by gfx908 Inductor corruption → build the eager seam in the decoder layer |
-| 4 | **Draft `base_kernel` conv weights** | `qwen3_dflash2.py:67` — `_grouped_conv` runs bf16; the `kernel_projection` feeding it IS W8A8 (`_kp_q` path confirmed at :100-110) | 131.5 MB bf16 across 20 tensors | bandwidth | MEDIUM: weights are conv taps consumed once per draft step; int8 with per-group scales needs a conv kernel change; sensitive (draft scores) — gate on acceptance |
+| 4 | **Draft `base_kernel` conv weights** | `qwen3_dflash2.py:67` — `_grouped_conv` runs bf16; CORRECTED 2026-08-25 (E4): the taps are 10x [2,2,5120] bf16 = **0.4 MB** (the 131.5 MB in this row was the `kernel_projection` GEMM weights, which ARE already W8A8) | negligible | E4 built scaled-int8 dequant-on-add (env `VLLM_GFX908_DF2_CONV_I8`) and REJECTED on ROI — surface too small to matter |
 | 5 | **Target `in_proj_a`/`in_proj_b`** | 48 GDN layers; standalone bf16 GEMMs [48,5120] feeding the decay/gate math | 47 MB bf16 total | launches + small bandwidth | pack/append into `in_proj_qkvz` (shares the quantized input read, one extra GEMM launch removed); do NOT quantize standalone (feeds exp(A) gates — audited sensitivity) |
 | 6 | **Attention P@V + softmax** | UA attention internals | fp16/fp32 math | compute | KEEP FLOAT (doctrine): probability accumulation and P@V are accuracy-critical; the KV read is already int8-PTH |
 | 7 | **Noncausal draft attention kernel** | DFlash2 draft attention runs the vLLM Triton unified kernel (`rocm_aiter_unified_attn.py:413`, aiter kernel is causal-only) — KV read IS int8-PTH | fp16 P against int8 KV | launches | an aiter-native noncausal variant would drop a Triton launch per draft layer; needs the aiter kernel extended to noncausal masks |
@@ -94,6 +94,34 @@ concentrated in the DRAFT (fc, ctx-KV) — the drafter is the next int8 front.
 7. **Re-gate draft ctx-KV projection int8** on the post-round stack.
 8. **Noncausal aiter-native draft attention** (launch-count win; KV already
    int8).
+
+## Experiment outcomes (2026-08-26, logs/surface_experiments/ledger.jsonl)
+
+All 8 surfaces were experiment-gated (speed+quality A/B, paired controls):
+
+| Surface | Verdict | Evidence |
+|---|---|---|
+| 1. Draft fc GEMM | **REJECT** — not a bottleneck | cast-quant W8A8 (0.49% GEMM err, cos 0.99999): TPOT +3.4% paired; fc read amortized across draft step |
+| 2. vLLM CAR geometry | **REJECT e2e** | microbench 256/8 cuts AR time 18% at T=16-32, end-to-end neutral (+1.4-1.9%): AR ~10% of decode. Knobs `VLLM_GFX908_AR_THREADS/_AR_BLOCKS` kept in kernel |
+| 3. Inter-op fp16 stream | **NEUTRAL** (prefill-only by design — decode is graph-captured) | seam implemented + booted clean (`VLLM_GFX908_EAGER_EPILOGUE=1`); known gap: PREQUANT stash bypassed under ACT_QUANT=round |
+| 4. Draft conv taps | **REJECT on ROI** | surface is 0.4 MB (audit misattribution corrected; the 131 MB was kernel_projection, already W8A8). Mechanism built + validated behind `VLLM_GFX908_DF2_CONV_I8` |
+| 5. in_proj_a/b pack | **REJECT on ROI + doctrine** | already runtime-fused as one `in_proj_ba` GEMM; remaining gain ~1% (below measurement floor) and packing quantizes exp(A)-feeding gates |
+| 6. Attention P@V/softmax | **KEEP FLOAT confirmed**; config sweep done | tile 32 (current) optimal: 64→+1.3%, 16→+1.8% TPOT, all fast-regime paired boots. Knobs `VLLM_GFX908_ATTN_TILE/_WARPS/_STAGES` kept |
+| 7. Noncausal draft attention | same kernel as 6 — verdict carries | earlier legs invalidated by regime skew; scale-fold parked (negligible vs floor) |
+| 8. Draft ctx-KV projection | **REJECT — bf16 exception stands** | paired 13.86 vs 12.56 control (+10.4% TPOT = acceptance drop) even with RN act quant; ladder unchanged |
+
+**Measurement doctrine (new, ledgered):** this box has a 24% per-rank sclk
+skew under load (GPU2/3 at 731 MHz vs GPU0/1 at 962 MHz; power-limited
+MI100 DVFS ramp). TP4 decode is straggler-bound → TPOT is bimodal
+(12.5-13.9 fast / 16.6-20 slow regime). Sub-15% single-boot deltas are
+unmeasurable; legs need paired fast-regime boots (TTFT ~200 ms marks the
+fast regime; ~420+ the slow one). Clock pinning needs sudo — deferred.
+
+Net: the audited exceptions ARE the optimum at the current measurement
+floor. The genuinely-open items are structural: Inductor fix (E3 fusion
+in decode), blockwise GS128 kernels (act-quant leg), and the CK gfx908
+tune table — none measurable to their potential on this box until the
+clock skew is pinned.
 
 ## Explicit non-goals
 

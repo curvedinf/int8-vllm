@@ -9,6 +9,8 @@
 
 from typing import Any
 
+import os
+
 import torch
 
 import vllm.envs as envs
@@ -795,6 +797,9 @@ def _get_tile_size(
     # MI100 (gfx908): larger decode tile amortizes per-tile overhead given
     # the 1.2 TB/s bandwidth (vs 5.3 TB/s on MI300X).
     if not is_prefill:
+        env_tile = os.environ.get("VLLM_GFX908_ATTN_TILE")
+        if env_tile:
+            return int(env_tile)
         from vllm.platforms import current_platform
 
         if current_platform.is_rocm():
@@ -947,8 +952,12 @@ def unified_attention(
     BLOCK_Q = BLOCK_M // num_queries_per_kv
 
     # Tuned launch parameters; ``None`` lets Triton pick its defaults.
-    launch_num_warps: int | None = None
-    launch_num_stages: int | None = None
+    # E6/E7 gfx908 sweep levers (env-selectable decode tile + warps/stages;
+    # see logs/surface_experiments ledger).
+    _env_warps = os.environ.get("VLLM_GFX908_ATTN_WARPS")
+    _env_stages = os.environ.get("VLLM_GFX908_ATTN_STAGES")
+    launch_num_warps: int | None = int(_env_warps) if _env_warps else None
+    launch_num_stages: int | None = int(_env_stages) if _env_stages else None
 
     # head_size 256 with many query rows per sequence (e.g. diffusion-gemma
     # bidirectional canvas passes) is prefill-shaped, but the decode-oriented
