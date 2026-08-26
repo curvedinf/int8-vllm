@@ -67,7 +67,7 @@ Highlights of the current stack:
 
 | Date | Stack | Config | Wall Clock Output tok/s | TG tok/s | PP tok/s | Notes |
 |---|---|---|---:|---:|---:|---|
-| 2026-08-26 | Qwen3.8-27B INT8 GS128 + DFlash2 | same recipe as the 2026-08-26 reduced-power row (tuned aiter a8w8, NS=13, TP4/C8); cards at 290W + auto DVFS | 492 | 972 | 5,676 | TPOT 8.23 ms; PP from the 8×2048 prefill leg (mean TTFT 2886 ms); peak package ~252W, junction peak 82°C; artifacts `logs/c8_optimization/stock-power-20260826T200301Z` |
+| 2026-08-26 | Qwen3.8-27B INT8 GS128 + DFlash2 | same recipe as the 2026-08-26 reduced-power row (tuned aiter a8w8, NS=13, TP4/C8); cards at 290W + auto DVFS | 492 | 972 | 5,676 | TPOT 8.23 ms; PP from the 8×2048 prefill leg (mean TTFT 2886 ms); peak package ~252W, junction peak 82°C |
 
 ### Reduced power (105W)
 
