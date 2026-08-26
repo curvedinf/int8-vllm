@@ -7,7 +7,7 @@ Runtime chain dequantizes with these scales, then the standard CK
 per-channel requant applies — the same end-state every other GS128 draft
 linear reaches. Loader needs no changes (auto-discovered from dtypes).
 
-Output: ~/.cache/huggingface/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit-fcq8
+Output: $DFLASH2_FC_Q8_DIR (default: $DFLASH2_INT8_DIR with -fcq8 suffix)
 """
 import json
 import os
@@ -16,12 +16,13 @@ import shutil
 import torch
 from safetensors.torch import load_file, save_file
 
-SRC = os.path.expanduser(
-    "~/.cache/huggingface/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit"
+SRC = os.environ.get(
+    "DFLASH2_INT8_DIR",
+    os.path.expanduser(
+        "~/.cache/int8-vllm/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit"
+    ),
 )
-DST = os.path.expanduser(
-    "~/.cache/huggingface/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit-fcq8"
-)
+DST = os.environ.get("DFLASH2_FC_Q8_DIR", SRC + "-fcq8")
 GS = 128
 
 shutil.copytree(SRC, DST, dirs_exist_ok=True)

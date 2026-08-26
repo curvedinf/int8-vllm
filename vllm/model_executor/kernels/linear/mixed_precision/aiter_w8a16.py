@@ -33,7 +33,7 @@ from vllm.model_executor.layers.rms_norm_int8_quant import PREQUANT_ATTR
 _AITER_W8A16_SUPPORTED_QUANT_TYPES = [scalar_types.uint8b128]
 _AITER_W8A16_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128, 256]
 
-# The Direwolf production contract is AITER W8A8 at every batch shape.
+# The recipe production contract is AITER W8A8 at every batch shape.
 # Keep this named threshold for compatibility with existing probes.
 _W8A8_DISPATCH_MIN_M = 1
 
@@ -299,7 +299,7 @@ class AiterW8A16LinearKernel(MPLinearKernel):
         """JIT-compile the production AITER A8W8 configs.
 
         Non-GS128 layers retain the compatibility A16W8 warmup and fallback,
-        but both published Direwolf checkpoints are GS128.
+        but both published recipe checkpoints are GS128.
         """
 
         w_q, w_s, _, _ = self._get_weight_params(layer)

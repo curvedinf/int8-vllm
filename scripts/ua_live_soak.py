@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Live correctness soak for the gfx908 int8 spec-decode stack.
 
-Fires N chat requests (varied lengths/URAs) at a running direwolf server and
+Fires N chat requests (varied lengths/URAs) at a running recipe server and
 greps every reply for coherence failures: empty/truncated bodies, refusal
 loops, character salad, repeated n-gram tails. This is the correctness gate
 from docs/recipes/README.md step "UA 500-request live soak" — deliberately
@@ -93,7 +93,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default="http://127.0.0.1:8020")
     ap.add_argument("-n", type=int, default=500)
-    ap.add_argument("--key", default="direwolf-local")
+    ap.add_argument("--key", default="recipe-local")
     ap.add_argument("--model", default=None)
     args = ap.parse_args()
 

@@ -10,8 +10,8 @@ alternative production recipes.
 
 | Repo | Branch | Role |
 |---|---|---|
-| `~/vllm-gfx908` | `main` (`curvedinf/int8-vllm`) | serving engine, int8 kernels |
-| `~/aiter` | `main` (`curvedinf/int8-aiter`) | int8 unified-attention + gfx908 tuning (PYTHONPATH) |
+| `vllm-gfx908` (this repo) | `main` (`curvedinf/int8-vllm`) | serving engine, int8 kernels |
+| sibling `../aiter` checkout | `main` (`curvedinf/int8-aiter`) | int8 unified-attention + gfx908 tuning (PYTHONPATH) |
 
 ## The baseline configuration (all features ON)
 
@@ -24,7 +24,7 @@ The DFlash2 checkpoint is not standalone. It drafts speculative tokens for
 the linked target model, which verifies them.
 
 ```bash
-scripts/serve_direwolf_qwen38.sh start    # or: supervise / restart / status
+scripts/serve_recipe_qwen38.sh start    # or: supervise / restart / status
 ```
 
 The production script uses local copies of those artifacts. The model-facing
@@ -57,7 +57,7 @@ The script encodes the full intended feature set:
 
 | Feature | Value | Why it's critical |
 |---|---|---|
-| Checkpoint | [`curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128`](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128), deployed at `~/models/Qwen3.8-27B-GPTQ-8bit-gs128` | GPTQ int8, gs=128 (enables W8A8) |
+| Checkpoint | [`curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128`](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128), deployed at `<models>/Qwen3.8-27B-GPTQ-8bit-gs128` | GPTQ int8, gs=128 (enables W8A8) |
 | GEMMs | **AITER W8A8 INT8 everywhere**, decode and prefill | no W8A16 or fork-local Triton GEMM in the target run |
 | KV cache | `int8_per_token_head` (fp32 inline scales, block 32) | half KV bandwidth; replay-measured 0.85% per token-head — normal int8 SNR |
 | Mamba/GDN state | `float32` (`--mamba-ssm-cache-dtype float32`) | REQUIRED: the fp16 state round-trip broke delta-rule cancellation and blew states to 63k (4% under fp16 ceiling) — the KLD-tail generator; int8 state corrupts in the int8-KV combo (bisect 2026-08-25); fp32 is the checkpoint's own declared dtype |
@@ -80,16 +80,16 @@ retired qwen36 unit).
 ## Models
 
 - Target: [`curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128`](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128), deployed at
-  `~/models/Qwen3.8-27B-GPTQ-8bit-gs128` (30G)
+  `<models>/Qwen3.8-27B-GPTQ-8bit-gs128` (30G)
 - Drafter: [`curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128`](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128), deployed at
-  `~/.cache/huggingface/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit`
+  `<models>/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit`
   (true GPTQ int8 GS128; requires the post-bake remap below when rebuilt)
 
 ## Quantization recipes
 
-- Target: `~/models/quantize_qwen38_27b_gptq8.py`
+- Target: `<models>/quantize_qwen38_27b_gptq8.py` (outside the repo)
   `--group-size 128` (single GPU, ~3h; `--lm-head` OOMs on 32GB — deferred)
-- Drafter: `~/models/quantize_dflash2_int8.py` (GPU0, ~3h) **then remap**
+- Drafter: `<models>/quantize_dflash2_int8.py` (outside the repo; GPU0, ~3h) **then remap**
   (`docs/recipes/drafter_remap.py`): gptqmodel saves with a `model.` prefix,
   mangles the arch tag to `Qwen3ForCausalLM`, quantizes conv/selector
   params that must stay dense, and re-restores dense `.weight` for modules
@@ -98,7 +98,7 @@ retired qwen36 unit).
 
 ## Validation gates (run these, in order, after any stack change)
 
-1. `PYTHONPATH="$PWD:$HOME/aiter" .venv/bin/python scripts/test_int8_kv_micro.py` — int8 PTH
+1. `PYTHONPATH="$PWD:$PWD/../aiter" .venv/bin/python scripts/test_int8_kv_micro.py` — int8 PTH
    attention incl. non-causal (2.4e-4)
 2. `HIP_VISIBLE_DEVICES=<idle> .venv/bin/python scripts/battery_gfx908.py`
    — prod shapes, FA interface, boot imports, gemm whitelist (4/4)

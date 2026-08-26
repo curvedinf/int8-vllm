@@ -18,7 +18,8 @@ Variants:
   smoothA0.7   alpha=0.7
   smoothA0.85  alpha=0.85
 
-Outputs ~/models/kld/quant_audit/replay/actquant_sweep.json + ranked table.
+Outputs $QUANT_AUDIT_OUT (default
+~/.cache/int8-vllm/kld/quant_audit/replay/actquant_sweep.json) + ranked table.
 CPU-only.
 """
 from __future__ import annotations
@@ -33,10 +34,30 @@ from pathlib import Path
 import torch
 
 REPO = Path(__file__).resolve().parents[1]
-CKPT = Path.home() / "models" / "Qwen3.8-27B-GPTQ-8bit-gs128"
-REF = Path.home() / "models" / "Qwen3.8-27B-bf16-ref"
-BOOT = Path.home() / "models" / "kld" / "quant_audit" / "bootA" / "rank0"
-OUT = Path.home() / "models" / "kld" / "quant_audit" / "replay" / "actquant_sweep.json"
+CKPT = Path(
+    os.environ.get(
+        "MODEL_DIR",
+        Path.home() / ".cache" / "int8-vllm" / "models" / "Qwen3.8-27B-GPTQ-8bit-gs128",
+    )
+)
+REF = Path(
+    os.environ.get(
+        "BF16_REF_DIR",
+        Path.home() / ".cache" / "int8-vllm" / "models" / "Qwen3.8-27B-bf16-ref",
+    )
+)
+BOOT = Path(
+    os.environ.get(
+        "QUANT_AUDIT_BOOT",
+        Path.home() / ".cache" / "int8-vllm" / "kld" / "quant_audit" / "bootA" / "rank0",
+    )
+)
+OUT = Path(
+    os.environ.get(
+        "QUANT_AUDIT_OUT",
+        Path.home() / ".cache" / "int8-vllm" / "kld" / "quant_audit" / "replay" / "actquant_sweep.json",
+    )
+)
 
 FAMILIES = (
     "mlp.gate_up_proj",

@@ -1,5 +1,5 @@
 [Unit]
-Description=Direwolf Qwen3.8+DFlash2 AITER W8A8 INT8 API (TP4 C8)
+Description=Recipe Qwen3.8+DFlash2 AITER W8A8 INT8 API (TP4 C8)
 Wants=network-online.target
 After=network-online.target
 Conflicts=llama-api-4x64k.service vllm-openai-gfx908.service
@@ -12,9 +12,9 @@ SupplementaryGroups=video render
 WorkingDirectory=%h/vllm-gfx908
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=/etc/llama/llama-api.env
-ExecStartPre=%h/vllm-gfx908/scripts/serve_direwolf_qwen38.sh stop
-ExecStart=%h/vllm-gfx908/scripts/serve_direwolf_qwen38.sh supervise
-ExecStop=%h/vllm-gfx908/scripts/serve_direwolf_qwen38.sh stop
+ExecStartPre=%h/vllm-gfx908/scripts/serve_recipe_qwen38.sh stop
+ExecStart=%h/vllm-gfx908/scripts/serve_recipe_qwen38.sh supervise
+ExecStop=%h/vllm-gfx908/scripts/serve_recipe_qwen38.sh stop
 Restart=always
 RestartSec=10
 KillSignal=SIGTERM

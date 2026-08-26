@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """State + custom-AR quant-error budget for the gfx908 W8A8 recipe (CPU-only).
 
-Replays recorded boot artifacts from ~/models/kld/quant_audit:
+Replays recorded boot artifacts from the quant-audit dir ($QUANT_AUDIT_DIR,
+default ~/.cache/int8-vllm/kld/quant_audit):
   bootA  -- production boot (fp16 + int8 per-token-head KV cache)
   bootB  -- bf16 reference boot (same hooks; no kv-quant files, auto kv dtype)
 
@@ -17,7 +18,7 @@ Families analyzed:
       Ranks record events independently, so candidate combos across instance
       indices are aligned by minimal residual (accepted below 1e-2).
 
-Writes ~/models/kld/quant_audit/replay/state_ar_budget.json and prints
+Writes <audit-dir>/replay/state_ar_budget.json and prints
 compact ranked tables. Run:
   CUDA_VISIBLE_DEVICES= .venv/bin/python scripts/quant_replay_state.py
 """
@@ -33,7 +34,11 @@ from pathlib import Path
 
 import torch
 
-AUDIT_DIR = Path.home() / "models" / "kld" / "quant_audit"
+AUDIT_DIR = Path(
+    os.environ.get(
+        "QUANT_AUDIT_DIR", Path.home() / ".cache" / "int8-vllm" / "kld" / "quant_audit"
+    )
+)
 RANKS = (0, 1, 2, 3)
 AR_ALIGN_TOL = 1e-2
 SCALE_MATCH_RTOL = 2e-3

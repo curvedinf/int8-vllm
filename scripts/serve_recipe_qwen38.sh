@@ -5,7 +5,7 @@ ROOT_DIR="${HOME}/vllm-gfx908"
 VENV="${ROOT_DIR}/.venv"
 MODEL_DIR="${HOME}/models/Qwen3.8-27B-GPTQ-8bit-gs128"
 SERVED_MODEL_NAME="qwen3.8-27b-gptq8"
-LOG_DIR="${ROOT_DIR}/logs/serve_direwolf_qwen38"
+LOG_DIR="${ROOT_DIR}/logs/serve_recipe_qwen38"
 PID_FILE="${LOG_DIR}/server.pid"
 API_KEY_FILE="/etc/llama/llama-api.key"
 WORKDIR="/tmp"
@@ -200,7 +200,7 @@ start_server() {
   rm -f "${PID_FILE}"
   rotate_log
 
-  printf 'starting direwolf Qwen3.8 server: url=http://%s:%s cpuset=%s log=%s/server.log\n' \
+  printf 'starting recipe Qwen3.8 server: url=http://%s:%s cpuset=%s log=%s/server.log\n' \
     "${HOST}" "${PORT}" "${CPUSET}" "${LOG_DIR}"
   printf '%s\n' 'contract: target+DFlash2 GS128; AITER W8A8/UA/custom-AR; INT8 KV/Mamba/quant-out; TP4/C8'
 

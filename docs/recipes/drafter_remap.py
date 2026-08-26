@@ -13,8 +13,16 @@ import argparse, json, os, sys
 import torch
 from safetensors.torch import load_file, save_file
 
-QDIR = os.path.expanduser(
-    "~/.cache/huggingface/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit")
+QDIR = os.environ.get(
+    "DFLASH2_INT8_DIR",
+    os.path.expanduser(
+        "~/.cache/int8-vllm/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit"
+    ),
+)
+BF16_DIR = os.environ.get(
+    "DFLASH2_BF16_DIR",
+    os.path.expanduser("~/.cache/int8-vllm/dflash2-bf16-with-tokenizer"),
+)
 
 SKIP_DENSE = ('conv', 'candidate_selector', 'fc.', 'lm_head', 'norm.',
               'q_norm', 'k_norm', 'input_layernorm', 'post_attention_layernorm',
@@ -31,8 +39,7 @@ def remap(dequant: bool):
         out[base] = v
     # restore dense params from bf16 source (skip modules that carry GPTQ
     # tensors — restoring their dense .weight leaves the loader two sources)
-    bf16 = load_file(os.path.expanduser(
-        '~/models/dflash2-bf16-with-tokenizer/model.safetensors'))
+    bf16 = load_file(os.path.join(BF16_DIR, 'model.safetensors'))
     quantized = {k.rsplit('.', 1)[0] for k in out if k.endswith('.qweight')}
     for k, v in bf16.items():
         if k.endswith('.weight') and k[:-len('.weight')] in quantized:

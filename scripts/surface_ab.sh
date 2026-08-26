@@ -22,14 +22,14 @@ cd "${ROOT}"
 if curl -fsS --max-time 2 -H "Authorization: Bearer ${KEY}" http://127.0.0.1:8020/v1/models >/dev/null 2>&1; then
   echo "ERROR: server already up on 8020" >&2; exit 1
 fi
-env ${EXP_ENV:-} VLLM_API_KEY="${KEY}" scripts/serve_direwolf_qwen38.sh start
-trap 'scripts/serve_direwolf_qwen38.sh stop >/dev/null 2>&1 || true' EXIT
+env ${EXP_ENV:-} VLLM_API_KEY="${KEY}" scripts/serve_recipe_qwen38.sh start
+trap 'scripts/serve_recipe_qwen38.sh stop >/dev/null 2>&1 || true' EXIT
 for _ in $(seq 1 90); do
   curl -fsS --max-time 2 -H "Authorization: Bearer ${KEY}" http://127.0.0.1:8020/v1/models >/dev/null 2>&1 && break
   sleep 10
 done
 curl -fsS --max-time 2 -H "Authorization: Bearer ${KEY}" http://127.0.0.1:8020/v1/models >/dev/null 2>&1 || {
-  echo "ERROR: server did not come up"; tail -30 logs/serve_direwolf_qwen38/server.log >&2; exit 1; }
+  echo "ERROR: server did not come up"; tail -30 logs/serve_recipe_qwen38/server.log >&2; exit 1; }
 
 # 2) speed: bench legs
 TPOTS=(); TGS=(); TTFTS=()

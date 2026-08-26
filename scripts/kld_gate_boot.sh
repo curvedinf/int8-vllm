@@ -5,8 +5,8 @@
 #   scripts/kld_gate_boot.sh <tag>            # e.g. fp32state_round
 #
 # Extra env (MAMBADT, NS, CAR, UA, ...) passes straight through to
-# scripts/serve_direwolf_qwen38.sh. Artifacts land in
-# ~/models/kld/quant_audit/<tag> and ~/models/kld/quant_audit/<tag>.npz.
+# scripts/serve_recipe_qwen38.sh. Artifacts land in
+# ${KLD_OUT_DIR:-~/.cache/int8-vllm/kld/quant_audit}/<tag> and <tag>.npz.
 # Reference tag: R0_bf16_ref (bf16 weights, auto KV, fp32 mamba, no spec).
 set -euo pipefail
 
@@ -25,8 +25,8 @@ fi
 
 cd "${ROOT}"
 VLLM_QUANT_AUDIT="${AUDIT_DIR}" VLLM_API_KEY="${KEY}" \
-  scripts/serve_direwolf_qwen38.sh start
-trap 'scripts/serve_direwolf_qwen38.sh stop >/dev/null 2>&1 || true' EXIT
+  scripts/serve_recipe_qwen38.sh start
+trap 'scripts/serve_recipe_qwen38.sh stop >/dev/null 2>&1 || true' EXIT
 
 for _ in $(seq 1 180); do
   curl -fsS --max-time 2 -H "Authorization: Bearer ${KEY}" http://127.0.0.1:8020/v1/models >/dev/null 2>&1 && break
@@ -34,7 +34,7 @@ for _ in $(seq 1 180); do
 done
 curl -fsS --max-time 2 -H "Authorization: Bearer ${KEY}" http://127.0.0.1:8020/v1/models >/dev/null 2>&1 || {
   echo "ERROR: server did not come up" >&2
-  tail -40 logs/serve_direwolf_qwen38/server.log >&2 || true
+  tail -40 logs/serve_recipe_qwen38/server.log >&2 || true
   exit 1
 }
 

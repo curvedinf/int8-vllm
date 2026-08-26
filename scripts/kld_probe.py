@@ -9,11 +9,14 @@ agreement. Exit code 0 = pass, 2 = marginal (see thresholds), 3 = fail.
 Usage:
   # capture baseline (run against the current prod config once)
   HIP_VISIBLE_DEVICES=0,1,2,3 python scripts/kld_probe.py capture \
-      --model ~/models/Qwen3.8-27B-GPTQ-8bit-gs128 --out ~/models/kld/q38_gs128.npz
+      --model <models>/Qwen3.8-27B-GPTQ-8bit-gs128 --out <kld-dir>/q38_gs128.npz
 
   # evaluate a variant
   HIP_VISIBLE_DEVICES=0,1,2,3 python scripts/kld_probe.py compare \
-      --model ~/models/Qwen3.8-27B-GPTQ-8bit-gs128 --base ~/models/kld/q38_gs128.npz
+      --model <models>/Qwen3.8-27B-GPTQ-8bit-gs128 --base <kld-dir>/q38_gs128.npz
+
+Artifacts default to KLD_DIR (env override), defaulting to
+~/.cache/int8-vllm/kld.
 
 Gate (from the int8-native program plan): KLD <= 0.02 and agreement >= 85%
 passes; KLD in (0.02, 0.05] passes only with a measured perf gain >= 5%
@@ -33,6 +36,10 @@ import numpy as np
 TOP_K = 20
 MAX_TOKENS = 256
 SEED = 1234
+
+KLD_DIR = Path(
+    os.environ.get("KLD_DIR", Path.home() / ".cache" / "int8-vllm" / "kld")
+)
 
 # Fixed corpus: 32 mixed code/general (mirrors quant calibration mix),
 # 16 code, 16 long-context chains. Same prompts for capture and compare.
@@ -194,10 +201,7 @@ def main():
 
     if args.mode == "capture":
         texts, dump = run_model(args.model, need_logprobs=True)
-        out = args.out or str(
-            Path.home() / "models" / "kld" /
-            (Path(args.model).name + ".npz")
-        )
+        out = args.out or str(KLD_DIR / (Path(args.model).name + ".npz"))
         Path(out).parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(
             out,
@@ -230,7 +234,8 @@ def main():
         "model": args.model, "kld": round(kld, 6), "agreement": round(agree, 4),
         "verdict": verdict, "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
-    Path.home().joinpath("models/kld/results.jsonl").open("a").write(
+    KLD_DIR.mkdir(parents=True, exist_ok=True)
+    KLD_DIR.joinpath("results.jsonl").open("a").write(
         json.dumps(row) + "\n"
     )
     return 0 if verdict.startswith("PASS") else (2 if verdict == "MARGINAL" else 3)

@@ -1,7 +1,7 @@
 # Agent Instructions for int8-vllm (MI100 fork)
 
-Operational guide for AI agents working in this repository (local checkout
-`~/vllm-gfx908`, remote `curvedinf/int8-vllm`, authoritative branch `main`).
+Operational guide for AI agents working in this repository (the `vllm-gfx908`
+checkout, remote `curvedinf/int8-vllm`, authoritative branch `main`).
 Read this before
 building, serving, testing, or syncing. This file is fork-specific; the
 upstream contribution rules (appendix below) still apply to anything destined
@@ -20,7 +20,7 @@ epilogue is OFF by default (an eager seam exists behind
 Do not substitute W8A16, the fork-local Triton GEMM, TRITON_ATTN, RCCL,
 AITER CAR, fp16 KV, no-spec, another TP size, or another concurrency in the
 target recipe. Historical
-experiments are archived (`~/archived-logs-20260822.tar.gz`, git history);
+experiments are archived (archived logs tarball outside the repo, git history);
 the A/B ledger lives at `docs/recipes/surface_experiments_ledger.jsonl`
 (`logs/` is gitignored).
 
@@ -43,29 +43,30 @@ do not derive an alternate production configuration from archival material.
 ## Repository layout (two sibling forks, both required)
 
 ```
-~/vllm-gfx908     branch main   (this repo — curvedinf/int8-vllm; serving venv .venv/)
-~/aiter           branch main   (curvedinf/int8-aiter; PYTHONPATH consumer, not pip-installed)
+<parent>/
+├── vllm-gfx908/   branch main   (this repo — curvedinf/int8-vllm; serving venv .venv/)
+└── aiter/         branch main   (curvedinf/int8-aiter; PYTHONPATH consumer, not pip-installed)
 ```
 
-- `aiter` is consumed **from the checkout at runtime** via
-  `PYTHONPATH=~/aiter` — never `pip install` it into `.venv` (that would
+- `aiter` is consumed **from the sibling checkout at runtime** via
+  `PYTHONPATH=../aiter` — never `pip install` it into `.venv` (that would
   shadow the checkout and its lazy JIT rebuild behavior). All attention and
   GEMM kernels come from this checkout; no separate attention package is part
   of the recipe.
 - `main` is the authoritative branch in both repos. Sync procedure: merge
   `upstream/main` (vllm upstream = vllm-project/vllm, aiter upstream =
   ROCm/aiter) into `main`, then validate E2E before pushing.
-- Known root-owned dirs were worked around as `*.rootjunk` siblings in
-  `~/aiter` and `.git/objects/.root-owned-*` here — they need a one-time
+- Known root-owned dirs were worked around as `*.rootjunk` siblings in the
+  `../aiter` checkout and `.git/objects/.root-owned-*` here — they need a one-time
   `sudo rm`/`chown` by the human.
 
 ## Environment (do not deviate)
 
-- All Python via `~/vllm-gfx908/.venv/bin/python`. Never system python, never
+- All Python via `.venv/bin/python` in the repo root. Never system python, never
   bare pip against this venv without a `--dry-run` first — it pins
   torch 2.11.0+rocm7.1 + triton 3.6.0 and PyPI resolution would replace them
   with CUDA builds.
-- Quantization uses a **separate venv** `~/quant-venv` (torch 2.13.0+rocm7.2,
+- Quantization uses a **separate quantization venv** outside the repo (torch 2.13.0+rocm7.2,
   gptqmodel 7.3.4, transformers 5.15) so the serving venv stays pinned.
 - ROCm env for any GPU work: `ROCM_PATH=/opt/rocm`,
   `LD_LIBRARY_PATH=/opt/rocm/lib`, `PYTORCH_ROCM_ARCH=gfx908`,
@@ -89,14 +90,14 @@ rebuild, smoke-check:
 .venv/bin/python -c "import vllm, vllm._rocm_C; from vllm.model_executor.kernels.linear.mixed_precision.aiter_w8a16 import AiterW8A16LinearKernel; print(AiterW8A16LinearKernel)"
 ```
 
-aiter JIT modules (`~/aiter/aiter/jit/module_*.so`) rebuild lazily on first
+aiter JIT modules (`../aiter/aiter/jit/module_*.so`) rebuild lazily on first
 use — but the JIT only triggers on `ModuleNotFoundError`, so after source
 changes move the stale `.so` aside once.
 
 ## Serving
 
 ```bash
-scripts/serve_direwolf_qwen38.sh {start|stop|restart|status|supervise}   # Qwen3.8 + DFlash2 (target config)
+scripts/serve_recipe_qwen38.sh {start|stop|restart|status|supervise}   # Qwen3.8 + DFlash2 (target config)
 ```
 
 Non-negotiable settings in the qwen38 script:
@@ -129,7 +130,7 @@ service.
 
 ## Testing ladder (run in this order after any stack change)
 
-1. **Micro** (idle GPU ok): `PYTHONPATH="$PWD:$HOME/aiter" .venv/bin/python scripts/test_int8_kv_micro.py`
+1. **Micro** (idle GPU ok): `PYTHONPATH="$PWD:$PWD/../aiter" .venv/bin/python scripts/test_int8_kv_micro.py`
    — int8 per-token-head attention vs fp16 reference.
 2. **Battery** (idle GPU ok): `HIP_VISIBLE_DEVICES=<idle> .venv/bin/python scripts/battery_gfx908.py`
    — production shapes (hdim 256, GQA 6:1), varlen causal/non-causal/sliding-window
@@ -156,7 +157,7 @@ without a reproducible A/B row.
 
 ## Quantizing a model
 
-Recipe lives at `~/models/quantize_qwen38_27b_gptq8.py`. Params that matter:
+Recipe lives outside the repo at `<models>/quantize_qwen38_27b_gptq8.py`. Params that matter:
 `bits=8, group_size=128, sym, true_sequential, lm_head=False`, 512 mixed
 evol-codealpaca + C4 samples binned 256-2048.
 **Run mode**: single GPU (`HIP_VISIBLE_DEVICES=0`), `offload_to_disk=False`,
@@ -169,9 +170,9 @@ gs 128) before serving.
 ## Model assets
 
 - Published target: `curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128`, deployed at
-  `~/models/Qwen3.8-27B-GPTQ-8bit-gs128`.
+  `<models>/Qwen3.8-27B-GPTQ-8bit-gs128`.
 - Published DFlash2 companion: `curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128`,
-  deployed at `~/.cache/huggingface/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit`.
+  deployed at `<models>/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit`.
   It is not standalone and is designed for the target above.
 
 ## What "done" means here

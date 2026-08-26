@@ -7,6 +7,7 @@ static cache picks it up. Prints CSV rows: threads,blocks,T,us.
 import os
 import sys
 import time
+from pathlib import Path
 
 threads, blocks = int(sys.argv[1]), int(sys.argv[2])
 os.environ["VLLM_GFX908_AR_THREADS"] = str(threads)
@@ -21,7 +22,7 @@ os.environ.update(
         "MASTER_PORT": "29517",
     }
 )
-sys.path.insert(0, "/home/curved/vllm-gfx908")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch  # noqa: E402
 import torch.distributed as dist  # noqa: E402

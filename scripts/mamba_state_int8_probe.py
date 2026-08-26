@@ -14,10 +14,11 @@ fp32 vs int8 state and compare per-token outputs. Gate: relative output
 error and no divergence blowup over 512 steps.
 """
 import sys
+from pathlib import Path
 
 import torch
 
-sys.path.insert(0, "/home/curved/vllm-gfx908")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from vllm.third_party.flash_linear_attention.ops import (
     chunk_gated_delta_rule,

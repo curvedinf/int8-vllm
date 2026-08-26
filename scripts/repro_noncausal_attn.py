@@ -8,9 +8,11 @@ fp16 KV. Reference = dense bidirectional attention over the 17 keys (the
 """
 
 import sys
+from pathlib import Path
+
 import torch
 
-sys.path.insert(0, "/home/curved/vllm-gfx908")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from vllm.v1.attention.ops.triton_unified_attention import unified_attention
 

@@ -18,9 +18,11 @@ import re
 import os
 import sys
 import traceback
+from pathlib import Path
 
-sys.path.insert(0, os.path.expanduser("~/aiter"))
-sys.path.insert(0, os.path.expanduser("~/vllm-gfx908"))
+sys.path.insert(0, os.environ.get(
+    "AITER_HOME", str(Path(__file__).resolve().parent.parent.parent / "aiter")))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 

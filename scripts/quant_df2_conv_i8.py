@@ -7,7 +7,7 @@ The base kernel is only ever ADDED to the projected delta (never
 matmul'd), so DFlashGroupedConv._convolve dequantizes the int8 planes on
 add when VLLM_GFX908_DF2_CONV_I8=1 and skips the bf16 param entirely.
 
-Output: ~/.cache/huggingface/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit-convq8
+Output: $DFLASH2_CONV_I8_DIR (default: $DFLASH2_INT8_DIR with -convq8 suffix)
 """
 import json
 import os
@@ -16,12 +16,13 @@ import shutil
 import torch
 from safetensors.torch import load_file, save_file
 
-SRC = os.path.expanduser(
-    "~/.cache/huggingface/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit"
+SRC = os.environ.get(
+    "DFLASH2_INT8_DIR",
+    os.path.expanduser(
+        "~/.cache/int8-vllm/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit"
+    ),
 )
-DST = os.path.expanduser(
-    "~/.cache/huggingface/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit-convq8"
-)
+DST = os.environ.get("DFLASH2_CONV_I8_DIR", SRC + "-convq8")
 
 shutil.copytree(SRC, DST, dirs_exist_ok=True)
 

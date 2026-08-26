@@ -100,7 +100,8 @@ Two repos are maintained as sibling forks, synced to upstream:
 | `curvedinf/int8-vllm` | `main` (authoritative) | vllm-project/vllm main @ 2026-08 |
 | `curvedinf/int8-aiter` | `main` (`e28051d2c`) | ROCm/aiter main @ 2026-08; carries int8 unified-attention + gfx908 tunings |
 
-The aiter checkout is consumed at runtime via `PYTHONPATH=~/aiter` and
+The aiter checkout is consumed at runtime via `PYTHONPATH=../aiter` (a
+sibling checkout) and
 provides every attention and GEMM kernel in the recipe; no separate attention
 package is used.
 
@@ -116,11 +117,11 @@ attention tuning
 ## Models
 
 - **[Qwen3.8-27B-GPTQ-INT8-W8A8-GS128](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128)**
-  (matching target model; local deployment: `~/models/Qwen3.8-27B-GPTQ-8bit-gs128`)
+  (matching target model; local deployment: `<models>/Qwen3.8-27B-GPTQ-8bit-gs128`)
 - **[Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128)**
   (required speculative-decoding companion; not standalone; local deployment:
-  `~/.cache/huggingface/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit`)
-- Quantization recipe: `~/models/quantize_qwen38_27b_gptq8.py`
+  `<models>/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit`)
+- Quantization recipe: `<models>/quantize_qwen38_27b_gptq8.py` (outside the repo)
   (GPTQModel 7.3.4; bits=8, group_size=128, sym, true-sequential; 512 mixed
   code+C4 calibration samples binned 256–2048)
 
@@ -128,7 +129,7 @@ attention tuning
 
 ```bash
 # The production script is fixed to the complete AITER INT8 TP4/C8 contract.
-scripts/serve_direwolf_qwen38.sh {start|stop|restart|status}
+scripts/serve_recipe_qwen38.sh {start|stop|restart|status}
 
 # systemd
 sudo cp scripts/vllm-openai-gfx908-qwen38.service /etc/systemd/system/
@@ -137,7 +138,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now vllm-openai-gfx908-q
 
 The complete flag contract (env pins, dtypes, spec config, NS, levers) is
 maintained in exactly one place: `docs/recipes/README.md`. The launcher
-`scripts/serve_direwolf_qwen38.sh` is its executable form.
+`scripts/serve_recipe_qwen38.sh` is its executable form.
 
 ## Hardware / software
 
@@ -153,7 +154,7 @@ maintained in exactly one place: `docs/recipes/README.md`. The launcher
 
 ```bash
 # int8 KV micro-correctness (AITER unified-attention path)
-PYTHONPATH="$PWD:$HOME/aiter" .venv/bin/python scripts/test_int8_kv_micro.py
+PYTHONPATH="$PWD:$PWD/../aiter" .venv/bin/python scripts/test_int8_kv_micro.py
 
 # post-sync battery: int8 KV at production shapes (hdim 256, GQA 6:1),
 # varlen attention interface checks, boot-import chain, GEMM whitelist

@@ -12,23 +12,31 @@ Rate ~ 0%  => drafter/inputs are wrong (checkpoint, aux states, or scale).
 
 Usage:
   HIP_VISIBLE_DEVICES=0 .venv/bin/python scripts/draft_offline_probe.py \
-      [--draft ~/.cache/huggingface/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit] \
+      [--draft <drafter-checkpoint-dir>] \
       [--text "The capital of France is"]
 """
 
 import argparse
 import os
 import sys
+from pathlib import Path
 
 import torch
 
-sys.path.insert(0, os.path.expanduser("~/vllm-gfx908"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+DFLASH2_INT8_DIR = os.environ.get(
+    "DFLASH2_INT8_DIR",
+    os.path.expanduser(
+        "~/.cache/int8-vllm/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit"
+    ),
+)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--draft", default=os.path.expanduser(
-        "~/.cache/huggingface/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit"))
+    ap.add_argument("--draft", default=DFLASH2_INT8_DIR,
+                    help="draft checkpoint dir (env override: DFLASH2_INT8_DIR)")
     ap.add_argument("--text", default="The capital of France is")
     args = ap.parse_args()
 

@@ -14,7 +14,8 @@ and measures, against the bf16 source checkpoint:
      recorded pool)
   3. bf16 rider tensors that dominate drafter memory (quantization targets)
 
-CPU-only. Writes ~/models/kld/quant_audit/replay/drafter_budget.json.
+CPU-only. Writes $QUANT_AUDIT_OUT (default
+~/.cache/int8-vllm/kld/quant_audit/replay/drafter_budget.json).
 """
 
 import csv
@@ -26,12 +27,25 @@ import time
 import torch
 from safetensors import safe_open
 
-INT8_DIR = os.path.expanduser(
-    "~/.cache/huggingface/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit"
+INT8_DIR = os.environ.get(
+    "DFLASH2_INT8_DIR",
+    os.path.expanduser(
+        "~/.cache/int8-vllm/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit"
+    ),
 )
-BF16_DIR = os.path.expanduser("~/models/dflash2-bf16-with-tokenizer")
-BOOTA = os.path.expanduser("~/models/kld/quant_audit/bootA")
-OUT_JSON = os.path.expanduser("~/models/kld/quant_audit/replay/drafter_budget.json")
+BF16_DIR = os.environ.get(
+    "DFLASH2_BF16_DIR",
+    os.path.expanduser("~/.cache/int8-vllm/dflash2-bf16-with-tokenizer"),
+)
+BOOTA = os.path.expanduser(
+    os.environ.get("QUANT_AUDIT_BOOT", "~/.cache/int8-vllm/kld/quant_audit/bootA")
+)
+OUT_JSON = os.path.expanduser(
+    os.environ.get(
+        "QUANT_AUDIT_OUT",
+        "~/.cache/int8-vllm/kld/quant_audit/replay/drafter_budget.json",
+    )
+)
 
 PROXY_LAYERS = (0, 32, 63)  # early / mid / late target layers
 FAMILIES = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj",

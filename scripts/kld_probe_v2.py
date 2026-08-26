@@ -10,10 +10,11 @@ Modes:
   capture  --model X --tag T   : dump greedy texts + top-K logprob dumps
   compare --tag T --ref-tag R  : KLD(R||T) over matched positions + agreement
 
-All artifacts land in ~/models/kld/quant_audit/<tag>.npz (not in git).
+All artifacts land in $KLD_OUT_DIR/<tag>.npz (not in git), defaulting to
+~/.cache/int8-vllm/kld/quant_audit.
 
 Usage:
-  python scripts/kld_probe_v2.py capture --model ~/models/X --tag leg_L1
+  python scripts/kld_probe_v2.py capture --model <models>/X --tag leg_L1
   python scripts/kld_probe_v2.py compare --tag leg_L1 --ref-tag R0
 """
 
@@ -26,7 +27,11 @@ from pathlib import Path
 
 import numpy as np
 
-OUT_DIR = Path.home() / "models" / "kld" / "quant_audit"
+OUT_DIR = Path(
+    os.environ.get(
+        "KLD_OUT_DIR", Path.home() / ".cache" / "int8-vllm" / "kld" / "quant_audit"
+    )
+)
 TOP_K = 20
 MAX_TOKENS = 256
 SEED = 20260825

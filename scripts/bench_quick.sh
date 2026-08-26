@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Quick perf gate: single-stream + C8 against the canonical RUNNING Direwolf
+# Quick perf gate: single-stream + C8 against the canonical RUNNING recipe
 # server on :8020. Results count only when that server was launched by
-# serve_direwolf_qwen38.sh with the target+DFlash2 GS128 pair, AITER W8A8
+# serve_recipe_qwen38.sh with the target+DFlash2 GS128 pair, AITER W8A8
 # everywhere, INT8 KV/Mamba/UA/custom-AR/quant-out, TP4, and max-num-seqs=8.
 # Usage: scripts/bench_quick.sh <model_dir> <tag> [api_key]
 set -euo pipefail
@@ -14,8 +14,8 @@ KEY="${3:-test-key-local-only}"
 OUT="${ROOT}/logs/c8_optimization/${TAG}"
 mkdir -p "${OUT}"
 
-PID_FILE="${ROOT}/logs/serve_direwolf_qwen38/server.pid"
-SERVER_LOG="${ROOT}/logs/serve_direwolf_qwen38/server.log"
+PID_FILE="${ROOT}/logs/serve_recipe_qwen38/server.pid"
+SERVER_LOG="${ROOT}/logs/serve_recipe_qwen38/server.log"
 [[ -r "${PID_FILE}" ]] || { printf 'missing server pid file: %s\n' "${PID_FILE}" >&2; exit 1; }
 SERVER_PID="$(cat "${PID_FILE}")"
 kill -0 "${SERVER_PID}" 2>/dev/null || { printf 'server pid is not running: %s\n' "${SERVER_PID}" >&2; exit 1; }
