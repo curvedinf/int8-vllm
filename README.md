@@ -98,8 +98,8 @@ Two repos are maintained as sibling forks, synced to upstream:
 
 | Repo | Branch | Base |
 |---|---|---|
-| `curvedinf/int8-vllm` | `main` (authoritative) | vllm-project/vllm main @ 2026-08 |
-| `curvedinf/int8-aiter` | `main` (`e28051d2c`) | ROCm/aiter main @ 2026-08; carries int8 unified-attention + gfx908 tunings |
+| [`curvedinf/int8-vllm`](https://github.com/curvedinf/int8-vllm) | `main` (authoritative) | vllm-project/vllm main @ 2026-08 |
+| [`curvedinf/int8-aiter`](https://github.com/curvedinf/int8-aiter) | `main` (`3a4f0aaf4`) | ROCm/aiter main @ 2026-08; carries int8 unified-attention + gfx908 tunings |
 
 The aiter checkout is consumed at runtime via `PYTHONPATH=../aiter` (a
 sibling checkout) and
