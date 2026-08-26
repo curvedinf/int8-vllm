@@ -19,7 +19,6 @@ it wins, with measured float exceptions where precision actually matters.
 >
 > - Models: [Qwen3.8-27B GPTQ INT8 W8A8 GS128](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128)
 >   + its matching [DFlash2 GPTQ INT8 W8A8 GS128 draft](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128)
->   (speculative decoding always on, NS=15)
 > - Compute: AITER CK W8A8 INT8 GEMMs at every decode/prefill shape, INT8
 >   lm_head
 > - Attention/KV: AITER unified attention; INT8 per-token-head KV on both
