@@ -1,6 +1,8 @@
-# Agent Instructions for vllm-gfx908 (MI100 fork)
+# Agent Instructions for int8-vllm (MI100 fork)
 
-Operational guide for AI agents working in this repository. Read this before
+Operational guide for AI agents working in this repository (local checkout
+`~/vllm-gfx908`, remote `curvedinf/int8-vllm`, authoritative branch `main`).
+Read this before
 building, serving, testing, or syncing. This file is fork-specific; the
 upstream contribution rules (appendix below) still apply to anything destined
 for vllm-project/vllm — but this repo is a deployment fork and is not
@@ -41,8 +43,8 @@ do not derive an alternate production configuration from archival material.
 ## Repository layout (two sibling forks, both required)
 
 ```
-~/vllm-gfx908     branch mi100-optimized-sync   (this repo; serving venv .venv/)
-~/aiter           branch mi100-optimized-sync   (PYTHONPATH consumer, not pip-installed)
+~/vllm-gfx908     branch main   (this repo — curvedinf/int8-vllm; serving venv .venv/)
+~/aiter           branch main   (curvedinf/int8-aiter; PYTHONPATH consumer, not pip-installed)
 ```
 
 - `aiter` is consumed **from the checkout at runtime** via
@@ -50,9 +52,9 @@ do not derive an alternate production configuration from archival material.
   shadow the checkout and its lazy JIT rebuild behavior). All attention and
   GEMM kernels come from this checkout; no separate attention package is part
   of the recipe.
-- Sync procedure: merge `upstream/main` into the `-sync` branches (vllm
-  upstream = vllm-project/vllm, aiter upstream = ROCm/aiter). Production
-  branches (`mi100-optimized`) advance only after E2E validation passes.
+- `main` is the authoritative branch in both repos. Sync procedure: merge
+  `upstream/main` (vllm upstream = vllm-project/vllm, aiter upstream =
+  ROCm/aiter) into `main`, then validate E2E before pushing.
 - Known root-owned dirs were worked around as `*.rootjunk` siblings in
   `~/aiter` and `.git/objects/.root-owned-*` here — they need a one-time
   `sudo rm`/`chown` by the human.
@@ -176,8 +178,8 @@ gs 128) before serving.
 
 A task is done when: the battery is 4/4, the serve script boots the intended
 model on all 4 GPUs, greedy outputs are sane, and any perf-affecting change
-has a fresh A/B row in the ledger. Push only `-sync` branches; production
-branch advancement is the human's call.
+has a fresh A/B row in the ledger. Push to `main`; it is the authoritative
+branch in both forks.
 
 ---
 

@@ -10,8 +10,8 @@ alternative production recipes.
 
 | Repo | Branch | Role |
 |---|---|---|
-| `~/vllm-gfx908` | `mi100-optimized-sync` | serving engine, int8 kernels |
-| `~/aiter` | `mi100-optimized-sync` | int8 unified-attention + gfx908 tuning (PYTHONPATH) |
+| `~/vllm-gfx908` | `main` (`curvedinf/int8-vllm`) | serving engine, int8 kernels |
+| `~/aiter` | `main` (`curvedinf/int8-aiter`) | int8 unified-attention + gfx908 tuning (PYTHONPATH) |
 
 ## The baseline configuration (all features ON)
 

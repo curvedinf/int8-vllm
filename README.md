@@ -55,8 +55,8 @@ Two repos are maintained as sibling forks, synced to upstream:
 
 | Repo | Branch | Base |
 |---|---|---|
-| `curvedinf/int8-vllm` | `mi100-optimized` (prod), `mi100-optimized-sync` (this update) | vllm-project/vllm main @ 2026-08 |
-| `curvedinf/aiter-gfx908` | `mi100-optimized-sync` (`e0b64a642`) | ROCm/aiter main @ 2026-08; carries int8 unified-attention + gfx908 tunings |
+| `curvedinf/int8-vllm` | `main` (authoritative) | vllm-project/vllm main @ 2026-08 |
+| `curvedinf/int8-aiter` | `main` (`e28051d2c`) | ROCm/aiter main @ 2026-08; carries int8 unified-attention + gfx908 tunings |
 
 The aiter checkout is consumed at runtime via `PYTHONPATH=~/aiter` and
 provides every attention and GEMM kernel in the recipe; no separate attention
