@@ -87,6 +87,11 @@ method apply to any accelerator where INT8 is among the best native dtypes:
 
 - **AMD CDNA family** — MI50/MI60 (gfx906, INT8 dot4), MI210/MI250 (gfx90a).
   Closest relatives; much of the ROCm/AITER path carries over directly.
+- **AMD RDNA (consumer)** — RDNA2 (gfx103x) runs INT8 via DP4A
+  (`v_dot4_i32_i8`) on the vector ALUs; RDNA3/3.5 (gfx11xx) add WMMA matrix
+  cores with native INT8 at 2x FP16. Single-GPU small-model serving is the
+  fit; the Triton paths carry over, CK GEMMs need WMMA replacements. RDNA4
+  (gfx12xx) adds FP8, which usually beats INT8 there — same caveat as Hopper.
 - **NVIDIA Turing/Ampere/Ada** — T4, A10/A30, A100, L4/L40S: INT8 tensor-core
   rate is 2x FP16 at half the bandwidth, the same trade MI100 makes. The
   Triton paths are largely portable; the CK GEMMs need a cuBLASLt/cutlass
