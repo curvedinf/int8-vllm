@@ -64,7 +64,7 @@ wall-clock cell. Rows 1–2 predate the INT8 conversion and ran fp16 KV.
 
 > [!IMPORTANT]
 > **All numbers below were captured with the MI100s on a 105W low-power
-> profile, not the 290W stock power limit.** Expect roughly 2x headroom on
+> profile, not the 290W stock power limit.** Expect roughly 2x performance on
 > power-unconstrained cards; do not compare these figures against
 > stock-power MI100 benchmarks.
 
