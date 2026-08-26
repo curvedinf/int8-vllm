@@ -1,12 +1,12 @@
 <!-- markdownlint-disable MD001 MD041 -->
 # int8-vllm — vLLM with a complete INT8 serving path, tuned for 4x MI100
 
-A fork of [vLLM](https://github.com/vllm-project/vllm) whose goal is to add
-**complete INT8 support that upstream is missing**: W8A8 INT8 GEMMs at
-every decode and prefill shape, an INT8 per-token-head KV cache, INT8
-lm_head, an INT8 speculative-decoding draft path, and the glue (quantizers,
-cache writers, dispatch) to keep activations INT8 end-to-end instead of
-falling back to fp16 between ops.
+**int8-vllm** is a fork of [vLLM](https://github.com/vllm-project/vllm)
+which adds **complete INT8 support that upstream is missing**: W8A8 INT8
+GEMMs at every decode and prefill shape, an INT8 per-token-head KV cache,
+INT8 lm_head, an INT8 speculative-decoding draft path, and the glue
+(quantizers, cache writers, dispatch) to keep activations INT8 end-to-end
+instead of falling back to fp16 between ops.
 
 The stack is tested and tuned on **4x AMD Instinct MI100 (gfx908 / CDNA1,
 32GB, XGMI full mesh)**. MI100 gets 2x int8 rate vs any dtype other than
