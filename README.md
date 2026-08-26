@@ -2,7 +2,7 @@
 # int8-vllm — vLLM with a complete INT8 serving path, tuned for 4x MI100
 
 A fork of [vLLM](https://github.com/vllm-project/vllm) whose goal is to add
-the **complete INT8 support upstream is mostly missing**: W8A8 INT8 GEMMs at
+the **complete INT8 support that upstream is missing**: W8A8 INT8 GEMMs at
 every decode and prefill shape, an INT8 per-token-head KV cache, INT8
 lm_head, an INT8 speculative-decoding draft path, and the glue (quantizers,
 cache writers, dispatch) to keep activations INT8 end-to-end instead of
