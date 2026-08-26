@@ -24,30 +24,30 @@ it wins, with measured float exceptions where precision actually matters.
 
 ## Performance
 
-C8 serving benchmark — 8 concurrent requests, TP4, input 32 / output 1000,
-greedy, `vllm bench serve` fresh-boot legs. TPOT-derived TG rate is the
-primary decode metric (8 streams ÷ mean TPOT); acceptance from the server's
-spec-decode counters. Current stack measured 2026-08-26.
+This branch was tuned the slow way: every performance-affecting surface of
+the model was measured, converted to INT8, and re-gated for quality before
+being kept. The order of attack was (1) replace every GEMM with AITER CK
+W8A8 INT8 kernels at all decode and prefill shapes, (2) move both the target
+and draft KV caches to int8 per-token-head with inline scales, (3) serve all
+attention through AITER's unified kernel with gfx908-specific tuning,
+(4) replace stock collectives with vLLM's custom XGMI all-reduce, and
+(5) put a DFlash2 INT8 speculative drafter (NS=15) in front of decode.
+Surfaces where INT8 cost measurable quality — the GDN recurrent state,
+selector codebooks, the draft ctx-KV projection — stay in higher dtypes,
+decided by KLD gating against a BF16 reference rather than guesswork. The
+full component-level dtype table lives in `docs/recipes/README.md` and the
+measurement program in `INT8_AUDIT_RESULTS.md`.
 
-**Current production stack** (DFlash2 W8A8, NS=15, fp32 GDN state +
-round act quant). Current numbers live in `docs/recipes/README.md`
-"Current production status" — the one source of truth for this table;
-they are not restated here.
+All numbers below come from C8 serving benchmarks — 8 concurrent requests,
+TP4, 32-token inputs / 1000-token outputs, greedy, fresh-boot
+`vllm bench serve` legs. The primary metric is steady-state **TG**
+(concurrency ÷ mean TPOT: pure decode throughput, prefill excluded);
+**wall-clock output tok/s** and **PP tok/s** are reported alongside and are
+only comparable within their own column. Current-stack numbers live in
+`docs/recipes/README.md` "Current production status" — the one source of
+truth — and are not restated here.
 
-TG rate = concurrency ÷ mean TPOT: pure decode throughput, prefill excluded.
-That is the project's primary throughput metric. Wall-clock tok/s (all output
-tokens ÷ total wall time incl. TTFT) is a defined secondary metric, comparable
-ONLY to other wall-clock numbers. What is BANNED: mixing steady-state TG with
-wall-clock in one comparison, and the old undefined label "whole-request
-output throughput" — it mixes prefill and decode into one meaningless number
-and has poisoned comparisons in this repo. Current numbers live in
-`docs/recipes/README.md` "Current production status" and are not restated
-here.
-
-Optimization history and the full component-level dtype table are NOT
-restated here — `docs/recipes/README.md` (component table + current status)
-and `INT8_AUDIT_RESULTS.md` (measurement program) are the sources of truth.
-Highlights of the current stack only:
+Highlights of the current stack:
 
 - Int8-native: W8A8 GEMMs (CK), int8 lm_head, int8-PTH KV (target + draft),
   int8 embedding, round-to-nearest per-token act quant.
