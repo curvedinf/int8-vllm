@@ -63,18 +63,23 @@ Highlights of the current stack:
   ceiling), selector codebooks bf16, draft ctx-KV projection bf16.
 - TP4 / C8, DFlash2 NS=13, vLLM CUSTOM all-reduce.
 
-### History (abbreviated, 27B C8 serving)
+### Stock power (290W)
 
-Metrics are split by definition — never compare a TG cell against a
-wall-clock cell. Rows 1–2 predate the INT8 conversion and ran fp16 KV.
-`—` = not measured under that definition.
+| Date | Stack | Config | Wall Clock Output tok/s | TG tok/s | PP tok/s | Notes |
+|---|---|---|---:|---:|---:|---|
+| 2026-08-26 | Qwen3.8-27B INT8 GS128 + DFlash2 | same recipe as the 2026-08-26 reduced-power row (tuned aiter a8w8, NS=13, TP4/C8); cards at 290W + auto DVFS | 492 | 972 | 5,676 | TPOT 8.23 ms; PP from the 8×2048 prefill leg (mean TTFT 2886 ms); peak package ~252W, junction peak 82°C; artifacts `logs/c8_optimization/stock-power-20260826T200301Z` |
+
+### Reduced power (105W)
+
+History (abbreviated, 27B C8 serving). Metrics are split by definition —
+never compare a TG cell against a wall-clock cell. Rows 1–2 predate the
+INT8 conversion and ran fp16 KV. `—` = not measured under that definition.
 
 > [!IMPORTANT]
-> **All numbers in the history table below were captured with the MI100s on a
-> 105W low-power profile, not the 290W stock power limit.** Expect roughly 2x
+> **All numbers in this table were captured with the MI100s on a 105W
+> low-power profile, not the 290W stock power limit.** Expect roughly 2x
 > performance on power-unconstrained cards; do not compare these figures
-> against stock-power MI100 benchmarks. A stock-power reference table follows
-> at the end of this section.
+> against stock-power MI100 benchmarks.
 
 | Date | Stack | Config | Wall Clock Output tok/s | TG tok/s | PP tok/s | Notes |
 |---|---|---|---:|---:|---:|---|
@@ -88,19 +93,6 @@ wall-clock cell. Rows 1–2 predate the INT8 conversion and ran fp16 KV.
 > were captured from configurations later shown to degrade output quality
 > (pre-corruption-bisect, pre-accuracy-program) and are superseded — see the
 > audit doc's history section for why they don't count.
-
-### Stock power (290W) reference
-
-Same recipe, server, and bench harness as the history table, measured with
-the cards at the stock 290W power limit and auto DVFS (sclk boosting to
-1502 MHz) for the duration of the run only; the 105W / 300 MHz-pinned
-low-power state was restored immediately after. Column definitions are
-identical: wall clock = aggregate output tok/s, TG = concurrency ÷ mean
-TPOT, PP = aggregate input tokens ÷ mean TTFT.
-
-| Date | Stack | Config | Wall Clock Output tok/s | TG tok/s | PP tok/s | Notes |
-|---|---|---|---:|---:|---:|---|
-| 2026-08-26 | Qwen3.8-27B INT8 GS128 + DFlash2 | same recipe as the 2026-08-26 row above (tuned aiter a8w8, NS=13, TP4/C8); cards at 290W + auto DVFS | 492 | 972 | 5,676 | TPOT 8.23 ms; PP from the 8×2048 prefill leg (mean TTFT 2886 ms); peak package ~252W, junction peak 82°C; artifacts `logs/c8_optimization/stock-power-20260826T200301Z` |
 
 ## Other hardware this is a good baseline for
 
