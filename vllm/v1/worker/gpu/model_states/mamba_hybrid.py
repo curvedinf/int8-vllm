@@ -104,8 +104,24 @@ class MambaHybridModelState(DefaultModelState):
         self.num_accepted_tokens_gpu[req_index].fill_(1)
         if self._align_mode:
             # Seed the running state block from the resumed/prefilled position.
+            # Divide by the mamba group's block size, NOT cache_config.block_size:
+            # the DFlash speculator's dataclasses.replace(vllm_config, ...) re-runs
+            # the gfx908 platform hook, which resets the shared
+            # cache_config.block_size to 32 while the mamba group runs on the
+            # aligned 1728. The mismatch seeded a wild src column and crashed
+            # precopy_mamba_align_fused_kernel with hipErrorIllegalAddress on
+            # prefix-cache resumes (e.g. nct=5184 seeded (5184-1)//32=161 in a
+            # 51-column row instead of (5184-1)//1728=2).
+            # _mamba_spec is populated lazily by the first preprocess_state; a
+            # resume implies a prior batch, and fresh requests seed -1 either
+            # way, so the mamba_block_size fallback is never actually taken.
+            mamba_block_size = (
+                self._mamba_spec.block_size
+                if self._mamba_spec is not None
+                else self.cache_config.mamba_block_size
+            )
             self._mamba_state_idx_gpu[req_index].fill_(
-                (new_req_data.num_computed_tokens - 1) // self.cache_config.block_size
+                (new_req_data.num_computed_tokens - 1) // mamba_block_size
             )
 
     def _get_mamba_group_info(
