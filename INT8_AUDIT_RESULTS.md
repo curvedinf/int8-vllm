@@ -23,6 +23,8 @@ Ground rules for this edition:
 ## Active float surfaces in the serving path (the real targets)
 
 Ranked by expected decode impact. TP4-rank figures where relevant.
+Feasibility column is pre-experiment; verdicts are in the Experiment
+outcomes table below.
 
 | # | Surface | Where | Dtype / size | Class | Feasibility |
 |---|---|---|---|---|---|
@@ -68,7 +70,7 @@ By tensor bytes in the ACTIVE decode path (per full model, TP4 aggregate):
 |---|---|---|
 | int8 W8A8 weights (GPTQ → CK) | ~14.4 GB | dominant |
 | bf16 draft `fc` | 262 MB (x4 replicated) | largest active float GEMM |
-| bf16 draft `base_kernel` convs | 131 MB | conv math stays bf16 |
+| bf16 draft `base_kernel` conv taps | 0.4 MB | conv math stays bf16 (the 131 MB was `kernel_projection`, already W8A8) |
 | bf16 target `in_proj_a/b` | 47 MB | packing candidate |
 | bf16 draft ctx-KV proj + codebooks | audited exceptions | ladder/codebook gates |
 | fp16 AR payloads + inter-op stream | transient | epilogue/vLLM-CAR work |
@@ -76,26 +78,7 @@ By tensor bytes in the ACTIVE decode path (per full model, TP4 aggregate):
 Every large dense GEMM in the TARGET is int8. The remaining float GEMM mass is
 concentrated in the DRAFT (fc, ctx-KV) — the drafter is the next int8 front.
 
-## Priority order (coverage work)
-
-1. **Draft `fc` → GPTQ GS128 W8A8.** Single largest active float GEMM, 4x
-   replicated, quantization recipe already proven on this drafter's other
-   linears. Gate: acceptance + KLD (standard).
-2. **vLLM CUSTOM all-reduce tuned for 4x MI100.** XGMI launch geometry,
-   decode-size specialization (C8, NS=15 → T in {1..16} rows x 5120), overlap
-   with the epilogue seam. NOT AITER CAR.
-3. **Eager AR+RMSNorm+int8-quant epilogue seam** (removes fp16 stream +
-   redundant per-consumer quant; kernel already bit-exact vs the unfused
-   chain).
-4. **Checkpoint hygiene pass**: strip visual tower + MTP sidecar, ship
-   int8-stored lm_head/embed variants of the published checkpoints.
-5. **Draft `base_kernel` conv weights → scaled int8** (acceptance-gated).
-6. **`in_proj_a/b` packing into `in_proj_qkvz`** (no standalone quant).
-7. **Re-gate draft ctx-KV projection int8** on the post-round stack.
-8. **Noncausal aiter-native draft attention** (launch-count win; KV already
-   int8).
-
-## Experiment outcomes (2026-08-26, logs/surface_experiments/ledger.jsonl)
+## Experiment outcomes (2026-08-26, docs/recipes/surface_experiments_ledger.jsonl)
 
 All 8 surfaces were experiment-gated (speed+quality A/B, paired controls):
 

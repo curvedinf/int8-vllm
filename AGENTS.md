@@ -9,13 +9,18 @@ upstreamed directly.
 ## THE BASELINE (read first)
 
 `docs/recipes/README.md` is the canonical baseline. Every feature listed there
-(the two GS128 checkpoints, AITER W8A8 INT8 GEMMs everywhere, int8 KV/Mamba,
-AITER unified attention, AITER custom all-reduce, fused
-AR+RMSNorm+per-group INT8 quant-out, DFlash2, TP4, and C8) is mandatory. Do
-not substitute W8A16, the fork-local Triton GEMM, TRITON_ATTN, RCCL, fp16 KV,
-no-spec, another TP size, or another concurrency in the target recipe. Historical
+(the two GS128 checkpoints, AITER W8A8 INT8 GEMMs everywhere, int8
+per-token-head KV on both target and draft, AITER unified attention, vLLM
+CUSTOM all-reduce, DFlash2 with NS=15, TP4, C8, ACT_QUANT=round, and fp32
+mamba state) is mandatory. The fused AR+RMSNorm+per-group INT8 quant-out
+epilogue is OFF by default (an eager seam exists behind
+`VLLM_GFX908_EAGER_EPILOGUE=1`; experiment E3 verdict was TPOT-neutral).
+Do not substitute W8A16, the fork-local Triton GEMM, TRITON_ATTN, RCCL,
+AITER CAR, fp16 KV, no-spec, another TP size, or another concurrency in the
+target recipe. Historical
 experiments are archived (`~/archived-logs-20260822.tar.gz`, git history);
-the experiment ledger lives on from this point under `logs/` fresh.
+the A/B ledger lives at `docs/recipes/surface_experiments_ledger.jsonl`
+(`logs/` is gitignored).
 
 ## The one paragraph you must internalize
 
@@ -24,10 +29,12 @@ This is the fastest vLLM branch for 4x AMD Instinct MI100 (gfx908 / CDNA1,
 (equal) at half the bandwidth — so **int8 is the native dtype** of this stack:
 GPTQ 8-bit weights (uint8b128, group_size 128) use AITER W8A8 INT8 GEMMs for
 every decode and prefill shape, plus int8 **per-token-head** KV cache
-(`--kv-cache-dtype int8_per_token_head`, block 32, f32 inline scales), int8
-Mamba state, and AITER unified attention. The DFlash2 draft is also GPTQ INT8
-GS128, and both target and draft KV use `int8_per_token_head`. Collectives use
-AITER custom all-reduce with fused AR+RMSNorm+per-group INT8 quant-out. The
+(`--kv-cache-dtype int8_per_token_head`, block 32, f32 inline scales) and
+AITER unified attention. The DFlash2 draft is also GPTQ INT8
+GS128, and both target and draft KV use `int8_per_token_head`. Mamba state
+stays fp32 (measured float exception — the int8 mamba experiment failed on
+quality). Collectives use vLLM CUSTOM all-reduce; the fused
+AR+RMSNorm+per-group INT8 quant-out epilogue is off. The
 optimized configuration is the Qwen3.8 target + DFlash2 pair at TP4/C8 over XGMI;
 do not derive an alternate production configuration from archival material.
 
@@ -130,15 +137,22 @@ service.
    — production shapes (hdim 256, GQA 6:1), FA 2.8.4 interface, boot import
    chain against merged aiter, AITER gemm whitelist. Expect `4/4 PASS`.
 3. **Serving regression** (all 4 GPUs): boot the qwen38 production script and
-   verify its startup report names AITER W8A8, AITER unified attention, AITER
-   custom AR, both INT8 caches, INT8 Mamba, TP4, C8, and DFlash2.
+   verify its startup report names AITER W8A8, AITER unified attention, vLLM
+   custom AR, int8 PTH KV on both models, fp32 mamba, TP4, C8, and DFlash2
+   NS=15.
 4. **E2E**: qwen3.8 + DFlash2 via the serve script; check coherence, DFlash2
    acceptance length, and C8 throughput without changing the target contract.
+
+Gate tooling: `scripts/kld_gate_boot.sh <tag>` (boot-gate harness),
+`scripts/kld_probe_v2.py` (live diagnostic probe), and the A/B ledger at
+`docs/recipes/surface_experiments_ledger.jsonl` (committed there because
+`logs/` is gitignored).
 
 Validation doctrine: `docs/recipes/README.md` is the baseline record for
 this "get it working" pass; the historical A/B ledger was archived to git
 history (see `logs/` before the fresh-slate commit). Optimization passes
-should re-establish an A/B ledger there before tuning. No perf claim
+should re-establish an A/B ledger at
+`docs/recipes/surface_experiments_ledger.jsonl` before tuning. No perf claim
 without a reproducible A/B row.
 
 ## Quantizing a model

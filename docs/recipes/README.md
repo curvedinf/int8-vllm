@@ -103,13 +103,14 @@ retired qwen36 unit).
    attention incl. non-causal (2.4e-4)
 2. `HIP_VISIBLE_DEVICES=<idle> .venv/bin/python scripts/battery_gfx908.py`
    — prod shapes, FA interface, boot imports, gemm whitelist (4/4)
-3. `scripts/kld_probe.py capture|compare` — real-artifact KLD gate
-   (needs `NCCL_ALGO=Ring NCCL_PROTO=Simple` env; TP small when a server is up)
+3. `scripts/kld_probe_v2.py` — real-artifact KLD gate; the boot-gate
+   harness `scripts/kld_gate_boot.sh <tag>` wraps the boot + probe cycle
 4. Coherence curl against the booted server
 5. `.venv/bin/python scripts/ua_live_soak.py -n 500` — verify the exact
    published model pair and require AITER W8A8, AITER unified attention,
-   AITER custom AR, fused INT8 quant-out, both INT8-PTH caches, INT8 Mamba,
-   TP4, and C8 to remain enabled.
+   vLLM CUSTOM all-reduce (CAR=0), fused epilogue OFF, both INT8-PTH
+   caches, float32 Mamba state, TP4, C8, and DFlash2 NS=15 to remain
+   enabled.
 
 ## AR+RMS+per-token-int8-quant fused epilogue (2026-08-24, status: kernel DONE, production enable BLOCKED)
 
@@ -139,11 +140,10 @@ nullcontext) so the day Inductor-on-gfx908 is fixed, the fusion activates
 with zero further work (set `VLLM_MI100_TORCH_COMPILE=1 CAR=1 ARFUSE=true
 CGMODE=FULL_DECODE_ONLY`; PIECEWISE graphs still hang at TP>1).
 
-Alternative activation route (not built): an eager AR+norm+quant seam in
-`Qwen3NextDecoderLayer.forward` — the AR fires inside
-`RowParallelLinear.forward` while the norm+quant consumer sits in the
-decoder layer, so eager fusion requires model-file surgery per layer type.
-Deferred: large diff, decode-graph capture interactions untested.
+Eager activation route (built, experiment E3): an eager AR+norm+quant seam
+now exists behind `VLLM_GFX908_EAGER_EPILOGUE=1`. Verdict: neutral on TPOT
+and prefill-only by design, so production keeps the epilogue OFF
+(`fuse_allreduce_rms=false`).
 
 Per-group int8 variant (fp16-scale format for the Triton blockscale path)
 remains available for the fallback path only.
