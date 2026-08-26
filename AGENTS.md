@@ -123,8 +123,9 @@ requires the acceptance gate: TP4/C8 greedy bench, acceptance within
 models it must dispatch AITER CK W8A8 for all M.
 `TritonW8A16LinearKernel` is blocklisted by the launcher.
 
-systemd: unit template at `scripts/vllm-openai-gfx908-qwen38.service` (`%h`
-paths). Install: copy to `/etc/systemd/system/`, `daemon-reload`,
+systemd: unit template at `scripts/vllm-openai-gfx908-qwen38.service`
+(hardcoded `/home/curved` paths — `%h` resolves to `/root` in system units,
+do not reintroduce it). Install: copy to `/etc/systemd/system/`, `daemon-reload`,
 `enable --now`. It conflicts with the old qwen36 unit and the llama-api
 service.
 
