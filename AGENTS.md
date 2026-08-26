@@ -38,25 +38,21 @@ AR+RMSNorm+per-group INT8 quant-out epilogue is off. The
 optimized configuration is the Qwen3.8 target + DFlash2 pair at TP4/C8 over XGMI;
 do not derive an alternate production configuration from archival material.
 
-## Repository layout (three sibling forks, all required)
+## Repository layout (two sibling forks, both required)
 
 ```
 ~/vllm-gfx908     branch mi100-optimized-sync   (this repo; serving venv .venv/)
 ~/aiter           branch mi100-optimized-sync   (PYTHONPATH consumer, not pip-installed)
-~/flash-attention branch gfx908-sync            (installed into .venv as flash-attn 2.8.4 python-only)
 ```
 
 - `aiter` is consumed **from the checkout at runtime** via
   `PYTHONPATH=~/aiter` — never `pip install` it into `.venv` (that would
-  shadow the checkout and its lazy JIT rebuild behavior).
-- `flash-attention` is the interface layer only; its Triton AMD backend comes
-  from its `third_party/aiter` submodule, which points at `../aiter-gfx908.git`
-  (relative URL — resolves to the same org). The CK backend does not build on
-  gfx908 (gfx90a+ ISA) — never build or enable it.
+  shadow the checkout and its lazy JIT rebuild behavior). All attention and
+  GEMM kernels come from this checkout; no separate attention package is part
+  of the recipe.
 - Sync procedure: merge `upstream/main` into the `-sync` branches (vllm
-  upstream = vllm-project/vllm, aiter upstream = ROCm/aiter, FA upstream =
-  Dao-AILab/flash-attention). Production branches (`mi100-optimized`)
-  advance only after E2E validation passes.
+  upstream = vllm-project/vllm, aiter upstream = ROCm/aiter). Production
+  branches (`mi100-optimized`) advance only after E2E validation passes.
 - Known root-owned dirs were worked around as `*.rootjunk` siblings in
   `~/aiter` and `.git/objects/.root-owned-*` here — they need a one-time
   `sudo rm`/`chown` by the human.
@@ -134,8 +130,9 @@ service.
 1. **Micro** (idle GPU ok): `PYTHONPATH="$PWD:$HOME/aiter" .venv/bin/python scripts/test_int8_kv_micro.py`
    — int8 per-token-head attention vs fp16 reference.
 2. **Battery** (idle GPU ok): `HIP_VISIBLE_DEVICES=<idle> .venv/bin/python scripts/battery_gfx908.py`
-   — production shapes (hdim 256, GQA 6:1), FA 2.8.4 interface, boot import
-   chain against merged aiter, AITER gemm whitelist. Expect `4/4 PASS`.
+   — production shapes (hdim 256, GQA 6:1), varlen causal/non-causal/sliding-window
+   attention interface checks, boot import chain against merged aiter, AITER gemm
+   whitelist. Expect `4/4 PASS`.
 3. **Serving regression** (all 4 GPUs): boot the qwen38 production script and
    verify its startup report names AITER W8A8, AITER unified attention, vLLM
    custom AR, int8 PTH KV on both models, fp32 mamba, TP4, C8, and DFlash2

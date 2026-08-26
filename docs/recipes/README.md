@@ -12,7 +12,6 @@ alternative production recipes.
 |---|---|---|
 | `~/vllm-gfx908` | `mi100-optimized-sync` | serving engine, int8 kernels |
 | `~/aiter` | `mi100-optimized-sync` | int8 unified-attention + gfx908 tuning (PYTHONPATH) |
-| `~/flash-attention` | `gfx908-sync` | python-only 2.8.4, Triton AMD backend |
 
 ## The baseline configuration (all features ON)
 

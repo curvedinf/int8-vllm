@@ -51,18 +51,16 @@ Highlights of the current stack only:
 
 ## Dependencies
 
-All three repos are maintained as sibling forks, synced to upstream:
+Two repos are maintained as sibling forks, synced to upstream:
 
 | Repo | Branch | Base |
 |---|---|---|
-| `<your-org>/vllm-gfx908` | `mi100-optimized` (prod), `mi100-optimized-sync` (this update) | vllm-project/vllm main @ 2026-08 |
-| `<your-org>/aiter-gfx908` | `mi100-optimized-sync` (`e0b64a642`) | ROCm/aiter main @ 2026-08; carries int8 unified-attention + gfx908 tunings |
-| `<your-org>/flash-attention` | `gfx908-sync` (`d279da4`) | Dao-AILab/flash-attention main @ 2026-08; `third_party/aiter` submodule → the aiter fork above |
+| `curvedinf/int8-vllm` | `mi100-optimized` (prod), `mi100-optimized-sync` (this update) | vllm-project/vllm main @ 2026-08 |
+| `curvedinf/aiter-gfx908` | `mi100-optimized-sync` (`e0b64a642`) | ROCm/aiter main @ 2026-08; carries int8 unified-attention + gfx908 tunings |
 
-The aiter checkout is consumed at runtime via `PYTHONPATH=~/aiter`;
-flash-attention 2.8.4 (pure-python, Triton AMD backend from the aiter fork) is
-installed in the serving venv. The CK FA backend does not apply to gfx908
-(uses gfx90a+ ISA) and is not built.
+The aiter checkout is consumed at runtime via `PYTHONPATH=~/aiter` and
+provides every attention and GEMM kernel in the recipe; no separate attention
+package is used.
 
 Fork-specific code that matters: the compatibility-named
 `AiterW8A16LinearKernel` selects AITER A8W8 for every GS128 shape
