@@ -14,13 +14,20 @@ FP16 (equal), at half the memory bandwidth — so this branch treats **int8 as
 the native dtype** across the whole model surface and exploits it everywhere
 it wins, with measured float exceptions where precision actually matters.
 
-> **Optimized configuration:** [Qwen3.8-27B GPTQ INT8 W8A8 GS128](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128)
-> + its matching [DFlash2 GPTQ INT8 W8A8 GS128 draft](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128)
-> + AITER CK W8A8 INT8 GEMMs at every decode/prefill shape + INT8 lm_head
-> + AITER unified attention in INT8 + INT8 per-token-head target and draft
-> KV + DFlash2 speculative decoding at NS=15 + TP4/C8 over XGMI. This
-> complete pair and runtime contract is the sole production recipe;
-> DFlash2 speculative decoding is always enabled.
+> [!NOTE]
+> **Optimized configuration** — the sole production recipe:
+>
+> - Models: [Qwen3.8-27B GPTQ INT8 W8A8 GS128](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128)
+>   + its matching [DFlash2 GPTQ INT8 W8A8 GS128 draft](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128)
+>   (speculative decoding always on, NS=15)
+> - Compute: AITER CK W8A8 INT8 GEMMs at every decode/prefill shape, INT8
+>   lm_head
+> - Attention/KV: AITER unified attention; INT8 per-token-head KV on both
+>   target and draft
+> - Topology: TP4 over XGMI, 8 concurrent sequences (C8)
+>
+> Other models and settings generally work, but only this combination is
+> tuned and gated.
 
 ## Performance
 
