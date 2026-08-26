@@ -185,7 +185,7 @@ doc's history section explains why.
 ## NS (speculative token budget) sweep — 2026-08-26, tuned-aiter build
 
 Canonical `bench_quick.sh` C8 leg (8x32-in/1000-out, greedy), one boot per
-NS, single rep per leg, tuned aiter default (`~/aiter` 1353f63c9):
+NS, single rep per leg, tuned aiter default:
 
 | NS | TPOT (ms) | wall output (tok/s) | TTFT (ms) |
 |---|---|---|---|
@@ -217,10 +217,8 @@ sessions); NS=5 leads wall-clock and is coherence-verified (30/30).
   artifacts (2 reps/leg): tuned TPOT 14.64/13.55 vs baseline 19.58/17.56
   ms — tuned better on every metric incl. TTFT (203/212 vs 408/380 ms).
   NS=12/14 bracketing legs: 14.66/14.81 ms — no improvement over 13.
-  Artifacts: `logs/c8_optimization/final_tuned_default{,_r2}`,
-  `final_baseline_r{1,2}`, `ns_sweep_*`.
 - **2026-08-26 — aiter gfx908 tuning program merged; NS default 15 -> 13.**
-  `~/aiter` main @ 1353f63c9: 299-row gfx908 tuned a8w8 CSV (fp32-scale/
+  upstream int8-aiter main: 299-row gfx908 tuned a8w8 CSV (fp32-scale/
   fp16-out template), `module_gemm_a8w8.so` rebuilt with 45 tuned kernel
   variants, pruned instance build (all int8 dtype combos), tuner dtype-gap
   fix, AITER_CK_STRICT / AITER_JIT_ALLOWLIST / PREBUILD_KERNELS=4 knobs
