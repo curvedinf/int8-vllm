@@ -13,7 +13,7 @@ upstreamed directly.
 `docs/recipes/README.md` is the canonical baseline. Every feature listed there
 (the two GS128 checkpoints, AITER W8A8 INT8 GEMMs everywhere, int8
 per-token-head KV on both target and draft, AITER unified attention, vLLM
-CUSTOM all-reduce, DFlash2 with NS=15, TP4, C8, ACT_QUANT=round, and fp32
+CUSTOM all-reduce, DFlash2 with NS=13, TP4, C8, ACT_QUANT=round, and fp32
 mamba state) is mandatory. The fused AR+RMSNorm+per-group INT8 quant-out
 epilogue is OFF by default (an eager seam exists behind
 `VLLM_GFX908_EAGER_EPILOGUE=1`; experiment E3 verdict was TPOT-neutral).
@@ -107,7 +107,7 @@ VLLM_GFX908_INT8_LM_HEAD=1`, AITER CK W8A8 for every GS128 GEMM,
 --kv-cache-dtype int8_per_token_head --mamba-ssm-cache-dtype float32`,
 `VLLM_GFX908_ACT_QUANT=round` (fused round-to-nearest act quant — quality
 default, see INT8_AUDIT_RESULTS.md), and the speculative config
-`{"method":"dflash","num_speculative_tokens":15,"kv_cache_dtype":"int8_per_token_head"}`.
+`{"method":"dflash","num_speculative_tokens":13,"kv_cache_dtype":"int8_per_token_head"}`.
 The nested dtype is explicit and applies to the draft; the top-level
 `--kv-cache-dtype int8_per_token_head` applies to the target. The draft
 MODEL dtype resolves from its checkpoint (bf16) — forcing the target's
@@ -139,7 +139,7 @@ service.
 3. **Serving regression** (all 4 GPUs): boot the qwen38 production script and
    verify its startup report names AITER W8A8, AITER unified attention, vLLM
    custom AR, int8 PTH KV on both models, fp32 mamba, TP4, C8, and DFlash2
-   NS=15.
+   NS=13.
 4. **E2E**: qwen3.8 + DFlash2 via the serve script; check coherence, DFlash2
    acceptance length, and C8 throughput without changing the target contract.
 

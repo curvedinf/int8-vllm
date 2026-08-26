@@ -46,7 +46,7 @@ VLLM_DISABLED_KERNELS=TritonW8A16LinearKernel \
   --kv-cache-dtype int8_per_token_head \
   --mamba-ssm-cache-dtype float32 \
   --compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","pass_config":{"fuse_allreduce_rms":false}}' \
-  --speculative-config '{"method":"dflash","model":"'"$DRAFT_MODEL"'","num_speculative_tokens":15,"kv_cache_dtype":"int8_per_token_head"}'
+  --speculative-config '{"method":"dflash","model":"'"$DRAFT_MODEL"'","num_speculative_tokens":13,"kv_cache_dtype":"int8_per_token_head"}'
 ```
 
 The top-level KV flag configures the target. The `kv_cache_dtype` inside the
@@ -63,7 +63,7 @@ The script encodes the full intended feature set:
 | Mamba/GDN state | `float32` (`--mamba-ssm-cache-dtype float32`) | REQUIRED: the fp16 state round-trip broke delta-rule cancellation and blew states to 63k (4% under fp16 ceiling) — the KLD-tail generator; int8 state corrupts in the int8-KV combo (bisect 2026-08-25); fp32 is the checkpoint's own declared dtype |
 | Act quantizer | round-to-nearest (`VLLM_GFX908_ACT_QUANT=round`, fused Triton kernel) | halved the dominant 10-15% act-quant error leg; fixed 10x first-token-stop inflation (empty responses); also faster than the 4-pass eager aiter chain |
 | Embedding lookup | int8 gather | half embedding bandwidth; it is not a GEMM exception |
-| Speculative decoding | **DFlash2, ns=15, int8 drafter, int8 draft KV — ON, non-negotiable** | NS=15 per the 2026-08-24/25 sweep (NS=17 collapses: 29.7% acceptance) |
+| Speculative decoding | **DFlash2, ns=13, int8 drafter, int8 draft KV — ON, non-negotiable** | NS=13 per the 2026-08-26 tuned-aiter sweep: best measured TPOT 12.34 ms (single rep; see NS table below). Prior NS=15 default measured 18.89 ms same-session; NS=17 collapses: 29.7% acceptance |
 | Attention backend | **AITER unified attention in INT8** | target and draft both use INT8-PTH KV |
 | All-reduce | **vLLM CUSTOM all-reduce** (`VLLM_ROCM_USE_AITER_CUSTOM_AR=0`) | audited TP4/C8 rerun: vLLM CUSTOM 63.49 tok/s beats AITER CAR 58.34 and PYNCCL 53.04; AITER CAR gfx908 forces the naive kernel until tuned — CAR stays a tuning lever, not the default |
 | Fused epilogue | OFF (`fuse_allreduce_rms=false`) | the fused INT8 epilogue path is implemented but inactive; enable only after the gfx908 graph integration work lands |
@@ -108,7 +108,7 @@ retired qwen36 unit).
 5. `.venv/bin/python scripts/ua_live_soak.py -n 500` — verify the exact
    published model pair and require AITER W8A8, AITER unified attention,
    vLLM CUSTOM all-reduce (CAR=0), fused epilogue OFF, both INT8-PTH
-   caches, float32 Mamba state, TP4, C8, and DFlash2 NS=15 to remain
+   caches, float32 Mamba state, TP4, C8, and DFlash2 NS=13 to remain
    enabled.
 
 ## AR+RMS+per-token-int8-quant fused epilogue (2026-08-24, status: kernel DONE, production enable BLOCKED)
@@ -181,3 +181,53 @@ whole-request mixing):
 Older numbers elsewhere (554 tok/s / 14.44 ms / 770 tok/s regimes) predate
 the corruption bisect and the accuracy program — superseded; the audit
 doc's history section explains why.
+
+## NS (speculative token budget) sweep — 2026-08-26, tuned-aiter build
+
+Canonical `bench_quick.sh` C8 leg (8x32-in/1000-out, greedy), one boot per
+NS, single rep per leg, tuned aiter default (`~/aiter` 1353f63c9):
+
+| NS | TPOT (ms) | wall output (tok/s) | TTFT (ms) |
+|---|---|---|---|
+| 5 | 15.48 | **418.96** | 200.9 |
+| 7 | 16.19 | 285.39 | 200.0 |
+| 10 | 13.45 | 332.93 | 201.9 |
+| 12 | 14.66 | 253.72 | 204.0 |
+| **13** | **12.34**\* | 386.09 | 433.5 |
+| 14 | 14.81 | 258.32 | 204.8 |
+| 15 | 18.89 | 216.76 | 220.6 |
+
+\* Single-rep best. A second NS=13 boot the same session measured
+17.54 ms / 218.5 tok/s — run-to-run variance on this box exceeds the
+NS-to-NS deltas inside 10-14; treat the valley as provisional until an
+interleaved multi-rep protocol (>=3 reps/NS on a quiet node) confirms it.
+Robust findings: NS=15 is consistently worst on both metrics (both
+sessions); NS=5 leads wall-clock and is coherence-verified (30/30).
+
+## History
+
+- **2026-08-26 (evening) — NS=13 confirmed as production default; final
+  canonical bench on the tuned build.** Server rebooted at the new NS=13
+  default and verified serving (cmdline-checked). Final canonical
+  `bench_quick.sh` run on the tuned default earlier in the session (tag
+  `final_tuned_default`): wall-clock output **287.97 tok/s** at C8, TPOT
+  14.64 ms, TTFT 202.7 ms, single-stream TG 93.13 tok/s mean; prefill
+  (8x2048-in/8-out, same `vllm bench serve` tool): **~2,776 tok/s batched
+  PP** (5.90 s TTFT window). Paired same-session A/B vs pre-merge
+  artifacts (2 reps/leg): tuned TPOT 14.64/13.55 vs baseline 19.58/17.56
+  ms — tuned better on every metric incl. TTFT (203/212 vs 408/380 ms).
+  NS=12/14 bracketing legs: 14.66/14.81 ms — no improvement over 13.
+  Artifacts: `logs/c8_optimization/final_tuned_default{,_r2}`,
+  `final_baseline_r{1,2}`, `ns_sweep_*`.
+- **2026-08-26 — aiter gfx908 tuning program merged; NS default 15 -> 13.**
+  `~/aiter` main @ 1353f63c9: 299-row gfx908 tuned a8w8 CSV (fp32-scale/
+  fp16-out template), `module_gemm_a8w8.so` rebuilt with 45 tuned kernel
+  variants, pruned instance build (all int8 dtype combos), tuner dtype-gap
+  fix, AITER_CK_STRICT / AITER_JIT_ALLOWLIST / PREBUILD_KERNELS=4 knobs
+  (default-off). Kernel-level decode GEMM speedup 1.37x geo-mean (max
+  2.64x); same-session paired A/B at NS=15: +3.5% median wall-clock
+  (135.6 vs 131.0 tok/s, 3 reps). NS re-swept on the tuned build (table
+  above) -> default moved to NS=13 for best measured TPOT 12.34 ms.
+  Baseline artifacts for the A/B: pre-merge .so + 0-gfx908-row CSV.
+- Prior entries live in git history (2026-08-24/25 corruption bisect and
+  accuracy program; see INT8_AUDIT_RESULTS.md).

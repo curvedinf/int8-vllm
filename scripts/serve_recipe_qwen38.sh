@@ -113,11 +113,12 @@ ARGS=(
   # (corruption bisect 2026-08-25) until a scaled-int8 kernel exists.
   # MAMBADT env remains the bisect lever.
   --kv-cache-dtype int8_per_token_head --mamba-ssm-cache-dtype "${MAMBADT:-float32}"
-  # NS=15 default per the 2026-08-24 W8A8-stack sweep: TG 770 tok/s / 9.61 ms
-  # median TPOT / 71.2% acceptance / 11.68 accepted length. NS=17 collapses
-  # (29.7% acceptance — under investigation, suspected mechanical limit).
+  # NS=13 default per the 2026-08-26 tuned-aiter sweep (see docs/recipes
+  # README history): best measured TPOT 12.34 ms / TG 639-equivalent regime.
+  # NS=15 prior default (2026-08-24 sweep) measured 18.89 ms same-session;
+  # NS=17 collapses (29.7% acceptance — under investigation).
   # Draft KV int8-PTH: full-W8A8 doctrine.
-  --speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":'"${NS:-15}"',"kv_cache_dtype":"int8_per_token_head"}'
+  --speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":'"${NS:-13}"',"kv_cache_dtype":"int8_per_token_head"}'
 )
 
 # LOGSTATS=1 enables periodic engine/spec-decode stat logging

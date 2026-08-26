@@ -61,7 +61,7 @@ Highlights of the current stack:
 - Measured float exceptions (never quantize without re-gating): GDN state
   stays fp32 (int8 corrupts with int8 KV; fp16 blew states to the fp16
   ceiling), selector codebooks bf16, draft ctx-KV projection bf16.
-- TP4 / C8, DFlash2 NS=15, vLLM CUSTOM all-reduce.
+- TP4 / C8, DFlash2 NS=13, vLLM CUSTOM all-reduce.
 
 ### History (abbreviated, 27B C8 serving)
 
@@ -80,6 +80,7 @@ wall-clock cell. Rows 1–2 predate the INT8 conversion and ran fp16 KV.
 | 2026-06 early | Qwen3.6-27B GPTQ-8, TRITON_ATTN, no spec | TP4, fp16 KV | 129 (c=8 mixed) | 151 | 1,490 | TPOT 20.1 ms at c=1 |
 | 2026-06-11 | Qwen3.6-27B + AITER UA + MTP n=3 | TP4, fp16 KV | 212 (c=8) | — | — | +29% at 16K ctx; +15% on 4k-in/6k-out batch; UA ≈ TRITON without MTP |
 | 2026-08-25 | Qwen3.8-27B INT8 GS128 + DFlash2 | current recipe: W8A8 everywhere, int8-PTH KV both models, UA, fp32 GDN state, round act quant, TP4/C8 | 348 | — | 2,175 | INT8 conversion + accuracy program; NS=15 selected (NS=17 acceptance collapses to ~30%); TPOT 12.52 ms; ~71% draft acceptance; KLD median 0.0153 vs BF16; PP from the 8×8192 prefill leg |
+| 2026-08-26 | Qwen3.8-27B + tuned aiter gfx908 GEMMs | same recipe + 299-row gfx908 tuned a8w8 CSV, rebuilt `module_gemm_a8w8` (45 tuned kernels), NS=13, TP4/C8 | 288 | 648 | 2,776 | aiter tuning program merged (`~/aiter` 1353f63c9); kernel-level decode GEMM 1.37× geo (max 2.64×); NS=13 per same-session sweep (full NS table in recipes README) |
 
 > [!NOTE]
 > Higher numbers than the ones above may appear in historical logs. Those
