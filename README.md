@@ -79,8 +79,7 @@ wall-clock cell. Rows 1–2 predate the INT8 conversion and ran fp16 KV.
 |---|---|---|---:|---:|---:|---|
 | 2026-06 early | Qwen3.6-27B GPTQ-8, TRITON_ATTN, no spec | TP4, fp16 KV | 129 (c=8 mixed) | 151 | 1,490 | TPOT 20.1 ms at c=1 |
 | 2026-06-11 | Qwen3.6-27B + AITER UA + MTP n=3 | TP4, fp16 KV | 212 (c=8) | — | — | +29% at 16K ctx; +15% on 4k-in/6k-out batch; UA ≈ TRITON without MTP |
-| 2026-08-24 | Qwen3.8-27B INT8 GS128 + DFlash2 | W8A8 everywhere, int8-PTH KV both models, UA, TP4/C8 | — | — | 2,175 | INT8 conversion lands; NS sweep selects NS=15 (NS=17 acceptance collapses to ~30%); PP from the 8×8192 prefill leg |
-| 2026-08-25/26 | + fp32 GDN state, round act quant (accuracy program) | current recipe | 348 | **639** | 2,175 | TPOT 12.52 ms; ~71% draft acceptance; KLD median 0.0153 vs BF16. PP is the 8×8192 long-prompt leg (spec decode doesn't touch prefill, so it carries over) |
+| 2026-08-25 | Qwen3.8-27B INT8 GS128 + DFlash2 | current recipe: W8A8 everywhere, int8-PTH KV both models, UA, fp32 GDN state, round act quant, TP4/C8 | 348 | **639** | 2,175 | INT8 conversion + accuracy program; NS=15 selected (NS=17 acceptance collapses to ~30%); TPOT 12.52 ms; ~71% draft acceptance; KLD median 0.0153 vs BF16; PP from the 8×8192 prefill leg |
 
 Older headline numbers (554/770 tok/s regimes) predate the corruption bisect
 and the accuracy program — superseded; see the audit doc's history section.
