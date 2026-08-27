@@ -56,17 +56,6 @@ for i in $(seq 1 2880); do  # 24h at 30s
     M="$ROOT/logs/c8_optimization/$TAG/c8_metrics.txt"
     if [[ -r "$M" ]]; then
       log "TPOT: $(grep -oP 'Mean TPOT \(ms\):\s+\K[0-9.]+' "$M" || echo '?')  TG: $(grep -oP 'Output token throughput \(tok/s\):\s+\K[0-9.]+' "$M" || echo '?')"
-      # Append the definitive full-clock ledger row (AGENTS.md: every
-      # perf-affecting change gets a fresh A/B row).
-      TPOT="$(grep -oP 'Mean TPOT \(ms\):\s+\K[0-9.]+' "$M" || echo null)"
-      TG="$(grep -oP 'Output token throughput \(tok/s\):\s+\K[0-9.]+' "$M" || echo null)"
-      TTFT="$(grep -oP 'Mean TTFT \(ms\):\s+\K[0-9.]+' "$M" || echo null)"
-      SS="$(python3 -c "import json;print(round(json.load(open('$ROOT/logs/c8_optimization/$TAG/single_stream.json'))['mean'],2))" 2>/dev/null || echo null)"
-      printf '{"exp": "FIX_clock_restore_full_validation", "surface": "GPU clock restore + a8w8 tuned CSV", "change": "DPM=auto + 290W cap restored; tuned rows live", "tpot_ms": ["%s"], "tg_toks": ["%s"], "ttft_ms": ["%s"], "note": "auto-appended by clock_restore_watcher; single-stream %s tok/s; baseline broken was TPOT ~85-100ms/14-20 tok/s, pinned-clock post-CSV-fix 24.95ms/37.5 tok/s", "verdict": "VALIDATED"}\n' \
-        "$TPOT" "$TG" "$TTFT" "$SS" >> "$ROOT/docs/recipes/surface_experiments_ledger.jsonl"
-      git -C "$ROOT" add docs/recipes/surface_experiments_ledger.jsonl >/dev/null 2>&1 || true
-      git -C "$ROOT" commit -m "ledger: full-clock validation (auto, clock_restore_watcher)" >/dev/null 2>&1 || true
-      git -C "$ROOT" push origin main >/dev/null 2>&1 || true
     fi
     env HOME=/home/curved "$ROOT/scripts/serve_recipe_qwen38.sh" stop >>"$LOG" 2>&1 || true
     log "validation complete; results in logs/c8_optimization/$TAG/"
