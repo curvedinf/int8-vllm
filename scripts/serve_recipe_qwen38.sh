@@ -187,54 +187,9 @@ rotate_log() {
   fi
 }
 
-# 2026-08-27: a tuner session on 2026-08-26 20:03 left all four MI100s in
-# manual DPM pinned to sclk level 0 (300 MHz of 1502) with a 105 W power
-# cap (max 290 W). Compute-bound decode GEMMs ran ~5x slow while
-# bandwidth-bound prefill looked normal. Restore sane defaults when this
-# script runs as root; otherwise warn with the exact root fix so a
-# non-root boot makes the throttled state visible in the startup report.
-clock_state_guard() {
-  local lvl cap min_cap=290000000 pinned=0
-  for d in /sys/class/drm/card*/device; do
-    lvl="$(cat "$d/power_dpm_force_performance_level" 2>/dev/null || echo unknown)"
-    [[ "${lvl}" != "auto" ]] && pinned=1
-  done
-  for h in /sys/class/hwmon/hwmon*/power1_cap; do
-    cap="$(cat "$h" 2>/dev/null || echo 0)"
-    (( cap < min_cap )) && pinned=1
-  done
-  (( pinned == 0 )) && return 0
-
-  if [[ "$(id -u)" == "0" ]]; then
-    for d in /sys/class/drm/card*/device; do
-      echo auto > "$d/power_dpm_force_performance_level" 2>/dev/null || true
-    done
-    rocm-smi --setpoweroverdrive 290 >/dev/null 2>&1 || true
-  fi
-
-  pinned=0
-  for d in /sys/class/drm/card*/device; do
-    lvl="$(cat "$d/power_dpm_force_performance_level" 2>/dev/null || echo unknown)"
-    [[ "${lvl}" != "auto" ]] && pinned=1
-  done
-  for h in /sys/class/hwmon/hwmon*/power1_cap; do
-    cap="$(cat "$h" 2>/dev/null || echo 0)"
-    (( cap < min_cap )) && pinned=1
-  done
-  if (( pinned == 0 )); then
-    printf 'clock-guard: restored GPU DPM=auto, power cap=290W (was pinned at 300MHz/105W)\n'
-  else
-    printf 'WARNING: GPUs are clock-throttled (DPM manual, sclk level 0 = 300MHz, cap %sW). Decode runs ~5x slow.\n' \
-      "$((cap / 1000000))"
-    printf '         root fix: for d in /sys/class/drm/card*/device; do echo auto > $d/power_dpm_force_performance_level; done && rocm-smi --setpoweroverdrive 290\n'
-  fi
-}
-
 start_server() {
   [[ -x "${VENV}/bin/vllm" ]] || { printf 'missing vLLM executable: %s\n' "${VENV}/bin/vllm" >&2; exit 1; }
   [[ -d "${MODEL_DIR}" ]] || { printf 'missing model directory: %s\n' "${MODEL_DIR}" >&2; exit 1; }
-
-  clock_state_guard
 
   if is_running; then
     printf 'already running pid=%s url=http://%s:%s log=%s/server.log\n' \
