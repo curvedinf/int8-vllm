@@ -38,25 +38,6 @@ since "a couple days" of work. Root causes found:
    - `aiter/aiter/ops/gemm_op_a8w8.py`: miss logging deduped per shape
      (was flooding serving logs, esp. eager prefill tails).
 
-## Validation status (2026-08-27, under goal mode)
-
-- Post-CSV-fix, pinned-clock (300 MHz) API validation:
-  `logs/c8_optimization/csvfix_pinnedclk_20260827T072332Z` —
-  single-stream 37.5 tok/s (was 14-20), C8 TPOT 24.95 ms, agg 217 tok/s,
-  coherent greedy outputs. Miss lines 628 -> 28.
-- The 28 residual misses are lm_head prefill-tail Ms (1280/2048 x
-  62080x5120): swept separately — splitK=0 is measured-optimal (1.0x) at
-  both, so the default fallback IS the winner there; no rows needed.
-- Software side complete and pushed (int8-vllm 588ba48ceb, int8-aiter
-  dc318f5bc). Full-speed 10-12 ms / 650 tok/s validation executes
-  automatically on clock restore: `sudo scripts/restore_gpu_clocks.sh`
-  (or any root start of the serve script — the guard restores). The
-  watcher (`scripts/clock_restore_watcher.sh`, logs/clock_watcher.log)
-  boots + benches + saves results + stops the server unattended.
-- splitK winners were ranked at pinned clock; ranking argument is
-  CU-occupancy (tile-count vs 120 CUs), which is clock-independent, but
-  a full-clock re-sweep is cheap if ever in doubt.
-
 ## User request
 
 Duplicate the existing main-model quantization audit process for the DFlash
