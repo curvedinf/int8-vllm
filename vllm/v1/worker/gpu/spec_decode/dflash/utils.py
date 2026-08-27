@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig, replace
@@ -50,6 +51,30 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     is_neox_style = dflash_target_rope_is_neox_style(target_model)
     if is_neox_style is not None:
         draft_model_config.hf_config.is_neox_style = is_neox_style
+    # "auto" KV dtype is resolved inside Attention against
+    # get_current_vllm_config().model_config — still the TARGET's ModelConfig
+    # here (fp16 under --dtype half), so a bf16 draft would get an fp16 cache
+    # tensor while the flash-cache writer stores bf16 bits raw into it and the
+    # reader reinterprets them as fp16: silently corrupted draft attention
+    # (layer-0 attn_out rel L2 ~1.9, acceptance ~13%; see
+    # HANDOFF_DFLASH_DIAGNOSTIC.md). Resolve "auto" against the drafter's own
+    # dtype instead; explicit dtypes (production: int8_per_token_head) and
+    # inherited quantized dtypes pass through unchanged.
+    draft_kv_dtype = (
+        speculative_config.kv_cache_dtype
+        if speculative_config.kv_cache_dtype is not None
+        else vllm_config.cache_config.cache_dtype
+    )
+    if draft_kv_dtype == "auto":
+        draft_kv_dtype = {
+            torch.bfloat16: "bfloat16",
+            torch.float16: "float16",
+        }.get(draft_model_config.dtype, "auto")
+    logger.info_once(
+        "DFlash draft KV cache dtype: %s (draft compute dtype %s)",
+        draft_kv_dtype,
+        draft_model_config.dtype,
+    )
     # Select an attention backend that supports the drafter's attention: mixing
     # a non-causal layer onto a causal-only backend would fail.
     draft_vllm_config = replace(
@@ -62,14 +87,7 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
                 vllm_config.attention_config.backend,
             ),
         ),
-        cache_config=(
-            replace(
-                vllm_config.cache_config,
-                cache_dtype=speculative_config.kv_cache_dtype,
-            )
-            if speculative_config.kv_cache_dtype is not None
-            else vllm_config.cache_config
-        ),
+        cache_config=replace(vllm_config.cache_config, cache_dtype=draft_kv_dtype),
     )
     with set_model_tag("dflash_head"):
         dflash_model = get_model(
