@@ -81,9 +81,9 @@ ARGS=(
   --port "${PORT}"
   --tensor-parallel-size 4
   --dtype half
-  --max-model-len 65536
-  --max-num-seqs 8
-  --gpu-memory-utilization 0.86
+  --max-model-len 262144
+  --max-num-seqs 6
+  --gpu-memory-utilization 0.92
   --compilation-config '{"mode":'"${CMODE:-3}"',"cudagraph_mode":"'"${CGMODE:-FULL_AND_PIECEWISE}"'","custom_ops":["+gemma_rms_norm","+silu_and_mul","+rms_norm_gated","+rotary_embedding","+apply_rotary_emb","none"],"pass_config":{"fuse_allreduce_rms":'"${ARFUSE:-false}"'}}'
   --language-model-only
   --skip-mm-profiling
@@ -119,6 +119,11 @@ ARGS=(
   # NS=17 collapses (29.7% acceptance — under investigation).
   # Draft KV int8-PTH: full-W8A8 doctrine.
   --speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":'"${NS:-13}"',"kv_cache_dtype":"'"${DRAFT_KV_DTYPE:-int8_per_token_head}"'"}'
+  # CPU KV second tier: 12 GiB total (cross-worker) host DRAM via the native
+  # OffloadingConnector. Blocks are copied as raw bytes, so int8-PTH inline
+  # scales and the fp32 mamba state pages transfer dtype-safely. L2 reuse
+  # cache only — the live arena stays on-GPU.
+  --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":12884901888}}'
 )
 
 # LOGSTATS=1 enables periodic engine/spec-decode stat logging
@@ -127,7 +132,7 @@ if [[ "${LOGSTATS:-0}" != "1" ]]; then
   ARGS+=(--disable-log-stats)
 fi
 
-# C8 means eight concurrent sequences. The target and DFlash2 draft are both
+# C6 means six concurrent sequences. The target and DFlash2 draft are both
 # GPTQ INT8 GS128. The actual runtime selections are reported in the startup
 # log; do not infer AITER CAR, fused quant-out, or draft INT8 KV from this
 # contract comment.
@@ -203,7 +208,7 @@ start_server() {
 
   printf 'starting recipe Qwen3.8 server: url=http://%s:%s cpuset=%s log=%s/server.log\n' \
     "${HOST}" "${PORT}" "${CPUSET}" "${LOG_DIR}"
-  printf '%s\n' 'contract: target+DFlash2 GS128; AITER W8A8/UA/custom-AR; INT8 KV/Mamba/quant-out; TP4/C8'
+  printf '%s\n' 'contract: target+DFlash2 GS128; AITER W8A8/UA/custom-AR; INT8 KV/Mamba/quant-out; TP4/C6; 12GiB CPU KV tier'
 
   local api_key
   api_key="$(read_api_key)"
@@ -276,7 +281,7 @@ status_server() {
   if is_running; then
     printf 'running pid=%s url=http://%s:%s model=%s log=%s/server.log\n' \
       "$(cat "${PID_FILE}")" "${HOST}" "${PORT}" "${SERVED_MODEL_NAME}" "${LOG_DIR}"
-    rg -n 'Model loading took|Available KV cache memory|GPU KV cache size|Maximum concurrency for 65,536|via P2P/IPC|Uvicorn running|dflash|DFlash|spec' \
+    rg -n 'Model loading took|Available KV cache memory|GPU KV cache size|Maximum concurrency|via P2P/IPC|Uvicorn running|dflash|DFlash|spec|ffload' \
       "${LOG_DIR}/server.log" 2>/dev/null | tail -20 || true
   else
     printf 'stopped url=http://%s:%s model=%s log=%s/server.log\n' \
