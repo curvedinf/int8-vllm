@@ -203,6 +203,7 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
             quant_config=quant_config,
             prefix=prefix,
         )
+        self._audit_layer_idx = layer_idx
         draft_config = config.dflash_config
         speculative_config = vllm_config.speculative_config
         assert speculative_config is not None
@@ -244,6 +245,12 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
                     f"nan={int(t.isnan().sum())}/{t.numel()} "
                     f"absmax={float(t.abs().max()):.3f}",
                     flush=True,
+                )
+            if os.environ.get("VLLM_DFLASH_AUDIT"):
+                from vllm import quant_audit_recorder as _qa
+
+                _qa.record_dflash_stage(
+                    f"layer{self._audit_layer_idx}_{tag}", hidden=t
                 )
 
         hidden_states, coefficients = self.attention_conv.prepare(hidden_states)

@@ -368,6 +368,15 @@ class DFlashSpeculator(DraftModelSpeculator):
         else:
             hidden_states = last_hidden_states
         self.hidden_states[:num_target_tokens].copy_(hidden_states[:num_target_tokens])
+        if os.environ.get("VLLM_DFLASH_AUDIT"):
+            from vllm import quant_audit_recorder as _qa
+
+            _qa.record_dflash_stage(
+                "target_context",
+                hidden=hidden_states[:num_target_tokens],
+                input_ids=input_batch.input_ids[:num_target_tokens],
+                positions=input_batch.positions[:num_target_tokens],
+            )
 
         if dummy_run and skip_attn_for_dummy_run:
             # Memory profiling path: block_tables / kv_cache_config are not initialized.

@@ -696,6 +696,12 @@ class DFlashQwen3Model(nn.Module):
             self._hidden_norm_weight,
             self._rms_norm_eps,
         )
+        if os.environ.get("VLLM_DFLASH_AUDIT"):
+            from vllm import quant_audit_recorder as _qa
+
+            _qa.record_dflash_stage(
+                "context_norm", context=context_states, normed=normed_context_states
+            )
         # E8 int8 path: RN activation quant + AITER CK W8A8 (see the ladder
         # note in _build_context_kv_buffers). Guard falls back to the dense
         # GEMM if the custom op is unavailable; quant buffers are only
@@ -731,6 +737,10 @@ class DFlashQwen3Model(nn.Module):
         )
         all_k = all_kv[0]  # [L, num_ctx, nkv, hd], contiguous
         all_v = all_kv[1]  # [L, num_ctx, nkv, hd], contiguous
+        if os.environ.get("VLLM_DFLASH_AUDIT"):
+            from vllm import quant_audit_recorder as _qa
+
+            _qa.record_dflash_stage("context_projected", k=all_k, v=all_v)
         return all_k, all_v
 
     def _normalize_context_k(self, all_k: torch.Tensor) -> torch.Tensor:
@@ -817,6 +827,15 @@ class DFlashQwen3Model(nn.Module):
 
         # --- Per-layer cache insert ---
         all_k_final = all_k_flat.view(L, num_ctx, nkv, hd)
+        if os.environ.get("VLLM_DFLASH_AUDIT"):
+            from vllm import quant_audit_recorder as _qa
+
+            _qa.record_dflash_stage(
+                "context_ready",
+                k=all_k_final,
+                v=all_v,
+                positions=context_positions,
+            )
         per_layer = isinstance(context_slot_mapping, (list, tuple))
         for i in range(L):
             slot_mapping = (
@@ -848,6 +867,16 @@ class DFlashQwen3Model(nn.Module):
         # projection and norms see a uniform dtype. Lossless for bf16 drafts.
         hidden_states = input_embeds.to(self.norm.weight.dtype)
 
+        if os.environ.get("VLLM_DFLASH_AUDIT"):
+            from vllm import quant_audit_recorder as _qa
+
+            _qa.record_dflash_stage(
+                "query_embedding",
+                hidden=hidden_states,
+                input_ids=input_ids,
+                positions=positions,
+            )
+
         if os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not (
             torch.cuda.is_current_stream_capturing()
         ):
@@ -866,6 +895,14 @@ class DFlashQwen3Model(nn.Module):
                 hidden_states=hidden_states,
                 residual=residual,
             )
+            if os.environ.get("VLLM_DFLASH_AUDIT"):
+                from vllm import quant_audit_recorder as _qa
+
+                _qa.record_dflash_stage(
+                    f"layer{layer_idx}_output",
+                    hidden=hidden_states,
+                    residual=residual,
+                )
             if os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not (
                 torch.cuda.is_current_stream_capturing()
             ):
@@ -878,6 +915,10 @@ class DFlashQwen3Model(nn.Module):
                     flush=True,
                 )
         hidden_states, _ = self.norm(hidden_states, residual)
+        if os.environ.get("VLLM_DFLASH_AUDIT"):
+            from vllm import quant_audit_recorder as _qa
+
+            _qa.record_dflash_stage("backbone_output", hidden=hidden_states)
         return hidden_states
 
     def _preprocess(

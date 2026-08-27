@@ -84,7 +84,7 @@ ARGS=(
   --max-model-len 65536
   --max-num-seqs 8
   --gpu-memory-utilization 0.86
-  --compilation-config '{"mode":3,"cudagraph_mode":"'"${CGMODE:-FULL_AND_PIECEWISE}"'","custom_ops":["+gemma_rms_norm","+silu_and_mul","+rms_norm_gated","+rotary_embedding","+apply_rotary_emb","none"],"pass_config":{"fuse_allreduce_rms":'"${ARFUSE:-false}"'}}'
+  --compilation-config '{"mode":'"${CMODE:-3}"',"cudagraph_mode":"'"${CGMODE:-FULL_AND_PIECEWISE}"'","custom_ops":["+gemma_rms_norm","+silu_and_mul","+rms_norm_gated","+rotary_embedding","+apply_rotary_emb","none"],"pass_config":{"fuse_allreduce_rms":'"${ARFUSE:-false}"'}}'
   --language-model-only
   --skip-mm-profiling
   --disable-uvicorn-access-log
@@ -118,7 +118,7 @@ ARGS=(
   # NS=15 prior default (2026-08-24 sweep) measured 18.89 ms same-session;
   # NS=17 collapses (29.7% acceptance — under investigation).
   # Draft KV int8-PTH: full-W8A8 doctrine.
-  --speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":'"${NS:-13}"',"kv_cache_dtype":"int8_per_token_head"}'
+  --speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":'"${NS:-13}"',"kv_cache_dtype":"'"${DRAFT_KV_DTYPE:-int8_per_token_head}"'"}'
 )
 
 # LOGSTATS=1 enables periodic engine/spec-decode stat logging
@@ -215,7 +215,8 @@ start_server() {
       "${COMMON_ENV[@]}" \
   VLLM_SPEC_DEBUG_DUMP="${VLLM_SPEC_DEBUG_DUMP:-}" \
   VLLM_GFX908_ACT_QUANT="${VLLM_GFX908_ACT_QUANT:-round}" \
-      VLLM_DFLASH_DRAFT_EAGER="${VLLM_DFLASH_DRAFT_EAGER:-}" \
+  VLLM_DFLASH_DRAFT_EAGER="${VLLM_DFLASH_DRAFT_EAGER:-}" \
+      VLLM_DFLASH_AUDIT="${VLLM_DFLASH_AUDIT:-}" \
       "${VENV}/bin/vllm" "${ARGS[@]}"
   ) >"${LOG_DIR}/server.log" 2>&1 </dev/null &
 

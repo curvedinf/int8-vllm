@@ -80,8 +80,10 @@ def _flush_loop():
         item = _STATE["queue"].get()
         if item is None:
             break
-        kind, key, n, name, cpu, meta = item
+        kind, key, n, name, cpu, meta, ready = item
         try:
+            if ready is not None:
+                ready.synchronize()
             d = _STATE["dir"]
             base = f"{kind}_{key}_{n}"
             fn = f"{base}__{name}.pt"
@@ -100,8 +102,16 @@ def _flush_loop():
             pass
 
 
-def _record(kind: str, key: str, tensors: dict):
+def _record(
+    kind: str,
+    key: str,
+    tensors: dict,
+    *,
+    float_dtype: torch.dtype = torch.float16,
+):
     if not _enabled():
+        return
+    if os.environ.get("VLLM_QUANT_AUDIT_DFLASH_ONLY") and kind != "dflash":
         return
     with _LOCK:
         n = _STATE["counts"].get((kind, key), 0)
@@ -120,16 +130,29 @@ def _record(kind: str, key: str, tensors: dict):
             continue
         if t.is_cuda:
             cpu = torch.empty(
-                t.shape, dtype=torch.float16 if t.is_floating_point() else t.dtype, pin_memory=True
+                t.shape,
+                dtype=float_dtype if t.is_floating_point() else t.dtype,
+                pin_memory=True,
             )
             cpu.copy_(t.to(cpu.dtype) if t.is_floating_point() else t, non_blocking=True)
             # Hold a reference so the async copy lands before the flusher saves.
-            staged.append((name, cpu, {"shape": list(t.shape), "dtype": str(cpu.dtype)}))
+            ready = torch.cuda.Event()
+            ready.record(torch.cuda.current_stream(t.device))
+            staged.append(
+                (
+                    name,
+                    cpu,
+                    {"shape": list(t.shape), "dtype": str(cpu.dtype)},
+                    ready,
+                )
+            )
         else:
-            staged.append((name, t, {"shape": list(t.shape), "dtype": str(t.dtype)}))
-    for name, cpu, meta in staged:
+            staged.append(
+                (name, t, {"shape": list(t.shape), "dtype": str(t.dtype)}, None)
+            )
+    for name, cpu, meta, ready in staged:
         try:
-            q.put_nowait((kind, key, n, name, cpu, meta))
+            q.put_nowait((kind, key, n, name, cpu, meta, ready))
         except queue.Full:
             with _LOCK:
                 _STATE["dropped"] += 1
@@ -173,6 +196,18 @@ def record_draft(hidden_states: torch.Tensor, draft_tokens: torch.Tensor, step: 
     if not _enabled():
         return
     _record("draft", f"s{step}", {"hs": hidden_states, "draft": draft_tokens})
+
+
+def record_dflash_stage(stage: str, **tensors: torch.Tensor) -> None:
+    """Capture a DFlash boundary without the recorder's fp16 round-trip.
+
+    Draft residuals and projected context K/V can exceed fp16's useful range.
+    Keeping these diagnostic tensors in fp32 makes BF16-vs-INT8 attribution
+    meaningful while the existing general audit remains compact.
+    """
+    if not _enabled():
+        return
+    _record("dflash", stage, tensors, float_dtype=torch.float32)
 
 
 def flush():

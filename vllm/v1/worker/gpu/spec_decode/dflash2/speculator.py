@@ -219,6 +219,15 @@ class DFlash2Speculator(DFlashSpeculator):
             num_reqs, self.num_speculative_steps, self.selector_top_k
         )
         unary_logits = unary_logits.view_as(candidate_ids)
+        if os.environ.get("VLLM_DFLASH_AUDIT"):
+            from vllm import quant_audit_recorder as _qa
+
+            _qa.record_dflash_stage(
+                "candidates",
+                hidden=hidden_states,
+                ids=candidate_ids,
+                unary=unary_logits,
+            )
         anchor_token_ids = self.input_buffers.input_ids[self._anchor_indices[:num_reqs]]
         if os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not torch.cuda.is_current_stream_capturing():
             n = min(num_reqs, 4)
@@ -237,5 +246,14 @@ class DFlash2Speculator(DFlashSpeculator):
             anchor_token_ids,
         )
         self._sample_path(candidate_ids, scores, num_reqs)
+        if os.environ.get("VLLM_DFLASH_AUDIT"):
+            from vllm import quant_audit_recorder as _qa
+
+            _qa.record_dflash_stage(
+                "selector",
+                scores=scores,
+                selected=self.draft_tokens[:num_reqs],
+                anchor=anchor_token_ids,
+            )
         if self.draft_logits is not None:
             self._cache_draft_logits(candidate_ids, num_sample)
