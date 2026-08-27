@@ -187,41 +187,9 @@ rotate_log() {
   fi
 }
 
-# 2026-08-26 20:03 a tuning A/B (stock-power vs lowpower-pp2k benches,
-# identical SHAs) left the clock GOVERNOR forced to manual with sclk
-# pinned to level 0 (300MHz). At that pin the GPUs cannot ramp under
-# load (measured: 18 TOPS / 33-66W at 100% util) — decode runs ~5x slow.
-# This restores ONLY the governor so clocks can use the power budget the
-# cap already allows. The POWER CAP itself is production policy and is
-# deliberately NOT touched.
-clock_state_guard() {
-  local pinned=0 lvl
-  for d in /sys/class/drm/card*/device; do
-    lvl="$(cat "$d/power_dpm_force_performance_level" 2>/dev/null || echo unknown)"
-    [[ "${lvl}" == "manual" ]] && pinned=1
-  done
-  (( pinned == 0 )) && return 0
-
-  if [[ "$(id -u)" == "0" ]]; then
-    local cap_before cap_after
-    cap_before="$(cat /sys/class/hwmon/hwmon1/power1_cap 2>/dev/null)"
-    for d in /sys/class/drm/card*/device; do
-      echo auto > "$d/power_dpm_force_performance_level" 2>/dev/null || true
-    done
-    cap_after="$(cat /sys/class/hwmon/hwmon1/power1_cap 2>/dev/null)"
-    printf 'clock-guard: governor restored to auto (sclk may ramp within the power cap; cap %sW -> %sW, unchanged by policy)\n' \
-      "$((cap_before / 1000000))" "$((cap_after / 1000000))"
-  else
-    printf 'NOTICE: clock governor is pinned to manual (sclk forced low, cannot ramp under load; decode ~5x slow). Power cap untouched.\n'
-    printf '        root start of this script restores the governor automatically: for d in /sys/class/drm/card*/device; do echo auto > $d/power_dpm_force_performance_level; done\n'
-  fi
-}
-
 start_server() {
   [[ -x "${VENV}/bin/vllm" ]] || { printf 'missing vLLM executable: %s\n' "${VENV}/bin/vllm" >&2; exit 1; }
   [[ -d "${MODEL_DIR}" ]] || { printf 'missing model directory: %s\n' "${MODEL_DIR}" >&2; exit 1; }
-
-  clock_state_guard
 
   if is_running; then
     printf 'already running pid=%s url=http://%s:%s log=%s/server.log\n' \
