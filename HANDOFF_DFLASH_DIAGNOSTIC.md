@@ -1,5 +1,43 @@
 # DFlash diagnostic handoff
 
+## PERFORMANCE REGRESSION (2026-08-27, investigation under goal mode)
+
+User report: TG ~1/10th expected (target 10-12 ms/token C8, ~650 tok/s
+agg; observed ~50-70 ms/token single-stream). Prefill normal. Present
+since "a couple days" of work. Root causes found:
+
+1. **GPU clock/power state pinned (dominant, ~5x)**: all four MI100s in
+   `power_dpm_force_performance_level=manual`, sclk pinned to level 0
+   (300 MHz of 1502), power cap 105 W (max 290 W). Sysfs mtimes: set
+   2026-08-26 20:03 — a tuner-session pin never reverted. Verified under
+   sustained GEMM load: 100% util, 66 W, sclk 300 MHz; measured 18 TOPS
+   on a big int8 GEMM = 92 TOPS x (300/1502). Compute-bound decode GEMMs
+   run ~5x slow; bandwidth-bound prefill (mclk full 1200 MHz) unaffected.
+   Fix requires root:
+   `for d in /sys/class/drm/card*/device; do echo auto > $d/power_dpm_force_performance_level; done && rocm-smi --setpoweroverdrive 290`
+   - `scripts/restore_gpu_clocks.sh` — idempotent restore, run as root.
+   - `scripts/serve_recipe_qwen38.sh` now runs `clock_state_guard` on
+     start: restores automatically when invoked as root (the user's
+     workflow), warns with the exact fix otherwise.
+   - `scripts/clock_restore_watcher.sh` (running, nohup) — on detecting
+     restoration, boots the recipe under curved and runs
+     `scripts/bench_quick.sh` automatically (logs/clock_watcher.log,
+     results under logs/c8_optimization/clock_restored_*/).
+
+2. **AITER tuned-CSV misses for every serving GEMM shape (secondary)**:
+   `a8w8_tuned_gemm.csv` lacks the target verify/decode (N,K) set —
+   (8704,5120) gate_up, (5120,4352) down, (5120,1536) o, (2048,5120) qkv,
+   (256,5120) kv-proj, (62080,5120) lm_head, (5120,25600) draft fc — at
+   ALL runtime Ms (graphs captured with splitK=0 defaults; log floods
+   with "not found tuned config"). The Aug 26 tuning campaign tuned only
+   M=1/16 draft-shaped rows. Fix: splitK sweep over the padded-M
+   coverage grid (M in {1,2,4,8,16,32,48,64,80,96,112,128,...,2048}),
+   append rows (CK dispatch consumes only splitK from the row; verified
+   vs current module .so). Measured wins at pinned clock: kv-proj up to
+   6x, draft fc 2.5x, qkv ~2x, MLP 1.2-1.7x at M>=64.
+   - `aiter/aiter/ops/gemm_op_a8w8.py`: miss logging deduped per shape
+     (was flooding serving logs, esp. eager prefill tails).
+
 ## User request
 
 Duplicate the existing main-model quantization audit process for the DFlash
