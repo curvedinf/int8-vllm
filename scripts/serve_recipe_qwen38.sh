@@ -80,7 +80,7 @@ ARGS=(
   --host "${HOST}"
   --port "${PORT}"
   --tensor-parallel-size 4
-  --dtype half
+  --dtype "${DTYPE:-half}"
   --max-model-len 262144
   --max-num-seqs 6
   --gpu-memory-utilization 0.92
@@ -112,19 +112,26 @@ ARGS=(
   # itself declares mamba_ssm_dtype float32; int8 state remains banned
   # (corruption bisect 2026-08-25) until a scaled-int8 kernel exists.
   # MAMBADT env remains the bisect lever.
-  --kv-cache-dtype int8_per_token_head --mamba-ssm-cache-dtype "${MAMBADT:-float32}"
+  --kv-cache-dtype "${KV_DTYPE:-int8_per_token_head}" --mamba-ssm-cache-dtype "${MAMBADT:-float32}"
   # NS=13 default per the 2026-08-26 tuned-aiter sweep (see docs/recipes
   # README history): best measured TPOT 12.34 ms / TG 639-equivalent regime.
   # NS=15 prior default (2026-08-24 sweep) measured 18.89 ms same-session;
   # NS=17 collapses (29.7% acceptance — under investigation).
   # Draft KV int8-PTH: full-W8A8 doctrine.
-  --speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":'"${NS:-13}"',"kv_cache_dtype":"'"${DRAFT_KV_DTYPE:-int8_per_token_head}"'"}'
+  # SPECOFF=1 drops the draft entirely (diagnostic target-only legs).
+  # The speculative-config is appended conditionally after ARGS below.
   # CPU KV second tier: 12 GiB total (cross-worker) host DRAM via the native
   # OffloadingConnector. Blocks are copied as raw bytes, so int8-PTH inline
   # scales and the fp32 mamba state pages transfer dtype-safely. L2 reuse
   # cache only — the live arena stays on-GPU.
   --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":12884901888}}'
 )
+
+# Draft KV int8-PTH: full-W8A8 doctrine. SPECOFF=1 drops the draft for
+# diagnostic target-only legs.
+if [[ "${SPECOFF:-0}" != "1" ]]; then
+  ARGS+=(--speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":'"${NS:-13}"',"kv_cache_dtype":"'"${DRAFT_KV_DTYPE:-int8_per_token_head}"'"}')
+fi
 
 # LOGSTATS=1 enables periodic engine/spec-decode stat logging
 # (default off: --disable-log-stats).
