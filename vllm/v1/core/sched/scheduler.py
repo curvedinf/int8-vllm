@@ -70,6 +70,18 @@ from vllm.v1.utils import record_function_or_nullcontext
 logger = init_logger(__name__)
 
 
+def _spec_step_trace(req_id, draft, accepted, rejected, computed, gen_len):
+    logger.info(
+        "SPECSTEP req=%s draft=%d accepted=%d rejected=%d computed=%d gen_len=%d",
+        req_id, draft, accepted, rejected, computed, gen_len,
+    )
+
+
+_SPEC_STEP_TRACE = None
+if __import__("os").environ.get("VLLM_SPEC_STEP_TRACE"):
+    _SPEC_STEP_TRACE = _spec_step_trace
+
+
 class Scheduler(SchedulerInterface):
     def __init__(
         self,
@@ -1877,6 +1889,18 @@ class Scheduler(SchedulerInterface):
                         num_draft_tokens=adj_draft_tokens,
                         num_accepted=num_accepted,
                         detailed=self.spec_decode_metrics_level == "detailed",
+                    )
+                if _SPEC_STEP_TRACE is not None:
+                    # Per-step acceptance trace (CPU-only values; no GPU sync).
+                    # Grep SPECSTEP from the server log and correlate with a
+                    # corrupting stream's timestamps.
+                    _SPEC_STEP_TRACE(
+                        req_id,
+                        num_draft_tokens,
+                        num_accepted,
+                        num_rejected,
+                        request.num_computed_tokens,
+                        len(generated_token_ids),
                     )
 
             # Free encoder inputs only after the step has actually executed.
