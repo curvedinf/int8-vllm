@@ -173,3 +173,41 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def chat_stream(messages, max_tokens, tag, seed=1234, greedy=False):
+    """Streaming variant: reassemble SSE deltas; report span-drop symptoms."""
+    import urllib.request
+    body = {
+        "model": MODEL, "messages": messages,
+        "temperature": 0.0 if greedy else 1.0,
+        "top_p": 1.0 if greedy else 0.95,
+        "top_k": -1 if greedy else 20,
+        "max_tokens": max_tokens, "seed": seed, "stream": True,
+    }
+    req = urllib.request.Request(
+        API, data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {os.environ.get('VLLM_API_KEY', '')}"})
+    pieces = []
+    t0 = time.time()
+    with urllib.request.urlopen(req, timeout=3600) as r:
+        for raw in r:
+            line = raw.decode().strip()
+            if not line.startswith("data: "):
+                continue
+            data = line[6:]
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except Exception:
+                continue
+            delta = chunk.get("choices", [{}])[0].get("delta", {})
+            c = delta.get("content")
+            if c:
+                pieces.append(c)
+    text = "".join(pieces)
+    print(f"[{tag}.stream] {time.time()-t0:.1f}s chars={len(text)} pieces={len(pieces)}")
+    save(f"{tag}.stream", text)
+    return text

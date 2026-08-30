@@ -1,15 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from collections.abc import Iterable, Iterator
 
 import numpy as np
 import torch
+
+from vllm.logger import init_logger
 
 from vllm.config import SpeculativeConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
+
+logger = init_logger(__name__)
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     get_num_sampled_and_rejected,
@@ -152,6 +157,24 @@ class RejectionSampler:
             draft_sampled,
             expanded_local_pos,
         )
+        if os.environ.get("VLLM_VERIFY_TRUNC_DEBUG") and not torch.cuda.is_current_stream_capturing():
+            # One-shot ground truth: does the verify path actually deliver
+            # truncated logits to rejection_sample? For a request with
+            # top_k < vocab, every row must have at most top_k finite entries.
+            states = self.sampler.sampling_states
+            for r, st in enumerate(idx_mapping_np.tolist()):
+                tk = int(states.top_k.np[st]) if states.top_k is not None else -1
+                if 0 < tk < processed_logits.shape[1]:
+                    finite = int(
+                        torch.isfinite(processed_logits[r]).sum().item()
+                    )
+                    if finite > tk:
+                        logger.warning(
+                            "VERIFY-TRUNC LEAK: row %d req_state %d top_k=%d "
+                            "but %d finite logits rows -> rejection_sample "
+                            "gets UNTRUNCATED target",
+                            r, st, tk, finite,
+                        )
         sampled, num_sampled = rejection_sample(
             processed_logits,
             draft_logits,
