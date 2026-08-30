@@ -78,12 +78,17 @@ def ref_committed(conv_state, x, weight, bias, activation, accept):
     (conv_state_token_offset), not the written buffer."""
     state_len = conv_state.shape[-1]
     seqlen = x.shape[-1]
-    # From the kernel source + live buffer dump (pass 24): the WRITE also
-    # applies the acceptance offset — new_state[t] = old[accept + t + 1]
-    # for the kept region, then x rows appended.
-    off = accept + 1
-    kept = conv_state[:, :, off:off + state_len - seqlen]
-    return torch.cat([kept, x], dim=-1)
+    # Empirical per-position alignment table (pass 26, accept=7, SL=17):
+    #   post[t] = old[accept+1+t] for t < K           (K = SL-seqlen-1 = 2)
+    #   post[t] = x[t-K]       for K <= t < K+seqlen
+    #   post[t] = old[t]       for t >= K+seqlen      (last slot untouched)
+    K = state_len - seqlen - 1
+    parts = [
+        conv_state[:, :, accept + 1:accept + 1 + K],
+        x,
+        conv_state[:, :, K + seqlen:],
+    ]
+    return torch.cat(parts, dim=-1)
 
 
 def main():
