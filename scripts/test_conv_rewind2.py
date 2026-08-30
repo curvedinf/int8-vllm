@@ -71,22 +71,19 @@ def kernel_step(x, conv_state, weight, bias, activation, accept, idx):
 
 
 def ref_committed(conv_state, x, weight, bias, activation, accept):
-    """Reference for the post-acceptance state: commit the first `accept+1`
-    rows of x into the rolling buffer (shift-in), per the kernel's
-    documented acceptance semantics (accept k => shift-left-by-k of the
-    drafted buffer's history)."""
+    """Post-kernel state per the kernel source (causal_conv1d.py:925-955):
+    new_state[t] = old_state[t+1] for t < state_len - seqlen, else
+    x[t - (state_len - seqlen)]. Shift-left-by-ONE + append ALL rows; the
+    acceptance offset only affects the NEXT step's read
+    (conv_state_token_offset), not the written buffer."""
     state_len = conv_state.shape[-1]
-    # History entering the step is the LAST width-1 entries; the extended
-    # tail beyond that is scratch from prior drafts.
-    hist = conv_state[:, :, -(WIDTH - 1):]
-    drafted = torch.cat([hist, x], dim=-1)
-    committed = drafted[:, :, accept + 1:]      # drop k accepted from front
-    L = committed.shape[-1]
-    if L >= state_len:
-        new_state = committed[:, :, L - state_len:]
-    else:
-        new_state = F.pad(committed, (state_len - L, 0))
-    return new_state
+    seqlen = x.shape[-1]
+    # From the kernel source + live buffer dump (pass 24): the WRITE also
+    # applies the acceptance offset — new_state[t] = old[accept + t + 1]
+    # for the kept region, then x rows appended.
+    off = accept + 1
+    kept = conv_state[:, :, off:off + state_len - seqlen]
+    return torch.cat([kept, x], dim=-1)
 
 
 def main():
