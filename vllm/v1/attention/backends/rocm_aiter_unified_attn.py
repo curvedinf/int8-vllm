@@ -530,18 +530,27 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         if n_mism:
             worst = int(diff.max())
             stale = 0
-            if prev is not None:
-                for j in mism.nonzero().flatten().tolist():
-                    sv = int(slots[j])
-                    if sv in prev and (got_k[j].int() - prev[sv]).abs().max() <= 1:
-                        stale += 1
+            allprev = getattr(self, "_rb_all", {})
+            stale_query = 0
+            for j in mism.nonzero().flatten().tolist():
+                sv = int(slots[j])
+                if sv in prev and (got_k[j].int() - prev[sv]).abs().max() <= 1:
+                    stale += 1
+                if sv in allprev and (got_k[j].int() - allprev[sv]).abs().max() <= 1:
+                    stale_query += 1
             logger.warning(
-                "KVREADBACK MISMATCH layer=%s mismatches=%d/%d worst=%d stale_prev=%d slots=%s",
+                "KVREADBACK MISMATCH layer=%s mismatches=%d/%d worst=%d stale_prev=%d stale_query=%d slots=%s",
                 getattr(self, "_rb_layer", "?"), n_mism, slots.numel(),
-                worst, stale, slots[mism][:6].tolist())
+                worst, stale, stale_query, slots[mism][:6].tolist())
         new_prev = {int(sv): got_k[j].clone()
                     for j, sv in enumerate(slots.tolist())}
+        # Merge (not replace): keep query-write bytes too, so a later
+        # context mismatch can be matched against the previous QUERY K at
+        # that slot (cross-step rollback overlap).
+        merged = dict(getattr(self, "_rb_all", {}))
+        merged.update(new_prev)
         self._rb_prev = new_prev
+        self._rb_all = merged
 
     def do_kv_cache_update(
         self,
