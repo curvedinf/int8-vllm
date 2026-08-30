@@ -200,6 +200,34 @@ class DFlashSpeculator(DraftModelSpeculator):
             device=self.device,
         )
 
+        # Groups whose slot-mappings row the draft OVERWRITES but a target
+        # layer also consumes (hybrid models merge the draft's SW spec group
+        # with the target's own SW layers — e.g. Qwen3.8 layers 64-68 share
+        # the DFlash drafter's group). The target verify's per-layer slot
+        # dict references that same mutable row, so the draft's
+        # prepare_dflash_inputs would redirect the TARGET's verify KV writes
+        # to draft-computed slots (rejection-pattern-dependent -> the
+        # temp>0 garble). Snapshot/restore those rows around the draft
+        # forward (2026-08-30; see logs/garble/NOTES.md pass 6).
+        self._shared_group_ids: list[int] = []
+        for grp_list in target_attn_groups or []:
+            for grp in grp_list:
+                if grp.kv_cache_group_id in self.draft_kv_cache_group_ids:
+                    self._shared_group_ids.append(grp.kv_cache_group_id)
+        if self._shared_group_ids:
+            logger.warning(
+                "DFlash draft shares KV group(s) %s with target attention "
+                "layers; enabling slot-mapping snapshot/restore around the "
+                "draft forward.",
+                sorted(set(self._shared_group_ids)),
+            )
+        self._shared_slot_backup = torch.zeros(
+            len(self._shared_group_ids),
+            self.max_num_tokens,
+            dtype=torch.int64,
+            device=self.device,
+        )
+
         # Map each draft decoder layer to the index (within draft_kv_cache_group_ids)
         # of the kv-cache group its cache belongs to. Models that share a single group
         # leave this as None and share one context slot mapping.
@@ -402,6 +430,31 @@ class DFlashSpeculator(DraftModelSpeculator):
         # The query slot mapping is written into the shared BlockTables slot_mappings.
         # That buffer's address is what the captured CUDA graph reads from at replay.
         assert self.draft_kv_cache_group_id >= 0
+        if os.environ.get("VLLM_SLOT_DEBUG"):
+            # One-shot per boot: assert the draft's group rows are disjoint
+            # from the target's attention groups in the shared slot_mappings
+            # buffer (a collision would send verify KV to wrong slots).
+            draft_ids = set(self.draft_kv_cache_group_ids)
+            target_ids = {
+                grp.kv_cache_group_id
+                for grp_list in self.target_attn_groups
+                for grp in grp_list
+            } if self.target_attn_groups else set()
+            overlap = draft_ids & target_ids
+            for grp_list in self.target_attn_groups:
+                for grp in grp_list:
+                    if grp.kv_cache_group_id in overlap:
+                        logger.warning(
+                            "SLOTDEBUG OVERLAP GROUP %d target_layers=%s "
+                            "spec=%s",
+                            grp.kv_cache_group_id,
+                            grp.layer_names[:8],
+                            type(grp.kv_cache_spec).__name__,
+                        )
+            logger.warning(
+                "SLOTDEBUG draft_groups=%s target_groups=%s overlap=%s",
+                sorted(draft_ids), sorted(target_ids), sorted(overlap),
+            )
         # Support multiple draft KV cache groups by preparing inputs once for each
         for i, gid in enumerate(self.draft_kv_cache_group_ids):
             prepare_dflash_inputs(
@@ -487,6 +540,17 @@ class DFlashSpeculator(DraftModelSpeculator):
         # so the real token count is num_query_tokens.
         self._prepare_eplb_forward(num_query_tokens)
 
+        # Snapshot the shared rows the draft is about to overwrite, and
+        # restore them right after the draft forward so the TARGET verify's
+        # slot dict (same mutable row) sees the target's own slots again.
+        shared_num = max(num_tokens_padded, num_target_tokens)
+        if self._shared_group_ids and not dummy_run:
+            for bi, gid in enumerate(self._shared_group_ids):
+                self._shared_slot_backup[bi, :shared_num].copy_(
+                    self.block_tables.slot_mappings[gid, :shared_num],
+                    non_blocking=True,
+                )
+
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
             assert self.query_cudagraph_manager is not None
             self.query_cudagraph_manager.run_fullgraph(batch_desc)
@@ -499,6 +563,13 @@ class DFlashSpeculator(DraftModelSpeculator):
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=batch_desc.cg_mode,
             )
+
+        if self._shared_group_ids and not dummy_run:
+            for bi, gid in enumerate(self._shared_group_ids):
+                self.block_tables.slot_mappings[gid, :shared_num].copy_(
+                    self._shared_slot_backup[bi, :shared_num],
+                    non_blocking=True,
+                )
 
         if os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not torch.cuda.is_current_stream_capturing():
             dt = self.draft_tokens[:num_reqs]
