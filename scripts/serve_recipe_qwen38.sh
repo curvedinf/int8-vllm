@@ -16,6 +16,14 @@ STARTUP_TIMEOUT=900
 STOP_TIMEOUT=20
 CPUSET="0-47"
 
+# UA flag file (diagnostic lever for systemd-driven boots: UA=0 selects the
+# Triton unified-attention path instead of AITER's). Must resolve BEFORE
+# COMMON_ENV, which consumes ${UA:-1}.
+_ua_flag="${LOG_DIR}/UA"
+if [[ -f "${_ua_flag}" ]]; then
+  UA="$(tr -d '[:space:]' < "${_ua_flag}")"
+fi
+
 COMMON_ENV=(
   PATH="${VENV}/bin:${PATH:-}"
   ROCM_PATH="/opt/rocm"
@@ -70,6 +78,10 @@ COMMON_ENV=(
   NCCL_DMABUF_ENABLE="0"
   NCCL_DEBUG="INFO"
   RCCL_LOG_LEVEL="INFO"
+  # mi210-vllm finding: above HIP's ~1 MiB pin threshold, .to(device)
+  # page-locks the caller's buffer (hsa_amd_memory_lock_to_pool ~1 s/tensor
+  # vs 14 ms DMA). 64 MiB threshold makes the 27B checkpoint load use DMA.
+  GPU_PINNED_MIN_XFER_SIZE="67108864"
 )
 
 DRAFT_MODEL_DIR="${DRAFT_MODEL_DIR:-${HOME}/.cache/huggingface/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit}"
@@ -84,6 +96,10 @@ ARGS=(
   --max-model-len 262144
   --max-num-seqs 6
   --gpu-memory-utilization 0.92
+  # KVMEM flag file / env: pin the KV arena size in bytes (gpu_worker reports
+  # ~1.4GiB/GPU unused headroom at 0.92 util; a pinned --kv-cache-memory
+  # both recovers it and makes the pool deterministic across boots).
+  # ${LOG_DIR}/KVMEM (e.g. "19000000000") overrides the env for systemd boots.
   --compilation-config '{"mode":'"${CMODE:-3}"',"cudagraph_mode":"'"${CGMODE:-FULL_AND_PIECEWISE}"'","custom_ops":["+gemma_rms_norm","+silu_and_mul","+rms_norm_gated","+rotary_embedding","+apply_rotary_emb","none"],"pass_config":{"fuse_allreduce_rms":'"${ARFUSE:-false}"'}}'
   --language-model-only
   --skip-mm-profiling
@@ -124,12 +140,30 @@ ARGS=(
   # OffloadingConnector. Blocks are copied as raw bytes, so int8-PTH inline
   # scales and the fp32 mamba state pages transfer dtype-safely. L2 reuse
   # cache only — the live arena stays on-GPU.
-  --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":12884901888}}'
+  # 2026-08-30: the connector's dflash draft-group misclassification was
+  # fixed (eagle catch-all flagged every group incl. mamba -> misaligned
+  # resume boundaries -> concurrent garble/wedges; see offloading/scheduler.py
+  # and logs/garble/NOTES.md). Tier ON per the recipe.
 )
+if [[ "${OFFLOAD:-1}" == "1" ]]; then
+  ARGS+=(--kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":12884901888}}')
+fi
 
 # Draft KV int8-PTH: full-W8A8 doctrine. SPECOFF=1 drops the draft for
-# diagnostic target-only legs.
-if [[ "${SPECOFF:-0}" != "1" ]]; then
+# diagnostic target-only legs. Flag-file override mirrors the levers above
+# (systemd-driven restarts cannot pass per-boot env).
+_spec_flag="${LOG_DIR}/SPECOFF"
+if [[ -f "${_spec_flag}" ]]; then
+  _spec_value="$(tr -d '[:space:]' < "${_spec_flag}")"
+else
+  _spec_value="${SPECOFF:-0}"
+fi
+# NS flag file (diagnostic lever for systemd-driven boots, e.g. NS=2 window test)
+_ns_flag="${LOG_DIR}/NS"
+if [[ -f "${_ns_flag}" ]]; then
+  NS="$(tr -d '[:space:]' < "${_ns_flag}")"
+fi
+if [[ "${_spec_value}" != "1" ]]; then
   ARGS+=(--speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":'"${NS:-13}"',"kv_cache_dtype":"'"${DRAFT_KV_DTYPE:-int8_per_token_head}"'"}')
 fi
 
@@ -139,6 +173,19 @@ if [[ "${LOGSTATS:-0}" != "1" ]]; then
   ARGS+=(--disable-log-stats)
 fi
 
+# PREFIXCACHE=0 disables prefix caching (diagnostic lever for the garble
+# bisect: isolates the hybrid mamba-align prefix-hit machinery). Flag-file
+# override mirrors OFFLOAD above for systemd-driven restarts.
+_prefix_flag="${LOG_DIR}/PREFIXCACHE"
+if [[ -f "${_prefix_flag}" ]]; then
+  _prefix_value="$(tr -d '[:space:]' < "${_prefix_flag}")"
+else
+  _prefix_value="${PREFIXCACHE:-1}"
+fi
+if [[ "${_prefix_value}" == "0" ]]; then
+  ARGS+=(--no-enable-prefix-caching)
+fi
+
 # C6 means six concurrent sequences. The target and DFlash2 draft are both
 # GPTQ INT8 GS128. The actual runtime selections are reported in the startup
 # log; do not infer AITER CAR, fused quant-out, or draft INT8 KV from this
@@ -146,6 +193,16 @@ fi
 # Spec-decode token budget; MNBT and NS remain tuning controls only.
 MNBT="${MNBT:-2048}"
 ARGS+=(--max-num-batched-tokens "${MNBT}")
+# KVMEM: optional pinned KV cache size in bytes (flag file or env).
+# Default 20.2 GiB (2026-08-30): recovers the ~1.4 GiB/GPU the 0.92-util
+# profiler leaves unused -> 1,031,145-token arena (was 982,523; +4.9%
+# capacity, 3.93x max-len). Concurrent-round stable, 0 collapse windows.
+_kvmem_flag="${LOG_DIR}/KVMEM"
+if [[ -f "${_kvmem_flag}" ]]; then
+  KVMEM="$(tr -d '[:space:]' < "${_kvmem_flag}")"
+fi
+KVMEM="${KVMEM:-20200000000}"
+ARGS+=(--kv-cache-memory "${KVMEM}")
 # AR=0 fully disables custom all-reduce (PYNCCL/RCCL path); AR=1 leaves the
 # selected custom backend enabled. With the defaults CAR=0/AR=1, vLLM CUSTOM
 # is selected ahead of PYNCCL.

@@ -201,6 +201,8 @@ def _copy_mamba_state_block(
         # exposing the dimension rows in parallel. All addresses retain
         # state_elem_size alignment: tensor strides and token offsets are
         # measured in whole elements before conversion to bytes.
+        # NOTE: conv_width here is the allocated rolling-buffer length
+        # (conv_kernel - 1 + num_spec), NOT the model's conv kernel width.
         num_dst_tokens = conv_width - token_bias
         for token_idx in range(0, num_dst_tokens):
             for row_base in range(0, dim_rows, COPY_BLOCK_SIZE):
@@ -242,6 +244,9 @@ def _copy_mamba_state_block(
         # SD conv: copy
         #   state[bt[src_col], token_bias:] ->
         #   state[bt[dst_col], :conv_width - token_bias]
+        # conv_width is the rolling-buffer length (conv_kernel - 1 + num_spec);
+        # the suffix copy [token_bias, L) always covers the next read window
+        # [token_bias, token_bias + conv_kernel - 2].
         src_block_id = tl.load(block_table_base + src_col).to(tl.int64)
         src_block_addr = state_base_addr + src_block_id * state_block_stride
         token_bytes = state_inner_size * state_elem_size

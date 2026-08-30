@@ -871,9 +871,26 @@ def _causal_conv1d_update_kernel(
         # - accept 1 tokens: [history2, ..., historyM, draft1]
         # - accept 2 tokens: [history3, ..., historyM, draft1, draft2]
         # - and so on.
-        conv_state_token_offset = (
-            tl.load(num_accepted_tokens_ptr + idx_seq).to(tl.int64) - 1
-        )
+        num_accepted = tl.load(num_accepted_tokens_ptr + idx_seq).to(tl.int64)
+        if (num_accepted < 1) | (num_accepted > seqlen):
+            # Stale or oversized accepted counts (e.g. a desynced
+            # num_accepted under connector-served prefixes) would index the
+            # rolling buffer out of bounds and spin the kernel on a wild
+            # address (engine-wedge signature). Zero the outputs and bail
+            # instead (vLLM PR #50021, vendored via qwen38-27b-rtx3090).
+            zero = tl.zeros((BLOCK_N,), dtype=tl.float32)
+            for idx_token in tl.range(seqlen):
+                o_ptrs = (
+                    o_ptr
+                    + o_offset
+                    + idx_token * stride_o_token
+                    + idx_feats * stride_o_dim
+                )
+                tl.store(o_ptrs, zero, mask=idx_feats < dim)
+            if launch_pdl:
+                tl.extra.cuda.gdc_launch_dependents()
+            return
+        conv_state_token_offset = num_accepted - 1
     else:
         conv_state_token_offset = 0
 

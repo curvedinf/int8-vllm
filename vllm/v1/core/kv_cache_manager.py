@@ -340,9 +340,23 @@ class KVCacheManager:
             return *self.get_computed_blocks(request), False
 
         num_local = per_group_hits[fa_group_id]
+        if min(per_group_hits) < num_local:
+            # Divergent per-group hits: a group (e.g. Mamba) stopped below
+            # the full-attention boundary. Always reconcile to the boundary
+            # every group agrees on -- previously this divergent tuple was
+            # kept whenever external tokens backed the deeper hit, but the
+            # resume then mixed full-attention's num_computed with mamba's
+            # shorter state coverage, and any path that did not (or could
+            # not, e.g. an exhausted CPU tier) restore that state resumed
+            # from a dirty mamba page -- the concurrent garble signature
+            # (2026-08-30 bisect; second defect after the dflash eagle
+            # catch-all). The strictly-longer-remote-hit optimization only
+            # ever needed the CONVERGENT case.
+            return *self.get_computed_blocks(request), False
+
         blocks = self.create_kv_cache_blocks(computed)
         # Per-group lookups do not detect an uncached shared prefix (boundary 0).
-        return blocks, num_local, 0, min(per_group_hits) < num_local
+        return blocks, num_local, 0, False
 
     def allocate_slots(
         self,

@@ -1270,6 +1270,12 @@ def _get_kv_cache_groups_uniform_page_size(
         # layers while accommodating speculative decoding drafters that add
         # extra layers to one attention type.
         group_size = max_num_layers
+    # NOTE: _prefer_padding_sliding_window_buckets (qwen38-27b-rtx3090 port)
+    # was evaluated 2026-08-30 and REJECTED on this vintage: it fired
+    # (group_size 8) but shrank the arena 1,031,145 -> 945,602 tokens --
+    # more mamba groups multiply the per-request spec-window state pages
+    # (6 groups x 14 pages vs 1 x 14), outweighing the padding savings.
+    # Do not re-enable without re-deriving the mamba window accounting.
     grouped_layers = []
     for layers in layer_buckets:
         num_padding_layers = group_size - len(layers) % group_size

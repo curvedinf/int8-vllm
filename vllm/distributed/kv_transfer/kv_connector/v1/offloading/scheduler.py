@@ -228,6 +228,26 @@ class SchedulerOffloadConfig(NamedTuple):
             and vllm_config.speculative_config.use_eagle()
         )
         if use_eagle and not eagle_groups:
+            # is_eagle_group is only ever set for DeepSeek V4 upstream, so
+            # this fallback marked EVERY group as draft attention under
+            # method=dflash/dspark/mtp -- excluding each group's trailing
+            # chunk from store while decoding AND applying EAGLE drop
+            # semantics to groups whose finders never drop (Mamba's).
+            # On a hybrid mamba model that misaligns the per-group hit
+            # boundaries the connector reconciles against, corrupting
+            # restored state on resume under concurrent load (the
+            # acceptance-collapse garble + engine wedges; 2026-08-30
+            # bisect: 3-5 collapse windows per concurrent round with the
+            # catch-all, 0 with the tier off). For dflash-family drafters
+            # the draft KV is exactly its sliding-window layers; flag those
+            # groups only (qwen38-27b-rtx3090 issue #33).
+            if vllm_config.speculative_config.use_dflash():
+                eagle_groups = {
+                    idx
+                    for idx, g in enumerate(kv_cache_config.kv_cache_groups)
+                    if isinstance(g.kv_cache_spec, SlidingWindowSpec)
+                }
+        if use_eagle and not eagle_groups:
             eagle_groups = set(range(len(kv_cache_config.kv_cache_groups)))
 
         if eagle_groups:
@@ -237,6 +257,35 @@ class SchedulerOffloadConfig(NamedTuple):
                 "excluded from offloading due to volatility.",
                 sorted(eagle_groups),
             )
+
+        # The CPU offload pool allocates uniform blocks sized for the largest
+        # group's chunk. A group with far smaller chunks burns a full block
+        # per tiny chunk, so one long request can evict the entire CPU tier
+        # and cross-request reuse never hits. Warn with the arithmetic
+        # (qwen38-27b-rtx3090 issue #33).
+        _chunk_tokens = [
+            tokens_per_block * spec.blocks_per_chunk
+            for tokens_per_block in spec.tokens_per_block
+        ]
+        _max_chunk = max(_chunk_tokens) if _chunk_tokens else 0
+        for _idx, _tok in enumerate(_chunk_tokens):
+            if _tok * 4 <= _max_chunk:
+                logger.warning(
+                    "KV offloading: group %d has %d-token chunks against a "
+                    "%d-token maximum, and offload blocks are uniformly sized "
+                    "for the maximum. Every %d-token chunk of this group "
+                    "occupies a full block, so one long request can consume "
+                    "the whole CPU tier and evict all previously stored "
+                    "blocks -- cross-request reuse will likely never hit "
+                    "(issue #33). Until blocks are sized per group or this "
+                    "group is excluded, expect ~%dx more cpu_bytes_to_use "
+                    "than the KV bytes suggest.",
+                    _idx,
+                    _tok,
+                    _max_chunk,
+                    _tok,
+                    max(1, _max_chunk // max(1, _tok)),
+                )
 
         kv_group_configs_list: list[GroupOffloadConfig] = []
         for idx, tokens_per_block in enumerate(spec.tokens_per_block):

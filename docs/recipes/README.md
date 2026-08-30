@@ -206,6 +206,41 @@ sessions); NS=5 leads wall-clock and is coherence-verified (30/30).
 
 ## History
 
+- **2026-08-30 (morning) — OffloadingConnector FIXED (tier stays ON).** Root
+  cause was two connector defects hitting the hybrid-mamba stack under
+  concurrent load, plus unbounded GDN state lookups turning desyncs into
+  engine wedges: (1) the connector's eagle catch-all flagged **every** KV
+  group (incl. mamba) as volatile draft attention under method=dflash —
+  boot line was "[0..14]", now "[14]" (the drafter's SW group); (2)
+  `get_computed_blocks_for_connector` kept divergent per-group hits when
+  external tokens existed, mixing full-attention's computed count with
+  mamba's shorter state coverage → dirty-state resume; now always reconciled
+  to the common boundary. (3) `causal_conv1d_update` /
+  `fused_sigmoid_gating` bound their `(num_accepted-1)` state lookups
+  (vLLM PR #50021) — stale counts previously read cross-request state rows
+  or wild addresses (the wedge signature). Validation: concurrent 3-stream
+  20k-in/4k-out rounds went from 3-5 acceptance-collapse windows/round +
+  2 wedges (pre-fix; the user-visible garble) to **0 over 4 rounds** with
+  the tier active (1.79 GiB stored). Method + tooling:
+  `scripts/garble_repro2.py`, `scripts/detect_collapse.py`,
+  `logs/garble/NOTES.md`. The earlier same-day entry below ("tier disabled
+  by default") was the interim mitigation and is superseded — `OFFLOAD=1`
+  is the default again. Fix (1) ported from qwen38-27b-rtx3090 issue #33.
+- **2026-08-30 — CPU KV offload tier (OffloadingConnector) disabled by
+  default: convicted as the production garble + hang source under
+  concurrency.** Concurrent 3-stream 20k-in/4k-out legs: with the tier on,
+  3-5 draft-acceptance-collapse windows per round (the corruption signature:
+  surface loops with pos-0 acceptance <=5%) on BOTH attention backends
+  (AITER UA and Triton), plus two hard engine wedges (kernel spin, metrics
+  silent); with the tier off, 0 windows over 3 rounds and no hangs. The
+  user's production day-log showed ~258 collapse windows with the tier on.
+  Sequential single-stream requests were rarely affected, which is why the
+  bisect needed concurrent load. Full log: `logs/garble/NOTES.md` (gitignored;
+  method preserved in `scripts/garble_repro2.py` +
+  `scripts/detect_collapse.py`). `OFFLOAD=1` restores the tier for
+  re-testing after the connector's async load/store + mamba partial-tail
+  handoff path is fixed. The GPU arena (982k tokens) still admits 3.75x
+  max-len requests.
 - **2026-08-26 (evening) — NS=13 confirmed as production default; final
   canonical bench on the tuned build.** Server rebooted at the new NS=13
   default and verified serving (cmdline-checked). Final canonical

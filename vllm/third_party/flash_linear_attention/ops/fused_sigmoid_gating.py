@@ -103,7 +103,20 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     if USE_INITIAL_STATE:
         if IS_CONTINUOUS_BATCHING:
             if IS_SPEC_DECODING:
-                i_t = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
+                num_accepted = tl.load(num_accepted_tokens + i_n).to(tl.int64)
+                i_t = num_accepted - 1
+                # Bound the accepted-token-derived state lookup to this
+                # request's row: an unbounded i_t reads into the NEXT
+                # request's state-indices row (silent cross-request state
+                # corruption) or past the tensor (wild address = engine
+                # wedge). The row width in token strides is
+                # stride_indices_seq / stride_indices_tok (== T for the
+                # contiguous [batch, T] layout). (vLLM PR #50021, vendored
+                # via qwen38-27b-rtx3090.)
+                if (num_accepted < 1) | (
+                    i_t * stride_indices_tok >= stride_indices_seq
+                ):
+                    return
             else:
                 i_t = 0
             # Load state index and check for invalid entries
