@@ -38,18 +38,23 @@ torch.manual_seed(0)
 
 
 def reference_step(conv_state, x_rows, accept):
-    """Dense reference: given the rolling buffer [dim, state_len] holding
-    [history..., drafts...] and a new 14-row block, accept `accept` tokens
-    from the block's start, produce new state + outputs.
+    """Dense reference matching the kernel's documented semantics.
+
+    The buffer entering a step holds the last STATE_LEN committed inputs
+    (history). The step processes R rows starting from the buffer's tail
+    (the conv window for row t spans [hist_tail, x_0..x_t]). After the
+    step, the drafted buffer is [hist, x_0..x_{R-1}] truncated to the last
+    STATE_LEN entries; accepting k rows (num_accepted = k, anchor counted)
+    commits x_0..x_{k-1}, so the next buffer is that drafted buffer
+    shifted left by k, again truncated to the last STATE_LEN entries.
     conv_state: [dim, state_len]; x_rows: [rows, dim]."""
     d = conv_state.shape[0]
-    # sequence the conv sees: state tail (history) + new rows
-    hist = conv_state[:, : WIDTH - 1]  # only first width-1 are history
-    seq = torch.cat([hist, x_rows.t().float()], dim=1)  # [d, W-1+R]
+    hist = conv_state  # [d, STATE_LEN] committed history
+    seq = torch.cat([hist, x_rows.t().float()], dim=1)  # [d, S+R]
     w = ref_weight.float()
     outs = []
     for t in range(x_rows.shape[0]):
-        window = seq[:, t:t + WIDTH]
+        window = seq[:, STATE_LEN + t - (WIDTH - 1): STATE_LEN + t + 1]
         o = (w * window).sum(dim=1)
         if REF_BIAS is not None:
             o = o + REF_BIAS.float()
@@ -57,17 +62,15 @@ def reference_step(conv_state, x_rows, accept):
             o = torch.nn.functional.silu(o)
         outs.append(o)
     outs = torch.stack(outs, dim=1)  # [d, R]
-    kept = accept + 1  # accepted drafts + anchor
-    total = WIDTH - 1 + x_rows.shape[0]
-    new_state = seq[:, total - STATE_LEN:total] if total >= STATE_LEN else \
-        torch.cat([seq, torch.zeros(d, STATE_LEN - total, device=seq.device)], dim=1)
-    # but only `kept` rows actually happened: state must reflect the
-    # accepted prefix, not the drafted tail
-    seq_kept = seq[:, : WIDTH - 1 + kept]
-    t2 = seq_kept.shape[1]
-    new_state = seq_kept[:, max(0, t2 - STATE_LEN):t2]
-    if t2 < STATE_LEN:
-        new_state = torch.cat([seq_kept, torch.zeros(d, STATE_LEN - t2, device=seq.device)], dim=1)
+    drafted = seq  # full [hist, drafts]
+    committed = drafted[:, accept:]  # shift left by k (accept = num_accepted)
+    L = committed.shape[1]
+    if L >= STATE_LEN:
+        new_state = committed[:, L - STATE_LEN:]
+    else:
+        new_state = torch.cat(
+            [committed,
+             torch.zeros(d, STATE_LEN - L, device=committed.device)], dim=1)
     return outs, new_state
 
 
