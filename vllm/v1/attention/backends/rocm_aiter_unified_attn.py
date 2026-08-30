@@ -456,6 +456,80 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
 
         return output
 
+
+    def _kv_readback_check(self, key, value, key_cache, value_cache, slot_mapping):
+        """Reference-quantize K/V, snapshot target slots before the kernel,
+        run the kernel, read back, compare. Logs KVREADBACK lines."""
+        import torch as _t
+        valid = slot_mapping >= 0
+        slots = slot_mapping[valid]
+        if slots.numel() == 0:
+            return
+        # Deduplicate slots keeping the LAST occurrence: spec-decode
+        # rewrites rejected slots in the same call (last write wins), so a
+        # first-occurrence reference would false-positive on every rewrite.
+        sm = slot_mapping.clone()
+        seen = {}
+        order = []
+        for i, sv in enumerate(sm.tolist()):
+            if sv < 0:
+                continue
+            if sv in seen:
+                order[seen[sv]] = -1
+            seen[sv] = len(order)
+            order.append(i)
+        keep_idx = [i for i in order if i >= 0]
+        if not keep_idx:
+            self._rb_pending = None
+            return
+        keep = _t.tensor(keep_idx, device=sm.device, dtype=_t.long)
+        n, nkv, hs = key.shape
+        pad = key_cache.shape[-1] - hs  # inline scale slots
+        def quant_ref(x):
+            sc = x.float().abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / 127.0
+            q = _t.clamp((x.float() / sc).round(), -127, 127).to(_t.int8)
+            return q, sc.squeeze(-1)
+        keyv = key[keep]
+        valuev = value[keep]
+        slots = sm[keep]
+        kq, ksc = quant_ref(keyv)
+        vq, vsc = quant_ref(valuev)
+        bs = key_cache.shape[1]
+        rows = (slots // bs).long()
+        cols = (slots % bs).long()
+        # snapshot pre-write contents at those slots (first head only)
+        pre_k = key_cache[rows, cols, 0, :].clone()
+        self._rb_counter = getattr(self, "_rb_counter", 0) + 1
+        idx = getattr(self, "_rb_idx", None)
+        if idx is None:
+            idx = _t.arange(slots.numel(), device=slots.device)
+            self._rb_idx = idx
+        # stash reference for post-kernel compare (kernel runs after return)
+        self._rb_pending = (rows, cols, kq, ksc, vq, vsc, slots, pre_k, key_cache)
+
+    def _kv_readback_finalize(self):
+        """Compare the cache against the stashed reference (call after the
+        kernel has run)."""
+        import torch as _t
+        p = getattr(self, "_rb_pending", None)
+        if p is None:
+            return
+        rows, cols, kq, ksc, vq, vsc, slots, pre_k, key_cache = p
+        self._rb_pending = None
+        got_k = key_cache[rows, cols, 0, :kq.shape[-1]]
+        ref_k = kq[:, 0, :]
+        diff = (got_k.int() - ref_k.int()).abs()
+        # Tolerate off-by-one rounding-mode differences (kernel rounds
+        # half-to-even; torch.round is half-away).
+        mism = (diff > 1).any(dim=-1)
+        n_mism = int(mism.sum())
+        if n_mism:
+            worst = int(diff.max())
+            logger.warning(
+                "KVREADBACK MISMATCH layer=%s mismatches=%d/%d worst=%d slots=%s",
+                getattr(self, "_rb_layer", "?"), n_mism, slots.numel(),
+                worst, slots[mism][:6].tolist())
+
     def do_kv_cache_update(
         self,
         layer: AttentionLayer,
@@ -475,6 +549,19 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             # Pass the padded halves: the kernel writes head_size data
             # elements plus the inline scale at offset head_size within
             # each half (mirrors TritonAttentionBackend).
+            import os as _os
+            if _os.environ.get("VLLM_KV_READBACK") and not torch.cuda.is_current_stream_capturing():
+                # Write-then-read-back audit: quantize the incoming K/V with
+                # a torch reference, run the real kernel, then re-read the
+                # written slots and compare. Any mismatch is direct evidence
+                # the cache holds different bytes than the kernel was given
+                # (the temp-1.0 garble's last unobserved surface).
+                try:
+                    self._kv_readback_check(
+                        key, value, key_cache, value_cache, slot_mapping
+                    )
+                except Exception as e:
+                    logger.warning("KV-READBACK check failed: %s", e)
             from vllm import quant_audit_recorder as _qa
 
             if _qa._enabled() and not torch.cuda.is_current_stream_capturing():
@@ -497,6 +584,8 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 slot_mapping,
                 kv_quant_mode=self._kv_quant_mode,
             )
+            if getattr(self, "_rb_pending", None) is not None:
+                self._kv_readback_finalize()
             return
 
         # Reshape the input keys and values and store them in the cache.
