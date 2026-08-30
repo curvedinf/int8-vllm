@@ -504,6 +504,26 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.sample_from_anchor,
             )
 
+        if os.environ.get("VLLM_STEP_STATE_DUMP") and not dummy_run:
+            # Per-step state dump for the composition hunt: the values the
+            # draft just wrote (shared seq_lens, block table row, context
+            # slots, query slots) vs what the target verify will consume.
+            # Eager CPU sync here is safe (between kernels, outside capture).
+            try:
+                gid = self.draft_kv_cache_group_ids[0]
+                sl = self.input_buffers.seq_lens[:num_reqs].tolist()
+                bt = self.block_tables.input_block_tables[gid][
+                    :num_reqs, :24].tolist()
+                ctx = self._context_slot_mappings[0][:num_target_tokens][
+                    :24].tolist()
+                qs = self._draft_slot_rows[0, :num_query_tokens][
+                    :20].tolist()
+                logger.info(
+                    "STEPDUMP reqs=%d seq_lens=%s bt0=%s ctx=%s qslots=%s",
+                    num_reqs, sl, bt[0] if bt else [], ctx, qs,
+                )
+            except Exception as e:
+                logger.warning("STEPDUMP failed: %s", e)
         # Pre-insert context K/V into the cache. Runs eagerly outside the captured graph
         # because the context shape varies per step. During dummy runs the block tables
         # are placeholders, so we skip the cache write to avoid clobbering real entries.
