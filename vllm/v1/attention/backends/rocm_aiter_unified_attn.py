@@ -518,6 +518,10 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         self._rb_pending = None
         got_k = key_cache[rows, cols, 0, :kq.shape[-1]]
         ref_k = kq[:, 0, :]
+        # STALE-DETECTOR: keep the previous step's reference for the same
+        # impl instance; a mismatch that equals LAST step's K at this slot
+        # means the write never landed (stale), vs unrelated bytes.
+        prev = getattr(self, "_rb_prev", None)  # {slot: ref bytes}
         diff = (got_k.int() - ref_k.int()).abs()
         # Tolerate off-by-one rounding-mode differences (kernel rounds
         # half-to-even; torch.round is half-away).
@@ -525,10 +529,19 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         n_mism = int(mism.sum())
         if n_mism:
             worst = int(diff.max())
+            stale = 0
+            if prev is not None:
+                for j in mism.nonzero().flatten().tolist():
+                    sv = int(slots[j])
+                    if sv in prev and (got_k[j].int() - prev[sv]).abs().max() <= 1:
+                        stale += 1
             logger.warning(
-                "KVREADBACK MISMATCH layer=%s mismatches=%d/%d worst=%d slots=%s",
+                "KVREADBACK MISMATCH layer=%s mismatches=%d/%d worst=%d stale_prev=%d slots=%s",
                 getattr(self, "_rb_layer", "?"), n_mism, slots.numel(),
-                worst, slots[mism][:6].tolist())
+                worst, stale, slots[mism][:6].tolist())
+        new_prev = {int(sv): got_k[j].clone()
+                    for j, sv in enumerate(slots.tolist())}
+        self._rb_prev = new_prev
 
     def do_kv_cache_update(
         self,
