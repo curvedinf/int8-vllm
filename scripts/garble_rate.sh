@@ -2,16 +2,18 @@
 # Rate leg: N no-tools 40k probes, temp 1.0, count corrupt tails.
 set -euo pipefail
 N="${1:-10}"
+TAG="${2:-RATE}"
 export PYTHONPATH="${HOME}/vllm-gfx908:${HOME}/aiter"
 P=$(pgrep -f "[.]venv/bin/vllm serve" | head -1)
 export VLLM_API_KEY=$(tr '\0' '\n' < /proc/$P/environ | grep '^VLLM_API_KEY=' | cut -d= -f2)
 cd "${HOME}/vllm-gfx908/scripts"
-../.venv/bin/python - "$N" <<'PY'
+../.venv/bin/python - "$N" "$TAG" <<'PY'
 import sys, json, time, os, urllib.request
 sys.path.insert(0, '.')
 from garble_docs_probe import build_corpus
 from garble_repro2 import get_tok, MODEL, API, save
 N = int(sys.argv[1])
+TAG = sys.argv[2] if len(sys.argv) > 2 else "RATE"
 tok = get_tok()
 corpus = build_corpus(tok)
 corrupt = 0
@@ -36,15 +38,15 @@ for k in range(N):
                 d = chunk.get("choices",[{}])[0].get("delta",{}) or {}
                 if d.get("content"): pieces.append(d["content"])
     except Exception as e:
-        print(f"[r{k}] stream error {e}", flush=True); continue
+        print(f"[{TAG} r{k}] stream error {e}", flush=True); continue
     text="".join(pieces)
     if len(text) < 3000:
-        print(f"[r{k}] short/BAILED chars={len(text)}", flush=True); continue
-    save(f"RATE_r{k}", text)
+        print(f"[{TAG} r{k}] short/BAILED chars={len(text)}", flush=True); continue
+    save(f"{TAG}_r{k}", text)
     tail = text[-300:]
     deg = tail.count("**") + sum(1 for ln in tail.splitlines() if len(ln.strip())<6)
     is_c = deg > 25
     corrupt += is_c
-    print(f"[r{k}] dur={time.time()-t0:.0f}s chars={len(text)} degen={deg} corrupt={'YES' if is_c else 'no'}", flush=True)
-print(f"RATE: {corrupt} corrupt of {N}", flush=True)
+    print(f"[{TAG} r{k}] dur={time.time()-t0:.0f}s chars={len(text)} degen={deg} corrupt={'YES' if is_c else 'no'}", flush=True)
+print(f"RATE {TAG}: {corrupt} corrupt of {N}", flush=True)
 PY
