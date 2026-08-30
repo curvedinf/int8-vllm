@@ -130,3 +130,87 @@ for seed in range(3):
         if rel > 0.05:
             ok = False
 print("OVERALL:", "PASS" if ok else "FAIL (kernel diverges from reference)")
+
+
+def run_replay_and_dirty(seq_len, seed, tag):
+    """Capture the kernel call in a CUDA graph, then replay it with DIFFERENT
+    live buffer contents (new K/V written into the same cache + dirty
+    neighbors filled with garbage), and check the replayed output still
+    matches the reference for the new contents."""
+    import torch.cuda.graphs as g
+    q, k_full, v_full, bt, ks, vs, kc, vc, blocks = build(
+        seq_len, (seq_len + BS - 1) // BS + 16, seed)
+    seqused = torch.tensor([seq_len], dtype=torch.int32, device=DEV)
+    cu_q = torch.tensor([0, 14], dtype=torch.int32, device=DEV)
+    out = torch.zeros(14, NH, HS, dtype=DT, device=DEV)
+
+    # Dirty every unallocated block with extreme garbage + hot scales
+    nb_total = kc.shape[0]
+    live = set(int(b) for b in blocks.tolist())
+    for b in range(nb_total):
+        if b not in live:
+            kc[b] = 120 if (b % 2) else -120
+            vc[b] = 120
+            ks[b] = 5e3
+            vs[b] = 5e3
+
+    # Warmup on a side stream (required before capture)
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        for _ in range(3):
+            unified_attention(
+                q=q, k=kc, v=vc, out=out, cu_seqlens_q=cu_q,
+                max_seqlen_q=14, seqused_k=seqused, max_seqlen_k=seq_len,
+                softmax_scale=HS ** -0.5, causal=True,
+                window_size=(SW - 1, 0), block_table=bt, softcap=0,
+                q_descale=None, k_descale=None, v_descale=None, sinks=None,
+                k_scale_cache=ks, v_scale_cache=vs)
+    torch.cuda.current_stream().wait_stream(s)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        unified_attention(
+            q=q, k=kc, v=vc, out=out, cu_seqlens_q=cu_q,
+            max_seqlen_q=14, seqused_k=seqused, max_seqlen_k=seq_len,
+            softmax_scale=HS ** -0.5, causal=True,
+            window_size=(SW - 1, 0), block_table=bt, softcap=0,
+            q_descale=None, k_descale=None, v_descale=None, sinks=None,
+            k_scale_cache=ks, v_scale_cache=vs)
+
+    # Rewrite live KV with NEW data in-place (same slots), replay, compare
+    q2, k2_full, v2_full, _, _, _, _, _, _ = build(
+        seq_len, (seq_len + BS - 1) // BS + 16, seed + 100)
+    # copy new contents into the same physical slots
+    cache_target_k = kc  # [nb, bs, nkv, hs+4]
+    cache_target_v = vc
+    for pos in range(seq_len):
+        b = int(blocks[pos // BS]); off = pos % BS
+        for h in range(NKV):
+            ksc = k2_full[pos, h].abs().max().item() / QM
+            vsc = v2_full[pos, h].abs().max().item() / QM
+            ksc = max(ksc, 1e-6); vsc = max(vsc, 1e-6)
+            cache_target_k[b, off, h, :HS] = torch.clamp(
+                (k2_full[pos, h] / ksc).round(), -QM, QM).to(torch.int8)
+            cache_target_v[b, off, h, :HS] = torch.clamp(
+                (v2_full[pos, h] / vsc).round(), -QM, QM).to(torch.int8)
+            ks[b, off, h] = ksc
+            vs[b, off, h] = vsc
+    q.copy_(q2)
+    graph.replay()
+    torch.cuda.synchronize()
+    r = ref(q2, k2_full, v2_full, seq_len, seq_len - 14).to(DT)
+    diff = (out.float() - r.float()).abs()
+    rel = diff.max() / r.float().abs().max().clamp(min=1e-6)
+    print(f"{tag}: REPLAY+DIRTY max_diff={diff.max():.4f} rel={rel:.4f}")
+    return rel.item()
+
+
+ok = True
+for seed in range(2):
+    for sl in (2050, 40000):
+        rel = run_replay_and_dirty(sl, seed, f"seq={sl} seed={seed}")
+        if rel > 0.05:
+            ok = False
+print("REPLAY OVERALL:", "PASS" if ok else "FAIL")
+
