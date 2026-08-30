@@ -6,6 +6,11 @@ VENV="${ROOT_DIR}/.venv"
 MODEL_DIR="${HOME}/models/Qwen3.8-27B-GPTQ-8bit-gs128"
 SERVED_MODEL_NAME="qwen3.8-27b-gptq8"
 LOG_DIR="${ROOT_DIR}/logs/serve_recipe_qwen38"
+# The OffloadingConnector's CPU tier mmaps /dev/shm; an unclean kill leaks
+# the 12 GiB buffer and (with psm_* churn segments) exhausts the tmpfs,
+# crash-looping every subsequent boot during KV-cache init. Clean orphans
+# before starting (safe: no live server exists at this point).
+find /dev/shm -maxdepth 1 -user "$(id -un)" \( -name 'vllm_offload_*.mmap' -o -name 'psm_*' \) -delete 2>/dev/null || true
 PID_FILE="${LOG_DIR}/server.pid"
 API_KEY_FILE="/etc/llama/llama-api.key"
 WORKDIR="/tmp"
@@ -78,10 +83,6 @@ COMMON_ENV=(
   NCCL_DMABUF_ENABLE="0"
   NCCL_DEBUG="INFO"
   RCCL_LOG_LEVEL="INFO"
-  # mi210-vllm finding: above HIP's ~1 MiB pin threshold, .to(device)
-  # page-locks the caller's buffer (hsa_amd_memory_lock_to_pool ~1 s/tensor
-  # vs 14 ms DMA). 64 MiB threshold makes the 27B checkpoint load use DMA.
-  GPU_PINNED_MIN_XFER_SIZE="67108864"
 )
 
 DRAFT_MODEL_DIR="${DRAFT_MODEL_DIR:-${HOME}/.cache/huggingface/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit}"
