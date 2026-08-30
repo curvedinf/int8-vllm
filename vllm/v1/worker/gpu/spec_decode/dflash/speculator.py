@@ -161,6 +161,8 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.max_model_len,
             causal=self._group_causal,
             progress_bar_desc=f"Capturing {self._speculator_name.lower()} CUDA graphs",
+            draft_slot_rows=self._draft_slot_rows,
+            draft_group_ids=self.draft_kv_cache_group_ids,
         )
 
     def load_draft_model(
@@ -224,6 +226,20 @@ class DFlashSpeculator(DraftModelSpeculator):
         self._shared_slot_backup = torch.zeros(
             len(self._shared_group_ids),
             self.max_num_tokens,
+            dtype=torch.int64,
+            device=self.device,
+        )
+
+        # Private slot rows for the draft. The shared BlockTables row for a
+        # draft group is ALSO baked into the TARGET's verify CUDA graphs
+        # (same buffer address); writing draft slots there — even with the
+        # snapshot/restore above — leaves a window where the target's
+        # replayed graph can read draft-written slot ids, misdirecting the
+        # target's verify KV writes (the temp>0 garble). The draft now uses
+        # rows the target's graphs never reference (2026-08-30 pass 9).
+        self._draft_slot_rows = torch.full(
+            (len(self.draft_kv_cache_group_ids), self.max_num_tokens),
+            PAD_SLOT_ID,
             dtype=torch.int64,
             device=self.device,
         )
@@ -459,7 +475,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         for i, gid in enumerate(self.draft_kv_cache_group_ids):
             prepare_dflash_inputs(
                 self.input_buffers,
-                self.block_tables.slot_mappings[gid],
+                self._draft_slot_rows[i],
                 self.context_positions,
                 self._context_slot_mappings[i],
                 self.sample_indices,
@@ -535,6 +551,13 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.block_tables.slot_mappings[:, :num_tokens_padded],
             self.kv_cache_config,
         )
+        # Overlay the draft's PRIVATE rows for the draft's groups so the
+        # draft forward never reads (or writes) the shared rows that the
+        # target's verify graphs also reference.
+        for i, gid in enumerate(self.draft_kv_cache_group_ids):
+            private_row = self._draft_slot_rows[i, :num_tokens_padded]
+            for layer_name in self.kv_cache_config.kv_cache_groups[gid].layer_names:
+                draft_slot_mappings_by_layer[layer_name] = private_row
 
         # DFlash processes all speculative tokens in one forward pass,
         # so the real token count is num_query_tokens.

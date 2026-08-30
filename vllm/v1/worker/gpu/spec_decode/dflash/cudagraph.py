@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable, Mapping
+from collections.abc import Sequence, Callable, Mapping
 
 import torch
 
@@ -31,6 +31,8 @@ def _prepare_dflash_inputs_to_capture(
     max_model_len: int,
     skip_attn: bool,
     causal: bool | Mapping[int, bool],
+    draft_slot_rows: torch.Tensor | None = None,
+    draft_group_ids: Sequence[int] | None = None,
 ) -> AttentionState:
     input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
@@ -38,6 +40,15 @@ def _prepare_dflash_inputs_to_capture(
     slot_mappings_by_layer = build_slot_mappings_by_layer(
         slot_mappings, kv_cache_config
     )
+    # The draft's per-layer slot dict must reference the DRAFT's private
+    # rows for its groups (the shared rows are baked into the TARGET's
+    # verify graphs; routing the draft through them misdirects target KV
+    # writes under replay).
+    if draft_slot_rows is not None:
+        for i, gid in enumerate(draft_group_ids or ()):
+            private_row = draft_slot_rows[i, :num_tokens]
+            for layer_name in kv_cache_config.kv_cache_groups[gid].layer_names:
+                slot_mappings_by_layer[layer_name] = private_row
 
     attn_metadata = None
     if not skip_attn:
@@ -98,6 +109,8 @@ class DFlashCudaGraphManager(CudaGraphManager):
         max_model_len: int,
         causal: bool | Mapping[int, bool],
         progress_bar_desc: str = "Capturing CUDA graphs",
+        draft_slot_rows: torch.Tensor | None = None,
+        draft_group_ids: Sequence[int] | None = None,
     ) -> None:
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
@@ -119,6 +132,8 @@ class DFlashCudaGraphManager(CudaGraphManager):
                 kv_cache_config,
                 max_model_len,
                 skip_attn=(desc.cg_mode == CUDAGraphMode.PIECEWISE),
+                draft_slot_rows=draft_slot_rows,
+                draft_group_ids=draft_group_ids,
                 causal=causal,
             )
             attn_metadata, slot_mappings = attn_state
