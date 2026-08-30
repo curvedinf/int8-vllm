@@ -156,6 +156,46 @@ from vllm.v1.worker.workspace import use_workspace_lane
 logger = init_logger(__name__)
 
 
+
+_digest_layers = None
+
+
+def _state_digest(model, num_reqs):
+    """Mamba temporal-state health digest per step: max page norm and the
+    count of outlier pages (norm > 100) across all GDN layers' temporal
+    states (the unpacked per-layer views live on the attention modules).
+    Runs in replay (never capture); the .item() syncs are acceptable for a
+    diagnostic boot."""
+    global _digest_layers
+    if _digest_layers is None:
+        _digest_layers = [
+            m for m in model.modules()
+            if isinstance(getattr(m, "kv_cache", None), tuple)
+            and len(m.kv_cache) >= 2
+            and m.kv_cache[1] is not None
+            and m.kv_cache[1].dim() >= 2
+        ]
+    if not _digest_layers:
+        logger.info("STATEDIGEST nomamba num_reqs=%d", num_reqs)
+        return
+    worst = 0.0
+    hot = 0
+    pages_n = 0
+    for m in _digest_layers:
+        ssm = m.kv_cache[1]
+        pages = ssm.reshape(ssm.shape[0], -1).float().norm(dim=1)
+        worst = max(worst, pages.max().item())
+        hot += (pages > 100.0).sum().item()
+        pages_n += pages.numel()
+    logger.info(
+        "STATEDIGEST layers=%d pages=%d max_pagenorm=%.3f hot_pages=%d "
+        "num_reqs=%d", len(_digest_layers), pages_n, worst, hot, num_reqs)
+
+
+_STATE_DIGEST = None
+if __import__("os").environ.get("VLLM_STATE_DIGEST"):
+    _STATE_DIGEST = _state_digest
+
 class GPUModelRunner(LoRAModelRunnerMixin):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
@@ -1380,6 +1420,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_rejected: torch.Tensor,
         query_start_loc: torch.Tensor | None = None,
     ) -> None:
+        if _STATE_DIGEST is not None and not torch.cuda.is_current_stream_capturing():
+            try:
+                _STATE_DIGEST(self.model, idx_mapping.shape[0])
+            except Exception as e:
+                logger.warning("STATEDIGEST failed: %s", e)
         # Update the number of computed tokens.
         if self.is_last_pp_rank:
             assert self.sampler is not None
