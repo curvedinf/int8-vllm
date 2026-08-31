@@ -15,6 +15,7 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 # Env-gated candidate ring (VLLM_CAND_RING): per-round (candidate_ids,
 # scores, draft_tokens) clones from _sample_path, flushed every 500 rounds.
 _cand_ring: list = []
+_hs_stats: list = []
 
 
 def _cand_ring_flush(pid: int) -> None:
@@ -35,6 +36,13 @@ def _cand_ring_flush(pid: int) -> None:
                 f,
             )
     _cand_ring.clear()
+    if _hs_stats:
+        with open(os.path.join(out_dir, f"hs_stats_{pid}.dump"), "ab") as f:
+            for nan_cnt, absmax in _hs_stats:
+                pickle.dump(
+                    {"nan": nan_cnt.tolist(), "absmax": absmax.tolist()}, f
+                )
+        _hs_stats.clear()
 
 
 @triton.jit
@@ -171,7 +179,6 @@ class DFlash2Speculator(DFlashSpeculator):
                  self.draft_tokens.detach().clone()))
             if len(_cand_ring) >= 500:
                 _cand_ring_flush(os.getpid())
-        block_k = triton.next_power_of_2(self.selector_top_k)
         _selector_walk_kernel[(num_reqs,)](
             scores.contiguous(),
             candidate_ids.contiguous(),
@@ -227,6 +234,15 @@ class DFlash2Speculator(DFlashSpeculator):
         hidden_states = last_hidden_states[self.sample_indices[:num_sample]].view(
             num_reqs, self.num_speculative_steps, -1
         )
+        if os.environ.get("VLLM_CAND_RING") and not torch.cuda.is_current_stream_capturing():
+            # cheap GPU-side stats: per-(req, step) NaN count + absmax of
+            # the draft hidden states (flushed with the candidate ring).
+            _hs_stats.append(
+                (
+                    hidden_states.isnan().sum(dim=-1).cpu(),
+                    hidden_states.abs().amax(dim=-1).cpu(),
+                )
+            )
         from vllm import quant_audit_recorder as _qa
 
         if _qa._enabled() and not torch.cuda.is_current_stream_capturing():
