@@ -64,6 +64,10 @@ def probe(k):
     tail = text[-300:]
     deg = tail.count("**") + sum(
         1 for ln in tail.splitlines() if len(ln.strip()) < 6)
+    # Repetition wall ("ductduct...") scores 0 above; count the most
+    # repeated 4-gram in the tail as well.
+    gram = max((tail.count(tail[i:i + 4]) for i in range(0, 60)), default=0)
+    deg = max(deg, gram * 2)
     results[k] = (k, f"dur={time.time()-t0:.0f}s chars={len(text)} "
                      f"degen={deg} corrupt={'YES' if deg > 25 else 'no'}",
                   deg, len(text))

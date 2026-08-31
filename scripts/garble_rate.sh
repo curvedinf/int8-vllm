@@ -45,6 +45,10 @@ for k in range(N):
     save(f"{TAG}_r{k}", text)
     tail = text[-300:]
     deg = tail.count("**") + sum(1 for ln in tail.splitlines() if len(ln.strip())<6)
+    # Repetition wall ("ductductduct...") scores 0 on the metrics above but
+    # is unambiguous garble: count the most-repeated 4-gram in the tail.
+    gram = max((tail.count(tail[i:i+4]) for i in range(0, 60)), default=0)
+    deg = max(deg, gram * 2)
     is_c = deg > 25
     corrupt += is_c
     print(f"[{TAG} r{k}] dur={time.time()-t0:.0f}s chars={len(text)} degen={deg} corrupt={'YES' if is_c else 'no'}", flush=True)
