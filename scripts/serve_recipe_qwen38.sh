@@ -226,6 +226,11 @@ if [[ -f "${_kvmem_flag}" ]]; then
 fi
 KVMEM="${KVMEM:-20200000000}"
 ARGS+=(--kv-cache-memory "${KVMEM}")
+# EAGERALL flag file: --enforce-eager (diagnostic; target python-side
+# instrumentation like the GDN state ring needs non-replayed rounds).
+if [[ -f "${LOG_DIR}/EAGERALL" ]]; then
+  ARGS+=(--enforce-eager)
+fi
 # GDNDUMP: optional dir for the spec-rewind audit lever (gdn_attn.py dumps
 # per-token state indices + accepted counts per step when non-empty).
 _gdndump_flag="${LOG_DIR}/GDNDUMP"
