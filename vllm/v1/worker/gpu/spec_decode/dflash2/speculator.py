@@ -179,6 +179,7 @@ class DFlash2Speculator(DFlashSpeculator):
                  self.draft_tokens.detach().clone()))
             if len(_cand_ring) >= 500:
                 _cand_ring_flush(os.getpid())
+        block_k = triton.next_power_of_2(self.selector_top_k)
         _selector_walk_kernel[(num_reqs,)](
             scores.contiguous(),
             candidate_ids.contiguous(),
