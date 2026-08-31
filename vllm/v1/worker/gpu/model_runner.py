@@ -18,6 +18,29 @@ instead of embedding feature-specific logic directly.
 """
 
 import functools
+import os
+
+_ASM_RING: list = []
+
+
+def _asm_ring_flush(pid: int) -> None:
+    out_dir = os.environ.get("VLLM_ASM_RING")
+    if not out_dir or not _ASM_RING:
+        return
+    import pickle
+
+    with open(os.path.join(out_dir, f"asm_ring_{pid}.dump"), "ab") as f:
+        for ids, pos, nsched, req_ids, _na in _ASM_RING:
+            pickle.dump(
+                {
+                    "ids": ids.cpu().tolist(),
+                    "pos": pos.cpu().tolist(),
+                    "nsched": nsched.tolist(),
+                    "req_ids": req_ids,
+                },
+                f,
+            )
+    _ASM_RING.clear()
 import gc
 import time
 from copy import deepcopy
@@ -1346,6 +1369,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 else None
             ),
         )
+        # Verify-input assembly audit lever (zero-cost when env unset):
+        # async-clone final per-step ids/positions/nsched/na; flushed to
+        # disk every 500 steps. Offline: position + token continuity.
+        if os.environ.get("VLLM_ASM_RING"):
+            _ASM_RING.append(
+                (
+                    input_batch.input_ids.to(torch.int64).clone(),
+                    input_batch.positions.clone(),
+                    num_scheduled_tokens_np.copy(),
+                    tuple(req_ids),
+                    getattr(self, "_asm_na_gpu", None),
+                )
+            )
+            if len(_ASM_RING) >= 500:
+                _asm_ring_flush(os.getpid())
         return pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)
 
     def prepare_attn(
