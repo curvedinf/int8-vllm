@@ -1466,16 +1466,19 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
             )
             if os.environ.get("VLLM_CAND_RING") and not torch.cuda.is_current_stream_capturing():
-                # NaN-origin hunt: draft+target GDN spec state health per
-                # layer (pass 46). NaN here entering a round = state was
-                # poisoned by a previous round's write.
+                # NaN-origin hunt: GDN spec state health per layer, over the
+                # LIVE request rows only (the whole cache includes stale/
+                # uninitialized slots whose garbage NaN is meaningless).
                 import vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn as _g
                 st = _g._gdn_state_stats
+                n_spec = int(attn_metadata.num_spec_decodes)  # type: ignore[attr-defined]
+                live_rows = spec_state_indices_tensor[:, 0][:n_spec]
+                live = ssm_state[live_rows.long()]
                 st.append(
                     (
                         getattr(self, "_gdn_ring_name", "?"),
-                        int(ssm_state.isnan().sum()),
-                        float(ssm_state.abs().amax()),
+                        int(live.isnan().sum()),
+                        float(live.abs().amax()),
                     )
                 )
                 if len(st) >= 4000:
