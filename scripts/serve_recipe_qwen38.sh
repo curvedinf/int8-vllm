@@ -210,6 +210,12 @@ _gdndump_flag="${LOG_DIR}/GDNDUMP"
 if [[ -f "${_gdndump_flag}" ]]; then
   VLLM_GDN_DUMP_DIR="$(tr -d '[:space:]' < "${_gdndump_flag}")"
 fi
+# GDNRING: zero-overhead ring capture (no device sync; dumped at process
+# exit). Prefer this over GDNDUMP — the per-step dump's sync masks the garble.
+_gdnring_flag="${LOG_DIR}/GDNRING"
+if [[ -f "${_gdnring_flag}" ]]; then
+  VLLM_GDN_RING="$(tr -d '[:space:]' < "${_gdnring_flag}")"
+fi
 # AR=0 fully disables custom all-reduce (PYNCCL/RCCL path); AR=1 leaves the
 # selected custom backend enabled. With the defaults CAR=0/AR=1, vLLM CUSTOM
 # is selected ahead of PYNCCL.
@@ -292,6 +298,7 @@ start_server() {
   VLLM_SPEC_DEBUG_DUMP="${VLLM_SPEC_DEBUG_DUMP:-}" \
   VLLM_GFX908_ACT_QUANT="${VLLM_GFX908_ACT_QUANT:-round}" \
   VLLM_GDN_DUMP_DIR="${VLLM_GDN_DUMP_DIR:-}" \
+  VLLM_GDN_RING="${VLLM_GDN_RING:-}" \
   VLLM_DFLASH_DRAFT_EAGER="${VLLM_DFLASH_DRAFT_EAGER:-}" \
       VLLM_DFLASH_AUDIT="${VLLM_DFLASH_AUDIT:-}" \
       "${VENV}/bin/vllm" "${ARGS[@]}"
