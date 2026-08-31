@@ -216,6 +216,12 @@ _gdnring_flag="${LOG_DIR}/GDNRING"
 if [[ -f "${_gdnring_flag}" ]]; then
   VLLM_GDN_RING="$(tr -d '[:space:]' < "${_gdnring_flag}")"
 fi
+# GDNBISECT: race-bisect lever injected into the GDN metadata build —
+# one of: sleep | stream | device (see gdn_attn.py).
+_gdnbisect_flag="${LOG_DIR}/GDNBISECT"
+if [[ -f "${_gdnbisect_flag}" ]]; then
+  VLLM_GDN_BISECT="$(tr -d '[:space:]' < "${_gdnbisect_flag}")"
+fi
 # AR=0 fully disables custom all-reduce (PYNCCL/RCCL path); AR=1 leaves the
 # selected custom backend enabled. With the defaults CAR=0/AR=1, vLLM CUSTOM
 # is selected ahead of PYNCCL.
@@ -299,6 +305,7 @@ start_server() {
   VLLM_GFX908_ACT_QUANT="${VLLM_GFX908_ACT_QUANT:-round}" \
   VLLM_GDN_DUMP_DIR="${VLLM_GDN_DUMP_DIR:-}" \
   VLLM_GDN_RING="${VLLM_GDN_RING:-}" \
+  VLLM_GDN_BISECT="${VLLM_GDN_BISECT:-}" \
   VLLM_DFLASH_DRAFT_EAGER="${VLLM_DFLASH_DRAFT_EAGER:-}" \
       VLLM_DFLASH_AUDIT="${VLLM_DFLASH_AUDIT:-}" \
       "${VENV}/bin/vllm" "${ARGS[@]}"
