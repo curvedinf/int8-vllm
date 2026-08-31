@@ -381,6 +381,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.key_dim = self.head_k_dim * self.num_k_heads
         self.value_dim = self.head_v_dim * self.num_v_heads
         self.gqa_interleaved_layout = gqa_interleaved_layout
+        # Instance id for the GDN state-ring log (prefix not retained here).
+        self._gdn_ring_name = f"{prefix}#{id(self) % 10000}"
         if current_platform.is_xpu():
             self._forward_method = self.forward_xpu
         elif current_platform.is_cpu():
@@ -1471,7 +1473,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 st = _g._gdn_state_stats
                 st.append(
                     (
-                        getattr(self, "layer_name", "?"),
+                        getattr(self, "_gdn_ring_name", "?"),
                         int(ssm_state.isnan().sum()),
                         float(ssm_state.abs().amax()),
                     )
