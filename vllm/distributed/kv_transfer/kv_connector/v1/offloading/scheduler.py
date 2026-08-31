@@ -1341,6 +1341,22 @@ class OffloadingConnectorScheduler:
                 if num_chunks <= start_chunk_idx:
                     continue
                 offload_keys = group_state.offload_keys[start_chunk_idx:num_chunks]
+                # Mamba groups (single rolling state row) live in their LAST
+                # block, which the engine's spec-decode checkpoint kernels
+                # rewrite EVERY round. A mid-request store of that block
+                # races the DMA read (transfers only order against compute
+                # work queued at submission), tearing the tier copy; a later
+                # prefix-hit load writes the torn bytes back into a live
+                # row — whole-group NaN and the temp-1.0 garble (passes
+                # 58-62). Skip the running chunk's KEY while the request is
+                # live; the finish-time store captures it once writes stop.
+                mamba_skip_last_chunk = (
+                    group_config.sliding_window_size_in_chunks == 1
+                    and not req.is_finished()
+                )
+                last_storable_chunk = (
+                    num_chunks - 1 if mamba_skip_last_chunk else None
+                )
                 # For each chunk, take the last corresponding GPU block. For
                 # blocks_per_chunk=3 and GPU block IDs 1 5 6 7 2 4 9 3 8,
                 # this selects GPU blocks 6 4 8.
@@ -1364,6 +1380,8 @@ class OffloadingConnectorScheduler:
                     # reachable. EAGLE/MTP requires one additional chunk that
                     # lookup later drops as its volatile draft tail.
                     abs_chunk_idx = start_chunk_idx + key_idx
+                    if abs_chunk_idx == last_storable_chunk:
+                        continue
                     if not is_store_reachable_swa_chunk(
                         abs_chunk_idx,
                         num_chunks,
@@ -1442,8 +1460,12 @@ class OffloadingConnectorScheduler:
 
                 group_sizes.append(num_group_blocks)
                 block_indices.append(start_gpu_block_idx or 0)
+                # Cap the advance at the skipped running chunk so the
+                # finish-time store retries it once engine writes stop.
                 group_state.next_stored_chunk_idx = max(
-                    group_state.next_stored_chunk_idx, num_chunks
+                    group_state.next_stored_chunk_idx,
+                    (last_storable_chunk
+                     if last_storable_chunk is not None else num_chunks),
                 )
 
             src_spec = GPULoadStoreSpec(
