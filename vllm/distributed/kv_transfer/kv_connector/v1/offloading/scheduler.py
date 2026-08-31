@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
@@ -923,6 +924,11 @@ class OffloadingConnectorScheduler:
         return make_offload_key(request.block_hashes[hash_idx], group_idx)
 
     def _lookup(self, req_status: RequestOffloadState) -> int | None:
+        # Diagnostic lever: force recompute instead of serving tier loads.
+        # Stores still run; only the load/serve path is bypassed. Used to
+        # isolate load-content corruption (garble hunt pass 29).
+        if os.environ.get("VLLM_OFFLOAD_NO_LOADS"):
+            return None
         complete_hit = self._lookup_complete_chunks(req_status)
         req_status.partial_tail_boundary = None
         if complete_hit is None or not self.config.supports_partial_tail:

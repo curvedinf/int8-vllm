@@ -216,6 +216,11 @@ _gdnring_flag="${LOG_DIR}/GDNRING"
 if [[ -f "${_gdnring_flag}" ]]; then
   VLLM_GDN_RING="$(tr -d '[:space:]' < "${_gdnring_flag}")"
 fi
+# NOLOADS flag file: bypass tier load serving (diagnostic lever).
+_noloads_flag="${LOG_DIR}/NOLOADS"
+if [[ -f "${_noloads_flag}" ]]; then
+  VLLM_OFFLOAD_NO_LOADS=1
+fi
 # GDNBISECT: race-bisect lever injected into the GDN metadata build —
 # one of: sleep | stream | device (see gdn_attn.py).
 _gdnbisect_flag="${LOG_DIR}/GDNBISECT"
