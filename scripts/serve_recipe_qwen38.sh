@@ -155,8 +155,18 @@ if [[ -f "${_offload_flag}" ]]; then
   _offload_value="$(tr -d '[:space:]' < "${_offload_flag}")"
   if [[ "${_offload_value}" != "1" ]]; then
     _filtered=()
+    _skip_next=0
     for _a in "${ARGS[@]}"; do
-      [[ "${_a}" == --kv-transfer-config* ]] || _filtered+=("$_a")
+      if [[ "${_a}" == --kv-transfer-config* ]]; then
+        # The value is a separate argv element unless '='-joined.
+        _skip_next=1
+        continue
+      fi
+      if [[ "${_skip_next}" == 1 ]]; then
+        _skip_next=0
+        continue
+      fi
+      _filtered+=("$_a")
     done
     ARGS=("${_filtered[@]}")
   fi
