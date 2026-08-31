@@ -3,6 +3,8 @@
 """Inference-only Qwen3-Next/Qwen3.5 model."""
 
 import os
+
+_gdn_state_stats: list = []
 from typing import Literal
 
 import torch
@@ -1461,6 +1463,30 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     use_qk_l2norm_in_kernel=True,
                 )
             )
+            if os.environ.get("VLLM_CAND_RING") and not torch.cuda.is_current_stream_capturing():
+                # NaN-origin hunt: draft+target GDN spec state health per
+                # layer (pass 46). NaN here entering a round = state was
+                # poisoned by a previous round's write.
+                import vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn as _g
+                st = _g._gdn_state_stats
+                st.append(
+                    (
+                        getattr(self, "layer_name", "?"),
+                        int(ssm_state.isnan().sum()),
+                        float(ssm_state.abs().amax()),
+                    )
+                )
+                if len(st) >= 4000:
+                    with open(
+                        os.path.join(
+                            os.environ["VLLM_CAND_RING"],
+                            f"gdn_state_{os.getpid()}.log",
+                        ),
+                        "a",
+                    ) as _f:
+                        for name, n, mx in st:
+                            _f.write(f"{name} nan={n} absmax={mx:.1f}\n")
+                    st.clear()
         else:
             core_attn_out_spec, last_recurrent_state = None, None
 
