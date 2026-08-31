@@ -5,9 +5,30 @@
 from dataclasses import dataclass
 from typing import Literal
 
+import atexit
 import os
 
 import torch
+
+_GDN_RING: dict[int, list] = {}
+
+
+def _gdn_ring_dump() -> None:
+    out_dir = os.environ.get("VLLM_GDN_RING")
+    if not out_dir or not _GDN_RING:
+        return
+    # This runs at process exit: device sync here is free.
+    for bid, ring in _GDN_RING.items():
+        with open(
+            os.path.join(out_dir, f"gdn_backend_{bid % 10000}.log"), "a"
+        ) as f:
+            for idx_t, na_t in ring:
+                f.write(
+                    f"idx={idx_t.tolist()} na={na_t.tolist()}\n"
+                )
+
+
+atexit.register(_gdn_ring_dump)
 
 from vllm.config import VllmConfig
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -371,6 +392,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             # per-token state-indices rows and accepted counts handed to the
             # GDN kernels each step. Aliased columns within a request would
             # make the SSM rewind fold too far (see scripts/test_gdn_rewind.py).
+            # Two modes: VLLM_GDN_DUMP_DIR writes per step (NOTE: .tolist()
+            # syncs the device — this perturbs CPU/GPU overlap and has masked
+            # the garble; use only when timing is irrelevant); VLLM_GDN_RING
+            # appends the per-step tensors (already fresh copies from advanced
+            # indexing) to an in-process ring dumped at exit — no sync, no
+            # measurable timing change.
             gdn_dump_dir = os.environ.get("VLLM_GDN_DUMP_DIR")
             if gdn_dump_dir:
                 with open(
@@ -382,6 +409,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                         f"na={num_accepted_tokens.tolist()} "
                         f"cusl={spec_query_start_loc.tolist()}\n"
                     )
+            elif os.environ.get("VLLM_GDN_RING"):
+                ring = _GDN_RING.setdefault(id(self), [])
+                ring.append((spec_state_indices_tensor, num_accepted_tokens))
+                if len(ring) > 20000:
+                    del ring[:10000]
 
         chunk_indices: torch.Tensor | None = None
         chunk_offsets: torch.Tensor | None = None
