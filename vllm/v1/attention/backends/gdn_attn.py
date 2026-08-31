@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import atexit
+import time
 import os
 
 import torch
@@ -414,6 +415,16 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 ring.append((spec_state_indices_tensor, num_accepted_tokens))
                 if len(ring) > 20000:
                     del ring[:10000]
+            # Race-bisect lever: sleep (pure CPU delay), stream (default
+            # stream only), device (all streams). Whichever variant masks
+            # the garble localizes the missing ordering.
+            bisect = os.environ.get("VLLM_GDN_BISECT")
+            if bisect == "sleep":
+                time.sleep(0.002)
+            elif bisect == "stream":
+                torch.cuda.current_stream().synchronize()
+            elif bisect == "device":
+                torch.cuda.synchronize()
 
         chunk_indices: torch.Tensor | None = None
         chunk_offsets: torch.Tensor | None = None
