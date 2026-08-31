@@ -5,6 +5,8 @@
 from dataclasses import dataclass
 from typing import Literal
 
+import os
+
 import torch
 
 from vllm.config import VllmConfig
@@ -364,6 +366,22 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
 
             assert num_accepted_tokens is not None
             num_accepted_tokens = num_accepted_tokens[spec_sequence_masks_cpu]
+
+            # Spec-rewind audit lever (zero-cost when env unset): dump the
+            # per-token state-indices rows and accepted counts handed to the
+            # GDN kernels each step. Aliased columns within a request would
+            # make the SSM rewind fold too far (see scripts/test_gdn_rewind.py).
+            gdn_dump_dir = os.environ.get("VLLM_GDN_DUMP_DIR")
+            if gdn_dump_dir:
+                with open(
+                    os.path.join(gdn_dump_dir, f"gdn_backend_{id(self) % 10000}.log"),
+                    "a",
+                ) as f:
+                    f.write(
+                        f"idx={spec_state_indices_tensor.tolist()} "
+                        f"na={num_accepted_tokens.tolist()} "
+                        f"cusl={spec_query_start_loc.tolist()}\n"
+                    )
 
         chunk_indices: torch.Tensor | None = None
         chunk_offsets: torch.Tensor | None = None

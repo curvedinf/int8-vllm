@@ -204,6 +204,12 @@ if [[ -f "${_kvmem_flag}" ]]; then
 fi
 KVMEM="${KVMEM:-20200000000}"
 ARGS+=(--kv-cache-memory "${KVMEM}")
+# GDNDUMP: optional dir for the spec-rewind audit lever (gdn_attn.py dumps
+# per-token state indices + accepted counts per step when non-empty).
+_gdndump_flag="${LOG_DIR}/GDNDUMP"
+if [[ -f "${_gdndump_flag}" ]]; then
+  VLLM_GDN_DUMP_DIR="$(tr -d '[:space:]' < "${_gdndump_flag}")"
+fi
 # AR=0 fully disables custom all-reduce (PYNCCL/RCCL path); AR=1 leaves the
 # selected custom backend enabled. With the defaults CAR=0/AR=1, vLLM CUSTOM
 # is selected ahead of PYNCCL.
@@ -285,6 +291,7 @@ start_server() {
       "${COMMON_ENV[@]}" \
   VLLM_SPEC_DEBUG_DUMP="${VLLM_SPEC_DEBUG_DUMP:-}" \
   VLLM_GFX908_ACT_QUANT="${VLLM_GFX908_ACT_QUANT:-round}" \
+  VLLM_GDN_DUMP_DIR="${VLLM_GDN_DUMP_DIR:-}" \
   VLLM_DFLASH_DRAFT_EAGER="${VLLM_DFLASH_DRAFT_EAGER:-}" \
       VLLM_DFLASH_AUDIT="${VLLM_DFLASH_AUDIT:-}" \
       "${VENV}/bin/vllm" "${ARGS[@]}"

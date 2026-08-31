@@ -67,7 +67,10 @@ def kernel_step(x, conv_state, weight, bias, activation, accept, idx):
         query_start_loc=cu,
         max_query_len=seq,
     )
-    return out.view(batch, dim, seq)
+    # Packed (num_tokens, dim) rows in varlen mode — un-flatten per-request
+    # then move dim forward. (view(batch, dim, seq) permutes flat memory and
+    # scrambled the comparison — the source of the constant ~13.8 out_err.)
+    return out.view(batch, seq, dim).transpose(1, 2)
 
 
 def ref_committed(conv_state, x, weight, bias, activation, accept):
@@ -110,8 +113,16 @@ def main():
         out = kernel_step(x, conv_state, weight, bias, activation, accept, idx)
         ref_state = ref_committed(pre, x, weight, bias, activation, accept)
         se = (conv_state[idx].float() - ref_state.float()).abs().max().item()
-        # Outputs: kernel processes all 14 rows against the PRE state.
-        x_new = torch.cat([pre[:, :, -(WIDTH - 1):], x], dim=-1).to(weight.dtype)
+        # Outputs: kernel reads the PRE state anchored at the acceptance
+        # offset (causal_conv1d.py:893/905: col_j = pre_state[A-1+j], kernel
+        # num_accepted A = accept+1) and rolls x through it. seq_eff =
+        # [pre[A-1], pre[A], pre[A+1], x[0..SEQ-1]]; out[t] = conv over
+        # seq_eff[t..t+W-1]. (The last-3 slots of the buffer are NOT the
+        # context except at full acceptance — that anchor was pass 26's
+        # mis-model.)
+        A = accept + 1
+        ctx = pre[:, :, A - 1:A - 1 + WIDTH - 1].to(weight.dtype)
+        x_new = torch.cat([ctx, x], dim=-1).to(weight.dtype)
         oref = F.conv1d(x_new, weight.unsqueeze(1), bias, padding=0,
                         groups=DIM)[:, :, -SEQ:]
         oref = F.silu(oref) if activation else oref
