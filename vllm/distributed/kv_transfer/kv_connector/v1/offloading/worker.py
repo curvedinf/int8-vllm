@@ -3,6 +3,8 @@
 from collections import defaultdict
 from dataclasses import replace
 
+import os
+
 import torch
 
 from vllm.config import VllmConfig
@@ -227,6 +229,25 @@ class OffloadingConnectorWorker:
                             mapping=mapping,
                         )
                     )
+
+            # Spec-rewind audit lever (pass 61): dump the group/tensor
+            # geometry the connector's block-copy is built from. If a
+            # mamba group's shared tensor row is larger than the first
+            # layer's page_size_bytes, restores are undersized (stale tail
+            # layers = the draft's deep-layer NaN).
+            if os.environ.get("VLLM_OFFLOAD_LAYOUT_DUMP"):
+                _fps = page_size_bytes.get(first_layer_name, 0)
+                _t = tensors_per_block[first_layer_name][0]
+                _row = _t.stride(0) * _t.element_size()
+                _n = len(tensor_layer_names)
+                print(
+                    f"[OFFLOAD-LAYOUT] group_layers={_n} "
+                    f"first={first_layer_name[:48]} "
+                    f"page_size={_fps} tensor_row={_row} "
+                    f"{'UNDERSIZED' if _row > _fps else 'ok'} "
+                    f"shared_ptrs={len({tensors_per_block[n][0].data_ptr() for n in tensor_layer_names})}",
+                    flush=True,
+                )
 
         group_data_refs: list[list[CanonicalKVCacheRef]] = []
         for kv_cache_group in kv_cache_config.kv_cache_groups:

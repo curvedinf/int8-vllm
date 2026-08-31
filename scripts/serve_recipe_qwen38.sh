@@ -243,6 +243,11 @@ _gdnring_flag="${LOG_DIR}/GDNRING"
 if [[ -f "${_gdnring_flag}" ]]; then
   VLLM_GDN_RING="$(tr -d '[:space:]' < "${_gdnring_flag}")"
 fi
+# OFFLOAD_LAYOUT flag file: dump connector group/tensor geometry at boot.
+if [[ -f "${LOG_DIR}/OFFLOAD_LAYOUT" ]]; then
+  VLLM_OFFLOAD_LAYOUT_DUMP=1
+fi
+
 # DFCACHEBYPASS flag file: dense draft-logits cache rewrite (diagnostic
 # A/B for the garble; requires DFLEAGER since python must run per round).
 if [[ -f "${LOG_DIR}/DFCACHEBYPASS" ]]; then
@@ -368,6 +373,7 @@ start_server() {
   VLLM_SPEC_DEBUG_DUMP="${VLLM_SPEC_DEBUG_DUMP:-}" \
   VLLM_CAND_RING="${VLLM_CAND_RING:-}" \
   VLLM_DF_CACHE_BYPASS="${VLLM_DF_CACHE_BYPASS:-}" \
+  VLLM_OFFLOAD_LAYOUT_DUMP="${VLLM_OFFLOAD_LAYOUT_DUMP:-}" \
   VLLM_GFX908_ACT_QUANT="${VLLM_GFX908_ACT_QUANT:-round}" \
   VLLM_GDN_DUMP_DIR="${VLLM_GDN_DUMP_DIR:-}" \
   VLLM_GDN_RING="${VLLM_GDN_RING:-}" \
@@ -376,6 +382,7 @@ start_server() {
   VLLM_SPEC_DEBUG_DUMP="${VLLM_SPEC_DEBUG_DUMP:-}" \
   VLLM_CAND_RING="${VLLM_CAND_RING:-}" \
   VLLM_DF_CACHE_BYPASS="${VLLM_DF_CACHE_BYPASS:-}" \
+  VLLM_OFFLOAD_LAYOUT_DUMP="${VLLM_OFFLOAD_LAYOUT_DUMP:-}" \
   VLLM_OFFLOAD_NO_LOADS="${VLLM_OFFLOAD_NO_LOADS:-}" \
   VLLM_DFLASH_DRAFT_EAGER="${VLLM_DFLASH_DRAFT_EAGER:-}" \
       VLLM_DFLASH_AUDIT="${VLLM_DFLASH_AUDIT:-}" \
