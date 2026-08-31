@@ -198,6 +198,33 @@ class DFlash2Speculator(DFlashSpeculator):
         )
 
     def _cache_draft_logits(self, candidate_ids: torch.Tensor, num_sample: int) -> None:
+        import os as _os
+        if _os.environ.get("VLLM_DF_CACHE_BYPASS"):
+            # Diagnostic A/B (garble hunt pass 53): rewrite the cache
+            # densely each round — fill -inf then index_put THIS round's
+            # candidates/scores for every (req_state, step). If the garble
+            # vanishes, the incremental mask/rewrite kernel is convicted.
+            draft_logits = self.draft_logits
+            assert draft_logits is not None
+            with torch.no_grad():
+                dev = draft_logits.device
+                steps = self.num_speculative_steps
+                r_states = self.sample_idx_mapping[:num_sample].long()
+                step_idx = (
+                    torch.arange(num_sample, device=dev) % steps
+                )
+                flat_ids = candidate_ids.reshape(num_sample, -1).long()
+                flat_scores = (
+                    self._selector_scores[:num_sample // steps]
+                    .reshape(num_sample, -1)
+                )
+                draft_logits.fill_(float("-inf"))
+                for k in range(flat_ids.shape[1]):
+                    draft_logits[r_states, step_idx, flat_ids[:, k]] = (
+                        flat_scores[:, k]
+                    )
+                del r_states, step_idx, flat_ids, flat_scores
+            return
         draft_logits = self.draft_logits
         assert draft_logits is not None
         block_k = triton.next_power_of_2(self.selector_top_k)
