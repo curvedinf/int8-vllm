@@ -24,19 +24,14 @@ import torch.nn as nn
 _ASM_RING: list = []
 
 
-def _asm_ring_dump() -> None:
+def _asm_ring_flush(pid: int) -> None:
     out_dir = os.environ.get("VLLM_ASM_RING")
     if not out_dir or not _ASM_RING:
         return
-    import os.path
+    import pickle
 
-    with open(
-        os.path.join(out_dir, f"asm_ring_{os.getpid()}.dump"), "wb"
-    ) as f:
-        import pickle
-
-        for entry in _ASM_RING:
-            ids, pos, nsched, req_ids, na = entry
+    with open(os.path.join(out_dir, f"asm_ring_{pid}.dump"), "ab") as f:
+        for ids, pos, nsched, req_ids, na in _ASM_RING:
             pickle.dump(
                 {
                     "ids": ids.cpu().tolist(),
@@ -47,6 +42,11 @@ def _asm_ring_dump() -> None:
                 },
                 f,
             )
+    _ASM_RING.clear()
+
+
+def _asm_ring_dump() -> None:
+    _asm_ring_flush(os.getpid())
 
 
 atexit.register(_asm_ring_dump)
@@ -2394,8 +2394,8 @@ class GPUModelRunner(
                     self.num_accepted_tokens.gpu[:num_reqs].clone(),
                 )
             )
-            if len(_ASM_RING) > 12000:
-                del _ASM_RING[:6000]
+            if len(_ASM_RING) >= 500:
+                _asm_ring_flush(os.getpid())
 
         return (
             logits_indices,
