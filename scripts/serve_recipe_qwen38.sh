@@ -238,6 +238,13 @@ _gdnring_flag="${LOG_DIR}/GDNRING"
 if [[ -f "${_gdnring_flag}" ]]; then
   VLLM_GDN_RING="$(tr -d '[:space:]' < "${_gdnring_flag}")"
 fi
+# DFLEAGER flag file: run the DFlash draft eager (python executes every
+# round -> the CAND ring can see graph-replayed rounds).
+_dfl_flag="${LOG_DIR}/DFLEAGER"
+if [[ -f "${_dfl_flag}" ]]; then
+  VLLM_DFLASH_DRAFT_EAGER=1
+fi
+
 # CANDRING flag file: DFlash2 candidate ring (per-round ids/scores/drafts).
 _candring_flag="${LOG_DIR}/CANDRING"
 if [[ -f "${_candring_flag}" ]]; then
