@@ -149,6 +149,18 @@ ARGS=(
 if [[ "${OFFLOAD:-1}" == "1" ]]; then
   ARGS+=(--kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":12884901888}}')
 fi
+# OFFLOAD flag file (diagnostic lever for systemd-driven restarts).
+_offload_flag="${LOG_DIR}/OFFLOAD"
+if [[ -f "${_offload_flag}" ]]; then
+  _offload_value="$(tr -d '[:space:]' < "${_offload_flag}")"
+  if [[ "${_offload_value}" != "1" ]]; then
+    _filtered=()
+    for _a in "${ARGS[@]}"; do
+      [[ "${_a}" == --kv-transfer-config* ]] || _filtered+=("$_a")
+    done
+    ARGS=("${_filtered[@]}")
+  fi
+fi
 
 # Draft KV int8-PTH: full-W8A8 doctrine. SPECOFF=1 drops the draft for
 # diagnostic target-only legs. Flag-file override mirrors the levers above
