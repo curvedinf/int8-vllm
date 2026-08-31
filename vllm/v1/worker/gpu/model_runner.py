@@ -21,6 +21,25 @@ import functools
 import os
 
 _ASM_RING: list = []
+_ASM_OUT: list = []
+
+
+def _asm_out_flush(pid: int) -> None:
+    out_dir = os.environ.get("VLLM_ASM_RING")
+    if not out_dir or not _ASM_OUT:
+        return
+    import pickle
+
+    with open(os.path.join(out_dir, f"asm_out_{pid}.dump"), "ab") as f:
+        for req_ids, sampled in _ASM_OUT:
+            pickle.dump(
+                {
+                    "req_ids": req_ids,
+                    "sampled": sampled.cpu().tolist(),
+                },
+                f,
+            )
+    _ASM_OUT.clear()
 
 
 def _asm_ring_flush(pid: int) -> None:
@@ -1447,6 +1466,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # Draft logits are needed for probabilistic rejection sampling.
                 self.speculator.draft_logits,
             )
+            if os.environ.get("VLLM_ASM_RING"):
+                # Emitted-token capture for the assembly audit: the accepted
+                # (emitted) token ids per request for THIS round.
+                _ASM_OUT.append(
+                    (
+                        tuple(input_batch.req_ids),
+                        sampler_output.sampled_token_ids.detach().clone(),
+                    )
+                )
+                if len(_ASM_OUT) >= 500:
+                    _asm_out_flush(os.getpid())
 
         return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
 
