@@ -238,6 +238,12 @@ _gdnring_flag="${LOG_DIR}/GDNRING"
 if [[ -f "${_gdnring_flag}" ]]; then
   VLLM_GDN_RING="$(tr -d '[:space:]' < "${_gdnring_flag}")"
 fi
+# ASMRING flag file: verify-input assembly audit ring (dumped at exit).
+_asmring_flag="${LOG_DIR}/ASMRING"
+if [[ -f "${_asmring_flag}" ]]; then
+  VLLM_ASM_RING="$(tr -d '[:space:]' < "${_asmring_flag}")"
+fi
+
 # NOLOADS flag file: bypass tier load serving (diagnostic lever).
 _noloads_flag="${LOG_DIR}/NOLOADS"
 if [[ -f "${_noloads_flag}" ]]; then

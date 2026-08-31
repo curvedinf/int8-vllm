@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import atexit
 import functools
 import gc
 import itertools
+import os
 import threading
 import time
 from collections import defaultdict
@@ -18,6 +20,36 @@ import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
+
+_ASM_RING: list = []
+
+
+def _asm_ring_dump() -> None:
+    out_dir = os.environ.get("VLLM_ASM_RING")
+    if not out_dir or not _ASM_RING:
+        return
+    import os.path
+
+    with open(
+        os.path.join(out_dir, f"asm_ring_{os.getpid()}.dump"), "wb"
+    ) as f:
+        import pickle
+
+        for entry in _ASM_RING:
+            ids, pos, nsched, req_ids, na = entry
+            pickle.dump(
+                {
+                    "ids": ids.cpu().tolist(),
+                    "pos": pos.cpu().tolist(),
+                    "nsched": nsched.tolist(),
+                    "req_ids": req_ids,
+                    "na": na.cpu().tolist(),
+                },
+                f,
+            )
+
+
+atexit.register(_asm_ring_dump)
 from tqdm import tqdm
 
 import vllm.envs as envs
@@ -2345,6 +2377,25 @@ class GPUModelRunner(
             self.set_active_loras(
                 self.input_batch, num_scheduled_tokens, num_sampled_tokens
             )
+
+        # Verify-input assembly audit lever (zero-cost when env unset):
+        # async-clone the final per-step input ids + positions + the
+        # acceptance anchors, dumped at exit. Offline check: per-request
+        # position continuity and context continuity across rounds.
+        asm_ring_dir = os.environ.get("VLLM_ASM_RING")
+        if asm_ring_dir:
+            _ASM_RING.append(
+                (
+                    self.input_ids.gpu[:total_num_scheduled_tokens]
+                    .to(torch.int64).clone(),
+                    self.positions[:total_num_scheduled_tokens].clone(),
+                    self.num_scheduled_tokens.np[:num_reqs].copy(),
+                    tuple(self.input_batch.req_ids[:num_reqs]),
+                    self.num_accepted_tokens.gpu[:num_reqs].clone(),
+                )
+            )
+            if len(_ASM_RING) > 12000:
+                del _ASM_RING[:6000]
 
         return (
             logits_indices,
