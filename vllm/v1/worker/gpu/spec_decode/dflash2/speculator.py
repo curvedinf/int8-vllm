@@ -12,6 +12,30 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
+# Env-gated candidate ring (VLLM_CAND_RING): per-round (candidate_ids,
+# scores, draft_tokens) clones from _sample_path, flushed every 500 rounds.
+_cand_ring: list = []
+
+
+def _cand_ring_flush(pid: int) -> None:
+    import os
+    import pickle
+
+    out_dir = os.environ.get("VLLM_CAND_RING")
+    if not out_dir or not _cand_ring:
+        return
+    with open(os.path.join(out_dir, f"cand_ring_{pid}.dump"), "ab") as f:
+        for ids, scores, drafts in _cand_ring:
+            pickle.dump(
+                {
+                    "cand": ids.cpu().tolist(),
+                    "scores": scores.float().cpu().tolist(),
+                    "drafts": drafts.cpu().tolist(),
+                },
+                f,
+            )
+    _cand_ring.clear()
+
 
 @triton.jit
 def _selector_walk_kernel(
@@ -141,6 +165,12 @@ class DFlash2Speculator(DFlashSpeculator):
         scores: torch.Tensor,
         num_reqs: int,
     ) -> None:
+        if os.environ.get("VLLM_CAND_RING") and not torch.cuda.is_current_stream_capturing():
+            _cand_ring.append(
+                (candidate_ids.detach().clone(), scores.detach().clone(),
+                 self.draft_tokens.detach().clone()))
+            if len(_cand_ring) >= 500:
+                _cand_ring_flush(os.getpid())
         block_k = triton.next_power_of_2(self.selector_top_k)
         _selector_walk_kernel[(num_reqs,)](
             scores.contiguous(),
