@@ -42,7 +42,7 @@ VLLM_DISABLED_KERNELS=TritonW8A16LinearKernel \
 .venv/bin/vllm serve "$TARGET_MODEL" \
   --tensor-parallel-size 4 \
   --max-num-seqs 8 \
-  --dtype half \
+  --dtype bfloat16 \
   --kv-cache-dtype int8_per_token_head \
   --mamba-ssm-cache-dtype float32 \
   --compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","pass_config":{"fuse_allreduce_rms":false}}' \
@@ -58,10 +58,12 @@ The script encodes the full intended feature set:
 | Feature | Value | Why it's critical |
 |---|---|---|
 | Checkpoint | [`curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128`](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128), deployed at `<models>/Qwen3.8-27B-GPTQ-8bit-gs128` | GPTQ int8, gs=128 (enables W8A8) |
+| Target compute dtype | `bfloat16` (since 2026-09-01; was fp16) | REQUIRED: the fp16 residual stream overflows past 65504 when a repetition attractor grows activations at long context — inf logits → full-row NaN → the token-1023 'duct' hard-lock (garble-hunt class A). bf16 has fp32 range; the int8 stack is input-dtype-agnostic; acceptance/speed unchanged (gate: 6.9-8.9 vs 4.96 baseline) |
 | GEMMs | **AITER W8A8 INT8 everywhere**, decode and prefill | no W8A16 or fork-local Triton GEMM in the target run |
 | KV cache | `int8_per_token_head` (fp32 inline scales, block 32) | half KV bandwidth; replay-measured 0.85% per token-head — normal int8 SNR |
 | Mamba/GDN state | `float32` (`--mamba-ssm-cache-dtype float32`) | REQUIRED: the fp16 state round-trip broke delta-rule cancellation and blew states to 63k (4% under fp16 ceiling) — the KLD-tail generator; int8 state corrupts in the int8-KV combo (bisect 2026-08-25); fp32 is the checkpoint's own declared dtype |
 | Act quantizer | round-to-nearest (`VLLM_GFX908_ACT_QUANT=round`, fused Triton kernel) | halved the dominant 10-15% act-quant error leg; fixed 10x first-token-stop inflation (empty responses); also faster than the 4-pass eager aiter chain |
+| Sampling default | `repetition_penalty=1.05` in the override-generation-config (since 2026-09-01) | at temp 1.0 on long structured output this model enters p→1.0 repetition attractors under ANY faithful sampler (engine proven exact — garble-hunt class B); the 1.05 default breaks the locks via the existing penalty machinery (validated 1/8 vs 4-6/8 without). Per-request override still works |
 | Embedding lookup | int8 gather | half embedding bandwidth; it is not a GEMM exception |
 | Speculative decoding | **DFlash2, ns=13, int8 drafter, int8 draft KV — ON, non-negotiable** | NS=13 per the 2026-08-26 tuned-aiter sweep: best measured TPOT 12.34 ms (single rep; see NS table below). Prior NS=15 default measured 18.89 ms same-session; NS=17 collapses: 29.7% acceptance |
 | Attention backend | **AITER unified attention in INT8** | target and draft both use INT8-PTH KV |

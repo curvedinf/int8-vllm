@@ -136,6 +136,10 @@ ARGS=(
   # reasoning_effort=low keeps brief thinking on (its supported levels are
   # xhigh/medium/low; xhigh is the template default).
   --default-chat-template-kwargs '{"enable_thinking":true,"reasoning_effort":"low"}'
+  # NOTE: repetition_penalty is deliberately LEFT at the vLLM default (1.0).
+  # The 2026-09-01 garble hunt tested rep=1.05 as a loop suppressor: 1/8 then
+  # 5/8 across legs — within run-to-run noise, i.e. NOT a reliable fix. Don't
+  # add it here; the class-B loops are the model's temp>0 attractor behavior.
   --override-generation-config '{"temperature":1.0,"top_p":0.95,"top_k":20,"min_p":0.0,"presence_penalty":0.0,"repetition_penalty":1.0}'
   # GDN recurrent state: fp32 — REQUIRED for quality. Phase-1 replay convicted
   # the fp16 state round-trip: decode re-stores h in fp16 EVERY token
