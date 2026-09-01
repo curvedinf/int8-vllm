@@ -3,12 +3,16 @@
 from dataclasses import dataclass
 from typing import Any
 
+import json
+import os
+
 import numpy as np
 import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
@@ -26,6 +30,8 @@ from vllm.v1.worker.mamba_utils import (
     preprocess_mamba_align_fused_kernel,
 )
 from vllm.v1.worker.utils import AttentionGroup
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -218,6 +224,12 @@ class MambaHybridModelState(DefaultModelState):
             BLOCK_SIZE=block,
             MAMBA_BLOCK_SIZE=mamba_spec.block_size,
         )
+        # Probe phase 1: crossing detection + source-block NaN scan BEFORE the
+        # precopy (the source is the previous round's checkpoint column).
+        _pre = None
+        if os.environ.get("VLLM_ALIGN_PROBE") and not torch.cuda.is_current_stream_capturing():
+            _pre = self._align_probe(input_batch, mamba_group_ids, block_tables,
+                                     kv_cache_config, phase="pre")
         ctx.run_fused_precopy(
             num_reqs,
             self._mamba_state_idx_gpu,
@@ -225,6 +237,194 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_src_off_gpu,
             input_batch.idx_mapping,
         )
+        if os.environ.get("VLLM_ALIGN_PROBE") and not torch.cuda.is_current_stream_capturing():
+            self._align_probe(input_batch, mamba_group_ids, block_tables,
+                              kv_cache_config, phase="post", pre=_pre)
+        if os.environ.get("VLLM_GDN_PROBE") and not torch.cuda.is_current_stream_capturing():
+            self._gdn_probe(input_batch, mamba_group_ids, kv_cache_config, block_tables)
+
+    @torch.inference_mode()
+    def _gdn_probe(self, input_batch, mamba_group_ids, kv_cache_config, block_tables) -> None:
+        """Env-gated (VLLM_GDN_PROBE) per-step NaN scan of every live
+        request's RUNNING mamba state block (the column the forward is about
+        to read), per layer. Runs eagerly outside the CUDA graph, so it sees
+        the replayed forward's actual state. First NaN onset per (rs, layer)
+        is logged with the request's position — localizing which state type /
+        layer / position produces the production-config logits NaN.
+        """
+        try:
+            fc = self.vllm_config.compilation_config.static_forward_context
+            idx_map = input_batch.idx_mapping.cpu().tolist()
+            state_idx = self._mamba_state_idx_gpu.cpu().tolist()
+            out = os.environ["VLLM_GDN_PROBE"]
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+            nct = input_batch.num_computed_tokens_np
+            self._probe_step = getattr(self, "_probe_step", 0) + 1
+            step = self._probe_step
+            # --- cross-request window sharing scan (mamba groups) ---
+            # The spec checkpoint window [start..start+13] of each request must
+            # hold PHYSICALLY PRIVATE blocks; a nonzero block id appearing in
+            # two live requests' windows means checkpoint writes cross-
+            # contaminate (prefix-shared or recycled block mapped twice).
+            mamba_bs = self._mamba_spec.block_size if self._mamba_spec else 1728
+            for gid in mamba_group_ids:
+                bt = block_tables[gid]
+                win_map: dict[int, list] = {}
+                for b, rs in enumerate(idx_map[: input_batch.num_reqs]):
+                    if rs < 0:
+                        continue
+                    col = state_idx[rs]
+                    if col < 0:
+                        continue
+                    width = bt.shape[1]
+                    lo = max(0, min(col, width - 1))
+                    hi = min(width, lo + 1 + 13)
+                    for c in range(lo, hi):
+                        blk = int(bt[b, c])
+                        if blk > 0:
+                            win_map.setdefault(blk, []).append((rs, c))
+                shared = {
+                    blk: owners
+                    for blk, owners in win_map.items()
+                    if len({o[0] for o in owners}) > 1
+                }
+                if shared:
+                    with open(out, "a") as f:
+                        f.write(
+                            json.dumps(
+                                {
+                                    "kind": "SHARE",
+                                    "step": step,
+                                    "gid": gid,
+                                    "shared": {
+                                        str(k): v for k, v in list(shared.items())[:8]
+                                    },
+                                }
+                            )
+                            + "\n"
+                        )
+            # --- per-layer NaN scan of the running state block ---
+            for gid in mamba_group_ids:
+                layer_names = kv_cache_config.kv_cache_groups[gid].layer_names
+                bt = block_tables[gid]
+                for layer_name in layer_names:
+                    attn = fc[layer_name]
+                    for st_i, state in enumerate(attn.kv_cache):
+                        # state: [num_blocks, ...] — scan the running block of
+                        # each live request (first 4k elements of the block).
+                        for b, rs in enumerate(idx_map[: input_batch.num_reqs]):
+                            if rs < 0:
+                                continue
+                            col = state_idx[rs]
+                            if col < 0:
+                                continue
+                            blk = int(bt[b, col])
+                            if blk <= 0:
+                                continue
+                            row = state[blk].reshape(-1)[:4096]
+                            nan = int(row.isnan().sum())
+                            if nan:
+                                entry = {
+                                    "kind": "NAN",
+                                    "step": step,
+                                    "rs": rs, "layer": layer_name,
+                                    "state_type": st_i, "col": col,
+                                    "block": blk, "nan": nan,
+                                    "absmax": float(row.abs().max())
+                                        if nan < row.numel() else float("nan"),
+                                    "pos": int(nct[b]) if nct is not None else None,
+                                }
+                                with open(out, "a") as f:
+                                    f.write(json.dumps(entry) + "\n")
+        except Exception as e:  # never let the probe kill the engine
+            logger.warning("GDNPROBE failed: %s", e)
+
+    def _align_probe(self, input_batch, mamba_group_ids, block_tables,
+                     kv_cache_config=None, phase="post", pre=None) -> dict | None:
+        """Env-gated (VLLM_ALIGN_PROBE) two-phase crossing audit.
+
+        phase="pre": detect each request's migration (src_col != dst_col),
+        scan the SOURCE block (column src_col + token_bias — the accepted-token
+        checkpoint written by the previous round's forward) for NaN across the
+        mamba group's state tensors, log the crossing, and return the per-key
+        source-NaN map.
+        phase="post": scan the DEST block after the precopy and classify:
+        source clean + dest NaN => the copy introduced the NaN (read past the
+        valid content); source NaN => the forward wrote NaN checkpoints.
+        """
+        try:
+            idx_map = input_batch.idx_mapping.cpu().tolist()
+            src_col = self._mamba_src_col_gpu.cpu().tolist()
+            dst_col = self._mamba_state_idx_gpu.cpu().tolist()
+            src_off = self._mamba_src_off_gpu.cpu().tolist()
+            gid = mamba_group_ids[0]
+            bt = block_tables[gid]
+            out = os.environ["VLLM_ALIGN_PROBE"]
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+            fc = self.vllm_config.compilation_config.static_forward_context
+            layer_names = (
+                kv_cache_config.kv_cache_groups[gid].layer_names
+                if kv_cache_config is not None
+                else []
+            )
+
+            def scan_block(blk: int) -> int:
+                """Total NaN count over the group's first-layer state tensors."""
+                if blk <= 0:
+                    return -1
+                total = 0
+                for ln in layer_names:
+                    for state in fc[ln].kv_cache:
+                        total += int(state[blk].reshape(-1)[:4096].isnan().sum())
+                return total
+
+            pre_map = {} if pre is None else pre
+            result = {}
+            for b, rs in enumerate(idx_map[: input_batch.num_reqs]):
+                if rs < 0:
+                    continue
+                sc, dc, off = src_col[rs], dst_col[rs], src_off[rs]
+                if sc < 0 or sc == dc:
+                    continue
+                row = bt[b].cpu().tolist()
+                width = len(row)
+                read_col = sc + off
+                read_blk = row[read_col] if read_col < width else -1
+                dst_blk = row[dc] if dc < width else -1
+                key = (rs, sc, dc, off)
+                if phase == "pre":
+                    src_nan = scan_block(read_blk)
+                    result[key] = src_nan
+                    entry = {
+                        "phase": "pre", "rs": rs, "src_col": sc,
+                        "dst_col": dc, "token_bias": off,
+                        "read_col": read_col, "read_block_id": read_blk,
+                        "dst_block_id": dst_blk, "src_nan": src_nan,
+                        "window_blocks": row[sc : min(sc + 14, width)],
+                    }
+                    with open(out, "a") as f:
+                        f.write(json.dumps(entry) + "\n")
+                else:
+                    dst_nan = scan_block(dst_blk)
+                    src_nan = pre_map.get(key, -2)
+                    verdict = (
+                        "COPY_INTRODUCED_NAN"
+                        if src_nan == 0 and dst_nan > 0
+                        else ("SOURCE_NAN" if src_nan and src_nan > 0 else "clean")
+                    )
+                    entry = {
+                        "phase": "post", "rs": rs, "src_col": sc,
+                        "dst_col": dc, "token_bias": off,
+                        "read_block_id": read_blk, "dst_block_id": dst_blk,
+                        "src_nan": src_nan, "dst_nan": dst_nan,
+                        "verdict": verdict,
+                    }
+                    with open(out, "a") as f:
+                        f.write(json.dumps(entry) + "\n")
+            return result
+        except Exception as e:  # never let the probe kill the engine
+            logger.warning("ALIGNPROBE failed: %s", e)
+            return None
 
     def prepare_attn(
         self,

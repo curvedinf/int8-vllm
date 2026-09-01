@@ -140,6 +140,7 @@ def gumbel_block_argmax(
     APPLY_TEMPERATURE: tl.constexpr,
     USE_FP64: tl.constexpr,
     PER_TOKEN_COL: tl.constexpr = False,
+    POS_SALT: tl.constexpr = 0,
 ):
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx).to(tl.int64)
     is_valid_req = req_state_idx >= 0
@@ -166,6 +167,12 @@ def gumbel_block_argmax(
 
     seed = tl.load(seeds_ptr + req_state_idx, mask=is_valid_req, other=0)
     pos = tl.load(pos_ptr + token_idx)
+    # POS_SALT decorrelates this draw's noise from any other draw keyed at the
+    # same (seed, pos) — used by the rejection resample so the residual draw
+    # does not share the draft walk's gumbel stream (both key on (seed, Q-1)
+    # for a token at position Q). Margin-preserving: any uniform noise is a
+    # valid gumbel draw.
+    pos = pos + POS_SALT
     return gumbel_noised_argmax(
         logits,
         block,

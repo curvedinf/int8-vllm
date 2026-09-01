@@ -25,6 +25,19 @@ CPUSET="0-47"
 # Triton unified-attention path instead of AITER's). Must resolve BEFORE
 # COMMON_ENV, which consumes ${UA:-1}.
 _ua_flag="${LOG_DIR}/UA"
+_ns_flag="${LOG_DIR}/NS"
+if [[ -f "${_ns_flag}" ]]; then
+  NS="$(tr -d '[:space:]' < "${_ns_flag}")"
+fi
+
+# DTYPE flag file: override the target model dtype (default half). The
+# 1023-lock NaN cascade is driven by fp16 overflow when a repetition
+# attractor grows the residual stream past 65504 at long context — bf16
+# (the model's native dtype) has fp32 range and cannot overflow there.
+_dt_flag="${LOG_DIR}/DTYPE"
+if [[ -f "${_dt_flag}" ]]; then
+  DTYPE="$(tr -d '[:space:]' < "${_dt_flag}")"
+fi
 if [[ -f "${_ua_flag}" ]]; then
   UA="$(tr -d '[:space:]' < "${_ua_flag}")"
 fi
@@ -93,7 +106,12 @@ ARGS=(
   --host "${HOST}"
   --port "${PORT}"
   --tensor-parallel-size 4
-  --dtype "${DTYPE:-half}"
+  # Target compute dtype. DEFAULT bfloat16 since 2026-09-01: the fp16 residual
+  # stream overflows (>65504) when a repetition attractor grows activations at
+  # long context, producing inf -> NaN logits and the token-1023 'duct' lock
+  # (garble hunt pass 75). bf16 has fp32 range; the int8 W8A8/int8-PTH stack
+  # is input-dtype-agnostic. Revert per-boot via the DTYPE flag file.
+  --dtype "${DTYPE:-bfloat16}"
   --max-model-len 262144
   --max-num-seqs 6
   --gpu-memory-utilization 0.92
@@ -181,11 +199,7 @@ if [[ -f "${_spec_flag}" ]]; then
 else
   _spec_value="${SPECOFF:-0}"
 fi
-# NS flag file (diagnostic lever for systemd-driven boots, e.g. NS=2 window test)
-_ns_flag="${LOG_DIR}/NS"
-if [[ -f "${_ns_flag}" ]]; then
-  NS="$(tr -d '[:space:]' < "${_ns_flag}")"
-fi
+# (NS flag file read near the top of this script, before COMMON_ENV.)
 if [[ "${_spec_value}" != "1" ]]; then
   ARGS+=(--speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":'"${NS:-13}"',"kv_cache_dtype":"'"${DRAFT_KV_DTYPE:-int8_per_token_head}"'"}')
 fi
@@ -278,6 +292,31 @@ fi
 _asmring_flag="${LOG_DIR}/ASMRING"
 if [[ -f "${_asmring_flag}" ]]; then
   VLLM_ASM_RING="$(tr -d '[:space:]' < "${_asmring_flag}")"
+fi
+
+# PRING flag file: per-round committed-token probability ring in the
+# rejection sampler (decisive for the wall question: target p at walls).
+_pring_flag="${LOG_DIR}/PRING"
+if [[ -f "${_pring_flag}" ]]; then
+  VLLM_P_RING="$(tr -d '[:space:]' < "${_pring_flag}")"
+fi
+
+# RSALT flag file: salt the resample gumbel key (decorrelates the residual
+# draw from the draft walk's noise stream; exactness-preserving A/B lever).
+if [[ -f "${LOG_DIR}/RSALT" ]]; then
+  VLLM_RESAMPLE_SALT=1
+fi
+
+# ALIGNPROBE flag file: log every align-mode mamba boundary migration with
+# the block-table columns the precopy reads (the 1023-lock NaN onset hunt).
+if [[ -f "${LOG_DIR}/ALIGNPROBE" ]]; then
+  VLLM_ALIGN_PROBE="/home/curved/vllm-gfx908/logs/garble/align_probe.jsonl"
+fi
+
+# GDNPROBE flag file: per-step NaN scan of each live request's running mamba
+# state block per layer, eager (sees the replayed forward's real state).
+if [[ -f "${LOG_DIR}/GDNPROBE" ]]; then
+  VLLM_GDN_PROBE="/home/curved/vllm-gfx908/logs/garble/gdn_probe.jsonl"
 fi
 
 # NOLOADS flag file: bypass tier load serving (diagnostic lever).
@@ -379,6 +418,10 @@ start_server() {
   VLLM_GDN_RING="${VLLM_GDN_RING:-}" \
   VLLM_GDN_BISECT="${VLLM_GDN_BISECT:-}" \
   VLLM_ASM_RING="${VLLM_ASM_RING:-}" \
+  VLLM_P_RING="${VLLM_P_RING:-}" \
+  VLLM_RESAMPLE_SALT="${VLLM_RESAMPLE_SALT:-}" \
+  VLLM_ALIGN_PROBE="${VLLM_ALIGN_PROBE:-}" \
+  VLLM_GDN_PROBE="${VLLM_GDN_PROBE:-}" \
   VLLM_SPEC_DEBUG_DUMP="${VLLM_SPEC_DEBUG_DUMP:-}" \
   VLLM_CAND_RING="${VLLM_CAND_RING:-}" \
   VLLM_DF_CACHE_BYPASS="${VLLM_DF_CACHE_BYPASS:-}" \

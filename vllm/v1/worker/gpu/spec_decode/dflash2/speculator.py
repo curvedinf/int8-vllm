@@ -101,6 +101,10 @@ def _selector_walk_kernel(
             scores,
             mask=mask & valid,
         )
+        # NaN scores make the argmax index match nowhere / run past the
+        # candidate row; clamp to candidate 0 (a wrong draft is simply
+        # rejected by the verify). Ported from the rtx3090 kvarn-v2 fix.
+        index = tl.where(index >= top_k, 0, index)
         token = tl.load(candidate_ptr + candidate_base + index, mask=valid, other=0)
         tl.store(tokens_ptr + flat, token, mask=valid)
         previous = index
@@ -319,6 +323,13 @@ class DFlash2Speculator(DFlashSpeculator):
             hidden_states,
             anchor_token_ids,
         )
+        # Degenerate (ultra-peaked) distributions can NaN the selector scores;
+        # NaN poisons both the walk (index runs past the candidate row) and
+        # the cached draft logits the rejection sampler reads (a NaN lse turns
+        # the whole residual -inf, tie-breaking the resample to a constant
+        # token). Sanitize to finite; verify stays exact. Ported from the
+        # rtx3090 kvarn-v2 fix. Pure GPU op, cudagraph-capture-safe.
+        scores = torch.nan_to_num(scores, nan=-1e30, posinf=1e30, neginf=-1e30)
         self._sample_path(candidate_ids, scores, num_reqs)
         if os.environ.get("VLLM_DFLASH_AUDIT"):
             from vllm import quant_audit_recorder as _qa

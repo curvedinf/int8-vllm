@@ -57,6 +57,74 @@ def _iter_request_chunks(
         start = end
 
 
+def _p_ring_append(
+    out_dir: str,
+    processed_logits: torch.Tensor,
+    sampled: torch.Tensor,
+    num_sampled: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+    pos: torch.Tensor,
+    idx_mapping_np: np.ndarray,
+    draft_sampled: torch.Tensor | None = None,
+) -> None:
+    """Env-gated (VLLM_P_RING) per-round committed-token probability ring.
+
+    For each request, per committed token c of the round, record the
+    probability the verify distribution (processed/truncated logits row
+    start+c) assigned to the committed token, plus the row's top-1 prob.
+    Decisive for the wall question: at a repetition wall, does the target
+    itself put p~1 on the wall token (state attractor) or is the committed
+    token a low-p token the sampler should rarely return (resample defect)?
+    """
+    import pickle
+
+    os.makedirs(out_dir, exist_ok=True)
+    lp = torch.log_softmax(processed_logits, dim=-1)
+    cu = cu_num_logits.cpu().tolist()
+    ns = num_sampled.cpu().tolist()
+    pos_l = pos.cpu().tolist()
+    with open(os.path.join(out_dir, f"p_ring_{os.getpid()}.dump"), "ab") as f:
+        for r, rs in enumerate(idx_mapping_np.tolist()):
+            start, n = int(cu[r]), int(ns[r])
+            if n <= 0:
+                continue
+            toks = sampled[r, :n]
+            rows = lp[start : start + n]
+            p_tok = rows.gather(1, toks.view(-1, 1)).exp().view(-1).cpu().tolist()
+            top1 = rows.max(dim=-1).values.exp().cpu().tolist()
+            # The drafts verified this round (draft_sampled rows start+1..start+n-1
+            # correspond to committed[0..n-2]; committed[n-1] is the resample).
+            drafts = (
+                draft_sampled[start + 1 : start + n].cpu().tolist()
+                if draft_sampled is not None
+                else []
+            )
+            # Magnitude signature of the resample row: inf-scale logits mean
+            # an overflow upstream (fp16 cast / GEMM); plain NaN means a
+            # poisoned state read.
+            rrow = processed_logits[start + n - 1]
+            row_nan = int(rrow.isnan().sum().item())
+            row_absmax = float(rrow.abs().max().item())
+            # Top-5 tokens of the resample row's (truncated) distribution:
+            # the support the sampler saw — clean English vs salad.
+            top5 = torch.topk(rrow, 5).indices.cpu().tolist()
+            pickle.dump(
+                {
+                    "rs": int(rs),
+                    "pos0": int(pos_l[start]),
+                    "n": n,
+                    "tok": toks.cpu().tolist(),
+                    "p": [round(x, 5) for x in p_tok],
+                    "top1": [round(x, 5) for x in top1],
+                    "drafts": drafts,
+                    "row_nan": row_nan,
+                    "row_absmax": round(row_absmax, 2),
+                    "top5": top5,
+                },
+                f,
+            )
+
+
 @triton.jit
 def _flatten_sampled_kernel(
     # [num_logits]
@@ -190,7 +258,21 @@ class RejectionSampler:
             self.synthetic_conditional_rates,
             use_fp64=self.sampler.use_fp64_gumbel,
             use_block_verification=self.use_block_verification,
+            salt_resample=bool(os.environ.get("VLLM_RESAMPLE_SALT")),
+            salt_u=bool(os.environ.get("VLLM_SALT_U")),
         )
+        _p_ring = os.environ.get("VLLM_P_RING")
+        if _p_ring and not torch.cuda.is_current_stream_capturing():
+            _p_ring_append(
+                _p_ring,
+                processed_logits,
+                sampled,
+                num_sampled,
+                cu_num_logits,
+                pos,
+                idx_mapping_np,
+                draft_sampled,
+            )
         return processed_logits, sampled, num_sampled
 
     def _verify_in_chunks(

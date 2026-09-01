@@ -538,6 +538,7 @@ def _rejection_kernel(
     HAS_DRAFT_LOGITS: tl.constexpr,
     SYNTHETIC_MODE: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
+    SALT_U: tl.constexpr = False,
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
@@ -567,7 +568,17 @@ def _rejection_kernel(
 
         if verifying:
             pos = tl.load(pos_ptr + logit_idx)
-            u = tl_rand32(seed, pos, includes_zero=False)
+            if SALT_U:
+                # Diagnostic A/B (garble hunt): draw the acceptance uniform from
+                # a decorrelated philox stream. The engine default shares the
+                # (seed, pos) philox block between this u and the draft walk's
+                # gumbel seed (tl.randint(seed, pos)), correlating u with which
+                # token the drafter picked; on a consistent drafter (a wall)
+                # that correlation over-accepts the repeat token through the
+                # chain. Salting preserves the marginal (any uniform u works).
+                u = tl_rand32(seed + 0x9E3779B9, pos, includes_zero=False)
+            else:
+                u = tl_rand32(seed, pos, includes_zero=False)
             if is_greedy:
                 # Greedy sampling. Accept IFF draft matches target argmax.
                 # NOTE: Target argmax is stored directly so that resampling
@@ -733,6 +744,7 @@ def _resample_kernel(
     HAS_DRAFT_LOGITS: tl.constexpr,
     USE_FP64: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
+    SALT_RESAMPLE: tl.constexpr = False,
 ):
     req_idx = tl.program_id(0)
     resample_idx = tl.load(rejected_step_ptr + req_idx)
@@ -840,6 +852,7 @@ def _resample_kernel(
         vocab_size,
         APPLY_TEMPERATURE=False,
         USE_FP64=USE_FP64,
+        POS_SALT=(1 << 40) if SALT_RESAMPLE else 0,
     )
     token_id = block_idx * BLOCK_SIZE + idx
     tl.store(
@@ -947,6 +960,8 @@ def rejection_sample(
     synthetic_conditional_rates: torch.Tensor | None = None,
     use_fp64: bool = False,
     use_block_verification: bool = False,
+    salt_resample: bool = False,
+    salt_u: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
     assert draft_logits is None or (
@@ -1157,6 +1172,7 @@ def rejection_sample(
         HAS_DRAFT_LOGITS=has_draft_logits,
         SYNTHETIC_MODE=synthetic_conditional_rates is not None,
         USE_BLOCK_VERIFICATION=use_block_verification,
+        SALT_U=salt_u,
         num_warps=1,
     )
 
@@ -1197,6 +1213,7 @@ def rejection_sample(
         HAS_DRAFT_LOGITS=has_draft_logits,
         USE_FP64=use_fp64,
         USE_BLOCK_VERIFICATION=use_block_verification,
+        SALT_RESAMPLE=salt_resample,
     )
 
     # Insert the resampled tokens into the output sampled.
