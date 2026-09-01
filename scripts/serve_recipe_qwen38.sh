@@ -307,6 +307,12 @@ if [[ -f "${LOG_DIR}/RSALT" ]]; then
   VLLM_RESAMPLE_SALT=1
 fi
 
+# SALTU flag file: draw the acceptance-test uniform from a decorrelated
+# philox stream (same marginal; A/B lever for the wall-amplification hunt).
+if [[ -f "${LOG_DIR}/SALTU" ]]; then
+  VLLM_SALT_U=1
+fi
+
 # ALIGNPROBE flag file: log every align-mode mamba boundary migration with
 # the block-table columns the precopy reads (the 1023-lock NaN onset hunt).
 if [[ -f "${LOG_DIR}/ALIGNPROBE" ]]; then
@@ -420,6 +426,7 @@ start_server() {
   VLLM_ASM_RING="${VLLM_ASM_RING:-}" \
   VLLM_P_RING="${VLLM_P_RING:-}" \
   VLLM_RESAMPLE_SALT="${VLLM_RESAMPLE_SALT:-}" \
+  VLLM_SALT_U="${VLLM_SALT_U:-}" \
   VLLM_ALIGN_PROBE="${VLLM_ALIGN_PROBE:-}" \
   VLLM_GDN_PROBE="${VLLM_GDN_PROBE:-}" \
   VLLM_SPEC_DEBUG_DUMP="${VLLM_SPEC_DEBUG_DUMP:-}" \
