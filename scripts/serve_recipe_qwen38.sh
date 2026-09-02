@@ -329,6 +329,12 @@ if [[ -f "${LOG_DIR}/GDNPROBE" ]]; then
   VLLM_GDN_PROBE="/home/curved/vllm-gfx908/logs/garble/gdn_probe.jsonl"
 fi
 
+# CONVGUARD flag file: count conv-kernel old-guard-condition hits per step
+# (the collapse_no_cross chain break; should be harmless post kernel fix).
+if [[ -f "${LOG_DIR}/CONVGUARD" ]]; then
+  VLLM_CONVGUARD_PROBE=1
+fi
+
 # NOLOADS flag file: bypass tier load serving (diagnostic lever).
 _noloads_flag="${LOG_DIR}/NOLOADS"
 if [[ -f "${_noloads_flag}" ]]; then
@@ -433,6 +439,7 @@ start_server() {
   VLLM_SALT_U="${VLLM_SALT_U:-}" \
   VLLM_ALIGN_PROBE="${VLLM_ALIGN_PROBE:-}" \
   VLLM_GDN_PROBE="${VLLM_GDN_PROBE:-}" \
+  VLLM_CONVGUARD_PROBE="${VLLM_CONVGUARD_PROBE:-}" \
   VLLM_SPEC_DEBUG_DUMP="${VLLM_SPEC_DEBUG_DUMP:-}" \
   VLLM_CAND_RING="${VLLM_CAND_RING:-}" \
   VLLM_DF_CACHE_BYPASS="${VLLM_DF_CACHE_BYPASS:-}" \

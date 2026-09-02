@@ -838,6 +838,10 @@ def _causal_conv1d_update_kernel(
                 tl.extra.cuda.gdc_launch_dependents()
             return
 
+    # In varlen (continuous-batching) calls, the kernel parameter ``seqlen``
+    # carries max_query_len and is revised below to this request's query_len.
+    # The spec-decode guard needs the pre-revision value (see below).
+    max_seqlen = seqlen
     if IS_VARLEN:
         query_start_index = tl.load(query_start_loc_ptr + idx_seq).to(tl.int64)
         query_end_index = tl.load(query_start_loc_ptr + (idx_seq + 1)).to(tl.int64)
@@ -871,8 +875,19 @@ def _causal_conv1d_update_kernel(
         # - accept 1 tokens: [history2, ..., historyM, draft1]
         # - accept 2 tokens: [history3, ..., historyM, draft1, draft2]
         # - and so on.
+        #
+        # num_accepted is the PREVIOUS round's acceptance count and only sets
+        # the rolling-buffer read offset (num_accepted - 1). It legitimately
+        # exceeds THIS round's seqlen when the draft count collapses mid-block
+        # (no mamba-boundary crossing to reset it): the buffer still holds the
+        # previous round's full optimistic window, so entries
+        # [num_accepted-1, num_accepted-1 + KERNEL_WIDTH-1) are valid. The true
+        # out-of-bounds condition is a read past the allocated rolling-buffer
+        # width (conv_kernel - 1 + max_query_len - 1), i.e.
+        # num_accepted > max_query_len (max_query_len == seqlen before the
+        # IS_VARLEN revision above).
         num_accepted = tl.load(num_accepted_tokens_ptr + idx_seq).to(tl.int64)
-        if (num_accepted < 1) | (num_accepted > seqlen):
+        if (num_accepted < 1) | (num_accepted > max_seqlen):
             # Stale or oversized accepted counts (e.g. a desynced
             # num_accepted under connector-served prefixes) would index the
             # rolling buffer out of bounds and spin the kernel on a wild

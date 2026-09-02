@@ -1448,10 +1448,25 @@ class MambaManager(SingleTypeKVCacheManager):
             # Blocks allocated during prefill may be non-contiguous. Use
             # `last_state_block_idx` to free the appropriate block and replace it
             # with a null block.
+            #
+            # DEFER the free until the vacated column is far behind the
+            # frontier. The worker-side block table is append-only: this
+            # null-out never propagates to the GPU row, so a block freed while
+            # any in-flight boundary migration or spec-decode window can still
+            # reference it remains visible in the donor's GPU row AND returns
+            # to the pool for another request's live window — the cross-request
+            # recurrent-state contamination behind the long-context garble
+            # (in-vivo: GDN probe SHARE events; distribution flattening past
+            # the first decode-time 1728-token boundary). The read reach is
+            # bounded: migrations read [frontier-1, frontier+num_spec] and the
+            # optimistic window regresses by at most one block, so a lag of
+            # num_speculative_blocks + 2 columns is unreachable by any future
+            # read while still recycling long-dead columns.
+            lag = self.num_speculative_blocks + 2
             if (
                 last_state_block_idx is not None
                 and last_state_block_idx
-                < cdiv(processed_computed_tokens, self.block_size) - 1
+                < cdiv(processed_computed_tokens, self.block_size) - 1 - lag
             ):
                 blocks = self.req_to_blocks[request_id]
                 if blocks[last_state_block_idx] != self._null_block:

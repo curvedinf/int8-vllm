@@ -380,6 +380,14 @@ class MambaHybridModelState(DefaultModelState):
 
             pre_map = {} if pre is None else pre
             result = {}
+            # num_accepted per req-state slot (previous round's acceptance,
+            # pre-reset — the token_bias source) for the regression analysis.
+            na_map = {}
+            try:
+                na_list = self.num_accepted_tokens_gpu.cpu().tolist()
+                na_map = {rs: na_list[rs] for rs in idx_map if rs >= 0}
+            except Exception:
+                pass
             for b, rs in enumerate(idx_map[: input_batch.num_reqs]):
                 if rs < 0:
                     continue
@@ -395,12 +403,19 @@ class MambaHybridModelState(DefaultModelState):
                 if phase == "pre":
                     src_nan = scan_block(read_blk)
                     result[key] = src_nan
+                    self._align_probe_step = getattr(self, "_align_probe_step", 0) + 1
                     entry = {
                         "phase": "pre", "rs": rs, "src_col": sc,
                         "dst_col": dc, "token_bias": off,
                         "read_col": read_col, "read_block_id": read_blk,
                         "dst_block_id": dst_blk, "src_nan": src_nan,
                         "window_blocks": row[sc : min(sc + 14, width)],
+                        # num_computed (optimistic mirror) + last-round
+                        # acceptance: the regression-driver measurements.
+                        "nct": int(input_batch.num_computed_tokens_np[b]),
+                        "na": na_map.get(rs, -1),
+                        "pid": os.getpid(),
+                        "step": self._align_probe_step,
                     }
                     with open(out, "a") as f:
                         f.write(json.dumps(entry) + "\n")
@@ -481,6 +496,27 @@ class MambaHybridModelState(DefaultModelState):
                     spec_decode_mask, num_draft_tokens_per_req, -1
                 )
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
+
+            # VLLM_CONVGUARD_PROBE (diagnostic): count spec rows where the OLD
+            # conv-kernel guard condition (num_accepted_prev > this round's
+            # query_len) would have fired — the collapse_no_cross chain break.
+            # With the kernel fix (guard bound = max_query_len) these proceed
+            # correctly; this counts how often the broken path was reachable.
+            if os.environ.get("VLLM_CONVGUARD_PROBE") and num_draft_tokens_per_req is not None:
+                na_np = self.num_accepted_tokens_gpu[input_batch.idx_mapping].cpu().numpy()
+                spec_rows = num_decode_draft_tokens_np[: input_batch.num_reqs] >= 0
+                if spec_rows.any():
+                    na_spec = na_np[: input_batch.num_reqs][spec_rows]
+                    seqlen_spec = num_decode_draft_tokens_np[: input_batch.num_reqs][spec_rows] + 1
+                    hits = int((na_spec > seqlen_spec).sum())
+                    self._convguard_hits = getattr(self, "_convguard_hits", 0) + hits
+                    self._convguard_rows = getattr(self, "_convguard_rows", 0) + int(spec_rows.sum())
+                    step = getattr(self, "_probe_step", 0)
+                    if step % 500 == 0:
+                        logger.warning(
+                            "CONVGUARD probe: old-guard hits=%d over %d spec rows (step %d)",
+                            self._convguard_hits, self._convguard_rows, step,
+                        )
 
         mamba_attn_metadata = MambaHybridAttnMetadata(
             is_prefilling=is_prefilling,

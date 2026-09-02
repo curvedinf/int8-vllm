@@ -23,7 +23,8 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
 
 DEV = "cuda"
 V = 1024
-NS = 13
+import os as _os
+NS = int(_os.environ.get("NS", "13"))
 R = 777  # the repeat token
 OTHERS = list(range(100, 118))  # 18 non-repeat tokens
 
@@ -68,6 +69,7 @@ def run_engine(M, seed):
     k = 0
     maxrun, walls, cur = 0, 0, 0
     wallrounds = []
+    cond_tot, cond_hit = {}, {}
     seeds_t = torch.tensor([seed], device=DEV, dtype=torch.int64)
     temp = torch.ones(1, device=DEV)
     total = 0
@@ -119,6 +121,11 @@ def run_engine(M, seed):
             # in a wall: did the run CONTINUE (all committed are R)?
             cont = all(t == R for t in committed)
             wallrounds.append((nn, cont))
+        # conditional fidelity: P(commit R | run k at round start)
+        for t in committed:
+            cond_tot[k] = cond_tot.get(k, 0) + 1
+            if t == R:
+                cond_hit[k] = cond_hit.get(k, 0) + 1
         for t in committed:
             if t == R:
                 cur += 1
@@ -153,6 +160,17 @@ def main():
           f"max={rr.max()} | walls>=20/run: {(rw>0).mean():.3f}")
     print(f"long-wall (>=100) rate: engine {(er>=100).mean():.3f} "
           f"vs reference {(rr>=100).mean():.3f}")
+    # conditional fidelity dump from the LAST engine trajectory
+    try:
+        ct, ch = _cond_dump
+        print("P(commit R | run k)  empirical-engine vs analytic-dist(k):")
+        for k in sorted(ct):
+            if ct[k] >= 30:
+                emp = ch[k]/ct[k]
+                ana = min(0.90, 0.35*1.25**min(k,40))
+                print(f"  k={k:3d}: n={ct[k]:4d} emp={emp:.4f} analytic={ana:.4f} ratio={emp/ana:.3f}")
+    except Exception as ex:
+        print("cond dump err", ex)
 
 
 if __name__ == "__main__":

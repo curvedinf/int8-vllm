@@ -92,10 +92,28 @@ def _p_ring_append(
             rows = lp[start : start + n]
             p_tok = rows.gather(1, toks.view(-1, 1)).exp().view(-1).cpu().tolist()
             top1 = rows.max(dim=-1).values.exp().cpu().tolist()
+            # Per-row magnitude signature of the VERIFY rows (not just the
+            # resample row): inf count + max finite |logit| per row —
+            # discriminates a true sharp distribution from a +inf point mass
+            # (LM-head/conv overflow regime) at p=1.0-garbage events.
+            raw = processed_logits[start : start + n].float()
+            inf_cnt = torch.isinf(raw).sum(dim=-1).cpu().tolist()
+            famax = raw.abs()
+            famax = famax.masked_fill(torch.isinf(raw) | raw.isnan(), 0)
+            famax = [round(float(x), 2) for x in famax.max(dim=-1).values.cpu().tolist()]
             # The drafts verified this round (draft_sampled rows start+1..start+n-1
             # correspond to committed[0..n-2]; committed[n-1] is the resample).
             drafts = (
                 draft_sampled[start + 1 : start + n].cpu().tolist()
+                if draft_sampled is not None
+                else []
+            )
+            # The REJECTED drafts at/after the resample position (the stale-KV
+            # conviction instrument: the draft whose KV occupies the anchor
+            # slot at the next round). draft_sampled[start+n] is the first
+            # rejected draft; take up to 3 for context.
+            rejected = (
+                draft_sampled[start + n : start + n + 3].cpu().tolist()
                 if draft_sampled is not None
                 else []
             )
@@ -117,8 +135,11 @@ def _p_ring_append(
                     "p": [round(x, 5) for x in p_tok],
                     "top1": [round(x, 5) for x in top1],
                     "drafts": drafts,
+                    "rejected": rejected,
                     "row_nan": row_nan,
                     "row_absmax": round(row_absmax, 2),
+                    "row_inf": [int(x) for x in inf_cnt],
+                    "row_famax": famax,
                     "top5": top5,
                 },
                 f,
