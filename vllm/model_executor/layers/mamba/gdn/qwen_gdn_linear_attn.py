@@ -92,6 +92,9 @@ MAX_FUSED_GDN_MTP_TOKENS = 8
 FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
 
 
+# Env-gated row-0 diagnostic ring (VLLM_ROW0_RING): GDN init-state norms.
+_ROW0_RING: dict = {}
+
 def _resolve_gdn_prefill_backend(
     vllm_config: VllmConfig,
 ) -> tuple[str, Literal["triton", "flashinfer", "cutedsl"]]:
@@ -1445,6 +1448,38 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
+            # VLLM_ROW0_RING (diagnostic): per step, per spec request, record
+            # L1/L2 of the GDN initial-state block the kernel is about to read
+            # (window column 0 = bt[start], the align running block) into a
+            # GPU ring — no per-step sync; flushed every 500 steps. Correlate
+            # with p-ring failing n1 rounds (NOTES build spec A, surface A).
+            _r0 = os.environ.get("VLLM_ROW0_RING")
+            if _r0 and not torch.cuda.is_current_stream_capturing():
+                try:
+                    n_spec_r = int(attn_metadata.num_spec_decodes)  # type: ignore[attr-defined]
+                    blk = spec_state_indices_tensor[:n_spec_r, 0].long()
+                    init_blk = ssm_state[blk]
+                    l1 = init_blk.float().abs().flatten(1).sum(-1)
+                    l2 = init_blk.float().flatten(1).pow(2).sum(-1)
+                    ring = _ROW0_RING.setdefault(
+                        "buf", torch.zeros(4000, 16, 4, dtype=torch.float32,
+                                           device=init_blk.device))
+                    step = _ROW0_RING.setdefault("step", 0)
+                    i = step % 4000
+                    n_copy = min(n_spec_r, 16)
+                    ring[i, :n_copy, 0] = l1[:n_copy]
+                    ring[i, :n_copy, 1] = l2[:n_copy]
+                    if num_accepted_tokens is not None:
+                        ring[i, :n_copy, 2] = num_accepted_tokens[:n_spec_r].float()
+                    ring[i, :n_copy, 3] = float(step)
+                    _ROW0_RING["step"] = step + 1
+                    if _ROW0_RING["step"] % 500 == 0:
+                        import pickle as _p
+                        os.makedirs(_r0, exist_ok=True)
+                        with open(os.path.join(_r0, f"row0_{os.getpid()}.dump"), "ab") as f:
+                            f.write(_p.dumps(ring[: min(_ROW0_RING["step"], 4000)].cpu().numpy()))
+                except Exception:
+                    pass
             core_attn_out_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,

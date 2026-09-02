@@ -298,6 +298,11 @@ if [[ -f "${_asmring_flag}" ]]; then
   VLLM_ASM_RING="$(tr -d '[:space:]' < "${_asmring_flag}")"
 fi
 
+# ROW0RING flag file: GDN init-state norm ring (build-spec A instrument).
+if [[ -f "${LOG_DIR}/ROW0RING" ]]; then
+  VLLM_ROW0_RING="/home/curved/vllm-gfx908/logs/garble/row0"
+fi
+
 # PRING flag file: per-round committed-token probability ring in the
 # rejection sampler (decisive for the wall question: target p at walls).
 _pring_flag="${LOG_DIR}/PRING"
@@ -435,6 +440,7 @@ start_server() {
   VLLM_GDN_BISECT="${VLLM_GDN_BISECT:-}" \
   VLLM_ASM_RING="${VLLM_ASM_RING:-}" \
   VLLM_P_RING="${VLLM_P_RING:-}" \
+  VLLM_ROW0_RING="${VLLM_ROW0_RING:-}" \
   VLLM_RESAMPLE_SALT="${VLLM_RESAMPLE_SALT:-}" \
   VLLM_SALT_U="${VLLM_SALT_U:-}" \
   VLLM_ALIGN_PROBE="${VLLM_ALIGN_PROBE:-}" \
@@ -552,3 +558,4 @@ case "${1:-}" in
     exit 2
     ;;
 esac
+
