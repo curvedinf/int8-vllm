@@ -109,9 +109,9 @@ retired qwen36 unit).
 4. Coherence curl against the booted server
 5. `.venv/bin/python scripts/ua_live_soak.py -n 500` — verify the exact
    published model pair and require AITER W8A8, AITER unified attention,
-   vLLM CUSTOM all-reduce (CAR=0), fused epilogue OFF, both INT8-PTH
-   caches, float32 Mamba state, TP4, C8, and DFlash2 NS=13 to remain
-   enabled.
+   vLLM CUSTOM all-reduce (CAR=0), fused epilogue OFF, both KV caches at
+   the recipe dtype (auto/bf16 since 2026-09-03), float32 Mamba state,
+   TP4, C8, and DFlash2 NS=13 to remain enabled.
 
 ## int8_block_g{G} KV cache dtypes (2026-09-03)
 
