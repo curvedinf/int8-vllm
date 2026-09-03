@@ -314,6 +314,14 @@ if [[ -f "${LOG_DIR}/KVLINE3" ]]; then
   VLLM_KVLINE3="/home/curved/vllm-gfx908/logs/garble/kvline3"
 fi
 
+# KVREADBACK flag file: write-site audit — reference-quantize incoming K/V,
+# run the int8-PTH write kernel, read back and compare (catches missed AND
+# stale-overwritten writes at full per-token resolution; eager forwards only
+# — pair with EAGERALL).
+if [[ -f "${LOG_DIR}/KVREADBACK" ]]; then
+  VLLM_KV_READBACK=1
+fi
+
 # PRING flag file: per-round committed-token probability ring in the
 # rejection sampler (decisive for the wall question: target p at walls).
 _pring_flag="${LOG_DIR}/PRING"
@@ -454,6 +462,7 @@ start_server() {
   VLLM_ROW0_RING="${VLLM_ROW0_RING:-}" \
   VLLM_KVLINE_RING="${VLLM_KVLINE_RING:-}" \
   VLLM_KVLINE3="${VLLM_KVLINE3:-}" \
+  VLLM_KV_READBACK="${VLLM_KV_READBACK:-}" \
   VLLM_RESAMPLE_SALT="${VLLM_RESAMPLE_SALT:-}" \
   VLLM_SALT_U="${VLLM_SALT_U:-}" \
   VLLM_ALIGN_PROBE="${VLLM_ALIGN_PROBE:-}" \
