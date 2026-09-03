@@ -64,16 +64,19 @@ for key, pren in pre.items():
     for n in ns:
         nct, T, rels = pren[n]
         po = postn.get(n)
-        if not po or n not in po:
+        if not po:
             stats["NOPOST"] += 1
             continue
         for bc, (slot, k_pre) in rels.items():
-            if bc not in po[n]:
+            if bc not in po:
                 stats["NOREL-POST"] += 1
                 continue
-            slot2, k_post = po[n][bc]
+            slot2, k_post = po[bc]
             if slot2 != slot:
                 stats["SLOT-SWAP"] += 1
+                if len(events["SLOT-SWAP"]) < 15:
+                    events["SLOT-SWAP"].append(
+                        (key[0], key[1], key[2], n, nct, T, bc, slot, slot2))
                 continue
             base = bc * 1728
             covers_query = (base + 1728 > nct) and (base < nct + T)
@@ -100,7 +103,7 @@ for key, pren in pre.items():
             nct2 = pren[n2][0]
             committed = nct2 - nct
             if 0 < committed <= 14:
-                for bc, (slot, k_post) in po[n].items():
+                for bc, (slot, k_post) in po.items():
                     base = bc * 1728
                     if base + 1728 <= nct or base >= nct2:
                         continue  # not covering committed span
