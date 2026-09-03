@@ -242,6 +242,163 @@ class MambaHybridModelState(DefaultModelState):
                               kv_cache_config, phase="post", pre=_pre)
         if os.environ.get("VLLM_GDN_PROBE") and not torch.cuda.is_current_stream_capturing():
             self._gdn_probe(input_batch, mamba_group_ids, kv_cache_config, block_tables)
+        if os.environ.get("VLLM_KVLINE3") and not torch.cuda.is_current_stream_capturing():
+            try:
+                self._kvline3_snap(
+                    "pre", input_batch, block_tables, kv_cache_config,
+                    mamba_group_ids,
+                )
+            except Exception:
+                if not getattr(self, "_kvl3_err", False):
+                    self._kvl3_err = True
+                    import traceback
+                    traceback.print_exc()
+
+    def _kvline3_snap(self, phase, input_batch, block_tables, kv_cache_config,
+                      mamba_group_ids) -> None:
+        """Env-gated (VLLM_KVLINE3) pre/post-forward mamba window lineage.
+
+        "pre"  (end of preprocess_state, after the precopy): per live request,
+               the 14-column checkpoint window (slot + checksum) for sampled
+               layers/state tensors, plus read_idx = num_accepted-1 (post-reset
+               semantics: 0 at boundary crossings) and this round's query
+               length T. This is exactly what the GDN spec kernel is about to
+               read (window[read_idx]) and overwrite.
+        "post" (start of postprocess_state): the same window after the verify
+               forward, before the post-step align copy.
+
+        Lineage invariant (SSM copies are byte-exact): pre[N][read_idx_N]
+        content == post[N-1] content at the same absolute column (col_{N-1} +
+        read_idx_N), including crossings (the precopy sources bt[src_col +
+        token_bias]). A violation = the kernel reads a checkpoint that the
+        previous round did not leave there (stale/recycled/wrong column).
+        """
+        import json as _json
+
+        out = os.environ["VLLM_KVLINE3"]
+        self._kvl3_n = getattr(self, "_kvl3_n", 0)
+        gid = mamba_group_ids[0]
+        bt = block_tables[gid]
+        width = bt.shape[1]
+        n_req = input_batch.num_reqs
+        idx_map = input_batch.idx_mapping[:n_req].cpu().tolist()
+        cols = self._mamba_state_idx_gpu.cpu().tolist()
+        nas = self.num_accepted_tokens_gpu.cpu().tolist()
+        qs = input_batch.query_start_loc.cpu().tolist()
+        fc = self.vllm_config.compilation_config.static_forward_context
+        layer_names = kv_cache_config.kv_cache_groups[gid].layer_names
+        n_ln = len(layer_names)
+        win_idx = sorted({0, n_ln // 3, (2 * n_ln) // 3, n_ln - 1})
+        rows = []
+        for ln_i in win_idx:
+            ln = layer_names[ln_i]
+            impl = fc.get(ln)
+            st = getattr(impl, "kv_cache", None) if impl else None
+            if not st:
+                continue
+            for r in range(n_req):
+                rs = idx_map[r]
+                col = cols[rs] if 0 <= rs < len(cols) else -1
+                if col < 0:
+                    continue
+                for st_i, t in enumerate(st):
+                    if not torch.is_tensor(t) or t.ndim < 1:
+                        continue
+                    tf = t.reshape(t.shape[0], -1)
+                    for rel in range(14):
+                        c = col + rel
+                        if c >= width:
+                            continue
+                        blk = int(bt[r, c])
+                        if blk <= 0 or blk >= tf.shape[0]:
+                            continue
+                        rows.append({
+                            "phase": phase, "n": self._kvl3_n, "rs": int(rs),
+                            "layer": f"{ln}#st{st_i}", "col": int(col),
+                            "rel": rel, "slot": blk,
+                            "k": round(float(tf[blk].float().sum().item()), 3),
+                            "ri": int(nas[rs]) - 1 if 0 <= rs < len(nas) else -1,
+                            "T": int(qs[r + 1] - qs[r]) if r + 1 < len(qs) else 0,
+                        })
+        rec = getattr(self, "_kvl3_recs", None)
+        if rec is None:
+            rec = self._kvl3_recs = []
+        rec.extend(rows)
+        if phase == "post":
+            self._kvl3_n = getattr(self, "_kvl3_n", 0) + 1
+        if len(rec) >= 400:
+            os.makedirs(out, exist_ok=True)
+            with open(os.path.join(out, f"kvl3_{os.getpid()}.jsonl"), "a") as f:
+                for e in rec:
+                    f.write(_json.dumps(e) + "\n")
+            self._kvl3_recs = []
+        # stash for the post hook (postprocess_state lacks block_tables)
+        self._kvl3_bt = block_tables
+        self._kvl3_cfg = kv_cache_config
+        self._kvl3_gids = mamba_group_ids
+
+    @torch.inference_mode()
+    def _kvl3_post(self, idx_mapping) -> None:
+        """Post-forward half of VLLM_KVLINE3 (see _kvline3_snap). Uses the
+        block tables stashed by the pre hook (persistent buffers, rewritten
+        per step by gather_block_tables, so they still hold this step's
+        batch-order rows)."""
+        import json as _json
+
+        out = os.environ["VLLM_KVLINE3"]
+        bt = self._kvl3_bt[self._kvl3_gids[0]]
+        width = bt.shape[1]
+        n_req = idx_mapping.shape[0]
+        idx_map = idx_mapping[:n_req].cpu().tolist()
+        cols = self._mamba_state_idx_gpu.cpu().tolist()
+        fc = self.vllm_config.compilation_config.static_forward_context
+        layer_names = self._kvl3_cfg.kv_cache_groups[
+            self._kvl3_gids[0]
+        ].layer_names
+        n_ln = len(layer_names)
+        win_idx = sorted({0, n_ln // 3, (2 * n_ln) // 3, n_ln - 1})
+        rows = []
+        for ln_i in win_idx:
+            ln = layer_names[ln_i]
+            impl = fc.get(ln)
+            st = getattr(impl, "kv_cache", None) if impl else None
+            if not st:
+                continue
+            for r in range(n_req):
+                rs = idx_map[r]
+                if rs < 0:
+                    continue
+                col = cols[rs] if 0 <= rs < len(cols) else -1
+                if col < 0:
+                    continue
+                for st_i, t in enumerate(st):
+                    if not torch.is_tensor(t) or t.ndim < 1:
+                        continue
+                    tf = t.reshape(t.shape[0], -1)
+                    for rel in range(14):
+                        c = col + rel
+                        if c >= width:
+                            continue
+                        blk = int(bt[r, c])
+                        if blk <= 0 or blk >= tf.shape[0]:
+                            continue
+                        rows.append({
+                            "phase": "post", "n": self._kvl3_n, "rs": int(rs),
+                            "layer": f"{ln}#st{st_i}", "col": int(col),
+                            "rel": rel, "slot": blk,
+                            "k": round(float(tf[blk].float().sum().item()), 3),
+                        })
+        rec = getattr(self, "_kvl3_recs", None)
+        if rec is None:
+            rec = self._kvl3_recs = []
+        rec.extend(rows)
+        self._kvl3_n = getattr(self, "_kvl3_n", 0) + 1
+        if len(rec) >= 400:
+            os.makedirs(out, exist_ok=True)
+            with open(os.path.join(out, f"kvl3_{os.getpid()}.jsonl"), "a") as f:
+                for e in rec:
+                    f.write(_json.dumps(e) + "\n")
+            self._kvl3_recs = []
 
     @torch.inference_mode()
     def _gdn_probe(self, input_batch, mamba_group_ids, kv_cache_config, block_tables) -> None:
@@ -557,6 +714,20 @@ class MambaHybridModelState(DefaultModelState):
     ) -> None:
         # Chunked prefill does not sample a token, so num_sampled can be 0.
         # Mamba treats num_accepted_tokens=1 as the neutral non-spec value.
+        if (
+            os.environ.get("VLLM_KVLINE3")
+            and not torch.cuda.is_current_stream_capturing()
+            and getattr(self, "_kvl3_bt", None) is not None
+            and idx_mapping.shape[0] > 0
+            and not isinstance(num_sampled, int)
+        ):
+            try:
+                self._kvl3_post(idx_mapping)
+            except Exception:
+                if not getattr(self, "_kvl3_err", False):
+                    self._kvl3_err = True
+                    import traceback
+                    traceback.print_exc()
         num_reqs = idx_mapping.shape[0]
         if num_reqs:
             if not isinstance(num_sampled, int):
