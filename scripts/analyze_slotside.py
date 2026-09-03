@@ -32,21 +32,8 @@ with open(tf) as f:
         rows_tf.append(json.loads(line))
 rows_tf = [r for r in rows_tf if r["p"] >= 40000]
 
-bt = defaultdict(lambda: defaultdict(dict))  # (pid,rs) -> leg_idx -> {bc: slot}
-chains = defaultdict(list)
-for r in rows_tf:
-    chains[(r["pid"], r["rs"])].append(r)
-leg_of = {}  # (pid, rs, n) -> leg idx
-for key, lst in chains.items():
-    lst.sort(key=lambda r: r["n"])
-    leg = -1
-    prev_p = None
-    for r in lst:
-        if prev_p is None or r["p"] < prev_p - 100:
-            leg += 1
-        leg_of[(key[0], key[1], r["n"])] = leg
-        prev_p = r["p"]
-
+# direct n-keyed block table: (pid, rs, n) -> {bc: slot}
+bt = defaultdict(dict)
 for f in sorted(glob.glob(os.path.join(d3, "kvl3_*.jsonl"))):
     pid = int(re.search(r"kvl3_(\d+)", f).group(1))
     with open(f) as fh:
@@ -57,17 +44,12 @@ for f in sorted(glob.glob(os.path.join(d3, "kvl3_*.jsonl"))):
                 continue
             if "#kv" not in r["layer"] or r["phase"] != "pre":
                 continue
-            li = leg_of.get((pid, r["rs"], r["n"]))
-            if li is None:
-                continue
-            bt[(pid, r["rs"])][li][r["bc"]] = r["slot"]
+            bt[(pid, r["rs"], r["n"])][r["bc"]] = r["slot"]
 
 stats = defaultdict(int)
 ex = []
 for r in rows_tf:
-    key = (r["pid"], r["rs"])
-    li = leg_of.get((key[0], key[1], r["n"]))
-    table = bt[key].get(li) if li is not None else None
+    table = bt.get((r["pid"], r["rs"], r["n"]))
     T = r.get("T", 0)
     if T <= 0 or T > 32 or len(r.get("sm", [])) < T:
         continue
