@@ -13,7 +13,6 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 
 if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
@@ -700,11 +699,14 @@ class Platform:
             # The backend owns its packing
             return backend_cls.customize_spec(spec).page_size_bytes
 
-        primary_dtype = (
-            kv_cache_dtype_str_to_dtype(cache_config.cache_dtype, model_config)
-            if cache_config.cache_dtype != "auto"
-            else model_config.dtype
-        )
+        if cache_config.cache_dtype != "auto":
+            from vllm.utils.torch_utils import (
+                kv_cache_dtype_str_to_dtype as _kcd,
+            )
+
+            primary_dtype = _kcd(cache_config.cache_dtype, model_config)
+        else:
+            primary_dtype = model_config.dtype
         primary_page = per_token_page_bytes(primary_dtype, cache_config.cache_dtype)
 
         # Per-token page of every higher-precision padded spec sharing the pool.
@@ -801,7 +803,11 @@ class Platform:
         if cache_config.cache_dtype == "auto":
             kv_cache_dtype = model_config.dtype
         else:
-            kv_cache_dtype = kv_cache_dtype_str_to_dtype(cache_config.cache_dtype, model_config)
+            from vllm.utils.torch_utils import (
+                kv_cache_dtype_str_to_dtype as _kcd,
+            )
+
+            kv_cache_dtype = _kcd(cache_config.cache_dtype, model_config)
 
         kv_quant_mode = get_kv_quant_mode(cache_config.cache_dtype)
 
