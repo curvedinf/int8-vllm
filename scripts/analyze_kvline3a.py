@@ -28,8 +28,8 @@ if not files:
     print("no files")
     sys.exit(1)
 
-pre = defaultdict(dict)   # (pid,rs,layer) -> n -> (nct, T, {rel:(slot,k)})
-post = defaultdict(dict)  # (pid,rs,layer) -> n -> {rel:(slot,k)}
+pre = defaultdict(dict)   # (pid,rs,layer) -> n -> (nct, T, {bc:(slot,k)})
+post = defaultdict(dict)  # (pid,rs,layer) -> n -> {bc:(slot,k)}
 for f in files:
     pid = int(re.search(r"kvl3_(\d+)", f).group(1))
     with open(f) as fh:
@@ -43,9 +43,10 @@ for f in files:
             key = (pid, r["rs"], r["layer"])
             if r["phase"] == "pre":
                 e = pre[key].setdefault(r["n"], [r.get("col", 0), r.get("T", 0), {}])
-                e[2][r["rel"]] = (r["slot"], r["k"])
+                e[2][r.get("bc", r["rel"])] = (r["slot"], r["k"])
             else:
-                post[key].setdefault(r["n"], {})[r["rel"]] = (r["slot"], r["k"])
+                post[key].setdefault(r["n"], {})[r.get("bc", r["rel"])] = (
+                    r["slot"], r["k"])
 print(f"kv rows: {sum(len(v) for v in pre.values())} pre-rounds over "
       f"{len(pre)} (pid,rs,layer) keys")
 
@@ -66,22 +67,22 @@ for key, pren in pre.items():
         if not po or n not in po:
             stats["NOPOST"] += 1
             continue
-        for rel, (slot, k_pre) in rels.items():
-            if rel not in po[n]:
+        for bc, (slot, k_pre) in rels.items():
+            if bc not in po[n]:
                 stats["NOREL-POST"] += 1
                 continue
-            slot2, k_post = po[n][rel]
+            slot2, k_post = po[n][bc]
             if slot2 != slot:
                 stats["SLOT-SWAP"] += 1
                 continue
-            base = max(0, nct - 64) + 32 * rel
-            covers_query = (base + 32 > nct) and (base < nct + T)
-            below_ctx = base + 32 <= nct
+            base = bc * 1728
+            covers_query = (base + 1728 > nct) and (base < nct + T)
+            below_ctx = base + 1728 <= nct
             if covers_query:
                 if _eq(k_pre, k_post):
                     stats["COVERAGE-MISS"] += 1
                     events["COVERAGE-MISS"].append(
-                        (key[0], key[1], key[2], n, nct, T, rel, slot,
+                        (key[0], key[1], key[2], n, nct, T, bc, slot,
                          k_pre, k_post))
                 else:
                     stats["COVERAGE-OK"] += 1
@@ -91,7 +92,7 @@ for key, pren in pre.items():
                 else:
                     stats["CTX-VIOLATION"] += 1
                     events["CTX-VIOLATION"].append(
-                        (key[0], key[1], key[2], n, nct, T, rel, slot,
+                        (key[0], key[1], key[2], n, nct, T, bc, slot,
                          k_pre, k_post))
         # cross-round stability: committed span [nct, nct2)
         n2 = n + 1
@@ -99,9 +100,9 @@ for key, pren in pre.items():
             nct2 = pren[n2][0]
             committed = nct2 - nct
             if 0 < committed <= 14:
-                for rel, (slot, k_post) in po[n].items():
-                    base = max(0, nct - 64) + 32 * rel
-                    if base + 32 <= nct or base >= nct2:
+                for bc, (slot, k_post) in po[n].items():
+                    base = bc * 1728
+                    if base + 1728 <= nct or base >= nct2:
                         continue  # not covering committed span
                     pre2 = pren[n2][2]
                     m = [x for x, (s2, _) in pre2.items() if s2 == slot]
@@ -112,7 +113,7 @@ for key, pren in pre.items():
                     if not _eq(k_post, k_pre2):
                         stats["XS-VIOLATION"] += 1
                         events["XS-VIOLATION"].append(
-                            (key[0], key[1], key[2], n, nct, nct2, rel,
+                            (key[0], key[1], key[2], n, nct, nct2, bc,
                              slot, k_post, k_pre2))
                     else:
                         stats["XS-OK"] += 1

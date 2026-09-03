@@ -354,15 +354,18 @@ class MambaHybridModelState(DefaultModelState):
                     T_r = int(qs[r + 1] - qs[r]) if r + 1 < len(qs) else 0
                     if nct < 0 or T_r <= 0:
                         continue
+                    # Attention KV blocks are 1728-token (slot ids are
+                    # 1728-aligned; the block table width is cdiv(len,1728)).
                     blocks = []
-                    for pos in range(max(0, nct - 64), nct + T_r + 1, 32):
-                        bcol = pos // 32
+                    for bcol in range(
+                        max(0, (nct - 1) // 1728 - 1), (nct + T_r) // 1728 + 1
+                    ):
                         if bcol >= w_a:
                             continue
                         bid = int(bt_a[r, bcol])
                         if bid > 0 and bid not in blocks:
-                            blocks.append(bid)
-                    self._kvl3_attn_blocks[r] = blocks[:5]
+                            blocks.append((bcol, bid))
+                    self._kvl3_attn_blocks[r] = blocks[:3]
                     for ln in lns:
                         impl = fc.get(ln)
                         kvv = getattr(impl, "kv_cache", None) if impl else None
@@ -372,13 +375,14 @@ class MambaHybridModelState(DefaultModelState):
                         ts = [t for t in ts if torch.is_tensor(t)]
                         for t_i, t in enumerate(ts[:2]):
                             tf = t.reshape(t.shape[0], -1)
-                            for j, bid in enumerate(blocks[:5]):
+                            for j, (bcol, bid) in enumerate(blocks[:3]):
                                 if bid >= tf.shape[0]:
                                     continue
                                 rows.append({
                                     "phase": phase, "n": self._kvl3_n,
                                     "rs": int(rs), "layer": f"{ln}#kv{t_i}",
-                                    "col": int(nct), "rel": j, "slot": bid,
+                                    "col": int(nct), "rel": j, "bc": int(bcol),
+                                    "slot": bid,
                                     "k": round(float(tf[bid].float().sum().item()), 3),
                                     "ri": int(nas[rs]) - 1 if 0 <= rs < len(nas) else -1,
                                     "T": T_r,
@@ -477,13 +481,14 @@ class MambaHybridModelState(DefaultModelState):
                             ts = [t for t in ts if torch.is_tensor(t)]
                             for t_i, t in enumerate(ts[:2]):
                                 tf = t.reshape(t.shape[0], -1)
-                                for j, bid in enumerate(ablocks[r]):
+                                for j, (bcol, bid) in enumerate(ablocks[r]):
                                     if bid >= tf.shape[0]:
                                         continue
                                     rows.append({
                                         "phase": "post", "n": self._kvl3_n,
                                         "rs": int(rs), "layer": f"{ln}#kv{t_i}",
-                                        "col": 0, "rel": j, "slot": bid,
+                                        "col": 0, "rel": j, "bc": int(bcol),
+                                        "slot": bid,
                                         "k": round(float(tf[bid].float().sum().item()), 3),
                                     })
         except Exception:
