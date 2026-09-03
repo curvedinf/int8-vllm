@@ -325,6 +325,12 @@ if [[ -f "${LOG_DIR}/GDNROWAUDIT" ]]; then
   VLLM_GDN_ROWAUDIT="/home/curved/vllm-gfx908/logs/garble/gdn_rowaudit"
 fi
 
+# KVG8 flag file: g8+f16 KV diagnostic mode (target+draft int8 caches get
+# per-8-dim-group fp16 scales; causal reads route through the triton kernel).
+if [[ -f "${LOG_DIR}/KVG8" ]]; then
+  VLLM_KV_G8=1
+fi
+
 # KVREADBACK flag file: write-site audit — reference-quantize incoming K/V,
 # run the int8-PTH write kernel, read back and compare (catches missed AND
 # stale-overwritten writes at full per-token resolution; eager forwards only
@@ -476,6 +482,7 @@ start_server() {
   VLLM_KV_READBACK="${VLLM_KV_READBACK:-}" \
   VLLM_UA_READAUDIT="${VLLM_UA_READAUDIT:-}" \
   VLLM_GDN_ROWAUDIT="${VLLM_GDN_ROWAUDIT:-}" \
+  VLLM_KV_G8="${VLLM_KV_G8:-}" \
   VLLM_RESAMPLE_SALT="${VLLM_RESAMPLE_SALT:-}" \
   VLLM_SALT_U="${VLLM_SALT_U:-}" \
   VLLM_ALIGN_PROBE="${VLLM_ALIGN_PROBE:-}" \
