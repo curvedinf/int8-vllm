@@ -314,6 +314,12 @@ if [[ -f "${LOG_DIR}/KVLINE3" ]]; then
   VLLM_KVLINE3="/home/curved/vllm-gfx908/logs/garble/kvline3"
 fi
 
+# UAREAD flag file: attention READ audit — reference-attend row 0 from the
+# cache bytes and compare vs the unified-attention kernel output.
+if [[ -f "${LOG_DIR}/UAREAD" ]]; then
+  VLLM_UA_READAUDIT="/home/curved/vllm-gfx908/logs/garble/ua_read"
+fi
+
 # KVREADBACK flag file: write-site audit — reference-quantize incoming K/V,
 # run the int8-PTH write kernel, read back and compare (catches missed AND
 # stale-overwritten writes at full per-token resolution; eager forwards only
@@ -463,6 +469,7 @@ start_server() {
   VLLM_KVLINE_RING="${VLLM_KVLINE_RING:-}" \
   VLLM_KVLINE3="${VLLM_KVLINE3:-}" \
   VLLM_KV_READBACK="${VLLM_KV_READBACK:-}" \
+  VLLM_UA_READAUDIT="${VLLM_UA_READAUDIT:-}" \
   VLLM_RESAMPLE_SALT="${VLLM_RESAMPLE_SALT:-}" \
   VLLM_SALT_U="${VLLM_SALT_U:-}" \
   VLLM_ALIGN_PROBE="${VLLM_ALIGN_PROBE:-}" \

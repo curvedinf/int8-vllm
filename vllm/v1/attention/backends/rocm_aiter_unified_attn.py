@@ -4,6 +4,8 @@
 
 from typing import ClassVar
 
+import os as _os
+
 from dataclasses import replace
 
 import torch
@@ -409,6 +411,18 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 k_scale_cache=k_scale_cache,
                 v_scale_cache=v_scale_cache,
             )
+            _ra = _os.environ.get("VLLM_UA_READAUDIT")
+            if _ra and not torch.cuda.is_current_stream_capturing():
+                try:
+                    self._ua_read_audit(
+                        query, output, key_cache, value_cache,
+                        k_scale_cache, v_scale_cache, cu_seqlens_q,
+                        seqused_k, block_table, softmax_scale, num_actual_tokens,
+                    )
+                except Exception as e:
+                    if not getattr(self, "_ra_err", False):
+                        self._ra_err = True
+                        logger.warning("UA-READAUDIT failed: %s", e)
         else:
             # The aiter kernel is causal-only. Non-causal cross-attention
             # (ENCODER_DECODER, e.g. Whisper) falls back to the vLLM Triton
@@ -456,6 +470,85 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
 
         return output
 
+
+    def _ua_read_audit(
+        self,
+        query: torch.Tensor,
+        output: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        k_scale_cache: torch.Tensor | None,
+        v_scale_cache: torch.Tensor | None,
+        cu_seqlens_q: torch.Tensor,
+        seqused_k: torch.Tensor,
+        block_table: torch.Tensor,
+        softmax_scale: float,
+        num_actual_tokens: int,
+    ) -> None:
+        """Env-gated (VLLM_UA_READAUDIT): reference-attend the FIRST query row
+        of batch row 0 from the int8-PTH cache bytes (exact dequant, fp32
+        softmax) and compare against the kernel's output row. The cache is
+        already verified byte-exact at write time (VLLM_KV_READBACK), so a
+        large divergence here convicts the READ path (kernel/metadata), not
+        the cache content. Logs one jsonl line per audited layer/round.
+        """
+        import json as _json
+
+        ln = getattr(self, "_ra_layer", None)
+        if ln is None:
+            # audit at most 4 layer instances to bound cost
+            n = type(self)._ra_instances = getattr(type(self), "_ra_instances", 0)
+            type(self)._ra_instances = n + 1
+            self._ra_layer = n
+        if self._ra_layer >= 4:
+            return
+        q0 = int(cu_seqlens_q[0].item())
+        q1 = int(cu_seqlens_q[1].item()) if cu_seqlens_q.shape[0] > 1 else q0
+        q_len = q1 - q0
+        if q_len < 2 or q0 != 0:
+            return  # only spec verify rows leading the batch
+        sk = int(seqused_k[0].item())
+        ctx = sk - q_len  # row 0 attends [0, ctx)
+        if ctx <= 0:
+            return
+        bs = key_cache.shape[1]
+        nblk = (ctx + bs - 1) // bs
+        bt0 = block_table[0, :nblk].long()
+        # dequant K/V for [0, ctx)
+        K = key_cache[bt0].float()  # [nblk, bs, h, d]
+        V = value_cache[bt0].float()
+        if k_scale_cache is not None:
+            ks = k_scale_cache[bt0].float()  # [nblk, bs, h]
+            K = K * ks.unsqueeze(-1)
+            vs = v_scale_cache[bt0].float()
+            V = V * vs.unsqueeze(-1)
+        K = K.reshape(-1, K.shape[-2], K.shape[-1])[:ctx]  # [ctx, h, d]
+        V = V.reshape(-1, V.shape[-2], V.shape[-1])[:ctx]
+        q = query[0].float()  # [h, d] (row 0 of the request's queries)
+        got = output[0].float()
+        # per head: scores over ctx, softmax, weighted V
+        num_h = q.shape[0]
+        rel = []
+        for h in range(num_h):
+            s = (K[:, h, :] @ q[h]) * softmax_scale
+            s = s - s.max()
+            p = torch.softmax(s, dim=-1)
+            o = p @ V[:, h, :]
+            g = got[h]
+            denom = g.abs().max().clamp(min=1e-6)
+            rel.append(float((o - g).abs().max() / denom))
+        rec = {
+            "layer": self._ra_layer,
+            "call": getattr(self, "_ra_call", 0),
+            "ctx": ctx,
+            "q_len": q_len,
+            "rel": round(max(rel), 4),
+        }
+        self._ra_call = getattr(self, "_ra_call", 0) + 1
+        out = _os.environ["VLLM_UA_READAUDIT"]
+        _os.makedirs(out, exist_ok=True)
+        with open(_os.path.join(out, f"ra_{_os.getpid()}.jsonl"), "a") as f:
+            f.write(_json.dumps(rec) + "\n")
 
     def _kv_readback_check(self, key, value, key_cache, value_cache, slot_mapping):
         """Reference-quantize K/V, snapshot target slots before the kernel,
