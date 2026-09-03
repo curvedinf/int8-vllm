@@ -2081,6 +2081,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.postprocess_num_computed_tokens(input_batch)
         return async_output
 
+
     def _kvline_snap(self, input_batch, slot_mappings_by_layer, phase: str) -> None:
         """Env-gated (VLLM_KVLINE_RING): per step, per request, checksum the
         K and V cache rows at the request's anchor slot (first query token)
@@ -2146,6 +2147,83 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 while len(s) < 2:
                     s.append(0.0)
                 rows.append((ln, r, slot, s[0], s[1]))
+        # Mamba state surfaces — pass 101 surface (b). Mirrors the proven
+        # _gdn_probe access (model_states/mamba_hybrid.py): block_tables[gid]
+        # batch-order tensor, running block = bt[b, col] with col =
+        # _mamba_state_idx_gpu[rs]. Two discriminating signals:
+        #   1. running block (col) + checkpoint window (col+1..col+13):
+        #      any TARGET mamba-state change between "pre" and "post" (only
+        #      the draft forward runs between) = draft leaking writes into
+        #      target mamba state — the mamba analog of the retracted pass-99
+        #      attention test, never measured.
+        #   2. window blocks across steps: written only by the post-step
+        #      checkpoint kernel; anomalous cross-step changes localize a bad
+        #      checkpoint write (rollback then restores garbage — matches the
+        #      n1/all-rejected entry structure).
+        # For mamba rows the "v" field carries the state_idx column (the
+        # running-block column doubles as a state_idx regression log).
+        try:
+            ms = self.model_state
+            if hasattr(ms, "_mamba_state_idx_gpu") and hasattr(
+                ms, "_get_mamba_group_info"
+            ):
+                gid_list, _ = ms._get_mamba_group_info(self.kv_cache_config)
+                if gid_list:
+                    gid = gid_list[0]
+                    fc2 = (
+                        self.vllm_config.compilation_config.static_forward_context
+                    )
+                    bts = self.block_tables.gather_block_tables(
+                        input_batch.idx_mapping,
+                        num_reqs_padded=input_batch.num_reqs_after_padding,
+                    )
+                    bt = bts[gid]
+                    width = bt.shape[1]
+                    cols = ms._mamba_state_idx_gpu.cpu().tolist()
+                    layer_names = self.kv_cache_config.kv_cache_groups[
+                        gid
+                    ].layer_names
+                    n_ln = len(layer_names)
+                    # Checksum the full spec window on 4 sampled layers to
+                    # bound volume; the running block on every mamba layer.
+                    win_idx = sorted({0, n_ln // 3, (2 * n_ln) // 3, n_ln - 1})
+                    for ln_i, ln in enumerate(layer_names):
+                        impl = fc2.get(ln)
+                        st = getattr(impl, "kv_cache", None) if impl else None
+                        if not st:
+                            continue
+                        for r in range(n_req):
+                            rs = idx_map[r]
+                            col = cols[rs] if 0 <= rs < len(cols) else -1
+                            if col < 0:
+                                continue
+                            lo = max(0, min(col, width - 1))
+                            hi = min(width, lo + 1 + 13)
+                            cs = range(lo, hi) if ln_i in win_idx else [lo]
+                            for st_i, t in enumerate(st):
+                                if not torch.is_tensor(t) or t.ndim < 1:
+                                    continue
+                                tf = t.reshape(t.shape[0], -1)
+                                for c in cs:
+                                    blk = int(bt[r, c])
+                                    if blk <= 0 or blk >= tf.shape[0]:
+                                        continue
+                                    rows.append(
+                                        (
+                                            f"{ln}#st{st_i}",
+                                            r,
+                                            blk,
+                                            float(
+                                                tf[blk].float().sum().item()
+                                            ),
+                                            float(c),
+                                        )
+                                    )
+        except Exception:
+            if not getattr(self, "_kvline_err2", False):
+                self._kvline_err2 = True
+                import traceback
+                traceback.print_exc()
         rec = getattr(self, "_kvline_recs", None)
         if rec is None:
             rec = self._kvline_recs = []
