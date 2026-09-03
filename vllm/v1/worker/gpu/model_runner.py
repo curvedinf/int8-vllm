@@ -391,6 +391,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # model_state exists (num_new_sampled_tokens_per_step from ModelState).
         self.sampler: Sampler | None = None
         self.rejection_sampler: RejectionSampler | None = None
+        self._in_dummy_run = False
         self.prompt_logprobs_worker: PromptLogprobsWorker | None = None
         self.structured_outputs_worker: StructuredOutputsWorker | None = None
         self.cudagraph_manager: ModelCudaGraphManager | None = None
@@ -721,6 +722,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @torch.inference_mode()
     @step_eplb_after(is_dummy=True)
     def _dummy_run(
+        self,
+        num_tokens: int,
+        *args,
+        skip_attn: bool = False,
+        uniform_decode: bool = False,
+        context_len: int = 0,
+        skip_eplb: bool = False,
+        is_profile: bool = False,
+        **kwargs,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        self._in_dummy_run = True
+        try:
+            return self._dummy_run_inner(
+                num_tokens, *args, skip_attn=skip_attn,
+                uniform_decode=uniform_decode, context_len=context_len,
+                skip_eplb=skip_eplb, is_profile=is_profile, **kwargs)
+        finally:
+            self._in_dummy_run = False
+
+    def _dummy_run_inner(
         self,
         num_tokens: int,
         *args,
@@ -1945,6 +1966,31 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
                 spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
+            # VLLM_KVLINE_RING (diagnostic): checksum the target's anchor-slot
+            # K/V rows across the speculator's propose (only the draft forward
+            # runs in between). Any before/after change on a target
+            # full-attention layer = draft leaking writes into target slots —
+            # the pass-98-implicated in-vivo state-write (NOTES pass 98/99).
+            _kvl = os.environ.get("VLLM_KVLINE_RING")
+            if _kvl and not getattr(self, "_kvline_hit", False):
+                self._kvline_hit = True
+                with open("/home/curved/vllm-gfx908/logs/garble/kvline/_dbg.txt", "a") as _f:
+                    _f.write(f"hook-site reached\n")
+            if (
+                _kvl
+                and slot_mappings_by_layer is not None
+                and not self._in_dummy_run
+                and not torch.cuda.is_current_stream_capturing()
+            ):
+                try:
+                    self._kvline_snap(
+                        input_batch, slot_mappings_by_layer, "pre"
+                    )
+                except Exception:
+                    if not getattr(self, "_kvline_err", False):
+                        self._kvline_err = True
+                        import traceback
+                        traceback.print_exc()
             with use_workspace_lane(self._draft_workspace_lane):
                 draft_tokens = self.speculator.propose(
                     input_batch,
@@ -1960,6 +2006,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.sampler.sampling_states.seeds.gpu,
                     mm_inputs=mm_inputs,
                 )
+            if _kvl and not self._in_dummy_run:
+                try:
+                    self._kvline_snap(
+                        input_batch, slot_mappings_by_layer, "post"
+                    )
+                except Exception:
+                    pass
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             if self.adaptive_verification is not None:
                 self.adaptive_verification.record_confidences(
@@ -2027,6 +2080,101 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.postprocess_num_computed_tokens(input_batch)
         return async_output
+
+    def _kvline_snap(self, input_batch, slot_mappings_by_layer, phase: str) -> None:
+        """Env-gated (VLLM_KVLINE_RING): per step, per request, checksum the
+        K and V cache rows at the request's anchor slot (first query token)
+        for every target full-attention layer. Only the draft forward runs
+        between the "pre" and "post" snapshots, so any change = draft writes
+        leaking into target KV slots. Rows kept in a python list, flushed to
+        <dir>/kvline_<pid>.jsonl every 200 snapshots.
+        """
+        import json as _json
+
+        qs = input_batch.query_start_loc
+        n_req = input_batch.num_reqs
+        idx_map = input_batch.idx_mapping[:n_req].cpu().tolist()
+        anchors = qs[: n_req + 1].cpu().tolist()
+        rows = []
+        from vllm.v1.kv_cache_interface import AttentionSpec as _AS
+
+        attn_names = []
+        for grp_list in self.attn_groups:
+            for grp in grp_list:
+                if not isinstance(grp.kv_cache_spec, _AS):
+                    continue  # GDN/mamba groups have no K/V rows
+                attn_names.extend(grp.layer_names)
+        if not getattr(self, "_kvline_dbg", False):
+            self._kvline_dbg = True
+            with open("/home/curved/vllm-gfx908/logs/garble/kvline/_dbg.txt", "a") as _f:
+                _f.write(f"dbg1 attn_names={len(attn_names)} first={attn_names[0] if attn_names else None}\n")
+        for ln in attn_names:
+            sm = slot_mappings_by_layer.get(ln)
+            if sm is None:
+                if not getattr(self, "_kvline_dbg2", False):
+                    self._kvline_dbg2 = True
+                    with open("/home/curved/vllm-gfx908/logs/garble/kvline/_dbg.txt", "a") as _f:
+                        _f.write(f"dbg2 no slot map {ln}\n")
+                continue
+            kc = self.kv_caches  # list per group? fall back to forward ctx
+            # kv cache tensors: use static forward context (per-layer views)
+            fc = self.vllm_config.compilation_config.static_forward_context
+            kv = fc[ln].kv_cache if ln in fc else None
+            tensors = (
+                list(kv) if isinstance(kv, (list, tuple)) else [kv]
+            )
+            tensors = [t for t in tensors if torch.is_tensor(t)]
+            if not tensors:
+                if not getattr(self, "_kvline_dbg3", False):
+                    self._kvline_dbg3 = True
+                    with open("/home/curved/vllm-gfx908/logs/garble/kvline/_dbg.txt", "a") as _f:
+                        _f.write(f"dbg3 {ln} kv={type(kv)}\n")
+                continue
+            for r in range(n_req):
+                slot = int(sm[anchors[r]].item())
+                if slot < 0:
+                    continue
+                s = []
+                for t in tensors[:2]:
+                    # 1728-token pages (attention blocks aligned to mamba):
+                    # slot = block*1728 + offset; checksum the whole page row.
+                    blk = slot // 1728
+                    if blk >= t.shape[0]:
+                        continue
+                    row = t.reshape(t.shape[0], -1)[blk]
+                    s.append(float(row.float().sum().item()))
+                while len(s) < 2:
+                    s.append(0.0)
+                rows.append((ln, r, slot, s[0], s[1]))
+        rec = getattr(self, "_kvline_recs", None)
+        if rec is None:
+            rec = self._kvline_recs = []
+            self._kvline_n = 0
+        import os as _os
+
+        for ln, r, slot, ksum, vsum in rows:
+            rec.append(
+                {
+                    "phase": phase,
+                    "n": self._kvline_n,
+                    "rs": int(idx_map[r]),
+                    "layer": ln,
+                    "slot": slot,
+                    "k": round(ksum, 3),
+                    "v": round(vsum, 3),
+                }
+            )
+        if phase == "post":
+            self._kvline_n += 1
+        if len(rec) >= 400:
+            out = _os.environ["VLLM_KVLINE_RING"]
+            _os.makedirs(out, exist_ok=True)
+            with open(
+                _os.path.join(out, f"kvline_{_os.getpid()}.jsonl"), "a"
+            ) as f:
+                for e in rec:
+                    f.write(_json.dumps(e) + "\n")
+            self._kvline_recs = []
 
     def postprocess_num_computed_tokens(self, input_batch: InputBatch) -> None:
         # Update the number of computed tokens.
