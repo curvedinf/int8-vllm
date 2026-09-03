@@ -366,7 +366,7 @@ class MambaHybridModelState(DefaultModelState):
                     for ln in lns:
                         impl = fc.get(ln)
                         kvv = getattr(impl, "kv_cache", None) if impl else None
-                        if not kvv:
+                        if kvv is None:
                             continue
                         ts = list(kvv) if isinstance(kvv, (list, tuple)) else [kvv]
                         ts = [t for t in ts if torch.is_tensor(t)]
@@ -471,7 +471,7 @@ class MambaHybridModelState(DefaultModelState):
                         for ln in lns:
                             impl = fc.get(ln)
                             kvv = getattr(impl, "kv_cache", None) if impl else None
-                            if not kvv:
+                            if kvv is None:
                                 continue
                             ts = list(kvv) if isinstance(kvv, (list, tuple)) else [kvv]
                             ts = [t for t in ts if torch.is_tensor(t)]
