@@ -522,18 +522,20 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             K = K * ks.unsqueeze(-1)
             vs = v_scale_cache[bt0].float()
             V = V * vs.unsqueeze(-1)
-        K = K.reshape(-1, K.shape[-2], K.shape[-1])[:ctx]  # [ctx, h, d]
+        K = K.reshape(-1, K.shape[-2], K.shape[-1])[:ctx]  # [ctx, h_kv, d]
         V = V.reshape(-1, V.shape[-2], V.shape[-1])[:ctx]
-        q = query[0].float()  # [h, d] (row 0 of the request's queries)
+        q = query[0].float()  # [h_q, d] (row 0 of the request's queries)
         got = output[0].float()
-        # per head: scores over ctx, softmax, weighted V
+        # per q head: scores over ctx, softmax, weighted V (GQA: h_q -> h_kv)
         num_h = q.shape[0]
+        num_kv = K.shape[1]
         rel = []
         for h in range(num_h):
-            s = (K[:, h, :] @ q[h]) * softmax_scale
+            kv_h = h * num_kv // num_h
+            s = (K[:, kv_h, :] @ q[h]) * softmax_scale
             s = s - s.max()
             p = torch.softmax(s, dim=-1)
-            o = p @ V[:, h, :]
+            o = p @ V[:, kv_h, :]
             g = got[h]
             denom = g.abs().max().clamp(min=1e-6)
             rel.append(float((o - g).abs().max() / denom))
