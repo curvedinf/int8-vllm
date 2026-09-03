@@ -201,6 +201,9 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
     _v_scale_cache: torch.Tensor | None = None
     _k_data_cache: torch.Tensor | None = None
     _v_data_cache: torch.Tensor | None = None
+    # int8_block_g{G} / VLLM_KV_G8: grouped fp16 scale views.
+    _g8_k: torch.Tensor | None = None
+    _g8_v: torch.Tensor | None = None
 
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return quant_key == kFp8StaticTensorSym
