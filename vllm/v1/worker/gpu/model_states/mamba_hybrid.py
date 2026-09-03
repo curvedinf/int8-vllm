@@ -366,6 +366,14 @@ class MambaHybridModelState(DefaultModelState):
                         if bid > 0 and bid not in blocks:
                             blocks.append((bcol, bid))
                     self._kvl3_attn_blocks[r] = blocks[:3]
+                    # Fixed 8-token-aligned absolute slices around the query
+                    # boundary: identical token ranges across rounds, so the
+                    # pre[n] -> pre[n+1] join is exact. Slice id s covers
+                    # tokens [s*8, s*8+8). Slices fully below nct must never
+                    # change; slices covering [nct, nct+T) must change (the
+                    # verify write).
+                    s_lo = max(0, (nct - 16) // 8)
+                    s_hi = (nct + T_r + 7) // 8
                     for ln in lns:
                         impl = fc.get(ln)
                         kvv = getattr(impl, "kv_cache", None) if impl else None
@@ -374,16 +382,35 @@ class MambaHybridModelState(DefaultModelState):
                         ts = list(kvv) if isinstance(kvv, (list, tuple)) else [kvv]
                         ts = [t for t in ts if torch.is_tensor(t)]
                         for t_i, t in enumerate(ts[:2]):
-                            tf = t.reshape(t.shape[0], -1)
-                            for j, (bcol, bid) in enumerate(blocks[:3]):
-                                if bid >= tf.shape[0]:
+                            tok_ax = 1 if t.dim() >= 2 and t.shape[1] == 1728 else (
+                                2 if t.dim() >= 3 and t.shape[2] == 1728 else 0
+                            )
+                            for s in range(s_lo, s_hi):
+                                bcol = (s * 8) // 1728
+                                if bcol >= w_a:
                                     continue
+                                bid = int(bt_a[r, bcol])
+                                if bid <= 0 or bid >= t.shape[0]:
+                                    continue
+                                lo = s * 8 - bcol * 1728
+                                hi = min(1728, lo + 8)
+                                if hi <= lo:
+                                    continue
+                                sl = (
+                                    t[bid, lo:hi]
+                                    if tok_ax == 1
+                                    else (
+                                        t[bid, :, lo:hi]
+                                        if tok_ax == 2
+                                        else t.reshape(t.shape[0], -1)[bid]
+                                    )
+                                )
                                 rows.append({
                                     "phase": phase, "n": self._kvl3_n,
                                     "rs": int(rs), "layer": f"{ln}#kv{t_i}",
-                                    "col": int(nct), "rel": j, "bc": int(bcol),
+                                    "col": int(nct), "s": s, "bc": int(bcol),
                                     "slot": bid,
-                                    "k": round(float(tf[bid].float().sum().item()), 3),
+                                    "k": round(float(sl.float().sum().item()), 3),
                                     "ri": int(nas[rs]) - 1 if 0 <= rs < len(nas) else -1,
                                     "T": T_r,
                                 })
@@ -460,39 +487,10 @@ class MambaHybridModelState(DefaultModelState):
                             "rel": rel, "slot": blk,
                             "k": round(float(tf[blk].float().sum().item()), 3),
                         })
-        # Attention-KV post half: checksum the SAME physical blocks selected
-        # by the pre hook (stashed in _kvl3_attn_blocks), giving exact
-        # pre->post pairing for the write-coverage test.
-        try:
-            attn_set = getattr(self, "_kvl3_attn", None)
-            ablocks = getattr(self, "_kvl3_attn_blocks", None)
-            if attn_set and ablocks:
-                for g, lns in attn_set:
-                    for r in range(n_req):
-                        rs = idx_map[r]
-                        if rs < 0 or r not in ablocks:
-                            continue
-                        for ln in lns:
-                            impl = fc.get(ln)
-                            kvv = getattr(impl, "kv_cache", None) if impl else None
-                            if kvv is None:
-                                continue
-                            ts = list(kvv) if isinstance(kvv, (list, tuple)) else [kvv]
-                            ts = [t for t in ts if torch.is_tensor(t)]
-                            for t_i, t in enumerate(ts[:2]):
-                                tf = t.reshape(t.shape[0], -1)
-                                for j, (bcol, bid) in enumerate(ablocks[r]):
-                                    if bid >= tf.shape[0]:
-                                        continue
-                                    rows.append({
-                                        "phase": "post", "n": self._kvl3_n,
-                                        "rs": int(rs), "layer": f"{ln}#kv{t_i}",
-                                        "col": 0, "rel": j, "bc": int(bcol),
-                                        "slot": bid,
-                                        "k": round(float(tf[bid].float().sum().item()), 3),
-                                    })
-        except Exception:
-            pass
+        # NOTE: the attention-KV post half was removed — the stashed block
+        # list proved unreliable (capture/dummy-phase overwrite + async
+        # post_update phasing). The attention tests are pre-only
+        # (analyze_kvline3b.py): sub-block slices at the query boundary.
         rec = getattr(self, "_kvl3_recs", None)
         if rec is None:
             rec = self._kvl3_recs = []
