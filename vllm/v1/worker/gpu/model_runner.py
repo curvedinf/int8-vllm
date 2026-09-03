@@ -1657,20 +1657,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         if s0_t + 1 >= len(pos_t):
                             continue
                         p_t = pos_t[s0_t]
-                        if p_t < 1 or p_t - 1 >= hist_t.shape[1]:
+                        if p_t < 1 or p_t + 1 >= hist_t.shape[1]:
                             continue
                         ls_row = ls_t[rs_t]
-                        fed_t = (
-                            int(ls_row[-1]) if isinstance(ls_row, list) else int(ls_row)
-                        )
+                        if not isinstance(ls_row, list):
+                            ls_row = [ls_row]
+                        h1 = int(hist_t[rs_t, p_t - 1])
+                        h0 = int(hist_t[rs_t, p_t])
+                        hp = int(hist_t[rs_t, p_t + 1])
                         recs_t.append(
                             {
                                 "n": getattr(self, "_tokfeed_n", 0),
                                 "pid": os.getpid(),
                                 "rs": int(rs_t),
                                 "p": int(p_t),
-                                "fed": fed_t,
-                                "hist": int(hist_t[rs_t, p_t - 1]),
+                                "ls": [int(x) for x in ls_row],
+                                "hm1": h1,
+                                "h0": h0,
+                                "hp1": hp,
                                 "T": int(qs_t[r + 1] - s0_t) if r + 1 <= n_req_t else 0,
                             }
                         )
