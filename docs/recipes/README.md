@@ -113,6 +113,56 @@ retired qwen36 unit).
    caches, float32 Mamba state, TP4, C8, and DFlash2 NS=13 to remain
    enabled.
 
+## int8_block_g{G} KV cache dtypes (2026-09-03)
+
+`--kv-cache-dtype int8_block_g{G}` (G in 4/8/16/32/64/128) stores int8
+data with one **fp16 scale per G-dim group** inside each 128-dim K/V head
+vector (scales inline in the widened pad of each half). The production
+default remains `int8_per_token_head` (one fp32 scale per whole head =
+g128 with an fp32 scalar); the block family is the long-context-quality
+lever for the int8-KV garble (pass 107/108: the int8 KV noise, at its
+mathematical floor, reshuffles small-margin verify decisions across 40k
+keys — garble at ~20k+ context, greedy acceptance 2.88/14 at 40k).
+
+Writer + read kernels are unit-tested for every G
+(`scripts/test_int8_block_kv.py`; roundtrip within half a quantum, read
+kernel within bf16 tile noise of a torch reference). End-to-end greedy
+acceptance at 40k context, Qwen3.8-27B + DFlash2 (both caches on the
+same dtype), 2048-token greedy legs on the 40k docs corpus:
+
+| dtype | bytes/elem | K RMS err | V RMS err | greedy accept @40k | suggested max context* |
+|---|---|---|---|---|---|
+| `int8_per_token_head` (prod default) | 1.031 | 0.0148 | 0.0439 | 2.88/14 (58% full-reject) | **~16k** (garbles beyond) |
+| `int8_block_g128` | 1.016 | 0.0148 | 0.0439 | — (same noise as default; f16 scale) | ~16k |
+| `int8_block_g64` | 1.031 | ~0.0133 | ~0.0396 | — | ~24k* |
+| `int8_block_g32` | 1.063 | 0.0104 | 0.0364 | — | ~40k* |
+| `int8_block_g16` | 1.125 | 0.0089 | 0.0319 | **4.67/14** (15% full-reject) | **~56k*** (measured clean at 44k) |
+| `int8_block_g8` | 1.250 | 0.0074 | 0.0269 | **4.96/14** (14% full-reject) | **~80k*** (measured clean at 44k; = short-prompt baseline) |
+| `int8_block_g4` | 1.500 | 0.0058 | 0.0211 | — | ~110k* |
+| fp16/bf16 reference | 2.000 | 0 (exact) | 0 (exact) | 4.51/14 | unlimited |
+
+RMS = per-element RMS of (dequantized − original) on live K/V tensors
+(14M elements/rank, decode legs, median over 4 TP ranks). fp16/bf16 is
+exact because the model computes in bf16 and every bf16 value round-trips
+fp16 storage bit-exactly.
+
+\* Suggested max context assumes garble onset scales with accumulated
+key-noise vs decision margins (~1/noise² in context length, anchored on
+the measured g128 failure at ~20k and the g8/g16 passes at 44k); entries
+without a measured acceptance row are extrapolations — run the 40k greedy
+leg before trusting a new G at a new context length. The measured safe
+choices today: **g8 and g16 at 44k** (greedy acceptance 4.96 / 4.67 vs
+2.88 for the default).
+
+Memory cost: +2–46% KV bytes/elem vs the default (g4 reaches 1.5 B/elem —
+75% of fp16); pair with the CPU offload tier or a smaller `--kv-cache-memory`
+when capacity-bound. Perf: reads/writes use the Triton kernels (not the
+aiter fast path) in this first cut — expect slower decode than the default
+dtype until the aiter kernel learns group scales; quality is identical.
+
+Set with `KV_DTYPE=int8_block_g8 DRAFT_KV_DTYPE=int8_block_g8` env for the
+serve script (both target and draft must match).
+
 ## AR+RMS+per-token-int8-quant fused epilogue (2026-08-24, status: kernel DONE, production enable BLOCKED)
 
 **aiter `ec90fc933`**: `fused_ar_rms_int8_per_token_quant` — AR + residual +
