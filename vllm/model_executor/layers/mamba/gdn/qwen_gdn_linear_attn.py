@@ -1313,10 +1313,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             g = -torch.exp(A) * _s(aa + dtb)  # [HV]
             beta = torch.sigmoid(bb)  # [HV]
             h = h * torch.exp(g)[:, None, None]
-            vdot = (h * kk[None, None, :]).sum(-1)  # [HV, V] = h . k per head
+            vdot = (h * kk[:, None, :]).sum(-1)  # [HV, V] = h . k per head
             vv = (vv - vdot) * beta[:, None]
-            h = h + vv[:, :, None] * kk[None, None, :]
-            o = (h * qq[None, None, :]).sum(-1)  # [HV, V]
+            h = h + vv[:, :, None] * kk[:, None, :]
+            o = (h * qq[:, None, :]).sum(-1)  # [HV, V]
             got = out[t_row].float()
             denom = got.abs().max().clamp(min=1e-6)
             rels.append(float((o - got).abs().max() / denom))
