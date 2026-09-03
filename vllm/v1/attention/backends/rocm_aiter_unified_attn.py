@@ -589,6 +589,40 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         slots = sm[keep]
         kq, ksc = quant_ref(keyv)
         vq, vsc = quant_ref(valuev)
+        # QUANT-ERROR stats (pass 108): empirical per-element relative error
+        # of the int8-PTH quantization vs the theoretical uniform bound
+        # (~0.11% RMS, 0.39% worst). Empirical >> bound = a quantizer bug;
+        # ~bound = fundamental int8 noise.
+        _qe = _os.environ.get("VLLM_KV_READBACK")
+        if _qe:
+            try:
+                for tag, x, q, sc in (("k", keyv, kq, ksc), ("v", valuev, vq, vsc)):
+                    deq = q.float() * sc.unsqueeze(-1)
+                    err = (deq - x.float()).abs()
+                    rel = err / x.float().abs().clamp(min=1e-6)
+                    self._qe_stats = getattr(self, "_qe_stats", {})
+                    st = self._qe_stats.setdefault(tag, [0.0, 0.0, 0.0, 0])
+                    st[0] = max(st[0], float(err.max()))
+                    st[1] = max(st[1], float(rel.max()))
+                    st[2] += float(rel.pow(2).sum())
+                    st[3] += rel.numel()
+                if getattr(self, "_rb_counter", 0) % 500 == 0:
+                    import json as _jsonq
+
+                    _os.makedirs(_qe + "_quanterr", exist_ok=True)
+                    with open(
+                        _os.path.join(_qe + "_quanterr", f"qe_{_os.getpid()}.jsonl"),
+                        "a",
+                    ) as _f:
+                        for tag, st in self._qe_stats.items():
+                            _f.write(_jsonq.dumps({
+                                "c": self._rb_counter, "t": tag,
+                                "absmax_err": st[0], "relmax": st[1],
+                                "relrms": (st[2] / max(st[3], 1)) ** 0.5,
+                                "n": st[3],
+                            }) + "\n")
+            except Exception:
+                pass
         bs = key_cache.shape[1]
         rows = (slots // bs).long()
         cols = (slots % bs).long()
