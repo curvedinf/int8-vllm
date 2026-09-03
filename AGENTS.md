@@ -19,7 +19,9 @@ mamba state) is mandatory. The fused AR+RMSNorm+per-group INT8 quant-out
 epilogue is OFF by default (an eager seam exists behind
 `VLLM_GFX908_EAGER_EPILOGUE=1`; experiment E3 verdict was TPOT-neutral).
 Do not substitute W8A16, the fork-local Triton GEMM, TRITON_ATTN, RCCL,
-AITER CAR, fp16 KV, no-spec, another TP size, or another concurrency in the
+AITER CAR, int8-PTH KV (the garble driver; bf16/auto is the fix — use
+`int8_block_g{4..128}` via KV_DTYPE if int8-class KV memory is required),
+no-spec, another TP size, or another concurrency in the
 target recipe. Historical
 experiments are archived (archived logs tarball outside the repo, git history);
 the A/B ledger lives at `docs/recipes/surface_experiments_ledger.jsonl`
@@ -32,9 +34,10 @@ This is the fastest vLLM branch for 4x AMD Instinct MI100 (gfx908 / CDNA1,
 (equal) at half the bandwidth — so **int8 is the native dtype** of this stack:
 GPTQ 8-bit weights (uint8b128, group_size 128) use AITER W8A8 INT8 GEMMs for
 every decode and prefill shape, plus bf16 KV cache
-(`--kv-cache-dtype int8_per_token_head`, block 32, f32 inline scales) and
+(`--kv-cache-dtype auto`, since 2026-09-03 — int8-PTH was the long-context
+garble driver, pass 107/108) and
 AITER unified attention. The DFlash2 draft is also GPTQ INT8
-GS128, and both target and draft KV use `int8_per_token_head`. Mamba state
+GS128, and both target and draft KV use `auto` (bf16). Mamba state
 stays fp32 (measured float exception — the int8 mamba experiment failed on
 quality). Collectives use vLLM CUSTOM all-reduce; the fused
 AR+RMSNorm+per-group INT8 quant-out epilogue is off. The
@@ -105,12 +108,15 @@ Non-negotiable settings in the qwen38 script:
 `VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1
 VLLM_GFX908_INT8_LM_HEAD=1`, AITER CK W8A8 for every GS128 GEMM,
 `--tensor-parallel-size 4 --max-num-seqs 8
---kv-cache-dtype int8_per_token_head --mamba-ssm-cache-dtype float32`,
+--kv-cache-dtype auto --mamba-ssm-cache-dtype float32`,
 `VLLM_GFX908_ACT_QUANT=round` (fused round-to-nearest act quant — quality
 default, see INT8_AUDIT_RESULTS.md), and the speculative config
 `{"method":"dflash","num_speculative_tokens":13,"kv_cache_dtype":"auto"}`.
 The nested dtype is explicit and applies to the draft; the top-level
-`--kv-cache-dtype int8_per_token_head` applies to the target. The draft
+`--kv-cache-dtype auto` applies to the target. bf16 KV is the garble fix
+(2026-09-03); the `int8_block_g{4..128}` family (KV_DTYPE env) is the
+long-context int8 fallback — see the table in docs/recipes/README.md.
+The draft
 MODEL dtype resolves from its checkpoint (bf16) — forcing the target's
 fp16 onto it overflows its residual stream (fixed 2026-08-24; do not
 regress). Measured float exceptions (do not quantize without re-gating):
