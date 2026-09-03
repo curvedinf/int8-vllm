@@ -1646,6 +1646,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     idx_t = input_batch.idx_mapping[:n_req_t].cpu().tolist()
                     ls_t = self.req_states.last_sampled_tokens.cpu().tolist()
                     hist_t = self.req_states.all_token_ids.gpu.cpu()
+                    # SLOTSIDE (pass 105): the attention group's slot mapping
+                    # for each request's real query tokens. A real token
+                    # mapped to PAD (-1) is skipped by BOTH the write kernel
+                    # and the write-site readback audit (valid mask) — the
+                    # invisible miss that slice checksums see but byte-exact
+                    # write audits cannot.
+                    gid_a = getattr(self, "_tokfeed_gid", None)
+                    if gid_a is None:
+                        from vllm.v1.kv_cache_interface import (
+                            AttentionSpec as _AS_t,
+                        )
+
+                        gid_a = next(
+                            g
+                            for g, grp in enumerate(
+                                self.kv_cache_config.kv_cache_groups
+                            )
+                            if isinstance(grp.kv_cache_spec, _AS_t)
+                        )
+                        self._tokfeed_gid = gid_a
+                    sm_t = slot_mappings[gid_a].cpu().tolist()
                     recs_t = getattr(self, "_tokfeed_recs", None)
                     if recs_t is None:
                         recs_t = self._tokfeed_recs = []
@@ -1675,6 +1696,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                 "hm1": h1,
                                 "h0": h0,
                                 "hp1": hp,
+                                "sm": sm_t[s0_t : s0_t + 32],
                                 "T": int(qs_t[r + 1] - s0_t) if r + 1 <= n_req_t else 0,
                             }
                         )
