@@ -631,6 +631,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                         ("g32f16", 32, torch.float16),
                         ("g16f32", 16, None),
                         ("g16f16", 16, torch.float16),
+                        ("g8f16", 8, torch.float16),
                     ):
                         gs = (
                             xf.abs()
