@@ -456,7 +456,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         key_cache, value_cache = self._split_kv_cache(kv_cache)
 
         softmax_scale = self.scale
-        if self._is_per_token_head_quant:
+        if self._is_per_token_head_quant or self._is_int8_block:
             self._ensure_scale_caches(kv_cache)
             key_cache = self._k_data_cache
             value_cache = self._v_data_cache
@@ -892,24 +892,29 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             return
         key_cache, value_cache = self._split_kv_cache(kv_cache)
 
+        # int8_block_g* and the VLLM_KV_G8 env diagnostic both take the
+        # grouped-f16-scale triton writer (and skip the C++ fallback below,
+        # which only knows auto/fp8).
+        if self._is_int8_block or getattr(self, "_g8_k", None) is not None:
+            self._ensure_scale_caches(kv_cache)
+            from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
+                reshape_and_cache_g8,
+            )
+
+            reshape_and_cache_g8(
+                key,
+                value,
+                self._k_data_cache,
+                self._v_data_cache,
+                self._g8_k,
+                self._g8_v,
+                slot_mapping,
+                group=self._block_g or 8,
+            )
+            return
+
         if self._is_per_token_head_quant:
             self._ensure_scale_caches(kv_cache)
-            if getattr(self, "_g8_k", None) is not None:
-                from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
-                    reshape_and_cache_g8,
-                )
-
-                reshape_and_cache_g8(
-                    key,
-                    value,
-                    self._k_data_cache,
-                    self._v_data_cache,
-                    self._g8_k,
-                    self._g8_v,
-                    slot_mapping,
-                    group=self._block_g or 8,
-                )
-                return
             # Pass the padded halves: the kernel writes head_size data
             # elements plus the inline scale at offset head_size within
             # each half (mirrors TritonAttentionBackend).
@@ -965,12 +970,12 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         )
 
     def fused_rope_kvcache_supported(self):
-        if self._is_per_token_head_quant:
+        if self._is_per_token_head_quant or self._is_int8_block:
             return False
         return rocm_aiter_ops.is_enabled()
 
     def fused_qk_norm_rope_kvcache_supported(self):
-        if self._is_per_token_head_quant:
+        if self._is_per_token_head_quant or self._is_int8_block:
             # The fused op writes unquantized fp16 K into the cache.
             return False
         return rocm_aiter_ops.is_enabled()
