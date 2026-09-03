@@ -1666,6 +1666,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         recs_t.append(
                             {
                                 "n": getattr(self, "_tokfeed_n", 0),
+                                "pid": os.getpid(),
                                 "rs": int(rs_t),
                                 "p": int(p_t),
                                 "fed": fed_t,
