@@ -320,6 +320,11 @@ if [[ -f "${LOG_DIR}/UAREAD" ]]; then
   VLLM_UA_READAUDIT="/home/curved/vllm-gfx908/logs/garble/ua_read"
 fi
 
+# GDNROWAUDIT flag file: GDN spec-kernel row-0 reference audit.
+if [[ -f "${LOG_DIR}/GDNROWAUDIT" ]]; then
+  VLLM_GDN_ROWAUDIT="/home/curved/vllm-gfx908/logs/garble/gdn_rowaudit"
+fi
+
 # KVREADBACK flag file: write-site audit — reference-quantize incoming K/V,
 # run the int8-PTH write kernel, read back and compare (catches missed AND
 # stale-overwritten writes at full per-token resolution; eager forwards only
@@ -470,6 +475,7 @@ start_server() {
   VLLM_KVLINE3="${VLLM_KVLINE3:-}" \
   VLLM_KV_READBACK="${VLLM_KV_READBACK:-}" \
   VLLM_UA_READAUDIT="${VLLM_UA_READAUDIT:-}" \
+  VLLM_GDN_ROWAUDIT="${VLLM_GDN_ROWAUDIT:-}" \
   VLLM_RESAMPLE_SALT="${VLLM_RESAMPLE_SALT:-}" \
   VLLM_SALT_U="${VLLM_SALT_U:-}" \
   VLLM_ALIGN_PROBE="${VLLM_ALIGN_PROBE:-}" \

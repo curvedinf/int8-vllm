@@ -1248,6 +1248,89 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out,
         )
 
+    def _gdn_row0_audit(self, q, k, v, a, b, out, ssm_state, spec_idx,
+                        num_accepted, n_spec):
+        """Env-gated (VLLM_GDN_ROWAUDIT): recompute the SPEC row-0 GDN output
+        from the kernel's own inputs — checkpoint state block
+        ssm_state[spec_idx[0, na-1]], and row 0's q/k/v/a/b — using the exact
+        kernel math (fused_sigmoid_gating_delta_rule_update_kernel, one
+        timestep), and compare against the kernel's output row 0. All inputs
+        are individually verified by earlier passes; a divergence convicts
+        the kernel's internal row handling (e.g., an off-by-one in the
+        14-row chain would compute row 0 from a different input row).
+        Logs one jsonl line per audited layer instance per round.
+        """
+        import json as _json
+        import os as _os
+
+        if n_spec <= 0:
+            return
+        li = getattr(self, "_gra_i", None)
+        if li is None:
+            li = type(self)._gra_inst = getattr(type(self), "_gra_inst", 0)
+            type(self)._gra_inst = li + 1
+            self._gra_i = li
+        if li >= 4:
+            return
+        q4 = q[0] if q.dim() == 4 else q
+        k4 = k[0] if k.dim() == 4 else k
+        v4 = v[0] if v.dim() == 4 else v
+        a1 = a[0] if a.dim() == 2 else a
+        b1 = b[0] if b.dim() == 2 else b
+        # shapes: q/k [T, H, K]; v [T, HV, V]; a/b [T, HV]
+        na = int(num_accepted[0].item()) if num_accepted is not None else 1
+        T = q4.shape[0]
+        if T < 1 or na < 1 or na > spec_idx.shape[-1]:
+            return
+        blk = int(spec_idx[0, na - 1].item())
+        if blk <= 0:
+            return
+        h = ssm_state[blk].float()  # [HV, V, K]
+        A = self.A_log.float()
+        dtb = self.dt_bias.float()
+        scale = float(k4.shape[-1]) ** -0.5
+
+        def _s(x):
+            return torch.where(x <= 20, torch.log1p(torch.exp(x)), x)
+
+        rels = []
+        for t_row in (0,):
+            qq = q4[t_row].float()  # [H, K]
+            kk = k4[t_row].float()
+            vv = v4[t_row].float()  # [HV, V]
+            aa = a1[t_row].float()  # [HV]
+            bb = b1[t_row].float()  # [HV]
+            H, Kdim = qq.shape
+            HV = vv.shape[0]
+            if H != HV:
+                grp = HV // H
+                sel = torch.arange(HV, device=qq.device) // grp
+                qq = qq[sel]
+                kk = kk[sel]
+            qq = qq * torch.rsqrt((qq * qq).sum(-1, keepdim=True) + 1e-6)
+            kk = kk * torch.rsqrt((kk * kk).sum(-1, keepdim=True) + 1e-6)
+            qq = qq * scale
+            g = -torch.exp(A) * _s(aa + dtb)  # [HV]
+            beta = torch.sigmoid(bb)  # [HV]
+            h = h * torch.exp(g)[:, None, None]
+            vdot = (h * kk[None, None, :]).sum(-1)  # [HV, V] = h . k per head
+            vv = (vv - vdot) * beta[:, None]
+            h = h + vv[:, :, None] * kk[None, None, :]
+            o = (h * qq[None, None, :]).sum(-1)  # [HV, V]
+            got = out[t_row].float()
+            denom = got.abs().max().clamp(min=1e-6)
+            rels.append(float((o - got).abs().max() / denom))
+        rec = {
+            "layer": li, "call": getattr(self, "_gra_c", 0),
+            "na": na, "T": T, "rel": round(max(rels), 4),
+        }
+        self._gra_c = getattr(self, "_gra_c", 0) + 1
+        _os.makedirs(_os.environ["VLLM_GDN_ROWAUDIT"], exist_ok=True)
+        with open(_os.path.join(
+            _os.environ["VLLM_GDN_ROWAUDIT"], f"gra_{_os.getpid()}.jsonl"
+        ), "a") as f:
+            f.write(_json.dumps(rec) + "\n")
+
     def _forward_core(
         self,
         mixed_qkv: torch.Tensor,
@@ -1500,6 +1583,21 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     use_qk_l2norm_in_kernel=True,
                 )
             )
+            _gra = os.environ.get("VLLM_GDN_ROWAUDIT")
+            if _gra and not torch.cuda.is_current_stream_capturing():
+                try:
+                    self._gdn_row0_audit(
+                        q=query_spec, k=key_spec, v=value_spec, a=a_spec,
+                        b=b_spec, out=core_attn_out_spec,
+                        ssm_state=ssm_state,
+                        spec_idx=spec_state_indices_tensor,
+                        num_accepted=num_accepted_tokens,
+                        n_spec=int(attn_metadata.num_spec_decodes),  # type: ignore[attr-defined]
+                    )
+                except Exception as _e:
+                    if not getattr(self, "_gra_err", False):
+                        self._gra_err = True
+                        logger.warning("GDN-ROWAUDIT failed: %s", _e)
             if os.environ.get("VLLM_CAND_RING") and not torch.cuda.is_current_stream_capturing():
                 # NaN-origin hunt: GDN spec state health per layer, over the
                 # LIVE request rows only (the whole cache includes stale/
