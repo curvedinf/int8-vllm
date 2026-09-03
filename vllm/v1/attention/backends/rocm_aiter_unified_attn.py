@@ -121,6 +121,21 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
         # K and V are packed into the content dim: logical (B, H, N, 2*hs).
+        from vllm.v1.kv_cache_interface import (
+            get_kv_quant_mode as _gkqm,
+            int8_block_group_size,
+        )
+
+        _g = int8_block_group_size(cache_dtype_str)
+        if _g is not None and _gkqm(cache_dtype_str).is_int8_block:
+            # int8_block_g{G}: int8 data + 2*hs/G bytes of fp16 scales per
+            # half (hs/G scales, one per G-dim group).
+            if head_size % _g != 0:
+                raise ValueError(
+                    f"int8_block_g{_g} requires head_size % {_g} == 0, got {head_size}"
+                )
+            scale_pad = 2 * head_size // _g  # fp16 bytes; int8 elems == bytes
+            return (num_blocks, num_kv_heads, block_size, 2 * (head_size + scale_pad))
         if kv_cache_uses_per_token_head_scales(cache_dtype_str):
             # Pad each half of the content dim by
             # sizeof(float32)/sizeof(cache_dtype) so the per-(token, head)
@@ -142,8 +157,17 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
         """Per-token-head modes pack inline fp32 scales after each half's
         data, so the content is (K data + K scale + V data + V scale)."""
+        from vllm.v1.kv_cache_interface import int8_block_group_size
+
         mode = spec.kv_quant_mode
-        if spec.state_content_bytes is not None or not mode.is_per_token_head:
+        if spec.state_content_bytes is not None:
+            return spec
+        if mode.is_int8_block:
+            # int8 data + fp16 group scales inline per half.
+            _g = mode.int8_block_group
+            content = 2 * (spec.head_size * 1 + 2 * spec.head_size // _g)
+            return replace(spec, state_content_bytes=content)
+        if not mode.is_per_token_head:
             return spec
         hs_k, hs_v = spec.head_size, spec.head_size_v
         if mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
@@ -184,24 +208,79 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
     def _ensure_scale_caches(self, kv_cache: torch.Tensor) -> None:
         """Extract per-head scale views from the padded content dimension.
 
-        The KV cache is packed as logical shape
-        ``(num_blocks, nkv, block_size, 2 * (hs + pad))`` where
-        ``pad = sizeof(float32) / sizeof(cache_dtype)``.  The content dim holds
-        ``[K(hs) | K_scale(pad) | V(hs) | V_scale(pad)]`` per (head, slot); the
-        last ``pad`` elements of each half hold one float32 scale.  We create
-        strided float32 views over those bytes.  ``kv_cache`` must be the
-        packed logical tensor (call before any transpose), but may have HND or
-        NHD physical strides.
+        For the int8_block_g{G} modes this instead carves fp16 group-scale
+        views: (num_blocks, block_size, nkv, head_size // G) per half, with
+        the scales living in the widened pad region after each half's data.
 
-        Scale shape: ``(num_blocks, block_size, num_kv_heads)``
+        The KV cache is packed as logical shape
+        ``(num_blocks, nkv, block_size, 2 * (hs + pad))``.  The content dim holds
+        ``[K(hs) | K_scale(pad) | V(hs) | V_scale(pad)]`` per (head, slot);
+        ``kv_cache`` must be the packed logical tensor (call before any
+        transpose), but may have HND or NHD physical strides.
+
+        Per-token-head scale shape: ``(num_blocks, block_size, num_kv_heads)``
         """
-        if self._k_scale_cache is not None:
+        if self._k_scale_cache is not None or self._g8_k is not None:
             return
 
         num_blocks, nkv, block_size, content = kv_cache.shape
         dtype_sz = kv_cache.element_size()
-        scale_pad = get_dtype_size(torch.float32) // dtype_sz  # e.g. 4
         padded_hs = content // 2
+
+        if self._is_int8_block:
+            assert dtype_sz == 1, "int8_block_g* caches must be int8 tensors"
+            g = self._block_g
+            # hs + 2*(hs//g) = padded_hs  ->  hs = padded_hs * g // (g + 2)
+            hs = padded_hs * g // (g + 2)
+            assert hs % g == 0 and hs + 2 * (hs // g) == padded_hs, (
+                f"int8_block_g{g}: content dim {content} incompatible "
+                f"(hs={hs}, pad={padded_hs - hs})"
+            )
+            groups = hs // g
+            raw = kv_cache.untyped_storage()
+            base_f16 = torch.tensor(
+                [], dtype=torch.float16, device=kv_cache.device
+            ).set_(raw)
+
+            def to_f16_units(elements: int) -> int:
+                nbytes = elements * dtype_sz
+                assert nbytes % 2 == 0
+                return nbytes // 2
+
+            strides = kv_cache.stride()
+            block_f16 = to_f16_units(strides[0])
+            head_f16 = to_f16_units(strides[1])
+            slot_f16 = to_f16_units(strides[2])
+            base_off_f16 = to_f16_units(kv_cache.storage_offset())
+            k_off = base_off_f16 + to_f16_units(hs)
+            v_off = base_off_f16 + to_f16_units(padded_hs + hs)
+
+            self._g8_k = torch.as_strided(
+                base_f16,
+                size=(num_blocks, block_size, nkv, groups),
+                stride=(block_f16, slot_f16, head_f16, 1),
+                storage_offset=k_off,
+            )
+            self._g8_v = torch.as_strided(
+                base_f16,
+                size=(num_blocks, block_size, nkv, groups),
+                stride=(block_f16, slot_f16, head_f16, 1),
+                storage_offset=v_off,
+            )
+            self._g8_k.fill_(1.0)
+            self._g8_v.fill_(1.0)
+
+            key_cache, value_cache = self._split_kv_cache(kv_cache)
+            self._k_data_cache = key_cache[..., :hs]
+            self._v_data_cache = value_cache[..., :hs]
+            logger.info_once(
+                "int8_block_g%d KV active: fp16 group scales inline "
+                "(%d groups/head, %d bytes/half)",
+                g, groups, padded_hs,
+            )
+            return
+
+        scale_pad = get_dtype_size(torch.float32) // dtype_sz  # e.g. 4
         hs = padded_hs - scale_pad
 
         raw = kv_cache.untyped_storage()
@@ -251,7 +330,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         # fp16 scales; data layout unchanged.
         if _os.environ.get("VLLM_KV_G8"):
             self._g8_k = torch.empty(
-                (num_blocks, nkv, block_size, hs // 8),
+                (num_blocks, block_size, nkv, hs // 8),
                 dtype=torch.float16,
                 device=kv_cache.device,
             )
@@ -300,6 +379,10 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
 
         self._kv_quant_mode = get_kv_quant_mode(kv_cache_dtype)
         self._is_per_token_head_quant = self._kv_quant_mode.is_per_token_head
+        self._is_int8_block = self._kv_quant_mode.is_int8_block
+        self._block_g = (
+            self._kv_quant_mode.int8_block_group if self._is_int8_block else None
+        )
 
     def _split_kv_cache(
         self, kv_cache: torch.Tensor
@@ -824,6 +907,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                     self._g8_k,
                     self._g8_v,
                     slot_mapping,
+                    group=self._block_g or 8,
                 )
                 return
             # Pass the padded halves: the kernel writes head_size data

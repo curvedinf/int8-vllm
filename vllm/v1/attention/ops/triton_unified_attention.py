@@ -267,6 +267,7 @@ def kernel_unified_attention(
     stride_g8_head: int | None = None,
     stride_g8_slot: int | None = None,
     USE_G8: tl.constexpr = False,
+    G8_GROUP: tl.constexpr = 8,
     # ``tl.int64`` cannot be combined with a ``None`` default — Triton's JIT
     # rejects ``Optional[tl.int64]`` / ``tl.int64 | None`` at trace time, and
     # plain ``tl.int64 = None`` raises ``TypeError: 'NoneType' object cannot
@@ -512,7 +513,7 @@ def kernel_unified_attention(
                 physical_block_idx[None, :] * stride_g8_blk
                 + kv_head_idx * stride_g8_head
                 + (seq_offset % BLOCK_SIZE)[None, :] * stride_g8_slot
-                + (offs_d // 8)[:, None]
+                + (offs_d // G8_GROUP)[:, None]
             )
             k_g8 = tl.load(
                 g8_k_scale_ptr + k_g8_off,
@@ -525,7 +526,7 @@ def kernel_unified_attention(
                 physical_block_idx[:, None] * stride_g8_blk
                 + kv_head_idx * stride_g8_head
                 + (seq_offset % BLOCK_SIZE)[:, None] * stride_g8_slot
-                + (offs_d // 8)[None, :]
+                + (offs_d // G8_GROUP)[None, :]
             )
             v_g8 = tl.load(
                 g8_v_scale_ptr + v_g8_off,
@@ -1137,7 +1138,9 @@ def unified_attention(
         gs = g8_k_scale.stride()
         g8_k_ptr = g8_k_scale
         g8_v_ptr = g8_v_scale
-        g8_blk, g8_head, g8_slot = gs[0], gs[1], gs[2]
+        # views are (blocks, block_size, nkv, groups): stride(1) is the
+        # slot axis, stride(2) the head axis.
+        g8_blk, g8_head, g8_slot = gs[0], gs[2], gs[1]
     else:
         g8_k_ptr = None
         g8_v_ptr = None
@@ -1208,6 +1211,7 @@ def unified_attention(
         stride_g8_head=g8_head,
         stride_g8_slot=g8_slot,
         USE_G8=use_g8,
+        G8_GROUP=(head_size // g8_k_scale.shape[-1]) if use_g8 else 8,
         scale=softmax_scale,
         q_scale=q_descale,
         k_scale=k_descale,

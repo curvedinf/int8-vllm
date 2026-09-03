@@ -34,6 +34,12 @@ CacheDType = Literal[
     "fp8_per_token_head",
     "nvfp4",
     "nvfp4_4over6",
+    "int8_block_g4",
+    "int8_block_g8",
+    "int8_block_g16",
+    "int8_block_g32",
+    "int8_block_g64",
+    "int8_block_g128",
 ]
 
 

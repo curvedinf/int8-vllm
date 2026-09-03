@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from collections import Counter
 from collections.abc import Collection
 from dataclasses import dataclass, fields, replace
@@ -51,6 +52,14 @@ class KVQuantMode(IntEnum):
     TURBOQUANT_4BIT_NC = 7
     TURBOQUANT_K3V4_NC = 8
     TURBOQUANT_3BIT_NC = 9
+    # int8 data + one fp16 scale per G-dim group within each token-head
+    # vector (dtype string "int8_block_g{G}"); G is encoded in the member.
+    INT8_BLOCK_G4 = 10
+    INT8_BLOCK_G8 = 11
+    INT8_BLOCK_G16 = 12
+    INT8_BLOCK_G32 = 13
+    INT8_BLOCK_G64 = 14
+    INT8_BLOCK_G128 = 15
 
     @property
     def is_per_token_head(self) -> bool:
@@ -60,6 +69,18 @@ class KVQuantMode(IntEnum):
             KVQuantMode.FP8_PER_TOKEN_HEAD,
             KVQuantMode.INT4_PER_TOKEN_HEAD,
         )
+
+    @property
+    def is_int8_block(self) -> bool:
+        """True for the int8_block_g{G} (per-dim-group fp16 scale) modes."""
+        return 10 <= self.value <= 15
+
+    @property
+    def int8_block_group(self) -> int | None:
+        """Group size G when is_int8_block, else None."""
+        if self.is_int8_block:
+            return {10: 4, 11: 8, 12: 16, 13: 32, 14: 64, 15: 128}[self.value]
+        return None
 
     @property
     def is_nvfp4(self) -> bool:
@@ -85,6 +106,9 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
         return KVQuantMode.INT8_PER_TOKEN_HEAD
     if kv_cache_dtype == "fp8_per_token_head":
         return KVQuantMode.FP8_PER_TOKEN_HEAD
+    _g = int8_block_group_size(kv_cache_dtype)
+    if _g is not None:
+        return KVQuantMode[f"INT8_BLOCK_G{_g}"]
     if kv_cache_dtype.startswith("nvfp4"):
         return KVQuantMode.NVFP4
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("turboquant_"):
@@ -92,6 +116,15 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("fp8"):
         return KVQuantMode.FP8_PER_TENSOR
     return KVQuantMode.NONE
+
+
+def int8_block_group_size(kv_cache_dtype: str) -> int | None:
+    """Group size G for an ``int8_block_g{G}`` dtype string, else None.
+
+    Valid G: 4, 8, 16, 32, 64, 128 (must divide the attention head size).
+    """
+    m = re.fullmatch(r"int8_block_g(4|8|16|32|64|128)", kv_cache_dtype or "")
+    return int(m.group(1)) if m else None
 
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:

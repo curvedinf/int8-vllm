@@ -515,6 +515,9 @@ def kv_cache_dtype_str_to_dtype(
     if kv_cache_dtype == "auto":
         # Model config may not be specified for unit tests, default to float16
         return model_config.dtype if model_config else torch.half
+    if kv_cache_dtype.startswith("int8_block_g"):
+        # int8 data with fp16 group scales stored in the pad region.
+        return torch.int8
     return STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
 
 

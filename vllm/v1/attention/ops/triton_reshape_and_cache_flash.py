@@ -327,9 +327,11 @@ def _reshape_cache_g8(
     # per-8-dim-group absmax: [HEAD] -> [NUM_GROUPS, GROUP]
     k_g = tl.reshape(k_h, (NUM_GROUPS, GROUP))
     k_amax = tl.maximum(tl.max(tl.abs(k_g), axis=1) / 127.0, 1e-6)
-    # fp16 scale storage simulation: round-trip through fp16
+    # fp16 scale storage: quantize with EXACTLY the stored (fp16-rounded)
+    # scale; the int8 clamp absorbs the max element when fp16 rounds down.
     k_s16 = k_amax.to(tl.float16).to(tl.float32)
     k_q = tl.reshape(k_h, (NUM_GROUPS, GROUP)) * (1.0 / k_s16)[:, None]
+    # Round half away from zero before the int8 store truncates.
     k_q = tl.where(k_q >= 0, k_q + 0.5, k_q - 0.5)
     k_q = tl.clamp(k_q, -128.0, 127.0)
     tl.store(
@@ -389,12 +391,15 @@ def reshape_and_cache_g8(
     g8_k_scale: torch.Tensor,
     g8_v_scale: torch.Tensor,
     slot_mapping: torch.Tensor,
+    group: int = 8,
 ):
     num_tokens, num_kv_heads, head_size = key.shape
     head_size_v = value.shape[2]
     head_size_padded = triton.next_power_of_2(max(head_size, head_size_v))
     block_size = key_cache.shape[1]
-    assert head_size % 8 == 0 and head_size_v % 8 == 0, "g8 needs dims % 8"
+    assert head_size % group == 0 and head_size_v % group == 0, (
+        f"int8_block_g{group} needs dims % {group} == 0"
+    )
     _reshape_cache_g8[(num_tokens, num_kv_heads)](
         key,
         value,
@@ -414,14 +419,14 @@ def reshape_and_cache_g8(
         value_cache.stride(1),
         value_cache.stride(2),
         g8_k_scale.stride(0),
-        g8_k_scale.stride(1),
         g8_k_scale.stride(2),
+        g8_k_scale.stride(1),
         block_size=block_size,
         head_size=head_size,
         head_size_v=head_size_v,
         HEAD_SIZE_PADDED=head_size_padded,
-        NUM_GROUPS=head_size // 8,
-        GROUP=8,
+        NUM_GROUPS=head_size // group,
+        GROUP=group,
     )
 
 
