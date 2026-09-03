@@ -2147,6 +2147,31 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 while len(s) < 2:
                     s.append(0.0)
                 rows.append((ln, r, slot, s[0], s[1]))
+        # Token-identity capture (pass 104): the anchor token FED to this
+        # round's verify (last_sampled_tokens, set by the previous round's
+        # post_update) vs the request history's token at nct-1 (the CORRECT
+        # anchor). A mismatch = the engine feeds a wrong anchor token at row
+        # 0 — confident-but-wrong row-0 distributions, self-sustaining, and
+        # invisible to every cache/state checksum.
+        try:
+            nct_np = input_batch.num_computed_tokens_np
+            ls_gpu = self.req_states.last_sampled_tokens
+            hist_gpu = self.req_states.all_token_ids.gpu
+            for r in range(n_req):
+                rs_i = idx_map[r]
+                p = int(nct_np[rs_i]) if rs_i < len(nct_np) else -1
+                if p < 1:
+                    continue
+                rows.append((
+                    "TOKFEED", r, p,
+                    float(int(ls_gpu[rs_i])),
+                    float(int(hist_gpu[rs_i, p - 1])),
+                ))
+        except Exception:
+            if not getattr(self, "_kvline_tokerr", False):
+                self._kvline_tokerr = True
+                import traceback
+                traceback.print_exc()
         # Mamba state surfaces — pass 101 surface (b). Mirrors the proven
         # _gdn_probe access (model_states/mamba_hybrid.py): block_tables[gid]
         # batch-order tensor, running block = bt[b, col] with col =
