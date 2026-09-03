@@ -8,7 +8,6 @@ import torch.nn as nn
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention import Attention
-from vllm.utils.torch_utils import PIN_MEMORY, STR_DTYPE_TO_TORCH_DTYPE, kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionType,
@@ -50,7 +49,8 @@ class EncoderOnlyModelState(DefaultModelState):
         if cache_config.cache_dtype == "auto":
             kv_cache_dtype = self.dtype
         else:
-            kv_cache_dtype = kv_cache_dtype_str_to_dtype(cache_config.cache_dtype, None)
+            from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype as _kcd
+            kv_cache_dtype = _kcd(cache_config.cache_dtype, None)
 
         # Build an attention group (and its non-causal metadata builder) for the
         # encoder-only layers, grouped by backend + query/KV head config. Models
