@@ -599,13 +599,14 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 for tag, x, q, sc in (("k", keyv, kq, ksc), ("v", valuev, vq, vsc)):
                     deq = q.float() * sc.unsqueeze(-1)
                     err = (deq - x.float()).abs()
-                    rel = err / x.float().abs().clamp(min=1e-6)
+                    # scale-relative: textbook round-to-nearest RMS = sc/sqrt(12)
+                    # ~ 0.289*sc; empirical >> that = quantizer bug
+                    esc = err / sc.clamp(min=1e-12).unsqueeze(-1)
                     self._qe_stats = getattr(self, "_qe_stats", {})
-                    st = self._qe_stats.setdefault(tag, [0.0, 0.0, 0.0, 0])
-                    st[0] = max(st[0], float(err.max()))
-                    st[1] = max(st[1], float(rel.max()))
-                    st[2] += float(rel.pow(2).sum())
-                    st[3] += rel.numel()
+                    st = self._qe_stats.setdefault(tag, [0.0, 0.0, 0])
+                    st[0] = max(st[0], float(esc.max()))
+                    st[1] += float(esc.pow(2).sum())
+                    st[2] += esc.numel()
                 if getattr(self, "_rb_counter", 0) % 500 == 0:
                     import json as _jsonq
 
@@ -617,9 +618,9 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                         for tag, st in self._qe_stats.items():
                             _f.write(_jsonq.dumps({
                                 "c": self._rb_counter, "t": tag,
-                                "absmax_err": st[0], "relmax": st[1],
-                                "relrms": (st[2] / max(st[3], 1)) ** 0.5,
-                                "n": st[3],
+                                "esc_max": st[0],
+                                "esc_rms": (st[1] / max(st[2], 1)) ** 0.5,
+                                "n": st[2],
                             }) + "\n")
             except Exception:
                 pass
