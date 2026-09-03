@@ -256,6 +256,17 @@ def kernel_unified_attention(
     # Per-(token, head) scale caches: used iff KV_QUANT_MODE in {2, 3}.
     k_scale_cache_ptr=None,
     v_scale_cache_ptr=None,
+    # G8 diagnostic mode (VLLM_KV_G8): int8 with one fp16 scale per 8-dim
+    # group in side tensors [num_blocks, nkv, block_size, head_size//8].
+    # Data layout matches the per-token-head mode; scales dequant K/V per
+    # group BEFORE the dot (a per-token post-dot multiply cannot express
+    # per-dim-group scales).
+    g8_k_scale_ptr=None,
+    g8_v_scale_ptr=None,
+    stride_g8_blk: int | None = None,
+    stride_g8_head: int | None = None,
+    stride_g8_slot: int | None = None,
+    USE_G8: tl.constexpr = False,
     # ``tl.int64`` cannot be combined with a ``None`` default — Triton's JIT
     # rejects ``Optional[tl.int64]`` / ``tl.int64 | None`` at trace time, and
     # plain ``tl.int64 = None`` raises ``TypeError: 'NoneType' object cannot
@@ -295,7 +306,7 @@ def kernel_unified_attention(
     # Per-(token, head) scale caches: used iff KV_QUANT_MODE in {2, 3}.
     USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = (KV_QUANT_MODE >= 2) and (
         KV_QUANT_MODE <= 3
-    )
+    ) and not USE_G8
     USE_FP8_Q_DESCALE: tl.constexpr = KV_QUANT_MODE == 1 and Q_IS_FP8
 
     if USE_TD:
@@ -493,6 +504,35 @@ def kernel_unified_attention(
             )
         K = _cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
         V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
+
+        # G8: dequant K/V per 8-dim group before the dots.
+        if USE_G8:
+            # K tile is (HEAD_SIZE, TILE_SIZE); scale tile same layout.
+            k_g8_off = (
+                physical_block_idx[None, :] * stride_g8_blk
+                + kv_head_idx * stride_g8_head
+                + (seq_offset % BLOCK_SIZE)[None, :] * stride_g8_slot
+                + (offs_d // 8)[:, None]
+            )
+            k_g8 = tl.load(
+                g8_k_scale_ptr + k_g8_off,
+                mask=dim_mask[:, None] & tile_mask[None, :],
+                other=1.0,
+            ).to(tl.float32)
+            K = (K.to(tl.float32) * k_g8).to(Q.dtype)
+            # V tile is (TILE_SIZE, HEAD_SIZE); scale tile same layout.
+            v_g8_off = (
+                physical_block_idx[:, None] * stride_g8_blk
+                + kv_head_idx * stride_g8_head
+                + (seq_offset % BLOCK_SIZE)[:, None] * stride_g8_slot
+                + (offs_d // 8)[None, :]
+            )
+            v_g8 = tl.load(
+                g8_v_scale_ptr + v_g8_off,
+                mask=dim_mask[None, :] & tile_mask[:, None],
+                other=1.0,
+            ).to(tl.float32)
+            V = (V.to(tl.float32) * v_g8).to(Q.dtype)
 
         # Per-(token, head) scales for INT8 / FP8 per-token-head modes.
         if USE_PER_TOKEN_HEAD_SCALES:
@@ -854,6 +894,10 @@ def unified_attention(
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE,
     k_scale_cache=None,  # [num_blocks, block_size, num_kv_heads] float32
     v_scale_cache=None,  # [num_blocks, block_size, num_kv_heads] float32
+    # G8 diagnostic mode: per-8-dim-group fp16 scales in side tensors
+    # [num_blocks, num_kv_heads, block_size, head_size//8].
+    g8_k_scale=None,
+    g8_v_scale=None,
     # Chunked attention: restrict attention to aligned blocks with lookback.
     chunk_lookback=-1,
     # Tensor-descriptor mode: use ``tl.make_tensor_descriptor`` for Q/K/V
@@ -1087,6 +1131,17 @@ def unified_attention(
         vs_blk = vs_slot = vs_head = None
         k_scale_ptr = None
         v_scale_ptr = None
+
+    use_g8 = g8_k_scale is not None
+    if use_g8:
+        gs = g8_k_scale.stride()
+        g8_k_ptr = g8_k_scale
+        g8_v_ptr = g8_v_scale
+        g8_blk, g8_head, g8_slot = gs[0], gs[1], gs[2]
+    else:
+        g8_k_ptr = None
+        g8_v_ptr = None
+        g8_blk = g8_head = g8_slot = None
     # 3D needs real segm tensors; 2D never touches them.  Pass ``None`` in
     # 2D mode so Triton can skip materialising these pointer arguments.
     segm_output_ptr = softmax_segm_output if use_3d else None
@@ -1147,6 +1202,12 @@ def unified_attention(
         qq_bias_ptr=qq_bias,
         k_scale_cache_ptr=k_scale_ptr,
         v_scale_cache_ptr=v_scale_ptr,
+        g8_k_scale_ptr=g8_k_ptr,
+        g8_v_scale_ptr=g8_v_ptr,
+        stride_g8_blk=g8_blk,
+        stride_g8_head=g8_head,
+        stride_g8_slot=g8_slot,
+        USE_G8=use_g8,
         scale=softmax_scale,
         q_scale=q_descale,
         k_scale=k_descale,

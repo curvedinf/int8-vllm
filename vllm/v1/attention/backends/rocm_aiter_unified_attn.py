@@ -247,6 +247,22 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         self._k_data_cache = key_cache[..., :hs]
         self._v_data_cache = value_cache[..., :hs]
 
+        # G8 diagnostic mode (VLLM_KV_G8): side tensors for per-8-dim-group
+        # fp16 scales; data layout unchanged.
+        if _os.environ.get("VLLM_KV_G8"):
+            self._g8_k = torch.empty(
+                (num_blocks, nkv, block_size, hs // 8),
+                dtype=torch.float16,
+                device=kv_cache.device,
+            )
+            self._g8_v = torch.empty_like(self._g8_k)
+            self._g8_k.fill_(1.0)
+            self._g8_v.fill_(1.0)
+            logger.info_once(
+                "VLLM_KV_G8: g8+f16 KV active (side scales %s bytes each)",
+                self._g8_k.numel() * 2,
+            )
+
     def __init__(
         self,
         num_heads: int,
@@ -388,7 +404,41 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         block_table = attn_metadata.block_table
 
         if attn_metadata.causal:
-            self.unified_attention(
+            if getattr(self, "_g8_k", None) is not None:
+                # G8 diagnostic mode: route through the vLLM triton unified
+                # kernel (slower than aiter, quality-identical measurement).
+                from vllm.v1.attention.ops.triton_unified_attention import (
+                    unified_attention as triton_unified_attention,
+                )
+
+                triton_unified_attention(
+                    q=query[:num_actual_tokens],
+                    k=key_cache,
+                    v=value_cache,
+                    out=output[:num_actual_tokens],
+                    cu_seqlens_q=cu_seqlens_q,
+                    max_seqlen_q=max_seqlen_q,
+                    seqused_k=seqused_k,
+                    max_seqlen_k=max_seqlen_k,
+                    softmax_scale=softmax_scale,
+                    causal=True,
+                    alibi_slopes=self.alibi_slopes,
+                    window_size=self.sliding_window,
+                    block_table=block_table,
+                    softcap=self.logits_soft_cap,
+                    kv_quant_mode=self._kv_quant_mode,
+                    q_descale=None,
+                    k_descale=None,
+                    v_descale=None,
+                    sinks=self.sinks,
+                    output_scale=output_scale,
+                    k_scale_cache=k_scale_cache,
+                    v_scale_cache=v_scale_cache,
+                    g8_k_scale=self._g8_k,
+                    g8_v_scale=self._g8_v,
+                )
+            else:
+                self.unified_attention(
                 q=query[:num_actual_tokens],
                 k=key_cache,
                 v=value_cache,
@@ -759,6 +809,21 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
 
         if self._is_per_token_head_quant:
             self._ensure_scale_caches(kv_cache)
+            if getattr(self, "_g8_k", None) is not None:
+                from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
+                    reshape_and_cache_g8,
+                )
+
+                reshape_and_cache_g8(
+                    key,
+                    value,
+                    self._k_data_cache,
+                    self._v_data_cache,
+                    self._g8_k,
+                    self._g8_v,
+                    slot_mapping,
+                )
+                return
             # Pass the padded halves: the kernel writes head_size data
             # elements plus the inline scale at offset head_size within
             # each half (mirrors TritonAttentionBackend).

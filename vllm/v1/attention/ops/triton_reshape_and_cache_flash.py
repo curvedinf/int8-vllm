@@ -269,6 +269,162 @@ _PER_TOKEN_HEAD_QUANT_PARAMS: dict[torch.dtype, tuple[float, float]] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# G8 diagnostic mode (VLLM_KV_G8): int8 with one fp16 scale per 8-dim group
+# (16 groups per 128-dim head). Scales live in side tensors
+# [num_blocks, num_kv_heads, block_size, 16] float16; the int8 data layout is
+# identical to the per-token-head mode, so the read path only changes how
+# scales are applied (dequant before the dot, per group).
+# ---------------------------------------------------------------------------
+@triton.jit
+def _reshape_cache_g8(
+    key_ptr,
+    value_ptr,
+    key_cache_ptr,
+    value_cache_ptr,
+    g8_k_scale_ptr,  # [num_blocks, num_kv_heads, block_size, 16] f16
+    g8_v_scale_ptr,
+    slot_mapping_ptr,
+    stride_key_tok: tl.int64,
+    stride_key_head: tl.int64,
+    stride_val_tok: tl.int64,
+    stride_val_head: tl.int64,
+    stride_kc_blk: tl.int64,
+    stride_kc_slot: tl.int64,
+    stride_kc_head: tl.int64,
+    stride_vc_blk: tl.int64,
+    stride_vc_slot: tl.int64,
+    stride_vc_head: tl.int64,
+    stride_gs_blk: tl.int64,
+    stride_gs_head: tl.int64,
+    stride_gs_slot: tl.int64,
+    block_size: tl.constexpr,
+    head_size: tl.constexpr,
+    head_size_v: tl.constexpr,
+    HEAD_SIZE_PADDED: tl.constexpr,
+    NUM_GROUPS: tl.constexpr,  # head_size // 8
+    GROUP: tl.constexpr,  # 8
+):
+    tok = tl.program_id(0)
+    head = tl.program_id(1)
+
+    slot = tl.load(slot_mapping_ptr + tok).to(tl.int64)
+    if slot < 0:
+        return
+
+    blk = slot // block_size
+    slot_in_blk = slot % block_size
+
+    dim_offs = tl.arange(0, HEAD_SIZE_PADDED)
+    grp_offs = tl.arange(0, NUM_GROUPS)
+
+    k_mask = dim_offs < head_size
+    k_h = tl.load(
+        key_ptr + tok * stride_key_tok + head * stride_key_head + dim_offs,
+        mask=k_mask,
+        other=0.0,
+    ).to(tl.float32)
+    # per-8-dim-group absmax: [HEAD] -> [NUM_GROUPS, GROUP]
+    k_g = tl.reshape(k_h, (NUM_GROUPS, GROUP))
+    k_amax = tl.maximum(tl.max(tl.abs(k_g), axis=1) / 127.0, 1e-6)
+    # fp16 scale storage simulation: round-trip through fp16
+    k_s16 = k_amax.to(tl.float16).to(tl.float32)
+    k_q = tl.reshape(k_h, (NUM_GROUPS, GROUP)) * (1.0 / k_s16)[:, None]
+    k_q = tl.where(k_q >= 0, k_q + 0.5, k_q - 0.5)
+    k_q = tl.clamp(k_q, -128.0, 127.0)
+    tl.store(
+        key_cache_ptr
+        + blk * stride_kc_blk
+        + slot_in_blk * stride_kc_slot
+        + head * stride_kc_head
+        + dim_offs,
+        tl.reshape(k_q, (HEAD_SIZE_PADDED,)),
+        mask=k_mask,
+    )
+    tl.store(
+        g8_k_scale_ptr
+        + blk * stride_gs_blk
+        + head * stride_gs_head
+        + slot_in_blk * stride_gs_slot
+        + grp_offs,
+        k_s16,
+    )
+
+    v_mask = dim_offs < head_size_v
+    v_h = tl.load(
+        value_ptr + tok * stride_val_tok + head * stride_val_head + dim_offs,
+        mask=v_mask,
+        other=0.0,
+    ).to(tl.float32)
+    v_g = tl.reshape(v_h, (NUM_GROUPS, GROUP))
+    v_amax = tl.maximum(tl.max(tl.abs(v_g), axis=1) / 127.0, 1e-6)
+    v_s16 = v_amax.to(tl.float16).to(tl.float32)
+    v_q = v_g * (1.0 / v_s16)[:, None]
+    v_q = tl.where(v_q >= 0, v_q + 0.5, v_q - 0.5)
+    v_q = tl.clamp(v_q, -128.0, 127.0)
+    tl.store(
+        value_cache_ptr
+        + blk * stride_vc_blk
+        + slot_in_blk * stride_vc_slot
+        + head * stride_vc_head
+        + dim_offs,
+        tl.reshape(v_q, (HEAD_SIZE_PADDED,)),
+        mask=v_mask,
+    )
+    tl.store(
+        g8_v_scale_ptr
+        + blk * stride_gs_blk
+        + head * stride_gs_head
+        + slot_in_blk * stride_gs_slot
+        + grp_offs,
+        v_s16,
+    )
+
+
+def reshape_and_cache_g8(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    g8_k_scale: torch.Tensor,
+    g8_v_scale: torch.Tensor,
+    slot_mapping: torch.Tensor,
+):
+    num_tokens, num_kv_heads, head_size = key.shape
+    head_size_v = value.shape[2]
+    head_size_padded = triton.next_power_of_2(max(head_size, head_size_v))
+    block_size = key_cache.shape[1]
+    assert head_size % 8 == 0 and head_size_v % 8 == 0, "g8 needs dims % 8"
+    _reshape_cache_g8[(num_tokens, num_kv_heads)](
+        key,
+        value,
+        key_cache,
+        value_cache,
+        g8_k_scale,
+        g8_v_scale,
+        slot_mapping,
+        key.stride(0),
+        key.stride(1),
+        value.stride(0),
+        value.stride(1),
+        key_cache.stride(0),
+        key_cache.stride(1),
+        key_cache.stride(2),
+        value_cache.stride(0),
+        value_cache.stride(1),
+        value_cache.stride(2),
+        g8_k_scale.stride(0),
+        g8_k_scale.stride(1),
+        g8_k_scale.stride(2),
+        block_size=block_size,
+        head_size=head_size,
+        head_size_v=head_size_v,
+        HEAD_SIZE_PADDED=head_size_padded,
+        NUM_GROUPS=head_size // 8,
+        GROUP=8,
+    )
+
+
 def triton_reshape_and_cache_flash_per_token_head_quant(
     key: torch.Tensor,  # [num_tokens, num_kv_heads, head_size]
     value: torch.Tensor,  # [num_tokens, num_kv_heads, head_size_v]
