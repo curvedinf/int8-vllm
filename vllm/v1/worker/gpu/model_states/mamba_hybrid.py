@@ -246,7 +246,7 @@ class MambaHybridModelState(DefaultModelState):
             try:
                 self._kvline3_snap(
                     "pre", input_batch, block_tables, kv_cache_config,
-                    mamba_group_ids,
+                    mamba_group_ids, num_computed_tokens,
                 )
             except Exception:
                 if not getattr(self, "_kvl3_err", False):
@@ -255,7 +255,7 @@ class MambaHybridModelState(DefaultModelState):
                     traceback.print_exc()
 
     def _kvline3_snap(self, phase, input_batch, block_tables, kv_cache_config,
-                      mamba_group_ids) -> None:
+                      mamba_group_ids, num_computed_tokens) -> None:
         """Env-gated (VLLM_KVLINE3) pre/post-forward mamba window lineage.
 
         "pre"  (end of preprocess_state, after the precopy): per live request,
@@ -320,6 +320,74 @@ class MambaHybridModelState(DefaultModelState):
                             "ri": int(nas[rs]) - 1 if 0 <= rs < len(nas) else -1,
                             "T": int(qs[r + 1] - qs[r]) if r + 1 < len(qs) else 0,
                         })
+        # Attention-KV tail blocks (pass 103 surface a): per live request,
+        # checksum the 32-token KV blocks covering [nct-64, nct+T]. Within a
+        # round, blocks covering query positions [nct, nct+T) MUST change
+        # pre->post (the verify's int8-PTH write); blocks fully below nct
+        # MUST NOT change. A query block that does NOT change = the KV write
+        # missed its slot -> the next round reads stale/rejected-draft KV.
+        try:
+            import re as _re
+            attn_set = getattr(self, "_kvl3_attn", None)
+            if attn_set is None:
+                from vllm.v1.kv_cache_interface import AttentionSpec as _AS
+                attn_set = []
+                for g, grp in enumerate(kv_cache_config.kv_cache_groups):
+                    if g in mamba_group_ids or not isinstance(grp.kv_cache_spec, _AS):
+                        continue
+                    tgt = [
+                        ln for ln in grp.layer_names
+                        if (_m := _re.search(r"(\d+)", ln))
+                        and int(_m.group(1)) <= 63
+                    ]
+                    if tgt:
+                        attn_set.append((g, tgt))
+                self._kvl3_attn = attn_set
+            ncts = num_computed_tokens.cpu().tolist()
+            self._kvl3_attn_blocks = {}
+            for g, lns in attn_set:
+                bt_a = block_tables[g]
+                w_a = bt_a.shape[1]
+                for r in range(n_req):
+                    rs = idx_map[r]
+                    nct = ncts[rs] if 0 <= rs < len(ncts) else -1
+                    T_r = int(qs[r + 1] - qs[r]) if r + 1 < len(qs) else 0
+                    if nct < 0 or T_r <= 0:
+                        continue
+                    blocks = []
+                    for pos in range(max(0, nct - 64), nct + T_r + 1, 32):
+                        bcol = pos // 32
+                        if bcol >= w_a:
+                            continue
+                        bid = int(bt_a[r, bcol])
+                        if bid > 0 and bid not in blocks:
+                            blocks.append(bid)
+                    self._kvl3_attn_blocks[r] = blocks[:5]
+                    for ln in lns:
+                        impl = fc.get(ln)
+                        kvv = getattr(impl, "kv_cache", None) if impl else None
+                        if not kvv:
+                            continue
+                        ts = list(kvv) if isinstance(kvv, (list, tuple)) else [kvv]
+                        ts = [t for t in ts if torch.is_tensor(t)]
+                        for t_i, t in enumerate(ts[:2]):
+                            tf = t.reshape(t.shape[0], -1)
+                            for j, bid in enumerate(blocks[:5]):
+                                if bid >= tf.shape[0]:
+                                    continue
+                                rows.append({
+                                    "phase": phase, "n": self._kvl3_n,
+                                    "rs": int(rs), "layer": f"{ln}#kv{t_i}",
+                                    "col": int(nct), "rel": j, "slot": bid,
+                                    "k": round(float(tf[bid].float().sum().item()), 3),
+                                    "ri": int(nas[rs]) - 1 if 0 <= rs < len(nas) else -1,
+                                    "T": T_r,
+                                })
+        except Exception:
+            if not getattr(self, "_kvl3_aerr", False):
+                self._kvl3_aerr = True
+                import traceback
+                traceback.print_exc()
         rec = getattr(self, "_kvl3_recs", None)
         if rec is None:
             rec = self._kvl3_recs = []
@@ -388,6 +456,38 @@ class MambaHybridModelState(DefaultModelState):
                             "rel": rel, "slot": blk,
                             "k": round(float(tf[blk].float().sum().item()), 3),
                         })
+        # Attention-KV post half: checksum the SAME physical blocks selected
+        # by the pre hook (stashed in _kvl3_attn_blocks), giving exact
+        # pre->post pairing for the write-coverage test.
+        try:
+            attn_set = getattr(self, "_kvl3_attn", None)
+            ablocks = getattr(self, "_kvl3_attn_blocks", None)
+            if attn_set and ablocks:
+                for g, lns in attn_set:
+                    for r in range(n_req):
+                        rs = idx_map[r]
+                        if rs < 0 or r not in ablocks:
+                            continue
+                        for ln in lns:
+                            impl = fc.get(ln)
+                            kvv = getattr(impl, "kv_cache", None) if impl else None
+                            if not kvv:
+                                continue
+                            ts = list(kvv) if isinstance(kvv, (list, tuple)) else [kvv]
+                            ts = [t for t in ts if torch.is_tensor(t)]
+                            for t_i, t in enumerate(ts[:2]):
+                                tf = t.reshape(t.shape[0], -1)
+                                for j, bid in enumerate(ablocks[r]):
+                                    if bid >= tf.shape[0]:
+                                        continue
+                                    rows.append({
+                                        "phase": "post", "n": self._kvl3_n,
+                                        "rs": int(rs), "layer": f"{ln}#kv{t_i}",
+                                        "col": 0, "rel": j, "slot": bid,
+                                        "k": round(float(tf[bid].float().sum().item()), 3),
+                                    })
+        except Exception:
+            pass
         rec = getattr(self, "_kvl3_recs", None)
         if rec is None:
             rec = self._kvl3_recs = []
