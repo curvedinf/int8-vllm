@@ -607,7 +607,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                     st[0] = max(st[0], float(esc.max()))
                     st[1] += float(esc.pow(2).sum())
                     st[2] += esc.numel()
-                if getattr(self, "_rb_counter", 0) % 500 == 0:
+                if getattr(self, "_rb_counter", 0) - getattr(self, "_qe_flushed", 0) >= 200:
                     import json as _jsonq
 
                     _os.makedirs(_qe + "_quanterr", exist_ok=True)
@@ -622,6 +622,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                                 "esc_rms": (st[1] / max(st[2], 1)) ** 0.5,
                                 "n": st[2],
                             }) + "\n")
+                    self._qe_flushed = self._rb_counter
             except Exception:
                 pass
         bs = key_cache.shape[1]
