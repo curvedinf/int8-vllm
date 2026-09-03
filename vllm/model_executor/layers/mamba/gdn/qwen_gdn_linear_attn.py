@@ -1249,7 +1249,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
 
     def _gdn_row0_audit(self, q, k, v, a, b, out, ssm_state, spec_idx,
-                        num_accepted, n_spec):
+                        num_accepted, n_spec, snap=None):
         """Env-gated (VLLM_GDN_ROWAUDIT): recompute the SPEC row-0 GDN output
         from the kernel's own inputs — checkpoint state block
         ssm_state[spec_idx[0, na-1]], and row 0's q/k/v/a/b — using the exact
@@ -1279,13 +1279,20 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         b1 = b[0] if b.dim() == 3 else b  # [T, HV]
         # shapes: q/k [T, H, K]; v [T, HV, V]; a/b [T, HV]
         na = int(num_accepted[0].item()) if num_accepted is not None else 1
+        if snap is not None:
+            h0 = snap[0].float()
+            na = snap[1]
+        else:
+            h0 = None
         T = q4.shape[0]
         if T < 1 or na < 1 or na > spec_idx.shape[-1]:
             return
         blk = int(spec_idx[0, na - 1].item())
-        if blk <= 0:
-            return
-        h = ssm_state[blk].float()  # [HV, V, K]
+        if h0 is None:
+            if blk <= 0:
+                return
+            h0 = ssm_state[blk].float()
+        h = h0  # [HV, V, K] pre-kernel checkpoint content
         A = self.A_log.float()
         dtb = self.dt_bias.float()
         scale = float(k4.shape[-1]) ** -0.5
@@ -1563,6 +1570,27 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                             f.write(_p.dumps(ring[: min(_ROW0_RING["step"], 4000)].cpu().numpy()))
                 except Exception:
                     pass
+            _gra = os.environ.get("VLLM_GDN_ROWAUDIT")
+            _gra_snap = None
+            if _gra and not torch.cuda.is_current_stream_capturing():
+                # snapshot the checkpoint block BEFORE the kernel (its
+                # inplace_final_state overwrites the window afterwards).
+                try:
+                    _n_spec_g = int(attn_metadata.num_spec_decodes)  # type: ignore[attr-defined]
+                    _na_g = (
+                        int(num_accepted_tokens[0].item())
+                        if num_accepted_tokens is not None
+                        else 1
+                    )
+                    if (
+                        _n_spec_g > 0
+                        and 0 < _na_g <= spec_state_indices_tensor.shape[-1]
+                    ):
+                        _blk_g = int(spec_state_indices_tensor[0, _na_g - 1].item())
+                        if _blk_g > 0:
+                            _gra_snap = (ssm_state[_blk_g].clone(), _na_g)
+                except Exception:
+                    _gra_snap = None
             core_attn_out_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,
@@ -1593,6 +1621,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                         spec_idx=spec_state_indices_tensor,
                         num_accepted=num_accepted_tokens,
                         n_spec=int(attn_metadata.num_spec_decodes),  # type: ignore[attr-defined]
+                        snap=_gra_snap,
                     )
                 except Exception as _e:
                     if not getattr(self, "_gra_err", False):
