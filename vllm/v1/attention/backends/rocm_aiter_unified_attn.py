@@ -516,6 +516,8 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 output_scale=output_scale,
                 k_scale_cache=k_scale_cache,
                 v_scale_cache=v_scale_cache,
+                g8_k_scale=getattr(self, "_g8_k", None),
+                g8_v_scale=getattr(self, "_g8_v", None),
             )
 
         return output
