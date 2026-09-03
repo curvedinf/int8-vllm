@@ -11,8 +11,9 @@ upstreamed directly.
 ## THE BASELINE (read first)
 
 `docs/recipes/README.md` is the canonical baseline. Every feature listed there
-(the two GS128 checkpoints, AITER W8A8 INT8 GEMMs everywhere, int8
-per-token-head KV on both target and draft, AITER unified attention, vLLM
+(the two GS128 checkpoints, AITER W8A8 INT8 GEMMs everywhere, bf16 KV on both
+target and draft (since 2026-09-03; int8-PTH was the long-context garble driver —
+pass 107/108), AITER unified attention, vLLM
 CUSTOM all-reduce, DFlash2 with NS=13, TP4, C8, ACT_QUANT=round, and fp32
 mamba state) is mandatory. The fused AR+RMSNorm+per-group INT8 quant-out
 epilogue is OFF by default (an eager seam exists behind
@@ -30,7 +31,7 @@ This is the fastest vLLM branch for 4x AMD Instinct MI100 (gfx908 / CDNA1,
 32GB, XGMI full mesh). MI100 int8 matrix rate is 2x every dtype except fp16
 (equal) at half the bandwidth — so **int8 is the native dtype** of this stack:
 GPTQ 8-bit weights (uint8b128, group_size 128) use AITER W8A8 INT8 GEMMs for
-every decode and prefill shape, plus int8 **per-token-head** KV cache
+every decode and prefill shape, plus bf16 KV cache
 (`--kv-cache-dtype int8_per_token_head`, block 32, f32 inline scales) and
 AITER unified attention. The DFlash2 draft is also GPTQ INT8
 GS128, and both target and draft KV use `int8_per_token_head`. Mamba state
@@ -107,7 +108,7 @@ VLLM_GFX908_INT8_LM_HEAD=1`, AITER CK W8A8 for every GS128 GEMM,
 --kv-cache-dtype int8_per_token_head --mamba-ssm-cache-dtype float32`,
 `VLLM_GFX908_ACT_QUANT=round` (fused round-to-nearest act quant — quality
 default, see INT8_AUDIT_RESULTS.md), and the speculative config
-`{"method":"dflash","num_speculative_tokens":13,"kv_cache_dtype":"int8_per_token_head"}`.
+`{"method":"dflash","num_speculative_tokens":13,"kv_cache_dtype":"auto"}`.
 The nested dtype is explicit and applies to the draft; the top-level
 `--kv-cache-dtype int8_per_token_head` applies to the target. The draft
 MODEL dtype resolves from its checkpoint (bf16) — forcing the target's

@@ -1,5 +1,5 @@
 [Unit]
-Description=Recipe Qwen3.8+DFlash2 AITER W8A8 INT8 API (TP4 C8)
+Description=Recipe Qwen3.8+DFlash2 AITER W8A8 API, BF16 KV (TP4 C8)
 Wants=network-online.target
 After=network-online.target
 Conflicts=llama-api-4x64k.service vllm-openai-gfx908.service
