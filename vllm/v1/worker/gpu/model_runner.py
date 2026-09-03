@@ -261,9 +261,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_cache_dtype = self.dtype
         if self.cache_config.cache_dtype != "auto":
             # Quantized KV cache.
-            self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
-                self.cache_config.cache_dtype
-            ]
+            from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+
+            self.kv_cache_dtype = kv_cache_dtype_str_to_dtype(
+                self.cache_config.cache_dtype, None
+            )
 
         # Lazily initialized in _init_kv_zero_meta() when the KV cache needs
         # zeroing (e.g. hybrid models with fp8 KV cache).
