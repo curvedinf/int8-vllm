@@ -1630,6 +1630,60 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.kv_cache_config,
                 self.req_states.num_computed_tokens.gpu,
             )
+            # TOKFEED v2 (pass 104): BEFORE the forward, last_sampled_tokens
+            # still holds the previous round's commit — the anchor token this
+            # round's verify is about to be fed at row 0. Compare against the
+            # request history at nct-1 (the correct anchor).
+            if (
+                os.environ.get("VLLM_KVLINE_RING")
+                and not dummy_run
+                and not torch.cuda.is_current_stream_capturing()
+            ):
+                try:
+                    n_req_t = input_batch.num_reqs
+                    qs_t = input_batch.query_start_loc[: n_req_t + 1].cpu().tolist()
+                    pos_t = input_batch.positions.cpu().tolist()
+                    idx_t = input_batch.idx_mapping[:n_req_t].cpu().tolist()
+                    ls_t = self.req_states.last_sampled_tokens.cpu().tolist()
+                    hist_t = self.req_states.all_token_ids.gpu.cpu()
+                    recs_t = getattr(self, "_tokfeed_recs", None)
+                    if recs_t is None:
+                        recs_t = self._tokfeed_recs = []
+                    import json as _json_t
+
+                    for r in range(n_req_t):
+                        rs_t = idx_t[r]
+                        s0_t = qs_t[r]
+                        if s0_t + 1 >= len(pos_t):
+                            continue
+                        p_t = pos_t[s0_t]
+                        if p_t < 1 or p_t - 1 >= hist_t.shape[1]:
+                            continue
+                        recs_t.append(
+                            {
+                                "n": getattr(self, "_tokfeed_n", 0),
+                                "rs": int(rs_t),
+                                "p": int(p_t),
+                                "fed": int(ls_t[rs_t]),
+                                "hist": int(hist_t[rs_t, p_t - 1]),
+                                "T": int(qs_t[r + 1] - s0_t) if r + 1 <= n_req_t else 0,
+                            }
+                        )
+                    self._tokfeed_n = getattr(self, "_tokfeed_n", 0) + 1
+                    if len(recs_t) >= 400:
+                        _out_t = os.environ.get("VLLM_KVLINE_RING")
+                        with open(
+                            _out_t.rstrip("/") + "_tokfeed.jsonl", "a"
+                        ) as _f:
+                            for _e in recs_t:
+                                _f.write(_json_t.dumps(_e) + "\n")
+                        self._tokfeed_recs = []
+                except Exception:
+                    if not getattr(self, "_tokfeed_err", False):
+                        self._tokfeed_err = True
+                        import traceback
+
+                        traceback.print_exc()
 
             if self.lora_config:
                 # Activate LoRA adapters.
