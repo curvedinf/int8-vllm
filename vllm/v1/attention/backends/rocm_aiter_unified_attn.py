@@ -646,6 +646,15 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                         stg["v"].setdefault(name, 0.0)
                         stg["v"][name] += float((qg - xf).pow(2).sum())
                     stg["n"] += xf.numel()
+                    # FP16 / BF16 storage simulation on the same tensors:
+                    # err = (x cast to dtype and back) - x
+                    for name, dt in (
+                        ("f16", torch.float16),
+                        ("bf16", torch.bfloat16),
+                    ):
+                        e = (xf.to(dt).float() - xf).pow(2).sum()
+                        stg["v"].setdefault(name, 0.0)
+                        stg["v"][name] += float(e)
                 if getattr(self, "_rb_counter", 0) - getattr(self, "_qe_flushed", 0) >= 200:
                     import json as _jsonq
 
