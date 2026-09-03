@@ -1275,8 +1275,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         q4 = q[0] if q.dim() == 4 else q
         k4 = k[0] if k.dim() == 4 else k
         v4 = v[0] if v.dim() == 4 else v
-        a1 = a[0] if a.dim() == 2 else a
-        b1 = b[0] if b.dim() == 2 else b
+        a1 = a[0] if a.dim() == 3 else a  # [T, HV]
+        b1 = b[0] if b.dim() == 3 else b  # [T, HV]
         # shapes: q/k [T, H, K]; v [T, HV, V]; a/b [T, HV]
         na = int(num_accepted[0].item()) if num_accepted is not None else 1
         T = q4.shape[0]
