@@ -2154,22 +2154,33 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # 0 — confident-but-wrong row-0 distributions, self-sustaining, and
         # invisible to every cache/state checksum.
         try:
-            nct_np = input_batch.num_computed_tokens_np
+            pos_gpu = input_batch.positions
             ls_gpu = self.req_states.last_sampled_tokens
             hist_gpu = self.req_states.all_token_ids.gpu
             for r in range(n_req):
-                rs_i = idx_map[r]
-                p = int(nct_np[rs_i]) if rs_i < len(nct_np) else -1
-                if p < 1:
-                    continue
-                rows.append((
-                    "TOKFEED", r, p,
-                    float(int(ls_gpu[rs_i])),
-                    float(int(hist_gpu[rs_i, p - 1])),
-                ))
+                try:
+                    rs_i = idx_map[r]
+                    p = int(pos_gpu[anchors[r]].item())
+                    if p < 1 or p - 1 >= hist_gpu.shape[1]:
+                        continue
+                    rows.append((
+                        "TOKFEED", r, p,
+                        float(int(ls_gpu[rs_i])),
+                        float(int(hist_gpu[rs_i, p - 1])),
+                    ))
+                except Exception as _e:
+                    if not getattr(self, "_kvline_tokerr", False):
+                        self._kvline_tokerr = True
+                        with open(
+                            "/home/curved/vllm-gfx908/logs/garble/kvline/_dbg.txt",
+                            "a",
+                        ) as _f:
+                            import traceback as _tb
+                            _f.write(f"TOKFEED fail: {_e}\n")
+                            _f.write(_tb.format_exc() + "\n")
         except Exception:
-            if not getattr(self, "_kvline_tokerr", False):
-                self._kvline_tokerr = True
+            if not getattr(self, "_kvline_tokerr2", False):
+                self._kvline_tokerr2 = True
                 import traceback
                 traceback.print_exc()
         # Mamba state surfaces — pass 101 surface (b). Mirrors the proven
