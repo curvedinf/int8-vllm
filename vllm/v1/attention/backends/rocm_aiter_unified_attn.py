@@ -607,6 +607,29 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                     st[0] = max(st[0], float(esc.max()))
                     st[1] += float(esc.pow(2).sum())
                     st[2] += esc.numel()
+                    # GROUP-SIZE comparison (Q8_0 feasibility): absolute RMS
+                    # error of absmax-quant at group 128 (current, per head),
+                    # 64, and 32 (llama.cpp Q8_0) on the same live tensors.
+                    stg = self._qe_stats.setdefault(tag + "g", [0.0, 0.0, 0.0, 0])
+                    xf = x.float()
+                    n_, h_, d_ = xf.shape
+                    for g in (128, 64, 32):
+                        gs = (
+                            xf.abs()
+                            .reshape(n_, h_, d_ // g, g)
+                            .amax(-1, keepdim=True)
+                            .clamp(min=1e-12)
+                            / 127.0
+                        ).expand(n_, h_, d_ // g, g).reshape(n_, h_, d_)
+                        qg = torch.clamp((xf / gs).round(), -127, 127) * gs
+                        e2 = float((qg - xf).pow(2).sum())
+                        if g == 128:
+                            stg[0] += e2
+                        elif g == 64:
+                            stg[1] += e2
+                        else:
+                            stg[2] += e2
+                    stg[3] += xf.numel()
                 if getattr(self, "_rb_counter", 0) - getattr(self, "_qe_flushed", 0) >= 200:
                     import json as _jsonq
 
@@ -616,6 +639,16 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                         "a",
                     ) as _f:
                         for tag, st in self._qe_stats.items():
+                            if tag.endswith("g"):
+                                n_e = max(st[3], 1)
+                                _f.write(_jsonq.dumps({
+                                    "c": self._rb_counter, "t": tag,
+                                    "rms128": (st[0] / n_e) ** 0.5,
+                                    "rms64": (st[1] / n_e) ** 0.5,
+                                    "rms32": (st[2] / n_e) ** 0.5,
+                                    "n": st[3],
+                                }) + "\n")
+                                continue
                             _f.write(_jsonq.dumps({
                                 "c": self._rb_counter, "t": tag,
                                 "esc_max": st[0],
