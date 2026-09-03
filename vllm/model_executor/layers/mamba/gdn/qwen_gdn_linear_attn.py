@@ -1597,7 +1597,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 except Exception as _e:
                     if not getattr(self, "_gra_err", False):
                         self._gra_err = True
-                        logger.warning("GDN-ROWAUDIT failed: %s", _e)
+                        logger.warning("GDN-ROWAUDIT failed: %s", _e, exc_info=True)
             if os.environ.get("VLLM_CAND_RING") and not torch.cuda.is_current_stream_capturing():
                 # NaN-origin hunt: GDN spec state health per layer, over the
                 # LIVE request rows only (the whole cache includes stale/
