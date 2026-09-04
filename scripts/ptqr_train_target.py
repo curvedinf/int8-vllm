@@ -125,28 +125,105 @@ def kv_block_quant_fake(t: torch.Tensor, group: int, tau: float = 0.0,
     return t + (out.to(orig_dtype) - t).detach()  # STE
 
 
-def weight_quant_fake(w: torch.Tensor, scale: torch.Tensor, group: int,
-                      tau: float = 0.0,
-                      gen: torch.Generator | None = None) -> torch.Tensor:
-    """G128 int8 weight fake-quant with learned per-group scales.
+class _PTQRLinFn(torch.autograd.Function):
+    """Memory-safe W8A8 fake-quant linear.
+
+    F.linear's autograd node SAVES its weight operand, so a graph-built
+    quantized weight retains a full weight-sized tensor per linear for the
+    whole step (~11 GiB across the stack — measured OOM driver). This Function
+    never retains the quantized tensors: forward computes them graph-free, and
+    backward recomputes them cheaply, applying straight-through estimators
+    (d q / d w ≡ 1, d q / d s = integer payload q) — the standard QAT pattern.
+    """
+
+    @staticmethod
+    def forward(ctx, x, w, scale, group: int, tau: float):
+        ctx.save_for_backward(x, w, scale)
+        ctx.group = group
+        ctx.tau = tau
+        with torch.no_grad():
+            wq = _weight_quant_compute(w, scale, group, tau)
+            xq = act_quant_fake(x, tau)
+            return F.linear(xq, wq)
+
+    @staticmethod
+    def backward(ctx, dy):
+        x, w, scale = ctx.saved_tensors
+        group, tau = ctx.group, ctx.tau
+        with torch.no_grad():
+            wq = _weight_quant_compute(w, scale, group, tau)
+            xq = act_quant_fake(x, tau)
+            grad_x = dy @ wq if ctx.needs_input_grad[0] else None  # y = x W^T -> dx = dy W
+            gw = gs = None
+            if ctx.needs_input_grad[1] or ctx.needs_input_grad[2]:
+                # Row-chunked so the lm_head shard's fp32 grad block never
+                # exceeds one row slice (full-size fp32 spikes OOM the ~3 GiB
+                # headroom — measured).
+                out_f, in_f = w.shape
+                dy_flat = dy.reshape(-1, dy.shape[-1])
+                x_flat = xq.reshape(-1, in_f)
+                R = 8192
+                gw = torch.empty(w.shape, dtype=w.dtype)
+                gs = torch.empty(scale.shape)
+                for r0 in range(0, out_f, R):
+                    r1 = min(r0 + R, out_f)
+                    gw_r = dy_flat[:, r0:r1].t() @ x_flat  # [rows, in] fp32, STE on w
+                    if ctx.needs_input_grad[1]:
+                        gw[r0:r1] = gw_r.to(w.dtype)
+                    if ctx.needs_input_grad[2]:
+                        wc = w[r0:r1].float().reshape(r1 - r0, in_f // group, group)
+                        s16 = scale[r0:r1].to(torch.float16).float()
+                        z = wc / s16.unsqueeze(-1)
+                        q = (torch.sign(z) * torch.floor(z.abs() + 0.5)
+                             .clamp(0.0, _QUANT_MAX_W)).reshape(r1 - r0, in_f)
+                        gs[r0:r1] = (gw_r.reshape(r1 - r0, in_f // group, group) * q.reshape(r1 - r0, in_f // group, group)).sum(dim=-1)
+        return grad_x, gw, gs, None, None
+
+
+def _weight_integer(w: torch.Tensor, scale: torch.Tensor, group: int) -> torch.Tensor:
+    """Integer payload q (pre fp16-scale multiply), row-chunked, no grad."""
+    out_f, in_f = w.shape
+    q = torch.empty(w.shape, dtype=torch.float32, device=w.device)
+    R = 2048
+    for r0 in range(0, out_f, R):
+        r1 = min(r0 + R, out_f)
+        wc = w[r0:r1].float().reshape(r1 - r0, in_f // group, group)
+        s16 = scale[r0:r1].to(torch.float16).float()
+        z = wc / s16.unsqueeze(-1)
+        sign = torch.sign(z)
+        az = torch.floor(z.abs() + 0.5).clamp(0.0, _QUANT_MAX_W)
+        q[r0:r1] = (sign * az).reshape(r1 - r0, in_f)
+    return q
+
+
+def _weight_quant_compute(w: torch.Tensor, scale: torch.Tensor, group: int,
+                          tau: float = 0.0,
+                          gen: torch.Generator | None = None) -> torch.Tensor:
+    """G128 int8 weight fake-quant with learned per-group scales (no grad).
 
     w: [out, in] master (bf16); scale: [out, in//group] fp32 parameter.
     Deployed grid: q in [-127, 127], fp16 group scale (aiter W8A8 GS128).
+
+    Row-chunked so the fp32 working set never exceeds one row block.
     """
     orig_dtype = w.dtype
     out_f, in_f = w.shape
-    wf = w.float().reshape(out_f, in_f // group, group)
-    s16 = scale.to(torch.float16).float()  # deployed scales are fp16
-    z = wf / s16.unsqueeze(-1)
-    sign = torch.sign(z)
-    az = torch.floor(z.abs() + 0.5)
-    d = _dither(az.shape, w.device, torch.float32, tau, gen)
-    if d is not None:
-        az = torch.floor(az + d + 0.5)
-    z = sign * az.clamp(0.0, _QUANT_MAX_W)
-    z = z.clamp(-_QUANT_MAX_W, _QUANT_MAX_W)
-    out = (z * s16.unsqueeze(-1)).reshape(out_f, in_f)
-    return w + (out.to(orig_dtype) - w).detach()  # STE
+    out = torch.empty_like(w)
+    R = 2048
+    for r0 in range(0, out_f, R):
+        r1 = min(r0 + R, out_f)
+        wc = w[r0:r1].float().reshape(r1 - r0, in_f // group, group)
+        s16 = scale[r0:r1].to(torch.float16).float()  # deployed fp16 scales
+        z = wc / s16.unsqueeze(-1)
+        sign = torch.sign(z)
+        az = torch.floor(z.abs() + 0.5)
+        d = _dither(az.shape, w.device, torch.float32, tau, gen)
+        if d is not None:
+            az = torch.floor(az + d + 0.5)
+        z = sign * az.clamp(0.0, _QUANT_MAX_W)
+        z = z.clamp(-_QUANT_MAX_W, _QUANT_MAX_W)
+        out[r0:r1] = (z * s16.unsqueeze(-1)).reshape(r1 - r0, in_f).to(orig_dtype)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -198,10 +275,7 @@ class PTQRLinear(nn.Module):
         self._col_range = col_range
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        w = weight_quant_fake(self.weight, self.scale, self.group, self.tau)
-        if self.quant_input:
-            x = act_quant_fake(x, self.tau)
-        out = F.linear(x, w, None)
+        out = _PTQRLinFn.apply(x, self.weight, self.scale, self.group, self.tau)
         if self.row_reduce_group is not None:
             # Row-parallel partial (own column slice of the input): sum the
             # partials across ranks, autograd-exact (_RowParallelSum).
@@ -285,18 +359,20 @@ def _vocab_ranges(vocab: int, world: int) -> list[tuple[int, int]]:
     return ranges
 
 
-def shard_mlp_and_heads(student, teacher, world: int, rank: int, group=None):
-    """Column/row-parallel MLP + vocab-parallel lm_head on both models.
+def shard_mlp_and_heads_one(model, world: int, rank: int, group=None):
+    """Column/row-parallel MLP + vocab-parallel lm_head on ONE model.
 
-    * mlp.gate_proj / up_proj: column-parallel (weight rows on the
-      intermediate dim); each rank's SiLU/glu math is local.
-    * mlp.down_proj: row-parallel via PTQRLinear's reduce hook (teacher: a
-      plain nn.Linear partial that the caller must reduce — for the frozen
-      teacher we instead keep down_proj REPLICATED on... no: the teacher
-      needs the same sharding to fit VRAM. Teacher down_proj partials are
-      reduced by a forward pre-hook below.
-    * lm_head: vocab-sharded; the loss is the SDGraft vocab-parallel exact
-      cross-rank LSE form (see tp_vocab_parallel_losses).
+    Runs BEFORE PTQR replacement (all projections are still plain nn.Linear),
+    slicing the mmap-backed weights so only each rank's shard materializes:
+
+    * mlp.gate_proj / up_proj: column-parallel on the intermediate dim.
+    * mlp.down_proj: row-parallel; partials are all-reduced by a forward hook
+      (a student's hooks vanish at PTQR replacement — re-established then as
+      PTQRLinear.row_reduce_group by the caller).
+    * lm_head: vocab-sharded; the loss is the exact cross-rank-LSE form
+      (tp_vocab_parallel_losses). tp_vocab_start is set on the new head.
+
+    Returns (intermediate_size, vocab_range_of_this_rank).
     """
     from common.tp_ssm import _RowParallelSum
 
@@ -308,53 +384,35 @@ def shard_mlp_and_heads(student, teacher, world: int, rank: int, group=None):
             new.weight.copy_(lin.weight[r0:r1])
         return new
 
-    def _shard_one_model(model, is_student: bool):
-        core = model.model
-        inter = None
-        for name, layer in core.named_modules():
-            mlp = getattr(layer, "mlp", None)
-            if mlp is None or not hasattr(mlp, "gate_proj"):
-                continue
-            inter = mlp.gate_proj.weight.shape[0]
-            q, rem = divmod(inter, world)
-            assert rem == 0, f"intermediate {inter} not divisible by TP{world}"
-            a, b = rank * q, (rank + 1) * q
-            if is_student:
-                mlp.gate_proj.shard_rows([(a, b)])
-                mlp.up_proj.shard_rows([(a, b)])
-                mlp.down_proj.shard_cols((a, b))
-                mlp.down_proj.row_reduce_group = group
-            else:
-                mlp.gate_proj = _shard_linear_rows(mlp.gate_proj, (a, b))
-                mlp.up_proj = _shard_linear_rows(mlp.up_proj, (a, b))
-                c0, c1 = a, b
-                new_down = nn.Linear(c1 - c0, mlp.down_proj.out_features, bias=False,
-                                     dtype=mlp.down_proj.weight.dtype,
-                                     device=mlp.down_proj.weight.device)
-                with torch.no_grad():
-                    new_down.weight.copy_(mlp.down_proj.weight[:, c0:c1])
-                # reduce the teacher's partial with an autograd-free hook
-                group_ref = group
+    core = model.model
+    inter = None
+    for name, layer in core.named_modules():
+        mlp = getattr(layer, "mlp", None)
+        if mlp is None or not hasattr(mlp, "gate_proj"):
+            continue
+        inter = mlp.gate_proj.weight.shape[0]
+        q, rem = divmod(inter, world)
+        assert rem == 0, f"intermediate {inter} not divisible by TP{world}"
+        a, b = rank * q, (rank + 1) * q
+        mlp.gate_proj = _shard_linear_rows(mlp.gate_proj, (a, b))
+        mlp.up_proj = _shard_linear_rows(mlp.up_proj, (a, b))
+        new_down = nn.Linear(b - a, mlp.down_proj.weight.shape[0], bias=False,
+                             dtype=mlp.down_proj.weight.dtype,
+                             device=mlp.down_proj.weight.device)
+        with torch.no_grad():
+            new_down.weight.copy_(mlp.down_proj.weight[:, a:b])
+        group_ref = group
 
-                def _reduce_hook(mod, inp, out):
-                    return (_RowParallelSum.apply(out, group_ref)
-                            if group_ref is not None else out)
-                new_down.register_forward_hook(_reduce_hook)
-                mlp.down_proj = new_down
-        vocab = model.lm_head.out_features if isinstance(model.lm_head, nn.Linear) \
-            else model.lm_head.weight.shape[0]
-        vr = _vocab_ranges(vocab, world)[rank]
-        if is_student:
-            model.lm_head.shard_rows([vr])
-            model.lm_head.tp_vocab_start = vr[0]
-        else:
-            model.lm_head = _shard_linear_rows(model.lm_head, vr)
-            model.lm_head.tp_vocab_start = vr[0]
-        return inter
-
-    inter = _shard_one_model(student, True)
-    _shard_one_model(teacher, False)
-    return inter
+        def _reduce_hook(mod, inp, out):
+            return (_RowParallelSum.apply(out, group_ref)
+                    if group_ref is not None else out)
+        new_down.register_forward_hook(_reduce_hook)
+        mlp.down_proj = new_down
+    vocab = model.lm_head.weight.shape[0]
+    vr = _vocab_ranges(vocab, world)[rank]
+    model.lm_head = _shard_linear_rows(model.lm_head, vr)
+    model.lm_head.tp_vocab_start = vr[0]
+    return inter, vr
 
 
 def tp_vocab_parallel_losses(student, teacher, x, y, temperature: float,
@@ -611,11 +669,49 @@ def build_lm_model(args, dtype, attn_impl):
         model = LMWithHead(text_model, text_cfg.vocab_size)
 
     from safetensors.torch import load_file
+    if not args.tiny and getattr(args, "base_checkpoint", None) and Path(args.base_checkpoint).exists():
+        # File-backed mmap load: pages are shared across the 4 TP ranks and
+        # faulted lazily, so host anon stays bounded (the eager safetensors
+        # path OOM-kills at 4x52 GB). The dict must stay referenced — the
+        # assign-loaded parameters point into its storages.
+        ckpt = torch.load(args.base_checkpoint, weights_only=True,
+                          map_location="cpu", mmap=True)
+        load_sd = ckpt["model_state_dict"]
+        missing, unexpected = model.load_state_dict(load_sd, strict=False, assign=True)
+        loaded = len(load_sd) - len(unexpected)
+        print(f"  [load] {loaded} tensors loaded (mmap), {len(missing)} missing, "
+              f"{len(unexpected)} unexpected", flush=True)
+        if missing:
+            raise RuntimeError(f"missing keys from base checkpoint: {missing[:5]}...")
+        # Non-persistent buffers (rotary inv_freq / original_inv_freq) are not
+        # in the state dict and stayed meta under the meta-device init; rebuild
+        # them properly from the live config.
+        from transformers.models.qwen3_5.modeling_qwen3_5 import (
+            Qwen3_5TextRotaryEmbedding,
+        )
+        for name, mod in model.named_modules():
+            if isinstance(mod, Qwen3_5TextRotaryEmbedding):
+                fresh = Qwen3_5TextRotaryEmbedding(mod.config, device="cpu")
+                mod.inv_freq = fresh.inv_freq
+                if getattr(mod, "original_inv_freq", None) is not None and fresh.original_inv_freq is not None:
+                    mod.original_inv_freq = fresh.original_inv_freq
+        model._base_ckpt_ref = ckpt  # keep the mmap alive
+        return model.to(dtype)
     load_sd: dict[str, torch.Tensor] = {}
     if not args.tiny:
         for f in sorted(Path(args.model).glob("*.safetensors")):
             load_sd.update(load_file(str(f)))
-        if any(k.startswith("layers.") for k in load_sd):
+        # The published reference is the full multimodal checkpoint: the LM
+        # lives under model.language_model.*, plus a vision tower (skip) and
+        # an mtp head (skip). lm_head.weight is top-level.
+        if any(k.startswith("model.language_model.") for k in load_sd):
+            head_w = load_sd.get("lm_head.weight")
+            load_sd = {"model." + k[len("model.language_model."):]: v
+                       for k, v in load_sd.items()
+                       if k.startswith("model.language_model.")}
+            if head_w is not None:
+                load_sd["lm_head.weight"] = head_w
+        elif any(k.startswith("layers.") for k in load_sd):
             head_w = load_sd.get("lm_head.weight")
             load_sd = {"model." + k: v for k, v in load_sd.items()
                        if k != "lm_head.weight"}
@@ -638,9 +734,60 @@ def build_lm_model(args, dtype, attn_impl):
                 for bname, b in list(module.named_buffers(recurse=False)):
                     if b is not None and b.is_meta:
                         module._buffers[bname] = torch.zeros_like(b, device="cpu")
-    del load_sd
-    gc.collect()
     return model.to(dtype)
+
+
+# ---------------------------------------------------------------------------
+# Manual gradient checkpointing (this HF impl never calls _gradient_
+# checkpointing_func — without wrapping, all 64 layers' activations stay
+# live, ~5-6 GiB at 4k tokens) + hook-based per-tensor weight SGD (full .grad
+# buffers for every weight would add another ~11 GiB/rank).
+# ---------------------------------------------------------------------------
+
+class _CkptLayer(nn.Module):
+    """Wrap a decoder layer in torch.utils.checkpoint (non-reentrant)."""
+
+    def __init__(self, layer: nn.Module):
+        super().__init__()
+        self.layer = layer
+
+    def forward(self, *args, **kwargs):
+        if self.training and torch.is_grad_enabled():
+            return torch.utils.checkpoint.checkpoint(
+                self.layer, *args, use_reentrant=False, **kwargs)
+        return self.layer(*args, **kwargs)
+
+
+def wrap_decoder_checkpointing(model) -> int:
+    core = model.model if hasattr(model, "model") else model
+    layers = getattr(core, "layers", None)
+    if layers is None or not isinstance(layers, nn.ModuleList):
+        return 0
+    for i, layer in enumerate(layers):
+        if not isinstance(layer, _CkptLayer):
+            layers[i] = _CkptLayer(layer)
+    return len(layers)
+
+
+def attach_weight_sgd_hooks(replaced: dict, lr: float) -> int:
+    """Per-tensor SGD on PTQR masters, applied and freed the moment each
+    weight's grad lands (post-accumulate hook). Keeps peak grad memory at ONE
+    tensor instead of the full 11 GiB set. Scales stay in Adafactor."""
+    import torch as _t
+
+    n = 0
+    for m in replaced.values():
+        w = m.weight
+
+        def _hook(p, lr=lr):
+            if p.grad is not None:
+                with _t.no_grad():
+                    p.data.add_(p.grad.to(p.dtype), alpha=-lr)
+                p.grad = None
+        w.register_post_accumulate_grad_hook(_hook)
+        w.requires_grad_(True)
+        n += 1
+    return n
 
 
 # ---------------------------------------------------------------------------
@@ -680,6 +827,8 @@ def build_dataloader(data_path: str, seq_len: int, batch_size: int,
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model", default="/home/curved/models/Qwen3.8-27B-bf16-ref")
+    p.add_argument("--base_checkpoint",
+                   default="/home/curved/models/Qwen3.8-27B-bf16-ref-lm.pt")
     p.add_argument("--data_dir", default="/home/curved/SDGraft/data")
     p.add_argument("--data_name", default="qwen38_longctx/train_tokens.pt")
     p.add_argument("--val_name", default="qwen38_longctx/val_tokens.pt")
@@ -722,18 +871,61 @@ def main():
     install_t_chunked_fallback()
     register_rocm_triton_tp()
 
-    print(f"[rank {rank}] building student + teacher ...", flush=True)
+    # --- host-RAM-staggered build (chain lock): each rank materializes its
+    # student+teacher shards ALONE (peak ~24 GB anon per rank; 4 concurrent
+    # builds OOM-kill the 61 GB host — measured twice). mmap pages are shared
+    # and evictable; the anon slices are not, hence the serialization.
+    build_lock = None
+    if world > 1:
+        import time as _time
+        ppid = os.getppid()  # torchrun agent: identical on all ranks, run-scoped
+        done_flag = f"/tmp/ptqr_build_{ppid}_{rank}.done"
+        if rank > 0:
+            prev_flag = f"/tmp/ptqr_build_{ppid}_{rank - 1}.done"
+            while not os.path.exists(prev_flag):
+                _time.sleep(2)
+        print(f"[rank {rank}] build slot acquired", flush=True)
+
+    def _trim():
+        gc.collect()
+        import ctypes
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
+
+    group = None
+    if world > 1:
+        import torch.distributed as dist
+        group = dist.group.WORLD
+
+    print(f"[rank {rank}] building student (mmap base ckpt) ...", flush=True)
     student = build_lm_model(args, dtype, args.attn_impl)
-    teacher = build_lm_model(args, dtype, args.attn_impl)
-    for p_ in teacher.parameters():
-        p_.requires_grad_(False)
-    teacher.eval()
+
+    # --- TP sharding BEFORE PTQR replacement ---------------------------------
+    # Slicing the mmap-backed weights materializes ONLY each rank's shard per
+    # module, so no rank ever holds a full anon copy of the model.
+    apply_ssm_tp(student.model, tp_size=world if world > 1 else None)
+    apply_tp_attention(student.model, tp_size=world if world > 1 else None)
+    inter = vocab_range = None
+    if world > 1:
+        inter, vocab_range = shard_mlp_and_heads_one(student, world, rank, group=group)
+        print(f"[rank {rank}] MLP sharded on intermediate {inter}; "
+              f"lm_head vocab shard {vocab_range}", flush=True)
 
     print(f"[rank {rank}] replacing linears with PTQR (G{args.weight_group}) ...", flush=True)
     replaced = replace_linears_with_ptqr(student, group=args.weight_group)
     n_kv = attach_kv_fake_quant(student, args.kv_group)
     print(f"[rank {rank}] {len(replaced)} PTQR linears, {n_kv} attention layers "
           f"with KV fake-quant g{args.kv_group}", flush=True)
+
+    # Row-parallel reduce for the student's MLP down_projs (their plain-Linear
+    # hooks vanished with replacement) + lm_head vocab base for the loss.
+    if world > 1:
+        for name, mod in student.named_modules():
+            if isinstance(mod, PTQRLinear) and name.endswith("mlp.down_proj"):
+                mod.row_reduce_group = group
+        student.lm_head.tp_vocab_start = vocab_range[0]
 
     # Only the PTQR masters + group scales train; everything else (embeddings,
     # norms, biases, conv1d, A_log/dt_bias) is frozen at the reference values.
@@ -742,38 +934,47 @@ def main():
     for m_ in replaced.values():
         m_.weight.requires_grad_(True)
         m_.scale.requires_grad_(True)
-    # Teacher shares the (frozen, identical) embedding table — saves ~2 GiB
-    # per rank and is exact: neither side ever updates it.
-    teacher.model.embed_tokens = student.model.embed_tokens
 
-    if args.gradient_checkpointing and hasattr(student.model, "gradient_checkpointing_enable"):
-        student.model.gradient_checkpointing_enable(
-            gradient_checkpointing_kwargs={"use_reentrant": False})
+    student.to(device)
+    _trim()
+    print(f"[rank {rank}] student on GPU; building teacher ...", flush=True)
 
-    # --- TP sharding (in place; both models keep identical math) ------------
-    apply_ssm_tp(student.model, tp_size=world if world > 1 else None)
-    apply_tp_attention(student.model, tp_size=world if world > 1 else None)
+    teacher = build_lm_model(args, dtype, args.attn_impl)
     apply_ssm_tp(teacher.model, tp_size=world if world > 1 else None)
     apply_tp_attention(teacher.model, tp_size=world if world > 1 else None)
     if world > 1:
-        import torch.distributed as dist
-        group = dist.group.WORLD
-        inter = shard_mlp_and_heads(student, teacher, world, rank, group=group)
-        print(f"[rank {rank}] MLP sharded on intermediate {inter}; "
-              f"lm_head vocab-sharded", flush=True)
-
-    student.to(device)
+        shard_mlp_and_heads_one(teacher, world, rank, group=group)
+    # Teacher shares the (frozen, identical) embedding table — saves ~2 GiB
+    # per rank and is exact: neither side ever updates it. The student's is
+    # already on GPU.
+    teacher.model.embed_tokens = student.model.embed_tokens
+    for p_ in teacher.parameters():
+        p_.requires_grad_(False)
+    teacher.eval()
     teacher.to(device)
+    _trim()
 
-    # --- optimizer: Adafactor (factored moments fit the 32GB envelope) ------
+    if world > 1:
+        open(done_flag, "w").write("x")
+        torch.distributed.barrier()
+
+    # This HF impl never calls _gradient_checkpointing_func, so wrap the
+    # decoder layers ourselves (full retention is ~5-6 GiB at 4k tokens).
+    if args.gradient_checkpointing:
+        n_ckpt = wrap_decoder_checkpointing(student)
+        print(f"[rank {rank}] decoder layers checkpoint-wrapped: {n_ckpt}", flush=True)
+
+    # --- optimizer -----------------------------------------------------------
+    # Weights: per-tensor SGD via post-accumulate hooks — each grad is applied
+    # and freed as it lands, so peak grad memory is one tensor, not the full
+    # ~11 GiB set. Scales: Adafactor (factored moments; grads are tiny).
     from torch.optim import Adafactor
-    w_params = [m.weight for m in replaced.values()]
     s_params = [m.scale for m in replaced.values()]
-    opt = Adafactor(
-        [{"params": w_params, "lr": args.lr},
-         {"params": s_params, "lr": args.lr * args.scale_lr_mult}],
-        eps=(1e-30, 1e-3), weight_decay=0.0, foreach=False,
-    )
+    opt = Adafactor(s_params, lr=args.lr * args.scale_lr_mult,
+                    eps=(1e-30, 1e-3), weight_decay=0.0, foreach=False)
+    n_hook = attach_weight_sgd_hooks(replaced, args.lr)
+    print(f"[rank {rank}] optimizer: {n_hook} weight SGD hooks + "
+          f"Adafactor on {len(s_params)} scale tensors", flush=True)
 
     train_dl = build_dataloader(str(Path(args.data_dir) / args.data_name),
                                 args.seq_len, args.batch_size, tiny=args.tiny)
@@ -809,8 +1010,7 @@ def main():
                 student, teacher, x, y, args.distill_temperature,
                 args.logits_chunk, args.distill_weight)
         # the loss functions ran backward internally; grads are in place.
-        torch.nn.utils.clip_grad_norm_(
-            itertools.chain(w_params, s_params), args.grad_clip)
+        torch.nn.utils.clip_grad_norm_(s_params, args.grad_clip)
         opt.step()
 
         if rank == 0:
