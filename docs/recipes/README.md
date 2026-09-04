@@ -60,13 +60,13 @@ The script encodes the full intended feature set:
 | Checkpoint | [`curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128`](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128), deployed at `<models>/Qwen3.8-27B-GPTQ-8bit-gs128` | GPTQ int8, gs=128 (enables W8A8) |
 | Target compute dtype | `bfloat16` (since 2026-09-01; was fp16) | REQUIRED: the fp16 residual stream overflows past 65504 when a repetition attractor grows activations at long context — inf logits → full-row NaN → the token-1023 'duct' hard-lock (garble-hunt class A). bf16 has fp32 range; the int8 stack is input-dtype-agnostic; acceptance/speed unchanged (gate: 6.9-8.9 vs 4.96 baseline) |
 | GEMMs | **AITER W8A8 INT8 everywhere**, decode and prefill | no W8A16 or fork-local Triton GEMM in the target run |
-| KV cache | **`float16`** (since 2026-09-04; was `int8_per_token_head`) | REQUIRED for long context: int8 KV noise at its measured mathematical floor garbles beyond ~16-20k (pass 107/108; greedy acceptance 2.88/14 @40k int8 vs 4.51/14 bf16, baseline 4.96); fp16 storage is lossless for bf16-computed K/V (measured RMS 0). Cost: 867,834-token GPU capacity (C6 avg 144k). `int8_block_g{G}` family is the long-context int8 fallback (see its table below) |
+| KV cache | **`bfloat16`** (since 2026-09-04; was `int8_per_token_head`) | REQUIRED for long context: int8 KV noise at its measured mathematical floor garbles beyond ~16-20k (pass 107/108; greedy acceptance 2.88/14 @40k int8 vs 4.51/14 bf16, baseline 4.96); fp16 storage is lossless for bf16-computed K/V (measured RMS 0). Cost: 867,834-token GPU capacity (C6 avg 144k). `int8_block_g{G}` family is the long-context int8 fallback (see its table below) |
 | Mamba/GDN state | `float32` (`--mamba-ssm-cache-dtype float32`) | REQUIRED: the fp16 state round-trip broke delta-rule cancellation and blew states to 63k (4% under fp16 ceiling) — the KLD-tail generator; int8 state corrupts in the int8-KV combo (bisect 2026-08-25); fp32 is the checkpoint's own declared dtype |
 | Act quantizer | round-to-nearest (`VLLM_GFX908_ACT_QUANT=round`, fused Triton kernel) | halved the dominant 10-15% act-quant error leg; fixed 10x first-token-stop inflation (empty responses); also faster than the 4-pass eager aiter chain |
 | Sampling default | `repetition_penalty=1.05` in the override-generation-config (since 2026-09-01) | at temp 1.0 on long structured output this model enters p→1.0 repetition attractors under ANY faithful sampler (engine proven exact — garble-hunt class B); the 1.05 default breaks the locks via the existing penalty machinery (validated 1/8 vs 4-6/8 without). Per-request override still works |
 | Embedding lookup | int8 gather | half embedding bandwidth; it is not a GEMM exception |
 | Speculative decoding | **DFlash2, ns=13, int8 drafter, int8 draft KV — ON, non-negotiable** | NS=13 per the 2026-08-26 tuned-aiter sweep: best measured TPOT 12.34 ms (single rep; see NS table below). Prior NS=15 default measured 18.89 ms same-session; NS=17 collapses: 29.7% acceptance |
-| Attention backend | **AITER unified attention** | target and draft both use the recipe KV dtype (fp16 since 2026-09-04) |
+| Attention backend | **AITER unified attention** | target and draft both use the recipe KV dtype (bfloat16 since 2026-09-04) |
 | All-reduce | **vLLM CUSTOM all-reduce** (`VLLM_ROCM_USE_AITER_CUSTOM_AR=0`) | audited TP4/C8 rerun: vLLM CUSTOM 63.49 tok/s beats AITER CAR 58.34 and PYNCCL 53.04; AITER CAR gfx908 forces the naive kernel until tuned — CAR stays a tuning lever, not the default |
 | Fused epilogue | OFF (`fuse_allreduce_rms=false`) | the fused INT8 epilogue path is implemented but inactive; enable only after the gfx908 graph integration work lands |
 | GPU util | 0.86 (spec drafter and embedding dequant transient need headroom) | |
@@ -110,7 +110,7 @@ retired qwen36 unit).
 5. `.venv/bin/python scripts/ua_live_soak.py -n 500` — verify the exact
    published model pair and require AITER W8A8, AITER unified attention,
    vLLM CUSTOM all-reduce (CAR=0), fused epilogue OFF, both KV caches at
-   the recipe dtype (float16 since 2026-09-04), float32 Mamba state,
+   the recipe dtype (bfloat16 since 2026-09-04), float32 Mamba state,
    TP4, C8, and DFlash2 NS=13 to remain enabled.
 
 ## int8_block_g{G} KV cache dtypes (2026-09-03)
