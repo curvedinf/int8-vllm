@@ -160,7 +160,7 @@ ARGS=(
   # Capacity: 867,834 tokens @ 20.2GB arena (C6 avg 144k context).
   # KV_DTYPE env remains the lever (int8_per_token_head = old default,
   # int8_block_g{4..128} = the long-context int8 family; see README table).
-  --kv-cache-dtype "${KV_DTYPE:-bfloat16}" --mamba-ssm-cache-dtype "${MAMBADT:-float32}"
+  --kv-cache-dtype "${KV_DTYPE:-int8_block_g16}" --mamba-ssm-cache-dtype "${MAMBADT:-float32}"
   # NS=13 default per the 2026-08-26 tuned-aiter sweep (see docs/recipes
   # README history): best measured TPOT 12.34 ms / TG 639-equivalent regime.
   # NS=15 prior default (2026-08-24 sweep) measured 18.89 ms same-session;
@@ -218,7 +218,7 @@ else
 fi
 # (NS flag file read near the top of this script, before COMMON_ENV.)
 if [[ "${_spec_value}" != "1" ]]; then
-  ARGS+=(--speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":'"${NS:-13}"',"kv_cache_dtype":"'"${DRAFT_KV_DTYPE:-bfloat16}"'"}')
+  ARGS+=(--speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":'"${NS:-13}"',"kv_cache_dtype":"'"${DRAFT_KV_DTYPE:-int8_block_g16}"'"}')
 fi
 
 # LOGSTATS=1 enables periodic engine/spec-decode stat logging
@@ -469,7 +469,7 @@ start_server() {
 
   printf 'starting recipe Qwen3.8 server: url=http://%s:%s cpuset=%s log=%s/server.log\n' \
     "${HOST}" "${PORT}" "${CPUSET}" "${LOG_DIR}"
-  printf '%s\n' 'contract: target+DFlash2 GS128; AITER W8A8/UA/custom-AR; BF16 KV/fp32 Mamba/quant-out; TP4/C6; 12GiB CPU KV tier'
+  printf '%s\n' 'contract: target+DFlash2 GS128; AITER W8A8/UA/custom-AR; INT8-G16 KV/fp32 Mamba/quant-out; TP4/C6; 12GiB CPU KV tier'
 
   local api_key
   api_key="$(read_api_key)"
