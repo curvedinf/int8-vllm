@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="${HOME}/vllm-gfx908"
 VENV="${ROOT_DIR}/.venv"
-MODEL_DIR="${HOME}/models/Qwen3.8-27B-GPTQ-8bit-gs128"
+MODEL_DIR="${MODEL_DIR:-${HOME}/models/Qwen3.8-27B-GPTQ-8bit-gs128}"
 SERVED_MODEL_NAME="qwen3.8-27b-gptq8"
 LOG_DIR="${ROOT_DIR}/logs/serve_recipe_qwen38"
 # The OffloadingConnector's CPU tier mmaps /dev/shm; an unclean kill leaks
