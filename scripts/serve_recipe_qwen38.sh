@@ -151,15 +151,16 @@ ARGS=(
   # itself declares mamba_ssm_dtype float32; int8 state remains banned
   # (corruption bisect 2026-08-25) until a scaled-int8 kernel exists.
   # MAMBADT env remains the bisect lever.
-  # KV dtype auto = bf16 (model dtype) since 2026-09-03: the int8-PTH cache
+  # KV dtype float16 since 2026-09-04: the int8-PTH cache
   # is the proven garble driver at long context (pass 107/108 — the noise at
   # its mathematical floor reshuffles verify decisions across tens of k keys;
-  # greedy acceptance 2.88/14 at 40k vs 4.51/14 bf16, short-prompt baseline
-  # 4.96). bf16 storage is bit-exact for bf16-computed K/V (measured RMS 0).
+  # greedy acceptance 2.88/14 at 40k vs 4.51/14 lossless 16-bit storage, short-prompt baseline
+  # 4.96). fp16 storage is lossless for bf16-computed K/V (K/V magnitudes are
+  # O(1-10), well inside fp16 range; measured RMS 0).
   # Capacity: 867,834 tokens @ 20.2GB arena (C6 avg 144k context).
   # KV_DTYPE env remains the lever (int8_per_token_head = old default,
   # int8_block_g{4..128} = the long-context int8 family; see README table).
-  --kv-cache-dtype "${KV_DTYPE:-auto}" --mamba-ssm-cache-dtype "${MAMBADT:-float32}"
+  --kv-cache-dtype "${KV_DTYPE:-float16}" --mamba-ssm-cache-dtype "${MAMBADT:-float32}"
   # NS=13 default per the 2026-08-26 tuned-aiter sweep (see docs/recipes
   # README history): best measured TPOT 12.34 ms / TG 639-equivalent regime.
   # NS=15 prior default (2026-08-24 sweep) measured 18.89 ms same-session;
@@ -202,7 +203,7 @@ if [[ -f "${_offload_flag}" ]]; then
   fi
 fi
 
-# Draft KV follows the target dtype (auto = bf16, 2026-09-03): int8 draft KV
+# Draft KV follows the target dtype (float16, 2026-09-04): int8 draft KV
 # inherits the same long-context noise. SPECOFF=1 drops the draft for
 # diagnostic target-only legs. Flag-file override mirrors the levers above
 # (systemd-driven restarts cannot pass per-boot env).
@@ -214,7 +215,7 @@ else
 fi
 # (NS flag file read near the top of this script, before COMMON_ENV.)
 if [[ "${_spec_value}" != "1" ]]; then
-  ARGS+=(--speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":'"${NS:-13}"',"kv_cache_dtype":"'"${DRAFT_KV_DTYPE:-auto}"'"}')
+  ARGS+=(--speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":'"${NS:-13}"',"kv_cache_dtype":"'"${DRAFT_KV_DTYPE:-float16}"'"}')
 fi
 
 # LOGSTATS=1 enables periodic engine/spec-decode stat logging
@@ -465,7 +466,7 @@ start_server() {
 
   printf 'starting recipe Qwen3.8 server: url=http://%s:%s cpuset=%s log=%s/server.log\n' \
     "${HOST}" "${PORT}" "${CPUSET}" "${LOG_DIR}"
-  printf '%s\n' 'contract: target+DFlash2 GS128; AITER W8A8/UA/custom-AR; BF16 KV (auto)/fp32 Mamba/quant-out; TP4/C6; 12GiB CPU KV tier'
+  printf '%s\n' 'contract: target+DFlash2 GS128; AITER W8A8/UA/custom-AR; FP16 KV/fp32 Mamba/quant-out; TP4/C6; 12GiB CPU KV tier'
 
   local api_key
   api_key="$(read_api_key)"
