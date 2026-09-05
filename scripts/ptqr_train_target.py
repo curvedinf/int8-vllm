@@ -136,6 +136,8 @@ class _PTQRLinFn(torch.autograd.Function):
     (d q / d w ≡ 1, d q / d s = integer payload q) — the standard QAT pattern.
     """
 
+    _dbg_done = False
+
     @staticmethod
     def forward(ctx, x, w, scale, group: int, tau: float):
         ctx.save_for_backward(x, w, scale)
@@ -150,9 +152,18 @@ class _PTQRLinFn(torch.autograd.Function):
     def backward(ctx, dy):
         x, w, scale = ctx.saved_tensors
         group, tau = ctx.group, ctx.tau
+        dbg = os.environ.get("PTQR_MEM_DEBUG") and not _PTQRLinFn._dbg_done
         with torch.no_grad():
             wq = _weight_quant_compute(w, scale, group, tau)
             xq = act_quant_fake(x, tau)
+            if dbg:
+                _PTQRLinFn._dbg_done = True
+                for nm, t in (("dy", dy), ("wq", wq), ("xq", xq),
+                              ("x", x), ("w", w), ("scale", scale)):
+                    fin = torch.isfinite(t).all().item()
+                    print(f"  [bkdbg] {nm}: finite={fin} "
+                          f"absmax={t.abs().max().item() if t.numel() else 0}",
+                          flush=True)
             grad_x = dy @ wq if ctx.needs_input_grad[0] else None  # y = x W^T -> dx = dy W
             gw = gs = None
             if ctx.needs_input_grad[1] or ctx.needs_input_grad[2]:
@@ -162,9 +173,9 @@ class _PTQRLinFn(torch.autograd.Function):
                 out_f, in_f = w.shape
                 dy_flat = dy.reshape(-1, dy.shape[-1])
                 x_flat = xq.reshape(-1, in_f)
-                R = 8192
-                gw = torch.empty(w.shape, dtype=w.dtype)
-                gs = torch.empty(scale.shape)
+                R = 2048
+                gw = torch.empty(w.shape, dtype=w.dtype, device=w.device)
+                gs = torch.empty(scale.shape, device=scale.device)
                 for r0 in range(0, out_f, R):
                     r1 = min(r0 + R, out_f)
                     gw_r = dy_flat[:, r0:r1].t() @ x_flat  # [rows, in] fp32, STE on w
@@ -415,6 +426,14 @@ def shard_mlp_and_heads_one(model, world: int, rank: int, group=None):
     return inter, vr
 
 
+def _mem(tag: str, rank: int):
+    if os.environ.get("PTQR_MEM_DEBUG") and torch.cuda.is_available():
+        a = torch.cuda.memory_allocated() / 2**30
+        r = torch.cuda.memory_reserved() / 2**30
+        print(f"[rank {rank}][mem] {tag}: alloc {a:.2f} GiB, reserved {r:.2f} GiB",
+              flush=True)
+
+
 def tp_vocab_parallel_losses(student, teacher, x, y, temperature: float,
                              chunk: int, distill_weight: float):
     """Vocab-parallel chunked CE+KLD (exact cross-rank logsumexp).
@@ -428,9 +447,12 @@ def tp_vocab_parallel_losses(student, teacher, x, y, temperature: float,
     import torch.distributed as dist
 
     world = dist.get_world_size() if dist.is_initialized() else 1
+    _mem("loss enter", 0)
     hidden = student.model(input_ids=x).last_hidden_state
+    _mem("student hidden done", 0)
     with torch.no_grad():
         t_hidden = teacher.model(input_ids=x).last_hidden_state
+    _mem("teacher hidden done", 0)
 
     H = hidden.shape[-1]
     s_flat = hidden.reshape(-1, H)
@@ -467,6 +489,7 @@ def tp_vocab_parallel_losses(student, teacher, x, y, temperature: float,
             print(f"  [tp-loss] chunk {ci}/{n_chunks}", flush=True)
         h_c = s_flat[i: i + chunk].detach().requires_grad_(True)
         logits_c = s_head(h_c).float()  # [chunk, local vocab]
+        _mem(f"chunk {ci} logits", 0)
         lse = _global_lse(logits_c, differentiable=True)
 
         y_local = y_flat[i: i + chunk] - s_v0
@@ -544,7 +567,9 @@ def eval_kld(student, teacher, val_iter, steps: int, chunk: int, temperature: fl
             in_shard = (y_local >= 0) & (y_local < s_lc.shape[-1])
             y_safe = y_local.clamp(0, s_lc.shape[-1] - 1)
             picked = s_lc.gather(1, y_safe.unsqueeze(1)).squeeze(1)
-            lm_step += (s_lse - torch.where(in_shard, picked, torch.zeros_like(picked))).sum().item()
+            # every rank owns lse/world of the denominator; only the target's
+            # owner carries the -logit term (exact after the cross-rank sum)
+            lm_step += (s_lse / world - torch.where(in_shard, picked, torch.zeros_like(picked))).sum().item()
             del s_lc, t_lc, s_logp, t_logp, t_prob
         kl_sum += kl_step / n_tok
         lm_sum += lm_step / n_tok
@@ -660,6 +685,8 @@ def build_lm_model(args, dtype, attn_impl):
     cfg = AutoConfig.from_pretrained(args.model, trust_remote_code=True)
     text_cfg = getattr(cfg, "text_config", cfg)
     text_cfg.use_cache = False
+    if getattr(args, "n_layers", 0):
+        text_cfg.num_hidden_layers = args.n_layers  # bisection: real dims, fewer layers
     if args.tiny:
         _tiny_override(text_cfg)
     if attn_impl is not None:
@@ -769,24 +796,38 @@ def wrap_decoder_checkpointing(model) -> int:
     return len(layers)
 
 
-def attach_weight_sgd_hooks(replaced: dict, lr: float) -> int:
-    """Per-tensor SGD on PTQR masters, applied and freed the moment each
-    weight's grad lands (post-accumulate hook). Keeps peak grad memory at ONE
-    tensor instead of the full 11 GiB set. Scales stay in Adafactor."""
+def attach_weight_sgd_hooks(replaced: dict, lr: float, scale_lr: float) -> int:
+    """Per-tensor SGD on PTQR masters + scales, applied and freed the moment
+    each grad lands (post-accumulate hook). Keeps peak grad memory at ONE
+    tensor instead of the full 11 GiB set. (Adafactor was tried first and its
+    initial update NaN'd a scale tensor on real data — measured; plain SGD is
+    also exactly composable with the per-chunk loss backwards, being linear
+    in the grad.) Scales are clamped to the deployed fp16-scale domain and
+    kept strictly positive."""
     import torch as _t
 
     n = 0
     for m in replaced.values():
-        w = m.weight
+        for p, p_lr, is_scale in ((m.weight, lr, False), (m.scale, scale_lr, True)):
 
-        def _hook(p, lr=lr):
-            if p.grad is not None:
+            def _hook(p=p, p_lr=p_lr, is_scale=is_scale):
+                if p.grad is None:
+                    return
+                g = p.grad
+                if not _t.isfinite(g).all():
+                    p.grad = None
+                    return
                 with _t.no_grad():
-                    p.data.add_(p.grad.to(p.dtype), alpha=-lr)
+                    gn = g.norm()
+                    if gn > 1.0:  # per-tensor clip (no global clip under hooks)
+                        g = g * (1.0 / gn)
+                    p.data.add_(g.to(p.dtype), alpha=-p_lr)
+                    if is_scale:
+                        p.data.clamp_(1e-7, 65500.0)  # fp16-representable, positive
                 p.grad = None
-        w.register_post_accumulate_grad_hook(_hook)
-        w.requires_grad_(True)
-        n += 1
+            p.register_post_accumulate_grad_hook(lambda *a, h=_hook: h())
+            p.requires_grad_(True)
+            n += 1
     return n
 
 
@@ -851,6 +892,11 @@ def main():
     p.add_argument("--save_every", type=int, default=50)
     p.add_argument("--gradient_checkpointing", action="store_true", default=True)
     p.add_argument("--tiny", action="store_true", help="tiny-model wiring smoke test")
+    p.add_argument("--n_layers", type=int, default=0,
+                   help="override num_hidden_layers (bisection; real dims kept)")
+    p.add_argument("--no_ptqr", action="store_true",
+                   help="infrastructure control: unquantized student (teacher-vs-teacher); "
+                        "isolates TP/attn/checkpoint bugs from quant-stack bugs")
     p.add_argument("--attn_impl", default="rocm_triton")
     args = p.parse_args()
 
@@ -914,8 +960,14 @@ def main():
               f"lm_head vocab shard {vocab_range}", flush=True)
 
     print(f"[rank {rank}] replacing linears with PTQR (G{args.weight_group}) ...", flush=True)
-    replaced = replace_linears_with_ptqr(student, group=args.weight_group)
-    n_kv = attach_kv_fake_quant(student, args.kv_group)
+    if args.no_ptqr:
+        replaced = {}
+        n_kv = 0
+        print(f"[rank {rank}] --no_ptqr: student left unquantized (control run)",
+              flush=True)
+    else:
+        replaced = replace_linears_with_ptqr(student, group=args.weight_group)
+        n_kv = attach_kv_fake_quant(student, args.kv_group)
     print(f"[rank {rank}] {len(replaced)} PTQR linears, {n_kv} attention layers "
           f"with KV fake-quant g{args.kv_group}", flush=True)
 
@@ -937,6 +989,7 @@ def main():
 
     student.to(device)
     _trim()
+    _mem("student on GPU", rank)
     print(f"[rank {rank}] student on GPU; building teacher ...", flush=True)
 
     teacher = build_lm_model(args, dtype, args.attn_impl)
@@ -953,6 +1006,7 @@ def main():
     teacher.eval()
     teacher.to(device)
     _trim()
+    _mem("teacher on GPU", rank)
 
     if world > 1:
         open(done_flag, "w").write("x")
@@ -965,16 +1019,16 @@ def main():
         print(f"[rank {rank}] decoder layers checkpoint-wrapped: {n_ckpt}", flush=True)
 
     # --- optimizer -----------------------------------------------------------
-    # Weights: per-tensor SGD via post-accumulate hooks — each grad is applied
-    # and freed as it lands, so peak grad memory is one tensor, not the full
-    # ~11 GiB set. Scales: Adafactor (factored moments; grads are tiny).
-    from torch.optim import Adafactor
+    # Weights AND scales: per-tensor SGD via post-accumulate hooks — each
+    # grad is applied (clipped) and freed as it lands, so peak grad memory is
+    # one tensor, not the full ~11 GiB set. (Adafactor NaN'd scales on its
+    # first real update — measured, see probe logs.)
+    n_hook = attach_weight_sgd_hooks(
+        replaced, args.lr, args.lr * args.scale_lr_mult) if replaced else 0
     s_params = [m.scale for m in replaced.values()]
-    opt = Adafactor(s_params, lr=args.lr * args.scale_lr_mult,
-                    eps=(1e-30, 1e-3), weight_decay=0.0, foreach=False)
-    n_hook = attach_weight_sgd_hooks(replaced, args.lr)
-    print(f"[rank {rank}] optimizer: {n_hook} weight SGD hooks + "
-          f"Adafactor on {len(s_params)} scale tensors", flush=True)
+    opt = None
+    print(f"[rank {rank}] optimizer: {n_hook} per-tensor SGD hooks "
+          f"(w lr {args.lr:g}, s lr {args.lr * args.scale_lr_mult:g})", flush=True)
 
     train_dl = build_dataloader(str(Path(args.data_dir) / args.data_name),
                                 args.seq_len, args.batch_size, tiny=args.tiny)
@@ -987,6 +1041,31 @@ def main():
     kv_state_refs = [m._ptqr_kv_state for m in student.model.modules()
                      if hasattr(m, "_ptqr_kv_state")]
     student.train()
+    if args.no_ptqr:
+        # Control run: nothing requires grad, so skip training entirely —
+        # one held-out eval of student-vs-teacher (identical unquantized
+        # models) measures the infra's true CE / zero-KLD sanity.
+        if rank == 0 and os.environ.get("PTQR_MEM_DEBUG"):
+
+            def _probe(name):
+                def h(mod, inp, out):
+                    hs = out[0] if isinstance(out, tuple) else out
+                    if torch.is_tensor(hs):
+                        print(f"[probe] {name}: |h| mean {hs.float().abs().mean().item():.4f}",
+                              flush=True)
+                return h
+            student.model.embed_tokens.register_forward_hook(_probe("embed"))
+            for i, layer in enumerate(student.model.layers):
+                layer.register_forward_hook(_probe(f"L{i:02d}"))
+            student.lm_head.register_forward_hook(_probe("lm_head"))
+        ev_lm, ev_kl = eval_kld(student, teacher, val_dl, max(4, args.eval_steps),
+                                args.logits_chunk, args.distill_temperature)
+        print(f"[control] unquantized student vs teacher: "
+              f"CE {ev_lm:.4f}, KLD/tok {ev_kl:.6f} (expect ~0)", flush=True)
+        if world > 1:
+            torch.distributed.destroy_process_group()
+        print("[done]", flush=True)
+        return
     step = 0
     for x, y in itertools.islice(train_dl, args.max_steps):
         # Identical RNG state on every rank: the dither draws (act/weight/KV
@@ -1000,7 +1079,8 @@ def main():
             st["tau"] = tau
 
         x, y = x.to(device), y.to(device)
-        opt.zero_grad(set_to_none=True)
+        if opt is not None:
+            opt.zero_grad(set_to_none=True)
         if world > 1:
             lm_loss, kl_loss = tp_vocab_parallel_losses(
                 student, teacher, x, y, args.distill_temperature,
@@ -1010,8 +1090,16 @@ def main():
                 student, teacher, x, y, args.distill_temperature,
                 args.logits_chunk, args.distill_weight)
         # the loss functions ran backward internally; grads are in place.
-        torch.nn.utils.clip_grad_norm_(s_params, args.grad_clip)
-        opt.step()
+        if opt is not None:
+            torch.nn.utils.clip_grad_norm_(s_params, args.grad_clip)
+            opt.step()
+            bad = [i for i, p in enumerate(s_params) if not torch.isfinite(p).all()]
+            if bad or (step % 10 == 0 and rank == 0):
+                import math as _math
+                allf = torch.cat([p.reshape(-1).float() for p in s_params])
+                print(f"  [scale-health] step {step}: nonfinite scales {len(bad)}, "
+                      f"scale min {allf.min().item():.3e} max {allf.max().item():.3e}",
+                      flush=True)
 
         if rank == 0:
             print(f"step {step} | tau {tau:.4f} | CE {lm_loss:.4f} | "
