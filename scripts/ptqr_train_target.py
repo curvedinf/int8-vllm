@@ -343,10 +343,15 @@ def fake_quant_embedding_(emb: nn.Embedding) -> None:
     both sides.
     """
     with torch.no_grad():
-        w = emb.weight.data.float()
-        scale = (w.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8) / 127.0).to(emb.weight.dtype)
-        q = (w / scale.float()).round().clamp(-128, 127)
-        emb.weight.data.copy_((q * scale.float()).to(emb.weight.dtype))
+        R = 8192  # chunked: the full fp32 upcast is ~15 GiB of transients
+        w = emb.weight.data
+        n = w.shape[0]
+        for r0 in range(0, n, R):
+            r1 = min(r0 + R, n)
+            wf = w[r0:r1].float()
+            scale = (wf.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8) / 127.0).to(w.dtype)
+            q = (wf / scale.float()).round().clamp(-128, 127)
+            w[r0:r1] = (q * scale.float()).to(w.dtype)
 
 
 # ---------------------------------------------------------------------------
@@ -1047,6 +1052,10 @@ def main():
     _mem("teacher on GPU", rank)
 
     if world > 1:
+        # Release reserved-but-unallocated VRAM so NCCL's first-collective
+        # calloc (~6 MB outside the caching allocator) cannot fail against a
+        # ~31 GiB reserved pool (measured: ncclUnhandledCudaError at barrier).
+        torch.cuda.empty_cache()
         open(done_flag, "w").write("x")
         torch.distributed.barrier()
 
@@ -1159,7 +1168,8 @@ def main():
             for st in kv_state_refs:
                 st["tau"] = tau
 
-        if args.save_every and step > 0 and step % args.save_every == 0 and rank == 0:
+        if args.save_every and step > 0 and step % args.save_every == 0:
+            # every rank saves ITS shard (the exporter stitches all four)
             save_ptqr_checkpoint(student, replaced, out_dir, step, args, rank, world)
         step += 1
 
