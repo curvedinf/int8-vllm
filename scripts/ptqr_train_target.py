@@ -1267,6 +1267,12 @@ def save_ptqr_checkpoint(model, replaced, out_dir: Path, step: int, args,
                       "lr", "distill_weight", "temp_start", "temp_end")}}
     suffix = f"_rank{rank}" if world > 1 else ""
     path = out_dir / f"ptqr_target_step{step}{suffix}.pt"
+    # keep only the LATEST shard per rank — 4-rank saves are ~30 GB per step
+    # and historical steps filled the 936 GB disk mid-run (measured iostream
+    # failure); retraining is deterministic enough to rely on the latest.
+    for old in out_dir.glob(f"ptqr_target_step*{suffix}.pt"):
+        if old != path:
+            old.unlink(missing_ok=True)
     torch.save(ckpt, path)
     print(f"  [save] {path}", flush=True)
     # scales live inside PTQRLinear modules; also emit them keyed by tensor name
