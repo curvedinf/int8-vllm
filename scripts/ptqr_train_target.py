@@ -864,15 +864,25 @@ def attach_weight_sgd_hooks(replaced: dict, lr: float, scale_lr: float) -> int:
                     gn = g.norm()
                     if gn > 1.0:  # per-tensor clip (no global clip under hooks)
                         g = g * (1.0 / gn)
-                    p.data.add_(g.to(p.dtype), alpha=-p_lr)
+                    if p.dtype == _t.bfloat16:
+                        # bf16 masters: plain add_ rounds sub-ULP updates away
+                        # (lr*g ~ 1e-7 vs ULP ~ 4e-5), turning SGD into a
+                        # rounding-driven random walk — the measured rising-KLD
+                        # mechanism. Stochastic rounding keeps the expected
+                        # update exact at zero extra memory.
+                        x = p.data.float() - p_lr * g.float()
+                        sign = _t.where(x < 0, -1.0, 1.0)
+                        ax = x.abs().clamp_min(1e-38)
+                        spacing = _t.pow(2.0, _t.floor(_t.log2(ax)) - 7)
+                        r = ax / spacing
+                        frac = r - _t.floor(r)
+                        stepped = _t.floor(r) + (
+                            _t.rand_like(frac) < frac).float()
+                        p.data.copy_((sign * stepped * spacing).to(p.dtype))
+                    else:
+                        p.data.add_(g.to(p.dtype), alpha=-p_lr)
                     if is_scale:
                         p.data.clamp_(1e-7, 65500.0)  # fp16-representable, positive
-                        # NOTE: no in-training feasibility projection —
-                        # s := max(s, amax/127) is a monotone ratchet that
-                        # coarsens every group's grid step-over-step and was
-                        # the measured cause of steadily RISING val KLD in
-                        # rungs 2-3 (0.039 -> 0.108). Outlier saturation is
-                        # handled by the export-side projection instead.
                 p.grad = None
             p.register_post_accumulate_grad_hook(lambda *a, h=_hook: h())
             p.requires_grad_(True)
