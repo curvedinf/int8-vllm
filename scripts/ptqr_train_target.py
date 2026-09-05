@@ -1240,8 +1240,9 @@ def main():
             save_ptqr_checkpoint(student, replaced, out_dir, step, args, rank, world)
         step += 1
 
-    if rank == 0:
-        save_ptqr_checkpoint(student, replaced, out_dir, args.max_steps, args, rank, world)
+    # final save on every rank (the interval save is step>0-based and short
+    # runs never reach it — measured: a 5-step run saved rank 0 only)
+    save_ptqr_checkpoint(student, replaced, out_dir, args.max_steps, args, rank, world)
     if world > 1:
         torch.distributed.destroy_process_group()
     print("[done]", flush=True)
