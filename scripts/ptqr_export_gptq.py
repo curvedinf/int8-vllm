@@ -94,7 +94,7 @@ def quant_pack(w: torch.Tensor, scale: torch.Tensor, group: int):
     st = stored.t().contiguous()                                       # [in, out]
     qw = (st[0::4].long() | (st[1::4].long() << 8) |
           (st[2::4].long() << 16) | (st[3::4].long() << 24)).to(torch.int32)
-    scales = s16.t().contiguous()                                      # [in/G, out]
+    scales = s16.to(torch.float16).t().contiguous()                     # [in/G, out] FP16 STORAGE (the loader parameter is fp16; fp32 bytes = garbage)
     qz = torch.full((in_f // group, out_f // 4), 2139062143, dtype=torch.int32)
     return qw, qz, scales
 
@@ -151,12 +151,14 @@ def main():
 
     quant_keys = [n for n in sorted(names) if n in scale_names]
     bf16_keys = [n for n in sorted(names) if n not in scale_names]
-    # extra base tensors not in shards (buffers etc.), normalized tree-form
+    # extra base tensors not in shards: ALL of them — A_log/dt_bias/biases do
+    # not end in .weight and were silently dropped in the first export,
+    # leaving GDN decay/delta at config-init (garbage output — measured)
     stripped_seen = set()
     for n in names:
         stripped_seen.add(n.replace(".layer.", ".", 1) if ".layer." in n else n)
-    extra = [k for k in base if k.endswith(".weight")
-             and k[len("model."):-len(".weight")] not in stripped_seen]
+    extra = [k for k in base if k[len("model."):] not in stripped_seen
+             and not k.endswith(".weight")]
 
     n_quant = 0
     total_bytes = 0
