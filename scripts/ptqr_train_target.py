@@ -139,12 +139,13 @@ class _PTQRLinFn(torch.autograd.Function):
     _dbg_done = False
 
     @staticmethod
-    def forward(ctx, x, w, scale, group: int, tau: float):
+    def forward(ctx, x, w, scale, group: int, tau: float, scale_fp16: bool = True):
         ctx.save_for_backward(x, w, scale)
         ctx.group = group
         ctx.tau = tau
+        ctx.scale_fp16 = scale_fp16
         with torch.no_grad():
-            wq = _weight_quant_compute(w, scale, group, tau)
+            wq = _weight_quant_compute(w, scale, group, tau, scale_fp16=scale_fp16)
             xq = act_quant_fake(x, tau)
             return F.linear(xq, wq)
 
@@ -152,9 +153,10 @@ class _PTQRLinFn(torch.autograd.Function):
     def backward(ctx, dy):
         x, w, scale = ctx.saved_tensors
         group, tau = ctx.group, ctx.tau
+        s_fp16 = ctx.scale_fp16
         dbg = os.environ.get("PTQR_MEM_DEBUG") and not _PTQRLinFn._dbg_done
         with torch.no_grad():
-            wq = _weight_quant_compute(w, scale, group, tau)
+            wq = _weight_quant_compute(w, scale, group, tau, scale_fp16=s_fp16)
             xq = act_quant_fake(x, tau)
             if dbg:
                 _PTQRLinFn._dbg_done = True
@@ -183,12 +185,13 @@ class _PTQRLinFn(torch.autograd.Function):
                         gw[r0:r1] = gw_r.to(w.dtype)
                     if ctx.needs_input_grad[2]:
                         wc = w[r0:r1].float().reshape(r1 - r0, in_f // group, group)
-                        s16 = scale[r0:r1].to(torch.float16).float()
-                        z = wc / s16.unsqueeze(-1)
+                        s_e = scale[r0:r1].to(torch.float16).float() if s_fp16 \
+                            else scale[r0:r1].float()
+                        z = wc / s_e.unsqueeze(-1)
                         q = (torch.sign(z) * torch.floor(z.abs() + 0.5)
                              .clamp(0.0, _QUANT_MAX_W)).reshape(r1 - r0, in_f)
                         gs[r0:r1] = (gw_r.reshape(r1 - r0, in_f // group, group) * q.reshape(r1 - r0, in_f // group, group)).sum(dim=-1)
-        return grad_x, gw, gs, None, None
+        return grad_x, gw, gs, None, None, None
 
 
 def _weight_integer(w: torch.Tensor, scale: torch.Tensor, group: int) -> torch.Tensor:
@@ -209,11 +212,14 @@ def _weight_integer(w: torch.Tensor, scale: torch.Tensor, group: int) -> torch.T
 
 def _weight_quant_compute(w: torch.Tensor, scale: torch.Tensor, group: int,
                           tau: float = 0.0,
-                          gen: torch.Generator | None = None) -> torch.Tensor:
+                          gen: torch.Generator | None = None,
+                          scale_fp16: bool = True) -> torch.Tensor:
     """G128 int8 weight fake-quant with learned per-group scales (no grad).
 
     w: [out, in] master (bf16); scale: [out, in//group] fp32 parameter.
-    Deployed grid: q in [-127, 127], fp16 group scale (aiter W8A8 GS128).
+    Deployed grid: q in [-127, 127]; fp16 group scales for the W8A8 GEMM
+    (gptq GS128 contract), fp32 row scales for the per-channel LM head
+    (_quantize_lm_head_w8a8_ contract).
 
     Row-chunked so the fp32 working set never exceeds one row block.
     """
@@ -224,8 +230,9 @@ def _weight_quant_compute(w: torch.Tensor, scale: torch.Tensor, group: int,
     for r0 in range(0, out_f, R):
         r1 = min(r0 + R, out_f)
         wc = w[r0:r1].float().reshape(r1 - r0, in_f // group, group)
-        s16 = scale[r0:r1].to(torch.float16).float()  # deployed fp16 scales
-        z = wc / s16.unsqueeze(-1)
+        s_e = scale[r0:r1].to(torch.float16).float() if scale_fp16 \
+            else scale[r0:r1].float()
+        z = wc / s_e.unsqueeze(-1)
         sign = torch.sign(z)
         az = torch.floor(z.abs() + 0.5)
         d = _dither(az.shape, w.device, torch.float32, tau, gen)
@@ -233,7 +240,7 @@ def _weight_quant_compute(w: torch.Tensor, scale: torch.Tensor, group: int,
             az = torch.floor(az + d + 0.5)
         z = sign * az.clamp(0.0, _QUANT_MAX_W)
         z = z.clamp(-_QUANT_MAX_W, _QUANT_MAX_W)
-        out[r0:r1] = (z * s16.unsqueeze(-1)).reshape(r1 - r0, in_f).to(orig_dtype)
+        out[r0:r1] = (z * s_e.unsqueeze(-1)).reshape(r1 - r0, in_f).to(orig_dtype)
     return out
 
 
@@ -251,7 +258,8 @@ class PTQRLinear(nn.Module):
     different accumulation order, second-order difference only).
     """
 
-    def __init__(self, weight: torch.Tensor, group: int = 128):
+    def __init__(self, weight: torch.Tensor, group: int = 128,
+                 scale_fp16: bool = True):
         super().__init__()
         out_f, in_f = weight.shape
         assert in_f % group == 0, f"in_features {in_f} not divisible by {group}"
@@ -261,6 +269,10 @@ class PTQRLinear(nn.Module):
             amax = wf.abs().amax(dim=-1)
             self.scale = nn.Parameter((amax / _QUANT_MAX_W).clamp_min(1e-8))
         self.group = group
+        # W8A8 GEMM weights use fp16 group scales (gptq GS128 contract); the
+        # untied LM head uses the CK per-channel contract (fp32 row scales,
+        # see _quantize_lm_head_w8a8_ in vocab_parallel_embedding.py).
+        self.scale_fp16 = scale_fp16
         self.tau = 0.0
         self.quant_input = True
         self.row_reduce_group = None   # set for row-parallel use (MLP down_proj)
@@ -286,7 +298,8 @@ class PTQRLinear(nn.Module):
         self._col_range = col_range
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = _PTQRLinFn.apply(x, self.weight, self.scale, self.group, self.tau)
+        out = _PTQRLinFn.apply(x, self.weight, self.scale, self.group, self.tau,
+                               self.scale_fp16)
         if self.row_reduce_group is not None:
             # Row-parallel partial (own column slice of the input): sum the
             # partials across ranks, autograd-exact (_RowParallelSum).
@@ -297,7 +310,12 @@ class PTQRLinear(nn.Module):
 
 def replace_linears_with_ptqr(model: nn.Module, group: int = 128,
                               skip: set[str] | None = None) -> dict[str, PTQRLinear]:
-    """Swap every nn.Linear (except skipped names) for a PTQRLinear."""
+    """Swap every nn.Linear (except skipped names) for a PTQRLinear.
+
+    The untied LM head gets the DEPLOYED per-channel contract (one scale per
+    output row, fp32 — _quantize_lm_head_w8a8_ in the serving fork), not the
+    G128 W8A8 group contract.
+    """
     skip = skip or set()
     replaced: dict[str, PTQRLinear] = {}
     for name, module in list(model.named_modules()):
@@ -305,11 +323,30 @@ def replace_linears_with_ptqr(model: nn.Module, group: int = 128,
             full = f"{name}.{child_name}" if name else child_name
             if full in skip or not isinstance(child, nn.Linear):
                 continue
-            pq = PTQRLinear(child.weight, group=group)
+            is_head = child_name == "lm_head"
+            pq = PTQRLinear(child.weight,
+                            group=child.weight.shape[1] if is_head else group,
+                            scale_fp16=not is_head)
             pq.quant_input = True
             setattr(module, child_name, pq)
             replaced[full] = pq
     return replaced
+
+
+def fake_quant_embedding_(emb: nn.Embedding) -> None:
+    """Apply the deployed int8 embedding conversion in place (frozen).
+
+    Mirrors _quantize_embedding_int8_ (vocab_parallel_embedding.py): per-row
+    fp16 scale, round, clamp [-128, 127]; the weight becomes the dequantized
+    values the serving gather returns. The Phase-0 BF16 reference was itself
+    served through this path, so student AND teacher both see it — exact on
+    both sides.
+    """
+    with torch.no_grad():
+        w = emb.weight.data.float()
+        scale = (w.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8) / 127.0).to(emb.weight.dtype)
+        q = (w / scale.float()).round().clamp(-128, 127)
+        emb.weight.data.copy_((q * scale.float()).to(emb.weight.dtype))
 
 
 # ---------------------------------------------------------------------------
@@ -988,6 +1025,7 @@ def main():
         m_.scale.requires_grad_(True)
 
     student.to(device)
+    fake_quant_embedding_(student.model.embed_tokens)
     _trim()
     _mem("student on GPU", rank)
     print(f"[rank {rank}] student on GPU; building teacher ...", flush=True)
