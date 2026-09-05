@@ -182,7 +182,7 @@ def main():
     if cur:
         file_plan.append(cur)
 
-    index = {"metadata": {"total_size": 0}}
+    index = {"metadata": {"total_size": 0}, "weight_map": {}}
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     n_files = len(file_plan)
@@ -200,7 +200,7 @@ def main():
         fn = f"model-{i+1:05d}-of-{n_files:05d}.safetensors"
         save_file(chunk, str(out_dir / fn))
         for k in chunk:
-            index[k] = fn
+            index["weight_map"][k] = fn
         index["metadata"]["total_size"] += sum(
             t.numel() * t.element_size() for t in chunk.values())
         del chunk
@@ -218,12 +218,12 @@ def main():
             old = f"model-{i+1:05d}-of-{n_files:05d}.safetensors"
             new = f"model-{i+1:05d}-of-{n_files+1:05d}.safetensors"
             (out_dir / old).rename(out_dir / new)
-            for k, v in list(index.items()):
+            for k, v in list(index["weight_map"].items()):
                 if v == old:
-                    index[k] = new
+                    index["weight_map"][k] = new
         save_file(chunk, str(out_dir / fn))
         for k in chunk:
-            index[k] = fn
+            index["weight_map"][k] = fn
         index["metadata"]["total_size"] += sum(
             t.numel() * t.element_size() for t in chunk.values())
         print(f"  wrote {fn} ({len(chunk)} base-only tensors)", flush=True)
