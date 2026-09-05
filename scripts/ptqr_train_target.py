@@ -867,15 +867,12 @@ def attach_weight_sgd_hooks(replaced: dict, lr: float, scale_lr: float) -> int:
                     p.data.add_(g.to(p.dtype), alpha=-p_lr)
                     if is_scale:
                         p.data.clamp_(1e-7, 65500.0)  # fp16-representable, positive
-                        # RTN feasibility: a group's scale must cover its
-                        # master's amax (|w| <= 127*s) — independent SGD on w
-                        # and s drifts past this (measured saturation), which
-                        # the deployed grid cannot represent.
-                        w_ref = p._ptqr_master_ref
-                        if w_ref is not None:
-                            amax = w_ref.detach().float().reshape(
-                                w_ref.shape[0], -1, p.shape[1]).abs().amax(dim=-1)
-                            p.data.copy_(torch.maximum(p.data, amax / 127.0))
+                        # NOTE: no in-training feasibility projection —
+                        # s := max(s, amax/127) is a monotone ratchet that
+                        # coarsens every group's grid step-over-step and was
+                        # the measured cause of steadily RISING val KLD in
+                        # rungs 2-3 (0.039 -> 0.108). Outlier saturation is
+                        # handled by the export-side projection instead.
                 p.grad = None
             p.register_post_accumulate_grad_hook(lambda *a, h=_hook: h())
             p.requires_grad_(True)
@@ -1091,6 +1088,9 @@ def main():
                                 args.seq_len, args.batch_size, tiny=args.tiny)
     val_dl = build_dataloader(str(Path(args.data_dir) / args.val_name),
                               args.seq_len, 1, tiny=args.tiny)
+    # deterministic eval: identical batches every eval (no shuffle) so KLD
+    # points are directly comparable across steps and runs
+    val_dl.shuffle = False
     out_dir = Path(args.out_dir)
     if rank == 0:
         out_dir.mkdir(parents=True, exist_ok=True)
