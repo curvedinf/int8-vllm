@@ -845,11 +845,13 @@ def _sr_sgd_step_(p, g, lr: float) -> None:
     turning SGD into a rounding-driven random walk — the measured rising-KLD
     mechanism. SR keeps the expected update exact at zero extra memory.
     Chunked: whole-tensor fp32 passes are 1.19 GiB on the lm_head shard
-    (measured OOM inside the chunk-0 backward).
+    (measured OOM inside the chunk-0 backward). 8M-element chunks keep the
+    fp32 transient at ~32 MiB; smaller chunks are kernel-launch-bound (R=2048
+    measured ~20 min/step across the stack).
     """
     import torch as _t
     with _t.no_grad():
-        R = 2048
+        R = 8_000_000
         flat = p.data.reshape(-1)
         gflat = g.reshape(-1)
         for r0 in range(0, flat.numel(), R):
