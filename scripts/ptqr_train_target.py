@@ -838,61 +838,93 @@ def wrap_decoder_checkpointing(model) -> int:
     return len(layers)
 
 
-def attach_weight_sgd_hooks(replaced: dict, lr: float, scale_lr: float) -> int:
+def _sr_sgd_step_(p, g, lr: float) -> None:
+    """One stochastic-rounding SGD step on a bf16 master (chunked).
+
+    Plain add_ rounds sub-ULP updates away (lr*g ~ 1e-7 vs ULP ~ 4e-5),
+    turning SGD into a rounding-driven random walk — the measured rising-KLD
+    mechanism. SR keeps the expected update exact at zero extra memory.
+    Chunked: whole-tensor fp32 passes are 1.19 GiB on the lm_head shard
+    (measured OOM inside the chunk-0 backward).
+    """
+    import torch as _t
+    with _t.no_grad():
+        R = 2048
+        flat = p.data.reshape(-1)
+        gflat = g.reshape(-1)
+        for r0 in range(0, flat.numel(), R):
+            r1 = min(r0 + R, flat.numel())
+            x = flat[r0:r1].float() - lr * gflat[r0:r1].float()
+            sign = _t.where(x < 0, -1.0, 1.0)
+            ax = x.abs().clamp_min(1e-38)
+            spacing = _t.pow(2.0, _t.floor(_t.log2(ax)) - 7)
+            rr = ax / spacing
+            frac = rr - _t.floor(rr)
+            stepped = _t.floor(rr) + (_t.rand_like(frac) < frac).float()
+            flat[r0:r1] = (sign * stepped * spacing).to(p.dtype)
+
+
+def _apply_param_update_(p, g, lr: float, is_scale: bool) -> None:
+    import torch as _t
+    if not _t.isfinite(g).all():
+        return
+    with _t.no_grad():
+        gn = g.norm()
+        if gn > 1.0:  # per-tensor clip (no global clip under hooks)
+            g = g * (1.0 / gn)
+        if p.dtype == _t.bfloat16:
+            _sr_sgd_step_(p, g, lr)
+        else:
+            p.data.add_(g.to(p.dtype), alpha=-lr)
+        if is_scale:
+            p.data.clamp_(1e-7, 65500.0)  # fp16-representable, positive
+
+
+def attach_weight_sgd_hooks(replaced: dict, lr: float, scale_lr: float,
+                             deferred: set | None = None) -> int:
     """Per-tensor SGD on PTQR masters + scales, applied and freed the moment
     each grad lands (post-accumulate hook). Keeps peak grad memory at ONE
     tensor instead of the full 11 GiB set. (Adafactor was tried first and its
     initial update NaN'd a scale tensor on real data — measured; plain SGD is
     also exactly composable with the per-chunk loss backwards, being linear
-    in the grad.) Scales are clamped to the deployed fp16-scale domain and
-    kept strictly positive."""
+    in the grad.)
+
+    Params named in `deferred` never apply in-hook: the lm_head receives 16
+    partial grads per step (one per loss chunk) and applying per chunk made
+    SR 16x as expensive (a step took 20 min — measured); those params
+    accumulate and are applied once by apply_deferred_updates() after the
+    loss (SGD is linear in the grad, so this is exact)."""
     import torch as _t
 
+    deferred = deferred or set()
     n = 0
     for m in replaced.values():
-        m.scale._ptqr_master_ref = m.weight  # for the feasibility projection
         for p, p_lr, is_scale in ((m.weight, lr, False), (m.scale, scale_lr, True)):
+            p._ptqr_lr = p_lr
+            p._ptqr_is_scale = is_scale
+            p.requires_grad_(True)
+            if getattr(p, "_ptqr_deferred", False):
+                n += 1
+                continue
 
             def _hook(p=p, p_lr=p_lr, is_scale=is_scale):
                 if p.grad is None:
                     return
-                g = p.grad
-                if not _t.isfinite(g).all():
-                    p.grad = None
-                    return
-                with _t.no_grad():
-                    gn = g.norm()
-                    if gn > 1.0:  # per-tensor clip (no global clip under hooks)
-                        g = g * (1.0 / gn)
-                    if p.dtype == _t.bfloat16:
-                        # bf16 masters: plain add_ rounds sub-ULP updates away
-                        # (lr*g ~ 1e-7 vs ULP ~ 4e-5), turning SGD into a
-                        # rounding-driven random walk — the measured rising-KLD
-                        # mechanism. Stochastic rounding keeps the expected
-                        # update exact at zero extra memory. Row-chunked: the
-                        # lm_head shard's fp32 pass is 1.19 GiB in the chunk-0
-                        # backward (measured OOM).
-                        R = 2048
-                        flat = p.data.reshape(-1)
-                        gflat = g.reshape(-1)
-                        for r0 in range(0, flat.numel(), R):
-                            r1 = min(r0 + R, flat.numel())
-                            x = flat[r0:r1].float() - p_lr * gflat[r0:r1].float()
-                            sign = _t.where(x < 0, -1.0, 1.0)
-                            ax = x.abs().clamp_min(1e-38)
-                            spacing = _t.pow(2.0, _t.floor(_t.log2(ax)) - 7)
-                            rr = ax / spacing
-                            frac = rr - _t.floor(rr)
-                            stepped = _t.floor(rr) + (
-                                _t.rand_like(frac) < frac).float()
-                            flat[r0:r1] = (sign * stepped * spacing).to(p.dtype)
-                    else:
-                        p.data.add_(g.to(p.dtype), alpha=-p_lr)
-                    if is_scale:
-                        p.data.clamp_(1e-7, 65500.0)  # fp16-representable, positive
+                _apply_param_update_(p, p.grad, p_lr, is_scale)
                 p.grad = None
             p.register_post_accumulate_grad_hook(lambda *a, h=_hook: h())
             p.requires_grad_(True)
+            n += 1
+    return n
+
+
+def apply_deferred_updates(model) -> int:
+    """Apply + clear the accumulated grads of deferred (lm_head) params."""
+    n = 0
+    for p in model.parameters():
+        if getattr(p, "_ptqr_deferred", False) and p.grad is not None:
+            _apply_param_update_(p, p.grad, p._ptqr_lr, p._ptqr_is_scale)
+            p.grad = None
             n += 1
     return n
 
@@ -1094,12 +1126,17 @@ def main():
     # grad is applied (clipped) and freed as it lands, so peak grad memory is
     # one tensor, not the full ~11 GiB set. (Adafactor NaN'd scales on its
     # first real update — measured, see probe logs.)
+    # The lm_head's params take 16 partial grads per step (one per loss
+    # chunk): defer them to a single post-loss apply (exact; SGD is linear).
+    for p in (student.lm_head.weight, student.lm_head.scale):
+        p._ptqr_deferred = True
     n_hook = attach_weight_sgd_hooks(
         replaced, args.lr, args.lr * args.scale_lr_mult) if replaced else 0
     s_params = [m.scale for m in replaced.values()]
     opt = None
     print(f"[rank {rank}] optimizer: {n_hook} per-tensor SGD hooks "
-          f"(w lr {args.lr:g}, s lr {args.lr * args.scale_lr_mult:g})", flush=True)
+          f"(w lr {args.lr:g}, s lr {args.lr * args.scale_lr_mult:g}; "
+          f"lm_head deferred)", flush=True)
 
     train_dl = build_dataloader(str(Path(args.data_dir) / args.data_name),
                                 args.seq_len, args.batch_size, tiny=args.tiny)
@@ -1164,6 +1201,7 @@ def main():
                 student, teacher, x, y, args.distill_temperature,
                 args.logits_chunk, args.distill_weight)
         # the loss functions ran backward internally; grads are in place.
+        apply_deferred_updates(student)  # lm_head's 16 partials, one apply
         if opt is not None:
             torch.nn.utils.clip_grad_norm_(s_params, args.grad_clip)
             opt.step()
