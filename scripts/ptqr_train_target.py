@@ -874,10 +874,10 @@ def attach_weight_sgd_hooks(replaced: dict, lr: float, scale_lr: float) -> int:
                         # backward (measured OOM).
                         R = 2048
                         flat = p.data.reshape(-1)
-                        gflat = g.reshape(-1).float()
+                        gflat = g.reshape(-1)
                         for r0 in range(0, flat.numel(), R):
                             r1 = min(r0 + R, flat.numel())
-                            x = flat[r0:r1].float() - p_lr * gflat[r0:r1]
+                            x = flat[r0:r1].float() - p_lr * gflat[r0:r1].float()
                             sign = _t.where(x < 0, -1.0, 1.0)
                             ax = x.abs().clamp_min(1e-38)
                             spacing = _t.pow(2.0, _t.floor(_t.log2(ax)) - 7)
