@@ -1130,8 +1130,9 @@ def main():
     # first real update — measured, see probe logs.)
     # The lm_head's params take 16 partial grads per step (one per loss
     # chunk): defer them to a single post-loss apply (exact; SGD is linear).
-    for p in (student.lm_head.weight, student.lm_head.scale):
-        p._ptqr_deferred = True
+    if replaced:  # only exists in PTQR mode (lm_head is a PTQRLinear)
+        for p in (student.lm_head.weight, student.lm_head.scale):
+            p._ptqr_deferred = True
     n_hook = attach_weight_sgd_hooks(
         replaced, args.lr, args.lr * args.scale_lr_mult) if replaced else 0
     s_params = [m.scale for m in replaced.values()]
