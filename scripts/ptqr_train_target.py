@@ -869,16 +869,23 @@ def attach_weight_sgd_hooks(replaced: dict, lr: float, scale_lr: float) -> int:
                         # (lr*g ~ 1e-7 vs ULP ~ 4e-5), turning SGD into a
                         # rounding-driven random walk — the measured rising-KLD
                         # mechanism. Stochastic rounding keeps the expected
-                        # update exact at zero extra memory.
-                        x = p.data.float() - p_lr * g.float()
-                        sign = _t.where(x < 0, -1.0, 1.0)
-                        ax = x.abs().clamp_min(1e-38)
-                        spacing = _t.pow(2.0, _t.floor(_t.log2(ax)) - 7)
-                        r = ax / spacing
-                        frac = r - _t.floor(r)
-                        stepped = _t.floor(r) + (
-                            _t.rand_like(frac) < frac).float()
-                        p.data.copy_((sign * stepped * spacing).to(p.dtype))
+                        # update exact at zero extra memory. Row-chunked: the
+                        # lm_head shard's fp32 pass is 1.19 GiB in the chunk-0
+                        # backward (measured OOM).
+                        R = 2048
+                        flat = p.data.reshape(-1)
+                        gflat = g.reshape(-1).float()
+                        for r0 in range(0, flat.numel(), R):
+                            r1 = min(r0 + R, flat.numel())
+                            x = flat[r0:r1].float() - p_lr * gflat[r0:r1]
+                            sign = _t.where(x < 0, -1.0, 1.0)
+                            ax = x.abs().clamp_min(1e-38)
+                            spacing = _t.pow(2.0, _t.floor(_t.log2(ax)) - 7)
+                            rr = ax / spacing
+                            frac = rr - _t.floor(rr)
+                            stepped = _t.floor(rr) + (
+                                _t.rand_like(frac) < frac).float()
+                            flat[r0:r1] = (sign * stepped * spacing).to(p.dtype)
                     else:
                         p.data.add_(g.to(p.dtype), alpha=-p_lr)
                     if is_scale:
