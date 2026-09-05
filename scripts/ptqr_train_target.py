@@ -850,6 +850,7 @@ def attach_weight_sgd_hooks(replaced: dict, lr: float, scale_lr: float) -> int:
 
     n = 0
     for m in replaced.values():
+        m.scale._ptqr_master_ref = m.weight  # for the feasibility projection
         for p, p_lr, is_scale in ((m.weight, lr, False), (m.scale, scale_lr, True)):
 
             def _hook(p=p, p_lr=p_lr, is_scale=is_scale):
@@ -866,6 +867,15 @@ def attach_weight_sgd_hooks(replaced: dict, lr: float, scale_lr: float) -> int:
                     p.data.add_(g.to(p.dtype), alpha=-p_lr)
                     if is_scale:
                         p.data.clamp_(1e-7, 65500.0)  # fp16-representable, positive
+                        # RTN feasibility: a group's scale must cover its
+                        # master's amax (|w| <= 127*s) — independent SGD on w
+                        # and s drifts past this (measured saturation), which
+                        # the deployed grid cannot represent.
+                        w_ref = p._ptqr_master_ref
+                        if w_ref is not None:
+                            amax = w_ref.detach().float().reshape(
+                                w_ref.shape[0], -1, p.shape[1]).abs().amax(dim=-1)
+                            p.data.copy_(torch.maximum(p.data, amax / 127.0))
                 p.grad = None
             p.register_post_accumulate_grad_hook(lambda *a, h=_hook: h())
             p.requires_grad_(True)
