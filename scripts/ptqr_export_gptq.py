@@ -107,6 +107,9 @@ def main():
     p.add_argument("--base", default="/home/curved/models/Qwen3.8-27B-bf16-ref-lm.pt")
     p.add_argument("--out", default="/home/curved/models/Qwen3.8-27B-PTQR-INT8-GS128")
     p.add_argument("--group", type=int, default=128)
+    p.add_argument("--aux_src",
+                   default="/home/curved/models/Qwen3.8-27B-GPTQ-8bit-gs128",
+                   help="dir to copy config/tokenizer/generation files from")
     args = p.parse_args()
 
     shards = load_rank_shards(Path(args.ckpt_dir), args.step, args.world)
@@ -235,6 +238,15 @@ def main():
         "meta": {"quantizer": ["ptqr-retrain:scripts/ptqr_export_gptq.py"]},
     }
     (out_dir / "quantize_config.json").write_text(json.dumps(qcfg, indent=2))
+    # aux files the loader needs (same architecture/tokenizer as source)
+    src_cfg = Path(args.aux_src) if args.aux_src else Path(args.base).parent
+    for fname in ("config.json", "tokenizer.json", "tokenizer_config.json",
+                  "generation_config.json", "chat_template.jinja",
+                  "processor_config.json"):
+        f = src_cfg / fname
+        if f.exists():
+            (out_dir / fname).write_bytes(f.read_bytes())
+    print("aux files copied (config/tokenizer/generation)", flush=True)
     print(f"exported -> {out_dir}")
 
 
