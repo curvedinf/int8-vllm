@@ -207,6 +207,13 @@ def main():
         print(f"  wrote {fn}", flush=True)
     # base-only tensors (buffers, embed if absent, etc.)
     if extra:
+        ref_idx = Path(args.aux_src) / "model.safetensors.index.json"
+        ref_keys = set()
+        if ref_idx.exists():
+            ref_keys = set(json.loads(ref_idx.read_text())["weight_map"])
+        extra = [k for k in extra if
+                 ("model.language_model." + k[len("model."):]
+                  if k.startswith("model.") else k) in ref_keys]
         chunk = {}
         for k in extra:
             kk = ("lm_head" if k == "model.lm_head.weight"
