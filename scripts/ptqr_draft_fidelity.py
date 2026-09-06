@@ -60,6 +60,9 @@ def main():
     target = T.build_lm_model(A(), torch.bfloat16, "rocm_triton")
     apply_ssm_tp(target.model, tp_size=world)
     apply_tp_attention(target.model, tp_size=world)
+    # free the full-vocab lm_head (2.4 GiB/rank unsharded): the gate only
+    # needs exit hiddens + ground truth, not target argmax
+    target.lm_head = torch.nn.Identity()
     target.to(dev).eval()
 
     # capture exit-layer hidden states (post-layer output, pre-final-norm)
@@ -96,7 +99,7 @@ def main():
             caps[L].clear()
         x = seq[:-1].to(dev)
         with torch.no_grad():
-            logits = target(input_ids=x[None]).logits
+            target(input_ids=x[None])  # lm_head is Identity (memory)
         if rank != 0:
             continue
         # note: with TP the hook fired on every rank; caps on rank0 hold
@@ -104,7 +107,6 @@ def main():
         # all-reduced hidden (replicated). Verified: o_proj partials are
         # summed, so the layer output IS replicated on every rank.
         states = [caps[L][0] for L in EXITS]          # [T, H] each
-        tgt_argmax = logits[0].argmax(-1).cpu()        # [T]
         Tn = x.shape[0]
         for pos in range(64, Tn - 1, args.probe_every):
             # anchor token at pos, predict pos+1 using context states [0, pos]
@@ -119,17 +121,14 @@ def main():
             truth = seq[pos + 1]
             n_probe += 1
             n_top1_true += int(pred == truth)
-            n_top1_target += int(pred == tgt_argmax[pos])
         if rank == 0:
             print(f"seq {si}: probes so far {n_probe} "
-                  f"top1-true {n_top1_true / max(1, n_probe):.3f} "
-                  f"top1-target {n_top1_target / max(1, n_probe):.3f}", flush=True)
+                  f"top1-true {n_top1_true / max(1, n_probe):.3f}", flush=True)
 
     for h in handles:
         h.remove()
     if rank == 0:
-        print(f"FIDELITY: probes {n_probe} | top1 vs TRUE {n_top1_true/max(1,n_probe):.3f} | "
-              f"top1 vs TARGET-ARGMAX {n_top1_target/max(1,n_probe):.3f}", flush=True)
+        print(f"FIDELITY: probes {n_probe} | top1 vs TRUE {n_top1_true/max(1,n_probe):.3f}", flush=True)
     dist.destroy_process_group()
 
 
