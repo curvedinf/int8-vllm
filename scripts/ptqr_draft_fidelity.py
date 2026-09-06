@@ -57,9 +57,11 @@ def main():
         tiny = False
         n_layers = 0
         attn_impl = "rocm_triton"
+    from ptqr_train_target import shard_mlp_and_heads_one
     target = T.build_lm_model(A(), torch.bfloat16, "rocm_triton")
     apply_ssm_tp(target.model, tp_size=world)
     apply_tp_attention(target.model, tp_size=world)
+    shard_mlp_and_heads_one(target, world, rank, group=None)
     # free the full-vocab lm_head (2.4 GiB/rank unsharded): the gate only
     # needs exit hiddens + ground truth, not target argmax
     target.lm_head = torch.nn.Identity()
