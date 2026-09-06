@@ -253,11 +253,11 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
                 ):
                     # one file per (layer, stage, call); training-fidelity work
                     import pathlib as _pl
+                    from .qwen3_dflash import spec_round as _sr
                     _pl.Path(_dump_dir).mkdir(parents=True, exist_ok=True)
                     torch.save(
                         t.detach().float().cpu(),
-                        f"{_dump_dir}/L{self._audit_layer_idx}_{tag}_"
-                        f"{id(self) % 1000}.pt",
+                        f"{_dump_dir}/R{_sr()}_L{self._audit_layer_idx}_{tag}.pt",
                     )
             if os.environ.get("VLLM_DFLASH_AUDIT"):
                 from vllm import quant_audit_recorder as _qa

@@ -13,6 +13,13 @@ from transformers import Qwen3Config
 
 from vllm import _custom_ops as ops
 from vllm.compilation.decorators import support_torch_compile
+
+_SPEC_ROUND = [0]
+
+
+def spec_round() -> int:
+    return _SPEC_ROUND[0]
+
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
@@ -804,23 +811,14 @@ class DFlashQwen3Model(nn.Module):
             _dump_dir = os.environ.get("VLLM_SPEC_DEBUG_TENSORS")
             if _dump_dir:
                 import pathlib as _pl
-                import itertools as _it
-                global _SPEC_DUMP_SEQ
-                try:
-                    _SPEC_DUMP_SEQ
-                except NameError:
-                    _SPEC_DUMP_SEQ = _it.count()
                 _pl.Path(_dump_dir).mkdir(parents=True, exist_ok=True)
-                _n = next(_SPEC_DUMP_SEQ)
+                _n = spec_round()
                 torch.save(context_states.detach().float().cpu(),
-                           f"{_dump_dir}/ctx_states_{_n}.pt")
+                           f"{_dump_dir}/R{_n}_ctx_states.pt")
                 torch.save(context_positions.detach().cpu(),
-                           f"{_dump_dir}/ctx_pos_{_n}.pt")
-                all_k, all_v = self._project_context_kv(
-                    context_states, num_ctx, L, nkv, hd)
-                torch.save(all_k.detach().float().cpu(), f"{_dump_dir}/ctx_K_{_n}.pt")
-                torch.save(all_v.detach().float().cpu(), f"{_dump_dir}/ctx_V_{_n}.pt")
-                return  # dump-only invocation: skip cache writes
+                           f"{_dump_dir}/R{_n}_ctx_pos.pt")
+                # NOTE: no early return — real decode rounds must still write
+                # the KV cache; the dump-only synthetic round is retired.
 
         all_k, all_v = self._project_context_kv(context_states, num_ctx, L, nkv, hd)
         all_k_normed = self._normalize_context_k(all_k)
@@ -910,18 +908,13 @@ class DFlashQwen3Model(nn.Module):
             _dump_dir = os.environ.get("VLLM_SPEC_DEBUG_TENSORS")
             if _dump_dir:
                 import pathlib as _pl
-                import itertools as _it
-                global _SPEC_DUMP_SEQ
-                try:
-                    _SPEC_DUMP_SEQ
-                except NameError:
-                    _SPEC_DUMP_SEQ = _it.count()
+                _SPEC_ROUND[0] += 1
                 _pl.Path(_dump_dir).mkdir(parents=True, exist_ok=True)
-                _n = next(_SPEC_DUMP_SEQ)
+                _n = _SPEC_ROUND[0]
                 torch.save(hidden_states.detach().float().cpu(),
-                           f"{_dump_dir}/query_embed_{_n}.pt")
-                torch.save(input_ids.detach().cpu(), f"{_dump_dir}/query_ids_{_n}.pt")
-                torch.save(positions.detach().cpu(), f"{_dump_dir}/query_pos_{_n}.pt")
+                           f"{_dump_dir}/R{_n}_query_embed.pt")
+                torch.save(input_ids.detach().cpu(), f"{_dump_dir}/R{_n}_query_ids.pt")
+                torch.save(positions.detach().cpu(), f"{_dump_dir}/R{_n}_query_pos.pt")
 
         residual = None
         for layer_idx, layer in enumerate(self.layers):
