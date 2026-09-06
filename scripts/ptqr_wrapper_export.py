@@ -31,7 +31,6 @@ from ptqr_export_gptq import (  # noqa: E402
     stitch,
     stitch_scales,
 )
-
 DEPLOYED = "/home/curved/models/Qwen3.8-27B-GPTQ-8bit-gs128"
 G = 128
 

@@ -50,8 +50,52 @@ def load_rank_shards(ckpt_dir: Path, step: int, world: int):
     return shards
 
 
+# GDN in_proj_qkv: each rank's slice is [q_seg | k_seg | v_seg] CONCATENATED
+# in range-list order (SSMShardSpec.qkv_rows), NOT contiguous rows of the full
+# tensor. Segment sizes per rank at TP4: q=k=k_per*head_k (512), v=v_per*head_v
+# (1536). Plain dim-0 concat interleaves q/k/v blocks across ranks — the
+# scrambling bug that produced CE 13.6 on UNTRAINED weights (ledger
+# PTQR_lr0_stitch_bug).
+QKV_SEGMENT_LEAFS = ("in_proj_qkv",)
+
+
+def _is_qkv_segmented(name: str) -> bool:
+    return name.split(".")[-1] in QKV_SEGMENT_LEAFS
+
+
+def stitch_qkv(name: str, shards) -> torch.Tensor:
+    """Scatter each rank's [q|k|v] slice back into the segmented full tensor.
+
+    Geometry from the Qwen3.8-27B GDN config (SSMShardSpec): 16 k-heads,
+    48 v-heads, head dims 128 — full rows = 2048 q + 2048 k + 6144 v; each
+    TP4 rank holds 512 q + 512 k + 1536 v concatenated in that order.
+    """
+    import torch as _t
+    per = [s[name + ".weight"] for s in shards]
+    out_f = sum(p.shape[0] for p in per)
+    in_f = per[0].shape[1]
+    kd, head = 2048, 128
+    vd = out_f - 2 * kd
+    assert out_f == 10240 and vd == 6144, f"unexpected qkv geometry {out_f}"
+    w = len(per)
+    k_per, v_per = kd // w, vd // w
+    full = _t.empty(out_f, in_f, dtype=per[0].dtype)
+    for r, p in enumerate(per):
+        assert p.shape[0] == k_per * head * 2 + v_per * head
+        q_seg = p[: k_per * head]
+        k_seg = p[k_per * head: 2 * k_per * head]
+        v_seg = p[2 * k_per * head:]
+        full[r * k_per * head: (r + 1) * k_per * head] = q_seg
+        full[kd + r * k_per * head: kd + (r + 1) * k_per * head] = k_seg
+        full[2 * kd + r * v_per * head:
+             2 * kd + (r + 1) * v_per * head] = v_seg
+    return full
+
+
 def stitch(name: str, shards) -> torch.Tensor:
     """Rebuild the full tensor from per-rank slices."""
+    if _is_qkv_segmented(name):
+        return stitch_qkv(name, shards)
     dim = 1 if _is_row_parallel(name) else 0
     parts = [s[name + ".weight"] if (name + ".weight") in s
              else s[name] for s in shards]
@@ -64,6 +108,24 @@ def stitch(name: str, shards) -> torch.Tensor:
 
 
 def stitch_scales(name: str, shards) -> torch.Tensor:
+    if _is_qkv_segmented(name):
+        # scales follow the same [q|k|v] row segmentation as the weights
+        per = [s[name + ".scale"] for s in shards]
+        import torch as _t
+        full = _t.empty(sum(p.shape[0] for p in per), per[0].shape[1],
+                        dtype=per[0].dtype)
+        # groups of 128 input dims; rows = output rows (segmented)
+        seg_rows = [p.shape[0] // 3 for p in per]  # not equal q/k/v! fall back
+        # q rows == k rows < v rows: split 1:1:2 by row count
+        total_r = per[0].shape[0]
+        qr = total_r // 4          # q rows per rank (= k rows)
+        vr = total_r - 2 * qr      # v rows per rank
+        kd_rows = sum(qr for _ in per)
+        for r, p in enumerate(per):
+            full[r * qr: (r + 1) * qr] = p[:qr]
+            full[kd_rows + r * qr: kd_rows + (r + 1) * qr] = p[qr: 2 * qr]
+            full[2 * kd_rows + r * vr: 2 * kd_rows + (r + 1) * vr] = p[2 * qr:]
+        return full
     parts = [s[name + ".scale"] for s in shards]
     if all(torch.equal(parts[0], p) for p in parts[1:]) and parts[0].dim() == 1:
         return parts[0]

@@ -18,6 +18,10 @@ import torch
 
 G = 128
 ROWPAR = ("o_proj", "out_proj", "down_proj")
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).parent))
+from ptqr_export_gptq import stitch_qkv  # noqa: E402  (segmented [q|k|v] fix)
 
 
 def flat(k: str) -> str:
@@ -56,8 +60,11 @@ def main():
         if replicas(vals):
             out[tgt] = vals[0]
             continue
-        dim = 1 if leaf in ROWPAR else 0
-        w = torch.cat(vals, dim=dim).float()
+        if leaf == "in_proj_qkv":
+            w = stitch_qkv(name, shards).float()
+        else:
+            dim = 1 if leaf in ROWPAR else 0
+            w = torch.cat(vals, dim=dim).float()
         sc = torch.cat([s[name + ".scale"] for s in shards], dim=dim).float() \
             if all((name + ".scale") in s for s in shards) else None
         if sc is None or w.dim() != 2 or w.shape[1] != G * sc.shape[1]:
