@@ -220,6 +220,15 @@ class DraftModel(nn.Module):
         # ("encoder.fc" in origin naming); the VOCAB head is the TARGET's
         # lm_head (shared), passed in as lm_head_weight [vocab, hidden].
         self.fc = nn.Linear(5 * CFG["hidden"], CFG["hidden"], bias=False)
+        # DFlash2 head (dflash2.py 311-375): candidates from lm_head top-k,
+        # edges scored via codebooks + rank projection
+        self.selector_rank = 256
+        self.selector_top_k = 16
+        self.predecessor_codebook = nn.Parameter(
+            torch.empty(CFG["vocab"], self.selector_rank), requires_grad=False)
+        self.successor_codebook = nn.Parameter(
+            torch.empty(CFG["vocab"], self.selector_rank), requires_grad=False)
+        self.hidden_projection = nn.Linear(CFG["hidden"], self.selector_rank, bias=False)
         self.register_buffer("lm_head_weight", lm_head_weight.detach().clone())
         self.input_embedding_scale = 1.0
 
@@ -241,11 +250,18 @@ class DraftModel(nn.Module):
         h = h[:, None, :]  # [T, 1, H]
         res = None
         exit_hiddens = []
-        # serving normalizes the target states ONCE with hidden_norm before
-        # the per-layer K/V projections (_project_context_kv: rms_norm with
-        # the hidden_norm weight) — feeding raw residual-stream states is
-        # ~290x too large and explodes the recurrence
-        ctx_normed = [self.hidden_norm(c) for c in ctx_states_per_layer]
+        # SERVING CONVENTION (speculator.py 408-413 + qwen3_dflash 1079+):
+        # the speculator combines the 5 aux exit states with the fc layer
+        # (5H -> H) into ONE tensor; ALL 5 draft layers consume the SAME
+        # combined states through their own per-layer KV weights
+        # (_project_context_kv fuses all layers in one GEMM).
+        if isinstance(ctx_states_per_layer, (list, tuple)):
+            combined = self.fc(torch.cat(ctx_states_per_layer, dim=-1))
+        else:
+            combined = self.fc(ctx_states_per_layer)  # [C, 5, H] or [C, 5H]
+            if combined.dim() == 3:
+                pass  # already per-position after fc? handled above for lists
+        ctx_normed = [self.hidden_norm(combined) for _ in range(CFG["layers"])]
         for i, layer in enumerate(self.layers):
             h, res = layer(h, res, ctx_normed[i], cos, sin, CFG["window"])
             # final norm is fused_add: normed = LN(h + res) * w (per exit)
@@ -261,8 +277,13 @@ class DraftModel(nn.Module):
 def load_draft(model: DraftModel, ckpt_dir: str = DRAFT_DIR):
     from safetensors.torch import load_file
     sd = load_file(f"{ckpt_dir}/model.safetensors")
-    # checkpoint keys map 1:1 to module names except selector (not in model)
-    sd = {k: v for k, v in sd.items() if not k.startswith("candidate_selector")}
+    # remap the selector keys onto the flat module names
+    sd = dict(sd)
+    for src, dst in (("candidate_selector.hidden_projection.weight", "hidden_projection.weight"),
+                     ("candidate_selector.predecessor_codebook", "predecessor_codebook"),
+                     ("candidate_selector.successor_codebook", "successor_codebook")):
+        if src in sd:
+            sd[dst] = sd.pop(src)
     missing, unexpected = model.load_state_dict(sd, strict=False)
     # embed/lm_head/mask are provided at construction, not from the draft ckpt
     skip = ("lm_head_weight", "embed.weight", "mask_embedding")
