@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 DRAFT_DIR = "/home/curved/models/dflash2-bf16-with-tokenizer"
 CFG = dict(hidden=5120, inter=17408, heads=32, kv_heads=8, hd=128,
            layers=5, window=2048, eps=1e-6, vocab=248320,
-           taps=2, group=16, ns=13, mask_token=248070, rope=1e6)
+           taps=2, group=16, ns=13, mask_token=248070, rope=1e7)  # checkpoint rope_theta 10000000 (was 1e6 — replay-bisect catch)
 
 
 class RMSNorm(nn.Module):
