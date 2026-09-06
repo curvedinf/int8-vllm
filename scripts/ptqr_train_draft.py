@@ -176,18 +176,21 @@ class DraftLayer(nn.Module):
             res = h
             h = self.input_layernorm(h)
         else:
-            h2 = self.input_layernorm(h)
-            h = res + h2
-            res = h2  # NOTE: verify exact residual convention vs vllm RMSNorm
+            # vLLM fused_add_rms_norm: s = x + residual; normed = LN(s)*w;
+            # returns (normed, s) — the SUM is the new residual (my earlier
+            # version stored the normed value: the 100x/layer explosion)
+            h = h + res
+            res = h
+            h = self.input_layernorm(h)
         h, coeff = self.attention_conv.prepare(h)
         _db("attn_conv_prep", h)
         h = self.self_attn(h, ctx_states, cos, sin, window)
         _db("attn_out", h)
         h = self.attention_conv.finish(h, coeff)
         _db("attn_conv_fin", h)
-        h2 = self.post_attention_layernorm(h)
-        h = res + h2
-        res = h2
+        h = h + res
+        res = h
+        h = self.post_attention_layernorm(h)
         h, coeff = self.mlp_conv.prepare(h)
         _db("mlp_conv_prep", h)
         h = self.mlp(h)
@@ -235,7 +238,8 @@ class DraftModel(nn.Module):
         for i, layer in enumerate(self.layers):
             h, res = layer(h, res, ctx_states_per_layer[i], cos, sin,
                            CFG["window"])
-            exit_hiddens.append(self.norm(h)[:, 0])          # [T, H] each
+            # final norm is fused_add: normed = LN(h + res) * w (per exit)
+            exit_hiddens.append(self.norm(h + res)[:, 0])  # [T, H] each
         # aux head: fc over the CONCAT of all 5 exit hiddens, one shared
         # logits tensor (the exits are consumed jointly, not per-exit vocab
         # projections — matches DFlash2's single lm_head compute_candidates)
