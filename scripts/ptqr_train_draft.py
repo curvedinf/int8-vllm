@@ -274,29 +274,31 @@ class DraftModel(nn.Module):
         # candidates from the lm_head, edges scored by the CandidateSelector
         # (hidden->rank proj; unary + codebook dot products), greedy chain.
         anchor = tokens[0]
+        self._chain_info = []
         prev = torch.full((exit_hiddens[0].shape[0],), int(anchor),
                           dtype=torch.long, device=h.device)
         chain = []
         chain_scores = []
         for lh in exit_hiddens:                       # lh: [T, H]
-            lg = F.linear(lh, self.lm_head_weight)     # [T, V]
+            lg = F.linear(lh.to(self.lm_head_weight.dtype), self.lm_head_weight)  # [T, V]
             topv, topi = lg.topk(self.selector_top_k, dim=-1)
-            hr = self.hidden_projection(lh)            # [T, R]
-            pred_e = self.predecessor_codebook[prev]   # [T, R]
-            cand_e = self.successor_codebook[topi]     # [T, K, R]
+            hr = self.hidden_projection(lh.to(self.hidden_projection.weight.dtype) if hasattr(self.hidden_projection, 'weight') else lh)
+            pred_e = self.predecessor_codebook[prev].to(hr.dtype)
+            cand_e = self.successor_codebook[topi].to(hr.dtype)
             edge = torch.einsum('tr,tkr->tk', pred_e * hr, cand_e)
             scores = topv + edge                       # [T, K]
             best = scores.argmax(-1)
             prev = topi.gather(1, best[:, None]).squeeze(1)
             chain.append(prev)
             chain_scores.append(scores.max(-1).values)
+            self._chain_info.append((topi.detach(), scores))
         # full-vocab "logits" for compat: scatter chain scores so argmax == chain
         logits = torch.full((len(chain), prev.shape[0], CFG['vocab']),
                             float('-inf'),
                             device=h.device, dtype=torch.float32)
         for li, (tok, sc) in enumerate(zip(chain, chain_scores)):
             logits[li, torch.arange(tok.shape[0]), tok] = sc.float()
-        return logits, exit_hiddens
+        return logits, exit_hiddens, self._chain_info
 
 
 def load_draft(model: DraftModel, ckpt_dir: str = DRAFT_DIR):

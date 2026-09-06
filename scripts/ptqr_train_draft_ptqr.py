@@ -124,13 +124,21 @@ def main():
     dev = torch.device("cuda:0")
 
     embed, lm = load_weights()
-    teacher = load_draft(DraftModel(embed, lm)).float().to(dev).eval()
+    teacher = load_draft(DraftModel(embed, lm)).to(torch.bfloat16).to(dev).eval()  # bf16 frozen
     for q in teacher.parameters():
         q.requires_grad_(False)
 
-    student = load_draft(DraftModel(embed, lm)).float().to(dev)
+    student = load_draft(DraftModel(embed, lm)).to(dev)  # fp32 masters (small model; exact SGD)
     replaced = quantize_model_(student, group=args.group,
                                kv_group=args.kv_group)
+    # dtype harmonization: dense glue ops produce fp32; PTQRLinear returns
+    # master-dtype (bf16). Cast both sides at every PTQRLinear boundary.
+    import types as _types
+    for pq in replaced.values():
+        _f = pq.forward
+        def _fwd(self, x, _f=_f):
+            return _f(x.to(self.weight.dtype)).to(x.dtype)
+        pq.forward = _types.MethodType(_fwd, pq)
     _apply_kv_quant(student)
     n_hook = attach_weight_sgd_hooks(replaced, args.lr, args.lr)
     print(f"student: {len(replaced)} PTQR linears, {n_hook} SGD hooks", flush=True)
@@ -147,7 +155,7 @@ def main():
     while step < args.steps:
         d = torch.load(cache[si % len(cache)], weights_only=True)
         si += 1
-        tokens, states = d["tokens"].to(dev), d["states"].to(dev).float()
+        tokens, states = d["tokens"].to(dev), d["states"].to(dev)
         C = states.shape[0]
 
         tau = anneal_tau(step, args.steps, opt_tau[0], opt_tau[1])
@@ -163,21 +171,42 @@ def main():
             toks = torch.full((1 + CFG["ns"],), CFG["mask_token"],
                               dtype=torch.long, device=dev)
             toks[0] = anchor
-            ctx = states[:pos + 1]                      # [C', 5, H]
-            ctx_list = [ctx[:, i, :] for i in range(CFG["layers"])]
+            ctx = states[:pos + 1]                      # [C', 5, H] fp16
+            ctx_t = [ctx[:, i, :].unsqueeze(1).to(torch.bfloat16) for i in range(CFG["layers"])]
+            ctx_s = [ctx[:, i, :].unsqueeze(1).to(torch.float32) for i in range(CFG["layers"])]
             qpos = torch.arange(pos + 1, pos + 1 + len(toks), device=dev)
             cpos = torch.arange(pos + 1, device=dev)
             with torch.no_grad():
-                tl, _ = teacher(toks, ctx_list)
-                t_top = tl[0, 0].topk(16).indices       # teacher slot-1 topk
-            sl, _ = student(toks, ctx_list)
+                _, _, t_info = teacher(toks, ctx_t)
+            _, _, s_info = student(toks, ctx_s)
             truth = tokens[pos + 1]
-            ce = F.cross_entropy(sl[0, 0][None], truth[None])
-            # KLD over the teacher's top candidates
-            sl_small = sl[0, 0][t_top]
-            tl_small = tl[0, 0][t_top]
-            kl = F.kl_div(F.log_softmax(sl_small, -1),
-                          F.softmax(tl_small, -1), reduction="batchmean")
+            # supervision over the layer-0 candidate scores (scatter logits
+            # are -inf outside the chain — unusable for CE/KLD)
+            t_topi, t_sc = t_info[0]
+            s_topi, s_sc = s_info[0]
+            # CE: -log p of the ground-truth token among the STUDENT's
+            # own candidates (finite 16-way softmax; 0 if not covered)
+            s_hit = (s_topi[0] == truth)
+            if s_hit.any():
+                j = s_hit.nonzero().flatten()[0]
+                ce = -F.log_softmax(s_sc[0].float(), -1)[j]
+            else:
+                ce = s_sc[0].float().mean() * 0.0
+            # KLD via dense vocab scatter, restricted to the both-finite mask
+            V = s_topi.new_tensor(0).numel() and 0 or CFG['vocab']
+            t_dense = torch.full((CFG['vocab'],), float('-inf'),
+                                 device=dev, dtype=torch.float32)
+            s_dense = torch.full((CFG['vocab'],), float('-inf'),
+                                 device=dev, dtype=torch.float32)
+            t_dense[t_topi[0]] = t_sc[0].float()
+            s_dense[s_topi[0]] = s_sc[0].float()
+            both = torch.isfinite(t_dense) & torch.isfinite(s_dense)
+            if both.any():
+                tp = F.softmax(t_dense[both], -1)
+                slp = F.log_softmax(s_dense[both], -1)
+                kl = F.kl_div(slp, tp, reduction="sum")
+            else:
+                kl = s_sc[0].float().sum() * 0.0
             losses.append(ce + 2.0 * kl)
             if len(losses) >= 8:
                 break

@@ -118,7 +118,7 @@ def main():
                               dtype=torch.long, device=dev)
             toks[0] = anchor
             with torch.no_grad():
-                dl, _ = draft(toks, ctx)
+                dl, _, _ = draft(toks, ctx)
             # [L, T, V] chain-scatter: slot-1 prediction = layer-0 token
             pred = (dl[0, 0] if dl.dim() == 3 else dl[0]).argmax(-1).cpu()
             truth = seq[pos + 1]
