@@ -79,11 +79,22 @@ def main():
             continue
         if leaf == "in_proj_qkv":
             w = stitch_qkv(name, shards).float()
+            sc = torch.cat([s[name + ".scale"] for s in shards], 0).float()
+            # scales are row-segmented exactly like the weights: scatter them
+            qr, vr = 512, 1536
+            kd_rows = qr * len(shards)
+            scf = torch.empty(sc.shape[0], sc.shape[1], dtype=sc.dtype)
+            for r in range(len(shards)):
+                p = sc[r * (2 * qr + vr): (r + 1) * (2 * qr + vr)]
+                scf[r * qr: (r + 1) * qr] = p[:qr]
+                scf[kd_rows + r * qr: kd_rows + (r + 1) * qr] = p[qr: 2 * qr]
+                scf[2 * kd_rows + r * vr: 2 * kd_rows + (r + 1) * vr] = p[2 * qr:]
+            sc = scf
         else:
             dim = 1 if leaf in ROWPAR else 0
             w = torch.cat(vals, dim=dim).float()
-        sc = torch.cat([s[name + ".scale"] for s in shards], dim=dim).float() \
-            if all((name + ".scale") in s for s in shards) else None
+            sc = torch.cat([s[name + ".scale"] for s in shards], dim=dim).float() \
+                if all((name + ".scale") in s for s in shards) else None
         if sc is None or w.dim() != 2 or w.shape[1] != G * sc.shape[1]:
             out[tgt] = w.to(torch.bfloat16)  # per-channel lm_head etc.
             continue
