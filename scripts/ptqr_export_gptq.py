@@ -78,17 +78,14 @@ def stitch_qkv(name: str, shards) -> torch.Tensor:
     vd = out_f - 2 * kd
     assert out_f == 10240 and vd == 6144, f"unexpected qkv geometry {out_f}"
     w = len(per)
-    k_per, v_per = kd // w, vd // w
+    qr = kd // w      # q rows per rank (= k rows per rank)
+    vr = vd // w      # v rows per rank
     full = _t.empty(out_f, in_f, dtype=per[0].dtype)
     for r, p in enumerate(per):
-        assert p.shape[0] == k_per * head * 2 + v_per * head
-        q_seg = p[: k_per * head]
-        k_seg = p[k_per * head: 2 * k_per * head]
-        v_seg = p[2 * k_per * head:]
-        full[r * k_per * head: (r + 1) * k_per * head] = q_seg
-        full[kd + r * k_per * head: kd + (r + 1) * k_per * head] = k_seg
-        full[2 * kd + r * v_per * head:
-             2 * kd + (r + 1) * v_per * head] = v_seg
+        assert p.shape[0] == 2 * qr + vr, (p.shape, qr, vr)
+        full[r * qr: (r + 1) * qr] = p[:qr]
+        full[kd + r * qr: kd + (r + 1) * qr] = p[qr: 2 * qr]
+        full[2 * kd + r * vr: 2 * kd + (r + 1) * vr] = p[2 * qr:]
     return full
 
 
@@ -114,13 +111,10 @@ def stitch_scales(name: str, shards) -> torch.Tensor:
         import torch as _t
         full = _t.empty(sum(p.shape[0] for p in per), per[0].shape[1],
                         dtype=per[0].dtype)
-        # groups of 128 input dims; rows = output rows (segmented)
-        seg_rows = [p.shape[0] // 3 for p in per]  # not equal q/k/v! fall back
-        # q rows == k rows < v rows: split 1:1:2 by row count
-        total_r = per[0].shape[0]
-        qr = total_r // 4          # q rows per rank (= k rows)
-        vr = total_r - 2 * qr      # v rows per rank
-        kd_rows = sum(qr for _ in per)
+        total_r = per[0].shape[0]          # 2560 = 512 q + 512 k + 1536 v
+        qr = 2048 // len(per)
+        vr = total_r - 2 * qr
+        kd_rows = qr * len(per)
         for r, p in enumerate(per):
             full[r * qr: (r + 1) * qr] = p[:qr]
             full[kd_rows + r * qr: kd_rows + (r + 1) * qr] = p[qr: 2 * qr]
