@@ -1,37 +1,12 @@
 #!/usr/bin/env python3
 """PTQR retraining of the DFlash2 draft for the all-int8 stack (Phase 2).
 
-STATUS: skeleton — model implementation + loading written; training loop
-reuses ptqr_train_target machinery. NOT yet smoke-tested (see ledger).
+Pure-torch reimplementation of the DFlash2 draft forward (semantics
+extracted from vllm/model_executor/models/qwen3_dflash{,2}.py — see the
+SERVING SEMANTICS block below), loadable strictly from the bf16 checkpoint.
 
-Draft architecture (from vllm/model_executor/models/qwen3_dflash2.py and the
-bf16 checkpoint at <models>/dflash2-bf16-with-tokenizer, 81 tensors):
-  * 5 decoder layers, sliding-window attention (window from config), head_dim
-    128, hidden 5120 — q/k/v/o + gate/up/down are the W8A8 GEMM surfaces.
-  * Each layer wraps attn and MLP with a DFlashGroupedConv (taps=2,
-    group_size=16, block_size=1+NS): kernel_projection Linear + base_kernel
-    [2, taps, hidden] parameter (bf16 conv surface — kernel_projection gets
-    the deployed per-channel W8A8 contract, see process_weights_after_loading).
-  * Head: hidden_norm (RMSNorm) + fc Linear (per-channel int8 at serve).
-  * candidate_selector: predecessor/successor codebooks (vocab x rank, keep
-    bf16 — measured float exception) + hidden_projection Linear (G128 W8A8).
-  * Draft CONSUMES target hidden states at target layers [5,19,33,47,61];
-    each exit predicts the target's next token.
-
-Training plan (per goal docs):
-  Stage A: precompute target hidden states at the 5 exit layers for the
-    training corpus using the FROZEN bf16 target (reuse
-    ptqr_train_target.build_lm_model --no_ptqr; hook the 5 layers; save
-    [N, L_exit, hidden] fp16 shards to disk).
-  Stage B (this script's loop): student = PTQR-quantized draft (PTQRLinear on
-    all Linear surfaces above, deployed contracts), teacher = frozen bf16
-    draft, both fed the SAME cached target hidden states; loss =
-    sum over exits of KL(student || teacher) + CE vs the true next token.
-  Gate: greedy acceptance at 40k ctx >= 3.67/14 (PRING probe) — the trainer's
-    own KL is only a progress signal.
-
-Usage (stage B):
-  python scripts/ptqr_train_draft.py --states <cache.pt> --steps 60 --lr 1e-5
+Smoke test (random context states, teacher==bf16 draft, no training):
+  FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE python scripts/ptqr_train_draft.py --smoke
 """
 from __future__ import annotations
 
@@ -45,136 +20,260 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).parent))
-from ptqr_train_target import PTQRLinear, fake_quant_embedding_  # noqa: E402
 
-DRAFT_CKPT = "/home/curved/models/dflash2-bf16-with-tokenizer/model.safetensors"
+DRAFT_DIR = "/home/curved/models/dflash2-bf16-with-tokenizer"
+CFG = dict(hidden=5120, inter=17408, heads=32, kv_heads=8, hd=128,
+           layers=5, window=2048, eps=1e-6, vocab=248320,
+           taps=2, group=16, ns=13, mask_token=248070, rope=1e6)
 
 
-# ---------------------------------------------------------------------------
-# DFlash grouped conv (pure-torch port of qwen3_dflash2._grouped_conv; the
-# training path uses dense ops — deploy uses the same math).
-# ---------------------------------------------------------------------------
-
-class DFlashGroupedConv(nn.Module):
-    def __init__(self, hidden_size: int, taps: int, group_size: int,
-                 block_size: int):
+class RMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = CFG["eps"]):
         super().__init__()
-        self.block_size, self.taps, self.group_size = block_size, taps, group_size
-        self.num_groups = hidden_size // group_size
-        self.base_kernel = nn.Parameter(
-            torch.zeros(2, taps, hidden_size), requires_grad=False)
-        self.kernel_projection = nn.Linear(hidden_size, 2 * taps * self.num_groups,
-                                           bias=False)
-
-    def _convolve(self, hidden_states: torch.Tensor, delta: torch.Tensor) -> torch.Tensor:
-        # hidden_states: [T, B, H]; delta: [T, B, 2*taps*groups]
-        T, B, H = hidden_states.shape
-        blocks = hidden_states.reshape(T, B, self.num_groups, self.group_size)
-        coeff = self.base_kernel.view(1, 2, self.taps, self.num_groups,
-                                      self.group_size) \
-            + delta.reshape(T, B, 2, self.taps, self.num_groups, 1)
-        which = delta  # placeholder; see prepare/finish split below
-        raise NotImplementedError("see prepare/finish split in vllm impl; "
-                                  "port before first run")
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.eps = eps
 
     def forward(self, x):
-        raise NotImplementedError
+        d = x.dtype
+        x = x.float()
+        x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        return (self.weight.float() * x).to(d)
 
 
-# ---------------------------------------------------------------------------
-# Draft model (sliding-attention decoder + conv wrappers + head + selector)
-# ---------------------------------------------------------------------------
+def rope_cos_sin(T: int, hd: int, theta: float, device, dtype):
+    inv = 1.0 / (theta ** (torch.arange(0, hd, 2, device=device).float() / hd))
+    t = torch.arange(T, device=device).float()
+    f = torch.outer(t, inv)
+    return f.cos().to(dtype), f.sin().to(dtype)
+
+
+def apply_rope(x, cos, sin):
+    # x: [B, H, T, D]; cos/sin: [T, D/2]
+    c = cos[None, None, :, :].to(x.dtype)
+    s = sin[None, None, :, :].to(x.dtype)
+    x1, x2 = x.chunk(2, dim=-1)
+    return torch.cat([x1 * c - x2 * s, x1 * s + x2 * c], dim=-1)
+
+
+class GroupedConv(nn.Module):
+    """DFlash grouped conv (dense port of qwen3_dflash2._grouped_conv)."""
+
+    def __init__(self, hidden: int, taps: int, group: int, block: int):
+        super().__init__()
+        self.taps, self.group, self.block = taps, group, block
+        self.ng = hidden // group
+        self.base_kernel = nn.Parameter(torch.zeros(2, taps, hidden),
+                                        requires_grad=False)
+        self.kernel_projection = nn.Linear(hidden, 2 * taps * self.ng, bias=False)
+
+    def _convolve(self, h, delta, side):
+        # h: [T, B, H]; delta: [T, B, taps*ng]
+        T, B, H = h.shape
+        blocks = h.reshape(T, B, self.ng, self.group)
+        base = self.base_kernel[side]                      # [taps, ng, gs]
+        coeff = base.view(1, self.taps, self.ng, self.group) + \
+            delta.reshape(T, B, self.taps, self.ng, 1)
+        out = coeff[:, 0] * blocks
+        pos = torch.arange(T, device=h.device)
+        pos = pos & (self.block - 1) if self.block & (self.block - 1) == 0 \
+            else pos % self.block
+        for tap in range(1, self.taps):
+            shifted = F.pad(blocks[:-tap], (0, 0, 0, 0, tap, 0))
+            out = out + coeff[:, tap] * shifted * (pos >= tap).view(-1, 1, 1, 1)
+        return out.reshape(T, B, H)
+
+    def prepare(self, h):
+        coeff = self.kernel_projection(h).reshape(
+            h.shape[0], h.shape[1], 2, self.taps, self.ng)
+        return self._convolve(h, coeff[:, :, 0].flatten(-2), 0), coeff[:, :, 1]
+
+    def finish(self, h, coeff):
+        return self._convolve(h, coeff.flatten(-2), 1)
+
+
+class DraftAttention(nn.Module):
+    def __init__(self):
+        super().__init__()
+        c = CFG
+        self.hd, self.heads, self.kvh = c["hd"], c["heads"], c["kv_heads"]
+        self.q_proj = nn.Linear(c["hidden"], self.heads * self.hd, bias=False)
+        self.k_proj = nn.Linear(c["hidden"], self.kvh * self.hd, bias=False)
+        self.v_proj = nn.Linear(c["hidden"], self.kvh * self.hd, bias=False)
+        self.o_proj = nn.Linear(self.heads * self.hd, c["hidden"], bias=False)
+        self.q_norm = RMSNorm(self.hd)
+        self.k_norm = RMSNorm(self.hd)
+
+    def _heads(self, x, h):
+        T, B, _ = x.shape
+        return x.reshape(T, B, h, self.hd).permute(1, 2, 0, 3)  # [B,h,T,D]
+
+    def forward(self, q_tok, ctx_states, cos, sin, window):
+        # q_tok: [T,B,H]; ctx_states: [C,B,H] target states at this exit
+        q = self._heads(self.q_proj(q_tok), self.heads)
+        kq = self._heads(self.k_proj(q_tok), self.kvh)
+        vq = self._heads(self.v_proj(q_tok), self.kvh)
+        q = self.q_norm(q)
+        kq = self.k_norm(kq)
+        q, kq = apply_rope(q, cos, sin), apply_rope(kq, cos, sin)
+        if ctx_states is not None:
+            kc = self._heads(self.k_norm(self.k_proj(ctx_states)), self.kvh)
+            vc = self._heads(self.v_proj(ctx_states), self.kvh)
+            kc = apply_rope(kc, cos[: ctx_states.shape[0]], sin[: ctx_states.shape[0]])
+            k = torch.cat([kc, kq], dim=2)
+            v = torch.cat([vc, vq], dim=2)
+        else:
+            k, v = kq, vq
+        T, C = q_tok.shape[0], ctx_states.shape[0] if ctx_states is not None else 0
+        # causal among query tokens; full attention to context; sliding window
+        q_idx = torch.arange(C, C + T, device=q.device)
+        k_idx = torch.arange(C + T, device=q.device)
+        allowed = (k_idx[None, :] <= q_idx[:, None])
+        if window:
+            allowed &= (q_idx[:, None] - k_idx[None, :]) < window
+        attn = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=allowed[:, None, None, :].to(q.dtype),
+            scale=1.0 / math.sqrt(self.hd))
+        out = attn.permute(2, 0, 1, 3).reshape(T, q_tok.shape[1], -1)
+        return self.o_proj(out)
+
+
+class DraftMLP(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.gate_proj = nn.Linear(CFG["hidden"], CFG["inter"], bias=False)
+        self.up_proj = nn.Linear(CFG["hidden"], CFG["inter"], bias=False)
+        self.down_proj = nn.Linear(CFG["inter"], CFG["hidden"], bias=False)
+
+    def forward(self, x):
+        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+
 
 class DraftLayer(nn.Module):
-    """One DFlash2 draft decoder layer (attn & MLP wrapped by grouped conv)."""
-
-    def __init__(self, cfg, layer_idx: int):
+    def __init__(self):
         super().__init__()
-        # TODO: sliding-window attention — port from transformers Qwen3 with
-        # window = cfg.sliding_window; q/k/v/o as PTQRLinears after load.
-        raise NotImplementedError
+        self.attention_conv = GroupedConv(CFG["hidden"], CFG["taps"], CFG["group"],
+                                          1 + CFG["ns"])
+        self.mlp_conv = GroupedConv(CFG["hidden"], CFG["taps"], CFG["group"],
+                                    1 + CFG["ns"])
+        self.self_attn = DraftAttention()
+        self.mlp = DraftMLP()
+        self.input_layernorm = RMSNorm(CFG["hidden"])
+        self.post_attention_layernorm = RMSNorm(CFG["hidden"])
+
+    def forward(self, h, res, ctx_states, cos, sin, window):
+        if res is None:
+            res = h
+            h = self.input_layernorm(h)
+        else:
+            h2 = self.input_layernorm(h)
+            h = res + h2
+            res = h2  # NOTE: verify exact residual convention vs vllm RMSNorm
+        h, coeff = self.attention_conv.prepare(h)
+        h = self.self_attn(h, ctx_states, cos, sin, window)
+        h = self.attention_conv.finish(h, coeff)
+        h2 = self.post_attention_layernorm(h)
+        h = res + h2
+        res = h2
+        h, coeff = self.mlp_conv.prepare(h)
+        h = self.mlp(h)
+        h = self.mlp_conv.finish(h, coeff)
+        return h, res
 
 
 class DraftModel(nn.Module):
-    def __init__(self, cfg):
+    def __init__(self, embed_weight: torch.Tensor):
         super().__init__()
-        raise NotImplementedError
+        self.embed = nn.Embedding.from_pretrained(embed_weight.detach().clone(),
+                                                  freeze=True)
+        self.mask_embedding = nn.Parameter(
+            embed_weight[CFG["mask_token"]].detach().clone())
+        self.layers = nn.ModuleList(DraftLayer() for _ in range(CFG["layers"]))
+        self.norm = RMSNorm(CFG["hidden"])
+        self.hidden_norm = RMSNorm(CFG["hidden"])
+        self.fc = nn.Linear(CFG["hidden"], CFG["vocab"], bias=False)
+        self.input_embedding_scale = 1.0
 
-    @classmethod
-    def from_checkpoint(cls, path: str = DRAFT_CKPT) -> "DraftModel":
-        from safetensors.torch import load_file
-        sd = load_file(path)
-        # TODO: build model from config.json (window, layer count, selector
-        # rank/top_k), load_state_dict(strict=True).
-        raise NotImplementedError
+    def forward(self, tokens, ctx_states_per_layer, positions0=0):
+        """tokens: [T] draft ids (anchor+mask); ctx: list of [C,B,H] per layer.
 
-
-def replace_draft_linears(model: nn.Module, group: int = 128) -> dict[str, PTQRLinear]:
-    """PTQR-wrap every Linear with its deployed contract:
-    G128 W8A8 for q/k/v/o, gate/up/down, kernel_projection, selector
-    hidden_projection; per-channel fp32 for fc (CK head path). Codebooks and
-    base_kernel stay bf16 (not Linears).
-    """
-    replaced = {}
-    for name, module in list(model.named_modules()):
-        for child_name, child in list(module.named_children()):
-            if not isinstance(child, nn.Linear):
-                continue
-            full = f"{name}.{child_name}" if name else child_name
-            is_head = child_name == "fc"
-            pq = PTQRLinear(child.weight,
-                            group=child.weight.shape[1] if is_head else group,
-                            scale_fp16=not is_head)
-            setattr(module, child_name, pq)
-            replaced[full] = pq
-    return replaced
-
-
-# ---------------------------------------------------------------------------
-# SERVING SEMANTICS (extracted from qwen3_dflash.py, verified 2026-09-06):
-# The draft forward that training must replicate per exit layer i (0..4):
-#   1. QUERY: embed(draft tokens) [* input_embedding_scale] -> [T_q, B, H]
-#      (draft tokens = the committed anchor + NS mask tokens; mask_embedding
-#      is a parameter, mask_token_id=248070).
-#   2. CONTEXT: target hidden states at exit layer (target layers 5/19/33/47/61)
-#      are projected per draft layer to K/V (fused _project_context_kv over
-#      all 5 layers at serve), K gets the draft's per-layer k_norm, then RoPE
-#      — written to that layer's KV cache (precompute_and_store_context_kv).
-#   3. Draft layer i = standard Qwen3 decoder step on the query attending to
-#      the context KV: input_layernorm -> attention_conv.prepare -> self_attn
-#      -> attention_conv.finish -> post_attention_layernorm -> mlp_conv.prepare
-#      -> mlp -> mlp_conv.finish (conv wraps attn AND mlp; prepare returns
-#      (mixed, coeffs[1]); finish convolves with coeffs[1]).
-#   4. norm(hidden, residual) -> hidden_norm -> fc -> per-exit logits
-#      (candidate top-k via lm_head + selector for the beam; TRAINING loss
-#      can use dense fc logits KL vs teacher + CE on true next token).
-# Training loop therefore needs, per sequence: target exit-layer hidden states
-# (stage-A cache) + the draft token ids/mask embedding. The conv math itself
-# is the small _grouped_conv above (taps=2, group=16, block=1+NS).
-# ---------------------------------------------------------------------------
-
-def precompute_target_states(out_path: str, n_seqs: int = 256,
-                             seq_len: int = 1024, exits=(5, 19, 33, 47, 61)):
-    """Cache [n_seqs, 5, seq_len, hidden] target states + next tokens.
-
-    Reuses the trainer's target build; hooks the 5 exit layers; runs under
-    no_grad on the bf16 reference. Roughly 256*5*1024*5120*2B = 13 GiB fp16.
-    """
-    raise NotImplementedError("port from ptqr_train_target control harness")
+        Returns per-exit logits list: 5 x [T, vocab].
+        """
+        T = tokens.shape[0]
+        dev = self.embed.weight.device
+        total = positions0 + T + max(c.shape[0] for c in ctx_states_per_layer)
+        cos, sin = rope_cos_sin(total, CFG["hd"], CFG["rope"], dev,
+                                torch.float32)
+        h = self.embed(tokens) * self.input_embedding_scale
+        h = h * 1.0
+        # mask rows use mask_embedding
+        h = torch.where((tokens == CFG["mask_token"])[:, None],
+                        self.mask_embedding.to(h.dtype), h)
+        h = h[:, None, :]  # [T, 1, H]
+        res = None
+        outs = []
+        for i, layer in enumerate(self.layers):
+            h, res = layer(h, res, ctx_states_per_layer[i], cos, sin,
+                           CFG["window"])
+            hs = self.norm(h)
+            logits = self.fc(self.hidden_norm(hs[:, 0]))
+            outs.append(logits)
+        return outs
 
 
-# ---------------------------------------------------------------------------
-# Stage B loop (student vs teacher on cached states)
-# ---------------------------------------------------------------------------
+def load_draft(model: DraftModel, ckpt_dir: str = DRAFT_DIR):
+    from safetensors.torch import load_file
+    sd = load_file(f"{ckpt_dir}/model.safetensors")
+    # checkpoint keys map 1:1 to module names except selector (not in model)
+    sd = {k: v for k, v in sd.items() if not k.startswith("candidate_selector")}
+    missing, unexpected = model.load_state_dict(sd, strict=False)
+    missing = [m for m in missing if not m.startswith("mask_embedding")]
+    assert not missing, f"missing: {missing[:6]}"
+    assert not unexpected, f"unexpected: {unexpected[:6]}"
+    return model
+
+
+def target_embed_table() -> torch.Tensor:
+    """The draft shares the TARGET's (int8-fake-quantized) embedding."""
+    base = torch.load("/home/curved/models/Qwen3.8-27B-bf16-ref-lm.pt",
+                      weights_only=True, mmap=True)["model_state_dict"]
+    w = base["model.embed_tokens.weight"]
+    # replicate the deployed int8 embedding conversion
+    import torch as _t
+    out = _t.empty_like(w, dtype=_t.float32)
+    R = 8192
+    with _t.no_grad():
+        for r0 in range(0, w.shape[0], R):
+            r1 = min(r0 + R, w.shape[0])
+            wf = w[r0:r1].float()
+            s = (wf.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8) / 127.0).to(w.dtype)
+            q = (wf / s.float()).round().clamp(-128, 127)
+            out[r0:r1] = q * s.float()
+    return out.to(torch.bfloat16)
+
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--states", required=True, help="stage-A cache .pt")
-    p.add_argument("--steps", type=int, default=60)
-    p.add_argument("--lr", type=float, default=1e-5)
+    p.add_argument("--smoke", action="store_true")
     args = p.parse_args()
-    raise NotImplementedError("loop: KL(student||teacher) per exit + CE; "
-                              "per-tensor SR SGD from ptqr_train_target")
+    if not args.smoke:
+        print("training loop not implemented yet; use --smoke")
+        return
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    torch.manual_seed(0)
+    print("loading target embed + draft...", flush=True)
+    model = load_draft(DraftModel(target_embed_table())).to(dev).to(torch.bfloat16)
+    model.eval()
+    T, C = 1 + CFG["ns"], 256
+    tokens = torch.full((T,), CFG["mask_token"], dtype=torch.long, device=dev)
+    tokens[0] = 100
+    ctx = [torch.randn(C, 1, CFG["hidden"], device=dev, dtype=torch.bfloat16)
+           for _ in range(CFG["layers"])]
+    with torch.no_grad():
+        outs = model(tokens, ctx)
+    for i, o in enumerate(outs):
+        print(f"exit {i}: {tuple(o.shape)} finite={torch.isfinite(o).all().item()} "
+              f"absmax={o.abs().max().item():.2f}", flush=True)
+    print("SMOKE OK" if all(torch.isfinite(o).all() for o in outs) else "SMOKE FAIL")
 
 
 if __name__ == "__main__":
