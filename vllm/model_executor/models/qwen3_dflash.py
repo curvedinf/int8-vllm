@@ -827,6 +827,13 @@ class DFlashQwen3Model(nn.Module):
                            f"{_dump_dir}/R{_n}_ctx_states.pt")
                 torch.save(context_positions.detach().cpu(),
                            f"{_dump_dir}/R{_n}_ctx_pos.pt")
+                _k, _v = self._project_context_kv(
+                    context_states, num_ctx, L, nkv, hd)
+                _w = str(torch.cuda.current_device())
+                torch.save(_k.detach().float().cpu(),
+                           f"{_dump_dir}/R{_n}_W{_w}_ctx_K.pt")
+                torch.save(_v.detach().float().cpu(),
+                           f"{_dump_dir}/R{_n}_W{_w}_ctx_V.pt")
                 # NOTE: no early return — real decode rounds must still write
                 # the KV cache; the dump-only synthetic round is retired.
 
