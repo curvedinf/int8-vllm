@@ -11,7 +11,7 @@ upstreamed directly.
 ## THE BASELINE (read first)
 
 `docs/recipes/README.md` is the canonical baseline. Every feature listed there
-(the two GS128 checkpoints, AITER W8A8 INT8 GEMMs everywhere, int8_block_g16 KV on both
+(the PTQR-retrained GS128 target + bf16 DFlash2 draft, AITER W8A8 INT8 GEMMs everywhere, int8_block_g128 KV on both
 target and draft (since 2026-09-04 — int8-first directive; halved KV noise vs
 int8_per_token_head, acceptance 4.67/14 at 40k), AITER unified attention, vLLM
 CUSTOM all-reduce, DFlash2 with NS=13, TP4, C8, ACT_QUANT=round, and fp32
@@ -33,10 +33,13 @@ This is the fastest vLLM branch for 4x AMD Instinct MI100 (gfx908 / CDNA1,
 32GB, XGMI full mesh). MI100 int8 matrix rate is 2x every dtype except fp16
 (equal) at half the bandwidth — so **int8 is the native dtype** of this stack:
 GPTQ 8-bit weights (uint8b128, group_size 128) use AITER W8A8 INT8 GEMMs for
-every decode and prefill shape, plus int8_block_g16 KV cache
-(`--kv-cache-dtype int8_block_g16`, since 2026-09-04) and
+every decode and prefill shape, plus int8_block_g128 KV cache
+(`--kv-cache-dtype int8_block_g128`; PTQR-era, since 2026-09-06) and
 AITER unified attention. The DFlash2 draft is also GPTQ INT8
-GS128, and both target and draft KV use `int8_block_g16`. Mamba state
+GS128; the target is PTQR-retrained (Qwen3.8-27B-PTQR-R10S60: serving-gate
+KLD 0.0069 vs 0.0110 deployed GPTQ, 42/52 greedy agreement vs 38/52,
+acceptance 3.88/13 >= the bf16 baseline 3.67 — see ledger
+PTQR_P1_R10S60_FINAL). Both target and draft KV use `int8_block_g128`. Mamba state
 stays fp32 (measured float exception — the int8 mamba experiment failed on
 quality). Collectives use vLLM CUSTOM all-reduce; the fused
 AR+RMSNorm+per-group INT8 quant-out epilogue is off. The
@@ -110,9 +113,9 @@ VLLM_GFX908_INT8_LM_HEAD=1`, AITER CK W8A8 for every GS128 GEMM,
 --kv-cache-dtype auto --mamba-ssm-cache-dtype float32`,
 `VLLM_GFX908_ACT_QUANT=round` (fused round-to-nearest act quant — quality
 default, see INT8_AUDIT_RESULTS.md), and the speculative config
-`{"method":"dflash","num_speculative_tokens":13,"kv_cache_dtype":"int8_block_g16"}`.
+`{"method":"dflash","num_speculative_tokens":13,"kv_cache_dtype":"int8_block_g128"}`.
 The nested dtype is explicit and applies to the draft; the top-level
-`--kv-cache-dtype int8_block_g16` applies to the target. fp16 draft KV is
+`--kv-cache-dtype int8_block_g128` applies to the target. fp16 draft KV is
 measured broken (mean_k=1.01, all drafts rejected) — do not use it; the `int8_block_g{4..128}` family (KV_DTYPE env) is the
 long-context int8 fallback — see the table in docs/recipes/README.md.
 The draft
@@ -177,7 +180,9 @@ gs 128) before serving.
 ## Model assets
 
 - Published target: `curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128`, deployed at
-  `<models>/Qwen3.8-27B-GPTQ-8bit-gs128`.
+  `<models>/Qwen3.8-27B-PTQR-R10S60` (PTQR-retrained export; the original
+  gptqmodel checkpoint `Qwen3.8-27B-GPTQ-8bit-gs128` remains the wrapper
+  source and rollback).
 - Published DFlash2 companion: `curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128`,
   deployed at `<models>/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit`.
   It is not standalone and is designed for the target above.
