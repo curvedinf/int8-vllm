@@ -131,7 +131,26 @@ def replace_draft_linears(model: nn.Module, group: int = 128) -> dict[str, PTQRL
 
 
 # ---------------------------------------------------------------------------
-# Stage A: target hidden-state cache (run with the frozen bf16 target)
+# SERVING SEMANTICS (extracted from qwen3_dflash.py, verified 2026-09-06):
+# The draft forward that training must replicate per exit layer i (0..4):
+#   1. QUERY: embed(draft tokens) [* input_embedding_scale] -> [T_q, B, H]
+#      (draft tokens = the committed anchor + NS mask tokens; mask_embedding
+#      is a parameter, mask_token_id=248070).
+#   2. CONTEXT: target hidden states at exit layer (target layers 5/19/33/47/61)
+#      are projected per draft layer to K/V (fused _project_context_kv over
+#      all 5 layers at serve), K gets the draft's per-layer k_norm, then RoPE
+#      — written to that layer's KV cache (precompute_and_store_context_kv).
+#   3. Draft layer i = standard Qwen3 decoder step on the query attending to
+#      the context KV: input_layernorm -> attention_conv.prepare -> self_attn
+#      -> attention_conv.finish -> post_attention_layernorm -> mlp_conv.prepare
+#      -> mlp -> mlp_conv.finish (conv wraps attn AND mlp; prepare returns
+#      (mixed, coeffs[1]); finish convolves with coeffs[1]).
+#   4. norm(hidden, residual) -> hidden_norm -> fc -> per-exit logits
+#      (candidate top-k via lm_head + selector for the beam; TRAINING loss
+#      can use dense fc logits KL vs teacher + CE on true next token).
+# Training loop therefore needs, per sequence: target exit-layer hidden states
+# (stage-A cache) + the draft token ids/mask embedding. The conv math itself
+# is the small _grouped_conv above (taps=2, group=16, block=1+NS).
 # ---------------------------------------------------------------------------
 
 def precompute_target_states(out_path: str, n_seqs: int = 256,
