@@ -804,15 +804,22 @@ class DFlashQwen3Model(nn.Module):
             _dump_dir = os.environ.get("VLLM_SPEC_DEBUG_TENSORS")
             if _dump_dir:
                 import pathlib as _pl
+                import itertools as _it
+                global _SPEC_DUMP_SEQ
+                try:
+                    _SPEC_DUMP_SEQ
+                except NameError:
+                    _SPEC_DUMP_SEQ = _it.count()
                 _pl.Path(_dump_dir).mkdir(parents=True, exist_ok=True)
+                _n = next(_SPEC_DUMP_SEQ)
                 torch.save(context_states.detach().float().cpu(),
-                           f"{_dump_dir}/ctx_states.pt")
+                           f"{_dump_dir}/ctx_states_{_n}.pt")
                 torch.save(context_positions.detach().cpu(),
-                           f"{_dump_dir}/ctx_pos.pt")
+                           f"{_dump_dir}/ctx_pos_{_n}.pt")
                 all_k, all_v = self._project_context_kv(
                     context_states, num_ctx, L, nkv, hd)
-                torch.save(all_k.detach().float().cpu(), f"{_dump_dir}/ctx_K.pt")
-                torch.save(all_v.detach().float().cpu(), f"{_dump_dir}/ctx_V.pt")
+                torch.save(all_k.detach().float().cpu(), f"{_dump_dir}/ctx_K_{_n}.pt")
+                torch.save(all_v.detach().float().cpu(), f"{_dump_dir}/ctx_V_{_n}.pt")
                 return  # dump-only invocation: skip cache writes
 
         all_k, all_v = self._project_context_kv(context_states, num_ctx, L, nkv, hd)
@@ -903,11 +910,18 @@ class DFlashQwen3Model(nn.Module):
             _dump_dir = os.environ.get("VLLM_SPEC_DEBUG_TENSORS")
             if _dump_dir:
                 import pathlib as _pl
+                import itertools as _it
+                global _SPEC_DUMP_SEQ
+                try:
+                    _SPEC_DUMP_SEQ
+                except NameError:
+                    _SPEC_DUMP_SEQ = _it.count()
                 _pl.Path(_dump_dir).mkdir(parents=True, exist_ok=True)
+                _n = next(_SPEC_DUMP_SEQ)
                 torch.save(hidden_states.detach().float().cpu(),
-                           f"{_dump_dir}/query_embed.pt")
-                torch.save(input_ids.detach().cpu(), f"{_dump_dir}/query_ids.pt")
-                torch.save(positions.detach().cpu(), f"{_dump_dir}/query_pos.pt")
+                           f"{_dump_dir}/query_embed_{_n}.pt")
+                torch.save(input_ids.detach().cpu(), f"{_dump_dir}/query_ids_{_n}.pt")
+                torch.save(positions.detach().cpu(), f"{_dump_dir}/query_pos_{_n}.pt")
 
         residual = None
         for layer_idx, layer in enumerate(self.layers):
