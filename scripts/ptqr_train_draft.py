@@ -266,11 +266,32 @@ class DraftModel(nn.Module):
             h, res = layer(h, res, ctx_normed[i], cos, sin, CFG["window"])
             # final norm is fused_add: normed = LN(h + res) * w (per exit)
             exit_hiddens.append(self.norm(h + res)[:, 0])  # [T, H] each
-        # aux head: fc over the CONCAT of all 5 exit hiddens, one shared
-        # logits tensor (the exits are consumed jointly, not per-exit vocab
-        # projections — matches DFlash2's single lm_head compute_candidates)
-        aux = self.fc(torch.cat(exit_hiddens, dim=-1))       # [T, H]
-        logits = F.linear(self.hidden_norm(aux), self.lm_head_weight)
+        # SERVING HEAD (dflash2.py 311-375 + 432-435): per-layer top-k
+        # candidates from the lm_head, edges scored by the CandidateSelector
+        # (hidden->rank proj; unary + codebook dot products), greedy chain.
+        anchor = tokens[0]
+        prev = torch.full((exit_hiddens[0].shape[0],), int(anchor),
+                          dtype=torch.long, device=h.device)
+        chain = []
+        chain_scores = []
+        for lh in exit_hiddens:                       # lh: [T, H]
+            lg = F.linear(lh, self.lm_head_weight)     # [T, V]
+            topv, topi = lg.topk(self.selector_top_k, dim=-1)
+            hr = self.hidden_projection(lh)            # [T, R]
+            pred_e = self.predecessor_codebook[prev]   # [T, R]
+            cand_e = self.successor_codebook[topi]     # [T, K, R]
+            edge = torch.einsum('tr,tkr->tk', pred_e * hr, cand_e)
+            scores = topv + edge                       # [T, K]
+            best = scores.argmax(-1)
+            prev = topi.gather(1, best[:, None]).squeeze(1)
+            chain.append(prev)
+            chain_scores.append(scores.max(-1).values)
+        # full-vocab "logits" for compat: scatter chain scores so argmax == chain
+        logits = torch.full((len(chain), prev.shape[0], CFG['vocab']),
+                            float('-inf'),
+                            device=h.device, dtype=torch.float32)
+        for li, (tok, sc) in enumerate(zip(chain, chain_scores)):
+            logits[li, torch.arange(tok.shape[0]), tok] = sc.float()
         return logits, exit_hiddens
 
 
