@@ -54,7 +54,24 @@ def main():
         vals = [s[k] for s in shards]
         gdn_param = (not k.endswith(".weight")) or leaf == "conv1d"
         if gdn_param:
-            out[tgt] = vals[0] if replicas(vals) else torch.cat(vals, 0)
+            if leaf == "conv1d" and not replicas(vals):
+                # conv channels follow the qkv [q|k|v] segmentation (its input
+                # is in_proj_qkv's output): scatter like stitch_qkv
+                import torch as _t
+                per = [v.reshape(v.shape[0], -1) for v in vals]
+                out_f = sum(p.shape[0] for p in per)
+                kd = 2048
+                vd = out_f - 2 * kd
+                w_ = len(per)
+                qr, vr = kd // w_, vd // w_
+                full = _t.empty(out_f, per[0].shape[1], dtype=per[0].dtype)
+                for r, p in enumerate(per):
+                    full[r * qr: (r + 1) * qr] = p[:qr]
+                    full[kd + r * qr: kd + (r + 1) * qr] = p[qr: 2 * qr]
+                    full[2 * kd + r * vr: 2 * kd + (r + 1) * vr] = p[2 * qr:]
+                out[tgt] = full.reshape(vals[0].shape[0] * w_, *vals[0].shape[1:])
+            else:
+                out[tgt] = vals[0] if replicas(vals) else torch.cat(vals, 0)
             continue
         name = k[:-len(".weight")]
         if replicas(vals):
