@@ -165,6 +165,13 @@ class DraftLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(CFG["hidden"])
 
     def forward(self, h, res, ctx_states, cos, sin, window):
+        import os as _os
+        dbg = _os.environ.get("DRAFT_STAGE_DEBUG")
+
+        def _db(tag, t):
+            if dbg:
+                print(f"[MY-DBGA] {id(self) % 1000} {tag} nan={int(t.isnan().sum())} "
+                      f"absmax={float(t.abs().max()):.3f}", flush=True)
         if res is None:
             res = h
             h = self.input_layernorm(h)
@@ -173,14 +180,20 @@ class DraftLayer(nn.Module):
             h = res + h2
             res = h2  # NOTE: verify exact residual convention vs vllm RMSNorm
         h, coeff = self.attention_conv.prepare(h)
+        _db("attn_conv_prep", h)
         h = self.self_attn(h, ctx_states, cos, sin, window)
+        _db("attn_out", h)
         h = self.attention_conv.finish(h, coeff)
+        _db("attn_conv_fin", h)
         h2 = self.post_attention_layernorm(h)
         h = res + h2
         res = h2
         h, coeff = self.mlp_conv.prepare(h)
+        _db("mlp_conv_prep", h)
         h = self.mlp(h)
+        _db("mlp_out", h)
         h = self.mlp_conv.finish(h, coeff)
+        _db("mlp_conv_fin", h)
         return h, res
 
 
