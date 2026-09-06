@@ -119,7 +119,8 @@ def main():
             toks[0] = anchor
             with torch.no_grad():
                 dl, _ = draft(toks, ctx)
-            pred = dl[0].argmax(-1).cpu()
+            # [L, T, V] chain-scatter: slot-1 prediction = layer-0 token
+            pred = (dl[0, 0] if dl.dim() == 3 else dl[0]).argmax(-1).cpu()
             truth = seq[pos + 1]
             n_probe += 1
             n_top1_true += int(pred == truth)
