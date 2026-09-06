@@ -83,9 +83,14 @@ retired qwen36 unit).
 
 - Target: [`curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128`](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128), deployed at
   `<models>/Qwen3.8-27B-PTQR-R10S60` (30G; original gptqmodel checkpoint kept at `Qwen3.8-27B-GPTQ-8bit-gs128`)
-- Drafter: [`curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128`](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128), deployed at
-  `<models>/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit`
-  (true GPTQ int8 GS128; requires the post-bake remap below when rebuilt)
+- Drafter (serving default since 2026-09-06): PTQR rung-1 export at
+  `<models>/dflash2-ptqr-r1` (wrapper: the published
+  [`curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128`](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128)
+  gptqmodel checkpoint, cached at `~/.cache/huggingface/dflash2-int8/`;
+  quantized fidelity top-1 0.042 == the bf16 draft, acceptance 3.83/13 at
+  42k — ledger `PTQR_P2_R1DRAFT_FINAL`). The bf16 draft
+  (`dflash2-bf16-with-tokenizer`) remains the fidelity/rollback reference.
+  A fresh gptqmodel rebuild still needs the post-bake remap below.
 
 ## Quantization recipes
 

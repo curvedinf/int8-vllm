@@ -11,7 +11,9 @@ upstreamed directly.
 ## THE BASELINE (read first)
 
 `docs/recipes/README.md` is the canonical baseline. Every feature listed there
-(the PTQR-retrained GS128 target + bf16 DFlash2 draft, AITER W8A8 INT8 GEMMs everywhere, int8_block_g128 KV on both
+(the PTQR-retrained GS128 target + PTQR-retrained int8 DFlash2 draft (since
+2026-09-06 — ledger PTQR_P2_R1DRAFT_FINAL: quantized fidelity == bf16, acceptance
+3.83/13 at 42k), AITER W8A8 INT8 GEMMs everywhere, int8_block_g128 KV on both
 target and draft (since 2026-09-04 — int8-first directive; halved KV noise vs
 int8_per_token_head, acceptance 4.67/14 at 40k), AITER unified attention, vLLM
 CUSTOM all-reduce, DFlash2 with NS=13, TP4, C8, ACT_QUANT=round, and fp32
@@ -35,8 +37,10 @@ This is the fastest vLLM branch for 4x AMD Instinct MI100 (gfx908 / CDNA1,
 GPTQ 8-bit weights (uint8b128, group_size 128) use AITER W8A8 INT8 GEMMs for
 every decode and prefill shape, plus int8_block_g128 KV cache
 (`--kv-cache-dtype int8_block_g128`; PTQR-era, since 2026-09-06) and
-AITER unified attention. The DFlash2 draft is also GPTQ INT8
-GS128; the target is PTQR-retrained (Qwen3.8-27B-PTQR-R10S60: serving-gate
+AITER unified attention. The DFlash2 draft is PTQR-retrained int8 (rung-1,
+`<models>/dflash2-ptqr-r1`: 35 G128 quant payloads + 12 dequant-grid bf16
+surfaces on the deployed wrapper — quantized fidelity gate top-1 0.042 ==
+bf16, acceptance 3.83/13 at 42k); the target is PTQR-retrained (Qwen3.8-27B-PTQR-R10S60: serving-gate
 KLD 0.0069 vs 0.0110 deployed GPTQ, 42/52 greedy agreement vs 38/52,
 acceptance 3.88/13 >= the bf16 baseline 3.67 — see ledger
 PTQR_P1_R10S60_FINAL). Both target and draft KV use `int8_block_g128`. Mamba state
@@ -183,9 +187,13 @@ gs 128) before serving.
   `<models>/Qwen3.8-27B-PTQR-R10S60` (PTQR-retrained export; the original
   gptqmodel checkpoint `Qwen3.8-27B-GPTQ-8bit-gs128` remains the wrapper
   source and rollback).
-- Published DFlash2 companion: `curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128`,
-  deployed at `<models>/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit`.
-  It is not standalone and is designed for the target above.
+- DFlash2 draft (serving default since 2026-09-06): PTQR rung-1 export at
+  `<models>/dflash2-ptqr-r1` (wrapper template: the published
+  `curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128` gptqmodel checkpoint,
+  cached at `~/.cache/huggingface/dflash2-int8/`; training source:
+  `<models>/ptqr_draft_r1/draft_final.pt`). The bf16 draft
+  (`<models>/dflash2-bf16-with-tokenizer`) remains the fidelity/rollback
+  reference. It is not standalone and is designed for the target above.
 
 ## What "done" means here
 
