@@ -235,9 +235,13 @@ class DraftModel(nn.Module):
         h = h[:, None, :]  # [T, 1, H]
         res = None
         exit_hiddens = []
+        # serving normalizes the target states ONCE with hidden_norm before
+        # the per-layer K/V projections (_project_context_kv: rms_norm with
+        # the hidden_norm weight) — feeding raw residual-stream states is
+        # ~290x too large and explodes the recurrence
+        ctx_normed = [self.hidden_norm(c) for c in ctx_states_per_layer]
         for i, layer in enumerate(self.layers):
-            h, res = layer(h, res, ctx_states_per_layer[i], cos, sin,
-                           CFG["window"])
+            h, res = layer(h, res, ctx_normed[i], cos, sin, CFG["window"])
             # final norm is fused_add: normed = LN(h + res) * w (per exit)
             exit_hiddens.append(self.norm(h + res)[:, 0])  # [T, H] each
         # aux head: fc over the CONCAT of all 5 exit hiddens, one shared
