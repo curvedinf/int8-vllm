@@ -107,7 +107,7 @@ class DraftAttention(nn.Module):
         T, B, _ = x.shape
         return x.reshape(T, B, h, self.hd).permute(1, 2, 0, 3)  # [B,h,T,D]
 
-    def forward(self, q_tok, ctx_states, cos, sin, window):
+    def forward(self, q_tok, ctx_states, cos, sin, window, qpos=None, cpos=None):
         # q_tok: [T,B,H]; ctx_states: [C,B,H] target states at this exit
         T = q_tok.shape[0]
         C = ctx_states.shape[0] if ctx_states is not None else 0
@@ -116,21 +116,27 @@ class DraftAttention(nn.Module):
         vq = self._heads(self.v_proj(q_tok), self.kvh)
         q = self.q_norm(q)
         kq = self.k_norm(kq)
-        # query tokens sit AFTER the context: RoPE over positions [C, C+T)
-        qcos, qsin = cos[C: C + T], sin[C: C + T]
+        # absolute positions when provided (serving replay); else the
+        # training convention of query tokens after context
+        if qpos is not None and cpos is not None:
+            qcos, qsin = cos[qpos], sin[qpos]
+            ccos, csin = cos[cpos], sin[cpos]
+            q_idx, k_idx = qpos, torch.cat([cpos, qpos])
+        else:
+            qcos, qsin = cos[C: C + T], sin[C: C + T]
+            ccos, csin = cos[:C], sin[:C]
+            q_idx = torch.arange(C, C + T, device=q.device)
+            k_idx = torch.arange(C + T, device=q.device)
         q, kq = apply_rope(q, qcos, qsin), apply_rope(kq, qcos, qsin)
         if ctx_states is not None:
             kc = self._heads(self.k_proj(ctx_states), self.kvh)
             kc = self.k_norm(kc)  # per-head norm AFTER head split
             vc = self._heads(self.v_proj(ctx_states), self.kvh)
-            kc = apply_rope(kc, cos[:C], sin[:C])
+            kc = apply_rope(kc, ccos, csin)
             k = torch.cat([kc, kq], dim=2)
             v = torch.cat([vc, vq], dim=2)
         else:
             k, v = kq, vq
-        # causal among query tokens; full attention to context; sliding window
-        q_idx = torch.arange(C, C + T, device=q.device)
-        k_idx = torch.arange(C + T, device=q.device)
         allowed = (k_idx[None, :] <= q_idx[:, None])
         if window:
             allowed &= (q_idx[:, None] - k_idx[None, :]) < window
@@ -164,7 +170,7 @@ class DraftLayer(nn.Module):
         self.input_layernorm = RMSNorm(CFG["hidden"])
         self.post_attention_layernorm = RMSNorm(CFG["hidden"])
 
-    def forward(self, h, res, ctx_states, cos, sin, window):
+    def forward(self, h, res, ctx_states, cos, sin, window, qpos=None, cpos=None):
         import os as _os
         dbg = _os.environ.get("DRAFT_STAGE_DEBUG")
 
@@ -184,7 +190,7 @@ class DraftLayer(nn.Module):
             h = self.input_layernorm(h)
         h, coeff = self.attention_conv.prepare(h)
         _db("attn_conv_prep", h)
-        h = self.self_attn(h, ctx_states, cos, sin, window)
+        h = self.self_attn(h, ctx_states, cos, sin, window, qpos=qpos, cpos=cpos)
         _db("attn_out", h)
         h = self.attention_conv.finish(h, coeff)
         _db("attn_conv_fin", h)
