@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="${HOME}/vllm-gfx908"
 VENV="${ROOT_DIR}/.venv"
-MODEL_DIR="${MODEL_DIR:-${HOME}/models/Qwen3.8-27B-GPTQ-8bit-gs128}"
+MODEL_DIR="${MODEL_DIR:-${HOME}/models/Qwen3.8-27B-PTQR-R10S60}"  # PTQR-retrained (ledger PTQR_P1_R10S60_FINAL: KLD 0.0069 vs 0.0110 deployed, acceptance 3.88)
 SERVED_MODEL_NAME="qwen3.8-27b-gptq8"
 LOG_DIR="${ROOT_DIR}/logs/serve_recipe_qwen38"
 # The OffloadingConnector's CPU tier mmaps /dev/shm; an unclean kill leaks
@@ -98,7 +98,7 @@ COMMON_ENV=(
   RCCL_LOG_LEVEL="INFO"
 )
 
-DRAFT_MODEL_DIR="${DRAFT_MODEL_DIR:-${HOME}/.cache/huggingface/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit}"
+DRAFT_MODEL_DIR="${DRAFT_MODEL_DIR:-${HOME}/models/dflash2-bf16-with-tokenizer}"  # Phase-2 draft retrain pending; bf16 draft is the validated companion
 
 ARGS=(
   serve "${MODEL_DIR}"
@@ -160,7 +160,7 @@ ARGS=(
   # Capacity: 867,834 tokens @ 20.2GB arena (C6 avg 144k context).
   # KV_DTYPE env remains the lever (int8_per_token_head = old default,
   # int8_block_g{4..128} = the long-context int8 family; see README table).
-  --kv-cache-dtype "${KV_DTYPE:-int8_block_g16}" --mamba-ssm-cache-dtype "${MAMBADT:-float32}"
+  --kv-cache-dtype "${KV_DTYPE:-int8_block_g128}" --mamba-ssm-cache-dtype "${MAMBADT:-float32}"
   # NS=13 default per the 2026-08-26 tuned-aiter sweep (see docs/recipes
   # README history): best measured TPOT 12.34 ms / TG 639-equivalent regime.
   # NS=15 prior default (2026-08-24 sweep) measured 18.89 ms same-session;
@@ -218,7 +218,7 @@ else
 fi
 # (NS flag file read near the top of this script, before COMMON_ENV.)
 if [[ "${_spec_value}" != "1" ]]; then
-  ARGS+=(--speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":'"${NS:-13}"',"kv_cache_dtype":"'"${DRAFT_KV_DTYPE:-int8_block_g16}"'"}')
+  ARGS+=(--speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":'"${NS:-13}"',"kv_cache_dtype":"'"${DRAFT_KV_DTYPE:-int8_block_g128}"'"}')
 fi
 
 # LOGSTATS=1 enables periodic engine/spec-decode stat logging
@@ -469,7 +469,7 @@ start_server() {
 
   printf 'starting recipe Qwen3.8 server: url=http://%s:%s cpuset=%s log=%s/server.log\n' \
     "${HOST}" "${PORT}" "${CPUSET}" "${LOG_DIR}"
-  printf '%s\n' 'contract: target+DFlash2 GS128; AITER W8A8/UA/custom-AR; INT8-G16 KV/fp32 Mamba/quant-out; TP4/C6; 12GiB CPU KV tier'
+  printf '%s\n' 'contract: PTQR-retrained target+DFlash2 GS128; AITER W8A8/UA/custom-AR; INT8-G128 KV/fp32 Mamba/quant-out; TP4/C6; 12GiB CPU KV tier'
 
   local api_key
   api_key="$(read_api_key)"
