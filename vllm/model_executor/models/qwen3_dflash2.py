@@ -248,7 +248,7 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
                 )
                 _dump_dir = os.environ.get("VLLM_SPEC_DEBUG_TENSORS")
                 if _dump_dir and tag in (
-                    "attn_conv_prep", "attn_out", "attn_conv_fin",
+                    "layer_in", "attn_conv_prep", "attn_out", "attn_conv_fin",
                     "mlp_conv_prep", "mlp_out", "mlp_conv_fin",
                 ):
                     # one file per (layer, stage, call); training-fidelity work
@@ -266,6 +266,7 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
                     f"layer{self._audit_layer_idx}_{tag}", hidden=t
                 )
 
+        _dbg("layer_in", residual if residual is not None else hidden_states)
         hidden_states, coefficients = self.attention_conv.prepare(hidden_states)
         _dbg("attn_conv_prep", hidden_states)
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
