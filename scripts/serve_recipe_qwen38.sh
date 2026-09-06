@@ -98,7 +98,7 @@ COMMON_ENV=(
   RCCL_LOG_LEVEL="INFO"
 )
 
-DRAFT_MODEL_DIR="${DRAFT_MODEL_DIR:-${HOME}/models/dflash2-bf16-with-tokenizer}"  # Phase-2 draft retrain pending; bf16 draft is the validated companion
+DRAFT_MODEL_DIR="${DRAFT_MODEL_DIR:-${HOME}/models/dflash2-ptqr-r1}"  # PTQR rung-1 int8 draft (fidelity gate: quantized top1 0.042 == bf16, zero loss)
 
 ARGS=(
   serve "${MODEL_DIR}"

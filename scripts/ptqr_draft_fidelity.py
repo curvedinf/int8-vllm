@@ -35,6 +35,10 @@ def main():
     p.add_argument("--seq_len", type=int, default=1024)
     p.add_argument("--probe_every", type=int, default=64,
                    help="probe positions per sequence (spread)")
+    p.add_argument("--ptqr", action="store_true",
+                   help="quantize the draft (G128 W + g128 KV + act quant)")
+    p.add_argument("--ckpt", default=None,
+                   help="trained PTQR draft state dict to load")
     args = p.parse_args()
 
     rank = int(__import__("os").environ.get("LOCAL_RANK", "0"))
@@ -90,8 +94,24 @@ def main():
         base = torch.load("/home/curved/models/Qwen3.8-27B-bf16-ref-lm.pt",
                           weights_only=True, mmap=True)["model_state_dict"]
         lm_head = base["lm_head.weight"].to(torch.bfloat16)
-        draft = load_draft(DraftModel(target_embed_table(base), lm_head)) \
-            .to(dev).to(torch.bfloat16).eval()
+        draft = load_draft(DraftModel(target_embed_table(base), lm_head))
+        if args.ptqr:
+            # rebuild the trainer's student exactly: PTQRLinear G128 on every
+            # 2D linear + g128 KV fake-quant, then overlay the trained ckpt
+            from ptqr_train_draft_ptqr import _apply_kv_quant, quantize_model_
+            replaced = quantize_model_(draft, group=128, kv_group=128, tau=0.0)
+            _apply_kv_quant(draft)
+            draft._ptqr_tau = 0.0
+            if args.ckpt:
+                sd = torch.load(args.ckpt, weights_only=True,
+                                map_location="cpu")
+                r = draft.load_state_dict(sd, strict=True)
+                print(f"[ptqr] {len(replaced)} PTQR linears, g128 KV, "
+                      f"tau=0, ckpt={args.ckpt} loaded {r}", flush=True)
+            else:
+                print(f"[ptqr] {len(replaced)} PTQR linears, g128 KV, "
+                      f"tau=0, UNTRAINED scales", flush=True)
+        draft = draft.to(dev).to(torch.bfloat16).eval()
 
     n_probe = 0
     n_top1_true = 0
