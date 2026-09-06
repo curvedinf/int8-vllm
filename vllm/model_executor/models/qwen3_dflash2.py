@@ -246,6 +246,19 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
                     f"absmax={float(t.abs().max()):.3f}",
                     flush=True,
                 )
+                _dump_dir = os.environ.get("VLLM_SPEC_DEBUG_TENSORS")
+                if _dump_dir and tag in (
+                    "attn_conv_prep", "attn_out", "attn_conv_fin",
+                    "mlp_conv_prep", "mlp_out", "mlp_conv_fin",
+                ):
+                    # one file per (layer, stage, call); training-fidelity work
+                    import pathlib as _pl
+                    _pl.Path(_dump_dir).mkdir(parents=True, exist_ok=True)
+                    torch.save(
+                        t.detach().float().cpu(),
+                        f"{_dump_dir}/L{self._audit_layer_idx}_{tag}_"
+                        f"{id(self) % 1000}.pt",
+                    )
             if os.environ.get("VLLM_DFLASH_AUDIT"):
                 from vllm import quant_audit_recorder as _qa
 
