@@ -67,19 +67,19 @@ class GroupedConv(nn.Module):
         self.kernel_projection = nn.Linear(hidden, 2 * taps * self.ng, bias=False)
 
     def _convolve(self, h, delta, side):
-        # h: [T, B, H]; delta: [T, B, taps*ng]
+        # h: [T, B, H]; delta: [T, B, taps*ng]  (B=1 in training use)
         T, B, H = h.shape
-        blocks = h.reshape(T, B, self.ng, self.group)
-        base = self.base_kernel[side]                      # [taps, ng, gs]
-        coeff = base.view(1, self.taps, self.ng, self.group) + \
-            delta.reshape(T, B, self.taps, self.ng, 1)
-        out = coeff[:, 0] * blocks
+        blocks = h.reshape(T, B, self.ng, self.group)          # [T,B,ng,gs]
+        base = self.base_kernel[side]                          # [taps,ng,gs]
+        coeff = base.view(1, 1, self.taps, self.ng, self.group) + \
+            delta.reshape(T, B, self.taps, self.ng, 1)         # [T,B,taps,ng,gs]
+        out = coeff[:, :, 0] * blocks
         pos = torch.arange(T, device=h.device)
         pos = pos & (self.block - 1) if self.block & (self.block - 1) == 0 \
             else pos % self.block
         for tap in range(1, self.taps):
-            shifted = F.pad(blocks[:-tap], (0, 0, 0, 0, tap, 0))
-            out = out + coeff[:, tap] * shifted * (pos >= tap).view(-1, 1, 1, 1)
+            shifted = F.pad(blocks[:-tap], (0, 0, 0, 0, 0, 0, tap, 0))
+            out = out + coeff[:, :, tap] * shifted * (pos >= tap).view(-1, 1, 1, 1)
         return out.reshape(T, B, H)
 
     def prepare(self, h):
@@ -109,21 +109,25 @@ class DraftAttention(nn.Module):
 
     def forward(self, q_tok, ctx_states, cos, sin, window):
         # q_tok: [T,B,H]; ctx_states: [C,B,H] target states at this exit
+        T = q_tok.shape[0]
+        C = ctx_states.shape[0] if ctx_states is not None else 0
         q = self._heads(self.q_proj(q_tok), self.heads)
         kq = self._heads(self.k_proj(q_tok), self.kvh)
         vq = self._heads(self.v_proj(q_tok), self.kvh)
         q = self.q_norm(q)
         kq = self.k_norm(kq)
-        q, kq = apply_rope(q, cos, sin), apply_rope(kq, cos, sin)
+        # query tokens sit AFTER the context: RoPE over positions [C, C+T)
+        qcos, qsin = cos[C: C + T], sin[C: C + T]
+        q, kq = apply_rope(q, qcos, qsin), apply_rope(kq, qcos, qsin)
         if ctx_states is not None:
-            kc = self._heads(self.k_norm(self.k_proj(ctx_states)), self.kvh)
+            kc = self._heads(self.k_proj(ctx_states), self.kvh)
+            kc = self.k_norm(kc)  # per-head norm AFTER head split
             vc = self._heads(self.v_proj(ctx_states), self.kvh)
-            kc = apply_rope(kc, cos[: ctx_states.shape[0]], sin[: ctx_states.shape[0]])
+            kc = apply_rope(kc, cos[:C], sin[:C])
             k = torch.cat([kc, kq], dim=2)
             v = torch.cat([vc, vq], dim=2)
         else:
             k, v = kq, vq
-        T, C = q_tok.shape[0], ctx_states.shape[0] if ctx_states is not None else 0
         # causal among query tokens; full attention to context; sliding window
         q_idx = torch.arange(C, C + T, device=q.device)
         k_idx = torch.arange(C + T, device=q.device)
@@ -131,8 +135,8 @@ class DraftAttention(nn.Module):
         if window:
             allowed &= (q_idx[:, None] - k_idx[None, :]) < window
         attn = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=allowed[:, None, None, :].to(q.dtype),
-            scale=1.0 / math.sqrt(self.hd))
+            q, k, v, attn_mask=allowed[None, None, :, :].to(q.dtype),
+            scale=1.0 / math.sqrt(self.hd), enable_gqa=True)
         out = attn.permute(2, 0, 1, 3).reshape(T, q_tok.shape[1], -1)
         return self.o_proj(out)
 
@@ -181,7 +185,7 @@ class DraftLayer(nn.Module):
 
 
 class DraftModel(nn.Module):
-    def __init__(self, embed_weight: torch.Tensor):
+    def __init__(self, embed_weight: torch.Tensor, lm_head_weight: torch.Tensor):
         super().__init__()
         self.embed = nn.Embedding.from_pretrained(embed_weight.detach().clone(),
                                                   freeze=True)
@@ -190,7 +194,11 @@ class DraftModel(nn.Module):
         self.layers = nn.ModuleList(DraftLayer() for _ in range(CFG["layers"]))
         self.norm = RMSNorm(CFG["hidden"])
         self.hidden_norm = RMSNorm(CFG["hidden"])
-        self.fc = nn.Linear(CFG["hidden"], CFG["vocab"], bias=False)
+        # aux-state encoder: concat of the 5 exit hiddens (5*5120) -> 5120
+        # ("encoder.fc" in origin naming); the VOCAB head is the TARGET's
+        # lm_head (shared), passed in as lm_head_weight [vocab, hidden].
+        self.fc = nn.Linear(5 * CFG["hidden"], CFG["hidden"], bias=False)
+        self.register_buffer("lm_head_weight", lm_head_weight.detach().clone())
         self.input_embedding_scale = 1.0
 
     def forward(self, tokens, ctx_states_per_layer, positions0=0):
@@ -210,14 +218,17 @@ class DraftModel(nn.Module):
                         self.mask_embedding.to(h.dtype), h)
         h = h[:, None, :]  # [T, 1, H]
         res = None
-        outs = []
+        exit_hiddens = []
         for i, layer in enumerate(self.layers):
             h, res = layer(h, res, ctx_states_per_layer[i], cos, sin,
                            CFG["window"])
-            hs = self.norm(h)
-            logits = self.fc(self.hidden_norm(hs[:, 0]))
-            outs.append(logits)
-        return outs
+            exit_hiddens.append(self.norm(h)[:, 0])          # [T, H] each
+        # aux head: fc over the CONCAT of all 5 exit hiddens, one shared
+        # logits tensor (the exits are consumed jointly, not per-exit vocab
+        # projections — matches DFlash2's single lm_head compute_candidates)
+        aux = self.fc(torch.cat(exit_hiddens, dim=-1))       # [T, H]
+        logits = F.linear(self.hidden_norm(aux), self.lm_head_weight)
+        return logits, exit_hiddens
 
 
 def load_draft(model: DraftModel, ckpt_dir: str = DRAFT_DIR):
@@ -226,17 +237,21 @@ def load_draft(model: DraftModel, ckpt_dir: str = DRAFT_DIR):
     # checkpoint keys map 1:1 to module names except selector (not in model)
     sd = {k: v for k, v in sd.items() if not k.startswith("candidate_selector")}
     missing, unexpected = model.load_state_dict(sd, strict=False)
-    missing = [m for m in missing if not m.startswith("mask_embedding")]
+    # embed/lm_head/mask are provided at construction, not from the draft ckpt
+    skip = ("lm_head_weight", "embed.weight", "mask_embedding")
+    missing = [m for m in missing if not m.startswith(skip)]
     assert not missing, f"missing: {missing[:6]}"
     assert not unexpected, f"unexpected: {unexpected[:6]}"
     return model
 
 
-def target_embed_table() -> torch.Tensor:
+def target_embed_table(base_sd=None) -> torch.Tensor:
     """The draft shares the TARGET's (int8-fake-quantized) embedding."""
-    base = torch.load("/home/curved/models/Qwen3.8-27B-bf16-ref-lm.pt",
-                      weights_only=True, mmap=True)["model_state_dict"]
-    w = base["model.embed_tokens.weight"]
+    if base_sd is None:
+        base_sd = torch.load(
+            "/home/curved/models/Qwen3.8-27B-bf16-ref-lm.pt",
+            weights_only=True, mmap=True)["model_state_dict"]
+    w = base_sd["model.embed_tokens.weight"]
     # replicate the deployed int8 embedding conversion
     import torch as _t
     out = _t.empty_like(w, dtype=_t.float32)
@@ -260,8 +275,12 @@ def main():
         return
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     torch.manual_seed(0)
-    print("loading target embed + draft...", flush=True)
-    model = load_draft(DraftModel(target_embed_table())).to(dev).to(torch.bfloat16)
+    print("loading target embed + lm_head + draft...", flush=True)
+    base = torch.load("/home/curved/models/Qwen3.8-27B-bf16-ref-lm.pt",
+                      weights_only=True, mmap=True)["model_state_dict"]
+    lm_head = base["lm_head.weight"].to(torch.bfloat16)
+    model = load_draft(DraftModel(target_embed_table(base), lm_head)) \
+        .to(dev).to(torch.bfloat16)
     model.eval()
     T, C = 1 + CFG["ns"], 256
     tokens = torch.full((T,), CFG["mask_token"], dtype=torch.long, device=dev)
@@ -269,11 +288,13 @@ def main():
     ctx = [torch.randn(C, 1, CFG["hidden"], device=dev, dtype=torch.bfloat16)
            for _ in range(CFG["layers"])]
     with torch.no_grad():
-        outs = model(tokens, ctx)
-    for i, o in enumerate(outs):
-        print(f"exit {i}: {tuple(o.shape)} finite={torch.isfinite(o).all().item()} "
-              f"absmax={o.abs().max().item():.2f}", flush=True)
-    print("SMOKE OK" if all(torch.isfinite(o).all() for o in outs) else "SMOKE FAIL")
+        logits, exits = model(tokens, ctx)
+    print(f"logits {tuple(logits.shape)} finite={torch.isfinite(logits).all().item()} "
+          f"absmax={logits.abs().max().item():.2f}")
+    for i, e in enumerate(exits):
+        print(f"exit {i}: {tuple(e.shape)} finite={torch.isfinite(e).all().item()}")
+    ok = torch.isfinite(logits).all() and all(torch.isfinite(e).all() for e in exits)
+    print("SMOKE OK" if ok else "SMOKE FAIL")
 
 
 if __name__ == "__main__":
