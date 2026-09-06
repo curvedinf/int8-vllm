@@ -325,6 +325,16 @@ class DFlashQwen3Attention(nn.Module):
 
         q, k = self.rotary_emb(positions, q, k)
 
+        _rd = os.environ.get("VLLM_SPEC_DEBUG_TENSORS")
+        if _rd and not torch.cuda.is_current_stream_capturing():
+            import pathlib as _pl
+            from .qwen3_dflash import spec_round as _sr  # noqa: PLC0415
+            _pl.Path(_rd).mkdir(parents=True, exist_ok=True)
+            torch.save(q.detach().float().cpu(),
+                       f"{_rd}/R{_sr()}_qpostrope_{self.layer_name.replace(chr(46), chr(45))}.pt")
+            torch.save(k.detach().float().cpu(),
+                       f"{_rd}/R{_sr()}_kpostrope_{self.layer_name.replace(chr(46), chr(45))}.pt")
+
         if os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not (
             torch.cuda.is_current_stream_capturing()
         ):
