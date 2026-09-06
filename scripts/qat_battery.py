@@ -30,11 +30,11 @@ TASKS = [
     "Identify inconsistencies, bugs, or risks in the document above and explain each.",
 ]
 
-# 20k-token windows from different parts of the corpus (code/en/non-en mix)
+# 20k-token windows inside the 250k-token val corpus (8 non-overlapping)
 WINDOWS = [
-    (100_000, 122_000), (400_000, 422_000), (700_000, 722_000),
-    (1_000_000, 1_022_000), (1_300_000, 1_322_000), (1_600_000, 1_622_000),
-    (1_900_000, 1_922_000), (2_200_000, 2_222_000),
+    (2_000, 24_000), (32_000, 54_000), (62_000, 84_000),
+    (92_000, 114_000), (122_000, 144_000), (152_000, 174_000),
+    (182_000, 204_000), (212_000, 234_000),
 ]
 
 
