@@ -331,9 +331,9 @@ class DFlashQwen3Attention(nn.Module):
             from .qwen3_dflash import spec_round as _sr  # noqa: PLC0415
             _pl.Path(_rd).mkdir(parents=True, exist_ok=True)
             torch.save(q.detach().float().cpu(),
-                       f"{_rd}/R{_sr()}_W" + os.environ.get("LOCAL_RANK", "0") + f"_qpostrope_{self.layer_name.replace(chr(46), chr(45))}.pt")
+                       f"{_rd}/R{_sr()}_W" + str(torch.cuda.current_device()) + f"_qpostrope_{self.layer_name.replace(chr(46), chr(45))}.pt")
             torch.save(k.detach().float().cpu(),
-                       f"{_rd}/R{_sr()}_W" + os.environ.get("LOCAL_RANK", "0") + f"_kpostrope_{self.layer_name.replace(chr(46), chr(45))}.pt")
+                       f"{_rd}/R{_sr()}_W" + str(torch.cuda.current_device()) + f"_kpostrope_{self.layer_name.replace(chr(46), chr(45))}.pt")
 
         if os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not (
             torch.cuda.is_current_stream_capturing()

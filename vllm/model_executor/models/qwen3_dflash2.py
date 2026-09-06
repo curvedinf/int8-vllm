@@ -257,7 +257,7 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
                     _pl.Path(_dump_dir).mkdir(parents=True, exist_ok=True)
                     torch.save(
                         t.detach().float().cpu(),
-                        f"{_dump_dir}/R{_sr()}_W" + os.environ.get("LOCAL_RANK", "0") + f"_L{self._audit_layer_idx}_{tag}.pt",
+                        f"{_dump_dir}/R{_sr()}_W" + str(torch.cuda.current_device()) + f"_L{self._audit_layer_idx}_{tag}.pt",
                     )
             if os.environ.get("VLLM_DFLASH_AUDIT"):
                 from vllm import quant_audit_recorder as _qa
