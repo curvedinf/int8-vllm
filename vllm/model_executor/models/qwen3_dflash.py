@@ -801,6 +801,19 @@ class DFlashQwen3Model(nn.Module):
                 context_positions[:4].cpu().tolist(),
                 csm_val,
             )
+            _dump_dir = os.environ.get("VLLM_SPEC_DEBUG_TENSORS")
+            if _dump_dir:
+                import pathlib as _pl
+                _pl.Path(_dump_dir).mkdir(parents=True, exist_ok=True)
+                torch.save(context_states.detach().float().cpu(),
+                           f"{_dump_dir}/ctx_states.pt")
+                torch.save(context_positions.detach().cpu(),
+                           f"{_dump_dir}/ctx_pos.pt")
+                all_k, all_v = self._project_context_kv(
+                    context_states, num_ctx, L, nkv, hd)
+                torch.save(all_k.detach().float().cpu(), f"{_dump_dir}/ctx_K.pt")
+                torch.save(all_v.detach().float().cpu(), f"{_dump_dir}/ctx_V.pt")
+                return  # dump-only invocation: skip cache writes
 
         all_k, all_v = self._project_context_kv(context_states, num_ctx, L, nkv, hd)
         all_k_normed = self._normalize_context_k(all_k)
@@ -887,6 +900,14 @@ class DFlashQwen3Model(nn.Module):
                 f"ids[:8]={ids.cpu().tolist()} pos[:8]={positions[:8].cpu().tolist()}",
                 flush=True,
             )
+            _dump_dir = os.environ.get("VLLM_SPEC_DEBUG_TENSORS")
+            if _dump_dir:
+                import pathlib as _pl
+                _pl.Path(_dump_dir).mkdir(parents=True, exist_ok=True)
+                torch.save(hidden_states.detach().float().cpu(),
+                           f"{_dump_dir}/query_embed.pt")
+                torch.save(input_ids.detach().cpu(), f"{_dump_dir}/query_ids.pt")
+                torch.save(positions.detach().cpu(), f"{_dump_dir}/query_pos.pt")
 
         residual = None
         for layer_idx, layer in enumerate(self.layers):
