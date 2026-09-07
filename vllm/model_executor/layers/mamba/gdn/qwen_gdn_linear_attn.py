@@ -7,6 +7,55 @@ import os
 _gdn_state_stats: list = []
 from typing import Literal
 
+_NANWATCH_STATE: dict = {"ring": [], "n": 0}
+
+
+def _nanwatch(rec: dict, oi: int, hookid: int) -> None:
+    """Env-gated (VLLM_GDN_NANWATCH) per-layer spec-path NaN/inf watch.
+
+    Accumulates (nan, inf, absmax) per tensor GPU-side (no per-step sync);
+    flushes the pending batch to <dir>/nanw_<pid>.jsonl every 512 records.
+    Tensor order in `s`: mixed, conv, q, k, v, a, b, out, state (3 each).
+    """
+    import os as _os
+
+    st = _NANWATCH_STATE
+    row = [oi, hookid]
+    for name in ("mixed", "conv", "q", "k", "v", "a", "b", "out", "state"):
+        t = rec.get(name)
+        if t is None or t.numel() > 4_000_000:
+            row.extend([0.0, 0.0, 0.0])
+            continue
+        row.append(torch.isnan(t).sum())
+        row.append(torch.isinf(t).sum())
+        row.append(t.abs().max())
+    st["ring"].append(row)
+    st["n"] += 1
+    if st["n"] % 512 == 0:
+        import json as _json
+
+        rows = st["ring"]
+        flat = []
+        for r in rows:
+            for x in r[2:]:
+                if torch.is_tensor(x):
+                    flat.append(x)
+        vals: list = []
+        if flat:
+            vals = torch.stack(flat).cpu().tolist()  # ONE sync per flush
+        _os.makedirs(_os.environ["VLLM_GDN_NANWATCH"], exist_ok=True)
+        path = _os.path.join(
+            _os.environ["VLLM_GDN_NANWATCH"], f"nanw_{_os.getpid()}.jsonl")
+        it = iter(vals)
+        with open(path, "a") as f:
+            for r in rows:
+                out = []
+                for x in r[2:]:
+                    out.append(next(it) if torch.is_tensor(x) else x)
+                f.write(_json.dumps({"oi": r[0], "h": r[1], "s": out}) + "\n")
+        st["ring"].clear()
+
+
 import torch
 from einops import rearrange
 from torch import nn
@@ -1353,6 +1402,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             a: alpha gating vector                  (num_tokens, num_heads)
             core_attn_out: Pre-allocated output buffer for attention results.
         """
+        _nw_oi = None
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
 
@@ -1426,6 +1476,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if spec_sequence_masks is not None:
             # spec_state_indices_tensor is always set when spec_sequence_masks is set
             assert spec_state_indices_tensor is not None
+            _nw = os.environ.get("VLLM_GDN_NANWATCH")
+            _nw_oi = None
+            if _nw and not torch.cuda.is_current_stream_capturing():
+                cls = type(self)
+                _nw_oi = getattr(self, "_nanw_oi", None)
+                if _nw_oi is None:
+                    _nw_oi = cls._nanw_next = getattr(cls, "_nanw_next", -1) + 1
+                    self._nanw_oi = _nw_oi
+                _nanwatch({"mixed": mixed_qkv_spec, "a": a_spec, "b": b_spec},
+                          _nw_oi, 1)
             mixed_qkv_spec = causal_conv1d_update(
                 mixed_qkv_spec,
                 conv_state,
@@ -1475,6 +1535,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             mixed_qkv_non_spec = None
 
         query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
+        if _nw_oi is not None:
+            _nanwatch({"conv": mixed_qkv_spec, "q": query_spec,
+                       "k": key_spec, "v": value_spec}, _nw_oi, 2)
 
         # Split mixed non-spec-decode+prefill to process independently
         split_non_spec = (
@@ -1611,6 +1674,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     use_qk_l2norm_in_kernel=True,
                 )
             )
+            if _nw_oi is not None:
+                _nanwatch({"out": core_attn_out_spec,
+                           "state": last_recurrent_state}, _nw_oi, 3)
             _gra = os.environ.get("VLLM_GDN_ROWAUDIT")
             if _gra and not torch.cuda.is_current_stream_capturing():
                 try:
