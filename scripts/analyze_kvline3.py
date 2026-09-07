@@ -57,7 +57,7 @@ for f in files:
             except Exception:
                 continue
             key = (pid, r["rs"], r["layer"])
-            ac = r["col"] + r["rel"]
+            ac = r["col"] + r.get("rel", 0)
             if r["phase"] == "pre":
                 e = pre[key].setdefault(
                     r["n"], [r["col"], r.get("ri", -1), r.get("T", 0), {}]
