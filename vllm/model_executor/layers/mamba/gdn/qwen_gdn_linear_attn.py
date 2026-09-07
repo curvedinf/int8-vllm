@@ -896,6 +896,22 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        """ROCm forward using AITER Triton attention."""
+        _nw = os.environ.get("VLLM_GDN_NANWATCH")
+        _oi_h0 = None
+        if _nw and not torch.cuda.is_current_stream_capturing():
+            cls = type(self)
+            _oi_h0 = getattr(self, "_nanw_oi", None)
+            if _oi_h0 is None:
+                _oi_h0 = cls._nanw_next = getattr(cls, "_nanw_next", -1) + 1
+                self._nanw_oi = _oi_h0
+        out = self._forward_hip_impl(hidden_states)
+        return out
+
+    def _forward_hip_impl(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
         """ROCm forward using AITER Triton fused projection+attention when
         available, otherwise falling back to the generic CUDA path."""
         if GDN_AITER_TRITON_AVAILABLE:
