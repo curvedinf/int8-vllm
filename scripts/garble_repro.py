@@ -99,7 +99,12 @@ def request(in_tokens: int, out_tokens: int, nonce: str, seed: int):
     with urllib.request.urlopen(req, timeout=3600) as r:
         out = json.load(r)
     dt = time.time() - t0
-    text = out["choices"][0]["message"]["content"]
+    msg = out["choices"][0]["message"]
+    text = msg.get("content")
+    if not text:
+        # reasoning-mode output: the garble lives there just the same
+        text = msg.get("reasoning") or ""
+        text = text + "\n<<<REASONING-MODE>>>\n"
     usage = out.get("usage", {})
     return text, dt, usage
 
