@@ -13,7 +13,7 @@ __global__ void __launch_bounds__(512, 1)
   // note: we don't reorder the address so the accumulation order is the same
   // for all ranks, ensuring bitwise identical results
   auto dp = *_dp;
-  barrier_at_start<ngpus>(sg, self_sg, rank);
+  barrier_at_start_release<ngpus>(sg, self_sg, rank);
   // do the actual reduction
   for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size;
        idx += gridDim.x * blockDim.x) {
@@ -48,7 +48,7 @@ __global__ void __launch_bounds__(512, 1)
     tmps[i] = get_tmp_buf<P>(sg.signals[target]);
   }
   auto tmp_out = tmps[0];
-  barrier_at_start<ngpus>(sg, self_sg, rank);
+  barrier_at_start_release<ngpus>(sg, self_sg, rank);
 
   // stage 1: reduce scatter
   for (int idx = start + tid; idx < end; idx += stride) {
