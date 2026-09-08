@@ -381,6 +381,13 @@ if [[ -f "${LOG_DIR}/GDNSTAT" ]]; then
   VLLM_GDNSTAT="$(tr -d '[:space:]' < "${LOG_DIR}/GDNSTAT")"
 fi
 
+# DRAFTGARBAGE flag file: corrupt proposed draft tokens before verify
+# (causal-isolation A/B — if committed logits move, verify attention reads
+# the batch's speculative KV rows).
+if [[ -f "${LOG_DIR}/DRAFTGARBAGE" ]]; then
+  VLLM_DRAFT_GARBAGE=1
+fi
+
 # SALTU flag file: draw the acceptance-test uniform from a decorrelated
 # philox stream (same marginal; A/B lever for the wall-amplification hunt).
 if [[ -f "${LOG_DIR}/SALTU" ]]; then
@@ -518,6 +525,7 @@ start_server() {
   VLLM_SALT_U="${VLLM_SALT_U:-}" \
   VLLM_ACCEPT1="${VLLM_ACCEPT1:-}" \
   VLLM_GDNSTAT="${VLLM_GDNSTAT:-}" \
+  VLLM_DRAFT_GARBAGE="${VLLM_DRAFT_GARBAGE:-}" \
   VLLM_ALIGN_PROBE="${VLLM_ALIGN_PROBE:-}" \
   VLLM_GDN_PROBE="${VLLM_GDN_PROBE:-}" \
   VLLM_CONVGUARD_PROBE="${VLLM_CONVGUARD_PROBE:-}" \

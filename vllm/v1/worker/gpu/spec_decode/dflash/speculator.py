@@ -633,6 +633,15 @@ class DFlashSpeculator(DraftModelSpeculator):
                 f"{self.input_buffers.input_ids[:4].cpu().tolist()}",
                 flush=True,
             )
+        if os.environ.get("VLLM_DRAFT_GARBAGE") and not dummy_run:
+            # Diagnostic: corrupt the proposed draft tokens before verify.
+            # If the verify batch is causally isolated, the committed stream
+            # cannot change (every garbage draft is rejected; greedy commits
+            # row 0's argmax either way). If row-0 logits move, the verify
+            # attention is reading the batch's speculative KV rows.
+            self.draft_tokens[:num_reqs] = torch.remainder(
+                self.draft_tokens[:num_reqs] + 12345, self.vocab_size
+            )
         return self.draft_tokens[:num_reqs]
 
 
