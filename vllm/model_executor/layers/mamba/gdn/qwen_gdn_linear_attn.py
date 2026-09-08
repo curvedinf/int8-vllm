@@ -1736,9 +1736,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     self._svd_errs = getattr(self, "_svd_errs", set())
                     if _key not in self._svd_errs and len(self._svd_errs) < 4:
                         self._svd_errs.add(_key)
+                        import traceback
                         logger.warning(
-                            "GDN SPEC_VIA_DECODE routing fell back: %r",
-                            _e)
+                            "GDN SPEC_VIA_DECODE routing fell back: %r\n%s",
+                            _e, traceback.format_exc())
             if not _routed:
                 core_attn_out_spec, last_recurrent_state = (
                     fused_sigmoid_gating_delta_rule_update(
