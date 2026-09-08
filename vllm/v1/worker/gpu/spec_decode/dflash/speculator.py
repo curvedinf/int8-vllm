@@ -213,13 +213,17 @@ class DFlashSpeculator(DraftModelSpeculator):
         )
 
         # Groups whose slot-mappings row the draft OVERWRITES but a target
-        # layer also consumes (hybrid models merge the draft's SW spec group
-        # with the target's own SW layers — e.g. Qwen3.8 layers 64-68 share
-        # the DFlash drafter's group). The target verify's per-layer slot
-        # dict references that same mutable row, so the draft's
-        # prepare_dflash_inputs would redirect the TARGET's verify KV writes
-        # to draft-computed slots (rejection-pattern-dependent -> the
-        # temp>0 garble). Snapshot/restore those rows around the draft
+        # layer also consumes. NOTE (2026-09-08): on Qwen3.8 + DFlash2 the
+        # draft is a 5-layer MTP-style continuation whose attention layers
+        # are numbered 64-68 and named "model.layers.N.self_attn.attn"
+        # (target layers are "language_model.model.layers.N..." — the
+        # language_model prefix distinguishes them). Group 14 therefore
+        # hosts the DRAFT'S OWN attention; it appears in the target's
+        # attn_groups because the configs merge. The target verify's
+        # per-layer slot dict references that same mutable row, so the
+        # draft's prepare_dflash_inputs would redirect the TARGET's verify
+        # KV writes to draft-computed slots (rejection-pattern-dependent ->
+        # the temp>0 garble). Snapshot/restore those rows around the draft
         # forward (2026-08-30; see logs/garble/NOTES.md pass 6).
         self._shared_group_ids: list[int] = []
         for grp_list in target_attn_groups or []:
