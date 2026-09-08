@@ -41,13 +41,14 @@ def main():
         }],
         "max_tokens": args.out_tokens,
         "temperature": args.temp,
-        "top_p": 0.95,
-        "top_k": 20,
+        "top_p": 1.0 if args.temp == 0.0 else 0.95,
+        "top_k": -1 if args.temp == 0.0 else 20,
         "min_p": 0.0,
         "presence_penalty": 0.0,
         "repetition_penalty": 1.0,
         "seed": args.seed,
         "return_token_ids": True,
+        "logprobs": True,
     }
     req = urllib.request.Request(
         API, data=json.dumps(body).encode(),
@@ -57,7 +58,9 @@ def main():
     resp = json.load(urllib.request.urlopen(req, timeout=3600))
     dt = time.time() - t0
     msg = resp["choices"][0]["message"]
-    _ids = resp["choices"][0].get("token_ids") or []
+    _ch = resp["choices"][0]
+    _ids = _ch.get("token_ids") or []
+    _lps = [e.get("logprob") if isinstance(e, dict) else None for e in ((_ch.get("logprobs") or {}).get("content") or [])]
     text = (msg.get("content") or "") + (msg.get("reasoning") or "")
     path = f"/home/curved/vllm-gfx908/logs/garble/{args.tag}.txt"
     with open(path, "w") as f:
@@ -73,7 +76,7 @@ def main():
             enable_thinking=True, reasoning_effort="low")["input_ids"]
         torch.save({"prompt_ids": ids, "nonce": nonce},
                    f"/home/curved/vllm-gfx908/logs/garble/{args.tag}_ids.pt")
-        import torch as _t; _t.save({"committed_ids": _ids}, f"/home/curved/vllm-gfx908/logs/garble/{args.tag}_committed.pt"); print(f"  prompt ids saved: {len(ids)}; committed saved: {len(_ids)}", flush=True)
+        import torch as _t; _t.save({"committed_ids": _ids, "eng_logprobs": _lps}, f"/home/curved/vllm-gfx908/logs/garble/{args.tag}_committed.pt"); print(f"  prompt ids saved: {len(ids)}; committed saved: {len(_ids)}", flush=True)
     except Exception as e:
         print(f"  (id-save failed: {e})", flush=True)
     print(f"[{args.tag}] {dt:.1f}s {resp['usage']} -> {path} ({len(text)} chars)",
