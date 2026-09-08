@@ -928,7 +928,7 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
                                 (hidden_states[_ri].float() @ _lp).cpu().tolist(),
                             )
                         )
-                    if len(_LAYERPROBE_RECS) >= 40000:
+                    if len(_LAYERPROBE_RECS) >= 10000:
                         # Incremental shard flush: atexit does not run on
                         # SIGTERM stops, so stream shards as we go.
                         import os as _os
@@ -937,7 +937,7 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
                         )
                         _os.makedirs(out, exist_ok=True)
                         torch.save(
-                            _LAYERPROBE_RECS[:40000],
+                            _LAYERPROBE_RECS[:10000],
                             _os.path.join(
                                 out,
                                 f"lp_r{_r()}_{_os.getpid()}_"
