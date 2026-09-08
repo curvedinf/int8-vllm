@@ -256,6 +256,7 @@ class MambaHybridModelState(DefaultModelState):
                 num_reqs,
                 self._mamba_state_idx_gpu,
                 self._spec_steps_gpu,
+                self._mamba_src_col_gpu,
                 input_batch.query_start_loc,
                 input_batch.idx_mapping,
                 self.vllm_config.speculative_config.num_speculative_tokens,

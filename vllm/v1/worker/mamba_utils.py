@@ -1103,6 +1103,7 @@ class MambaSpecDecodeGPUContext:
         num_reqs: int,
         state_idx_gpu: torch.Tensor,
         spec_steps_gpu: torch.Tensor,
+        src_col_gpu: torch.Tensor,
         query_start_loc_gpu: torch.Tensor,
         idx_mapping: torch.Tensor,
         num_spec_tokens: int,
@@ -1132,6 +1133,7 @@ class MambaSpecDecodeGPUContext:
         seed_spec_window_kernel[grid](
             state_idx_gpu,
             spec_steps_gpu,
+            src_col_gpu,
             query_start_loc_gpu,
             self.block_table_ptrs,
             self.block_table_stride_req,
@@ -1156,6 +1158,7 @@ class MambaSpecDecodeGPUContext:
 def seed_spec_window_kernel(
     state_idx_ptr,
     spec_steps_ptr,
+    src_col_ptr,
     query_start_loc_ptr,
     block_table_ptrs_ptr,
     block_table_stride_req,
@@ -1191,11 +1194,15 @@ def seed_spec_window_kernel(
     q_len = q_end - q_start
     if q_len != num_spec_tokens + 1:
         return  # not a spec round (prefill chunk or non-spec decode)
-    # First spec round only: seed. The counter is incremented by the
-    # state_idx==0 program (each (req, state) pair runs once per tile; guard
-    # the increment on tile 0 / state 0 to avoid double counts).
+    col_pre = tl.load(state_idx_ptr + req_state_idx)
+    # Seed on the FIRST spec round and on every state_idx ADVANCE (block
+    # crossing): the postprocess/precopy migrations seed bt[state_idx], but
+    # the spec gather reads its window at bt[state_idx+1], which no
+    # migration targets — after a crossing it again holds stale/INIT data
+    # while the na reset makes the next round read si[0] there.
     steps = tl.load(spec_steps_ptr + req_state_idx)
-    if steps > 0:
+    src_col = tl.load(src_col_ptr + req_state_idx)
+    if (steps > 0) & (src_col == col_pre):
         if state_idx_flat == 0 and tile_idx == 0:
             tl.store(spec_steps_ptr + req_state_idx, steps + 1)
         return
