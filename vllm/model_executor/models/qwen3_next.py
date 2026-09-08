@@ -918,7 +918,7 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
                     _pos_flat = positions.flatten()
                     _off = _r() * ((_pos_flat.numel() + _pad) // _w())
                     _rows = (
-                        list(range(0, _n, 64)) if _n > 64 else [0]
+                        list(range(0, _n, 4)) if _n > 64 else [0]
                     )
                     for _ri in _rows:
                         _pi = min(_off + _ri, _pos_flat.numel() - 1)
