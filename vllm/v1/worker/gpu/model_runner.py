@@ -2091,6 +2091,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self._swa_err = True
                         import traceback
                         traceback.print_exc()
+            _kva = os.environ.get("VLLM_KVAUDIT")
+            if (
+                _kva
+                and slot_mappings_by_layer is not None
+                and not self._in_dummy_run
+                and not torch.cuda.is_current_stream_capturing()
+            ):
+                try:
+                    self._kv_audit(input_batch, slot_mappings_by_layer, "pre")
+                except Exception:
+                    if not getattr(self, "_kva_err", False):
+                        self._kva_err = True
+                        import traceback
+                        traceback.print_exc()
             with use_workspace_lane(self._draft_workspace_lane):
                 draft_tokens = self.speculator.propose(
                     input_batch,
@@ -2314,6 +2328,83 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for e in recs:
                     f.write(_json.dumps(e) + "\n")
             self._swa_recs = []
+
+    def _kv_audit(self, input_batch, slot_mappings_by_layer, phase: str) -> None:
+        """Env-gated (VLLM_KVAUDIT): byte-capture the KV cache rows this step
+        wrote, for a few TARGET full-attention layers, keyed by request and
+        position-range. The verify path (spec decode) and the prefill path
+        (transcript replay) are then byte-compared at matched positions —
+        identical inputs must produce identical quantized KV; any element
+        difference = mixed-path cache inconsistency baked in permanently.
+        """
+        import torch as _torch
+
+        out_dir = os.environ["VLLM_KVAUDIT"]
+        ln_all = [
+            f"language_model.model.layers.{i}.self_attn.attn"
+            for i in (3, 31, 63)
+        ]
+        fc = self.vllm_config.compilation_config.static_forward_context
+        n_tok = int(input_batch.num_scheduled_tokens.sum().item()) \
+            if hasattr(input_batch.num_scheduled_tokens, "sum") \
+            else input_batch.num_actual_tokens
+        pos = input_batch.positions[:n_tok].cpu().tolist()
+        req_ids = list(input_batch.req_ids[: input_batch.num_reqs])
+        qsl = input_batch.query_start_loc.cpu().tolist()
+        rows = []
+        for ln in ln_all:
+            sm = slot_mappings_by_layer.get(ln)
+            if sm is None:
+                continue
+            impl = fc.get(ln)
+            kv = getattr(impl, "kv_cache", None) if impl else None
+            if kv is None:
+                continue
+            tensors = [t for t in (kv if isinstance(kv, (list, tuple)) else [kv])
+                       if _torch.is_tensor(t)]
+            if not tensors:
+                continue
+            # The tensor's dim0 rows are KERNEL blocks (64 tokens here);
+            # spec.block_size is the 1728-token PAGE size and would misalign
+            # rows by 27x (the KVLINE G1B lesson).
+            kb = 64
+            slots = sm[:n_tok].cpu().tolist()
+            seen_rows = {}
+            for i in range(n_tok):
+                slot = int(slots[i])
+                if slot < 0:
+                    continue
+                p = pos[i]
+                if p < 20000:  # output region only
+                    continue
+                r = next((ri for ri in range(len(qsl) - 1)
+                          if qsl[ri] <= i < qsl[ri + 1]), None)
+                req = req_ids[r] if r is not None and r < len(req_ids) else "?"
+                blk = slot // kb
+                key = (req, blk)
+                if key in seen_rows:
+                    continue
+                seen_rows[key] = True
+                for t in tensors:
+                    if blk >= t.shape[0]:
+                        continue
+                    prow = t.reshape(t.shape[0], -1)[blk]
+                    rows.append({
+                        "ln": ln, "req": req, "blk": blk, "kb": kb,
+                        "phase": phase, "pos_lo": (p // kb) * kb,
+                        "bytes": prow.view(_torch.uint8).cpu(),
+                    })
+        if not rows:
+            return
+        self._kva_n = getattr(self, "_kva_n", 0)
+        self._kva_rows = getattr(self, "_kva_rows", [])
+        self._kva_rows.extend(rows)
+        self._kva_n += 1
+        if len(self._kva_rows) >= 240:
+            os.makedirs(out_dir, exist_ok=True)
+            _torch.save(self._kva_rows,
+                        os.path.join(out_dir, f"kva_{os.getpid()}_{self._kva_n}.pt"))
+            self._kva_rows = []
 
     def _kvline_snap(self, input_batch, slot_mappings_by_layer, phase: str) -> None:
         """Env-gated (VLLM_KVLINE_RING): per step, per request, checksum the

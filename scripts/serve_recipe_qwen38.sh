@@ -401,6 +401,13 @@ if [[ -f "${LOG_DIR}/SWAUDIT" ]]; then
   VLLM_SWAUDIT="$(tr -d '[:space:]' < "${LOG_DIR}/SWAUDIT")"
 fi
 
+# KVAUDIT flag file: byte-capture the KV rows each step writes (target
+# full-attn layers 3/31/63, output region) — verify path vs prefill-replay
+# path byte comparison (mixed-path cache consistency).
+if [[ -f "${LOG_DIR}/KVAUDIT" ]]; then
+  VLLM_KVAUDIT="$(tr -d '[:space:]' < "${LOG_DIR}/KVAUDIT")"
+fi
+
 # SALTU flag file: draw the acceptance-test uniform from a decorrelated
 # philox stream (same marginal; A/B lever for the wall-amplification hunt).
 if [[ -f "${LOG_DIR}/SALTU" ]]; then
@@ -541,6 +548,7 @@ start_server() {
   VLLM_DRAFT_GARBAGE="${VLLM_DRAFT_GARBAGE:-}" \
   VLLM_GDN_RING="${VLLM_GDN_RING:-}" \
   VLLM_SWAUDIT="${VLLM_SWAUDIT:-}" \
+  VLLM_KVAUDIT="${VLLM_KVAUDIT:-}" \
   VLLM_ALIGN_PROBE="${VLLM_ALIGN_PROBE:-}" \
   VLLM_GDN_PROBE="${VLLM_GDN_PROBE:-}" \
   VLLM_CONVGUARD_PROBE="${VLLM_CONVGUARD_PROBE:-}" \
