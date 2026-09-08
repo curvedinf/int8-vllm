@@ -1678,6 +1678,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             if (
                 _via_dec
                 and not torch.cuda.is_current_stream_capturing()
+                and query_spec.shape[-1] == self.head_k_dim
                 and a_spec.shape[-1] == value_spec.shape[-2]
                 and query_spec.shape[-1] == key_spec.shape[-1]
                 and query_spec.shape[-1] > 0
