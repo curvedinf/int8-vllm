@@ -2234,7 +2234,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # own layers split into their own AttentionGroup (different head
         # count). layer_names[0] is therefore a TARGET layer; record it.
         ln = grp.layer_names[0]
-        ln = tgt_names[0]
         bt = self.block_tables.input_block_tables[gi]
         width = bt.shape[1]
         fc = self.vllm_config.compilation_config.static_forward_context
@@ -2246,6 +2245,34 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return
         pbs = int(grp.kv_cache_spec.block_size)
         ncts = input_batch.num_computed_tokens_np
+        if not getattr(self, "_swa_ptrdbg", False):
+            self._swa_ptrdbg = True
+            try:
+                os.makedirs(out_dir, exist_ok=True)
+                _sp2 = getattr(self, "speculator", None)
+                _dm = getattr(_sp2, "model", None) if _sp2 is not None else None
+                draft_ptrs = []
+                for _ln in grp.layer_names:
+                    _impl = fc.get(_ln)
+                    _kv = getattr(_impl, "kv_cache", None) if _impl else None
+                    draft_ptrs.append((_ln, _kv[0].data_ptr() if isinstance(_kv, (list, tuple)) and _kv else None))
+                tgt_ptrs = []
+                if _dm is not None:
+                    _layers = getattr(_dm, "layers", None) or []
+                    for _lay in _layers[:3]:
+                        try:
+                            _a = _lay.self_attn.attn
+                            _kv = _a.kv_cache
+                            tgt_ptrs.append((_a.kv_cache[0].data_ptr()
+                                             if isinstance(_kv, (list, tuple)) and _kv else None))
+                        except Exception:
+                            pass
+                with open(os.path.join(out_dir, "_dbg.txt"), "a") as f:
+                    f.write(f"ptr-identity: shared-group tensors {draft_ptrs}; "
+                            f"draft-model attn kv ptrs {tgt_ptrs}\n")
+            except Exception as _e:
+                with open(os.path.join(out_dir, "_dbg.txt"), "a") as f:
+                    f.write(f"ptr-identity failed: {_e}\n")
         K = 6
         rows = []
         for r in range(n_req):
