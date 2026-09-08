@@ -208,6 +208,15 @@ class RejectionSampler(nn.Module):
             use_fp64_gumbel=self.use_fp64_gumbel,
             p82_threshold=self.p82_threshold,
         )
+        if os.environ.get("VLLM_ACCEPT1"):
+            # ACCEPT1 diagnostic: force every verify round to commit exactly
+            # position 0 (blank all later draft/bonus slots). The speculative
+            # compute and temp-1 sampling stay fully active, but the post-round
+            # mamba state resume geometry (num_accepted - 1) becomes 0 every
+            # round, identical to non-spec decode. Clean leg => the
+            # rejection-resume math is the corruption source; drifting leg =>
+            # the multi-token verify write path itself corrupts state.
+            output_token_ids[:, 1:].fill_(PLACEHOLDER_TOKEN_ID)
 
         logprobs_tensors = None
         if sampling_metadata.max_num_logprobs is not None:

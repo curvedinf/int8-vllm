@@ -399,6 +399,18 @@ class RejectionSampler:
             max_num_logprobs,
         )
 
+        if os.environ.get("VLLM_ACCEPT1"):
+            # ACCEPT1 diagnostic (same lever as the V1 sampler): force every
+            # verify round to commit exactly one token. The speculative
+            # compute and temp-1 sampling stay fully active, but the
+            # post-round mamba state resume geometry (num_accepted - 1)
+            # becomes 0 every round, identical to non-spec decode. Clean leg
+            # => the rejection-resume math is the corruption source; drifting
+            # leg => the multi-token verify write path itself corrupts state.
+            if sampled.shape[-1] > 1:
+                sampled[:, 1:].fill_(-1)
+            num_sampled.clamp_(max=1)
+
         num_sampled, num_rejected = get_num_sampled_and_rejected(
             num_sampled,
             input_batch.seq_lens,

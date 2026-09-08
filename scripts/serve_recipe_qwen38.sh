@@ -365,6 +365,22 @@ if [[ -f "${LOG_DIR}/RSALT" ]]; then
   VLLM_RESAMPLE_SALT=1
 fi
 
+# ACCEPT1 flag file: force every verify round to commit exactly one token.
+# Keeps temp-1 sampling and the full 14-token speculative compute active but
+# makes the mamba state resume geometry (num_accepted - 1 == 0) identical to
+# non-spec decode. Causal knife: clean leg convicts the rejection-resume
+# index math; drifting leg convicts the multi-token verify write path.
+if [[ -f "${LOG_DIR}/ACCEPT1" ]]; then
+  VLLM_ACCEPT1=1
+fi
+
+# GDNSTAT flag file: per-round GDN checkpoint-window norms (all mamba layers,
+# 14 window slots) + strided value slices every 8th round, saved as .pt
+# shards (value file contains the output dir path).
+if [[ -f "${LOG_DIR}/GDNSTAT" ]]; then
+  VLLM_GDNSTAT="$(tr -d '[:space:]' < "${LOG_DIR}/GDNSTAT")"
+fi
+
 # SALTU flag file: draw the acceptance-test uniform from a decorrelated
 # philox stream (same marginal; A/B lever for the wall-amplification hunt).
 if [[ -f "${LOG_DIR}/SALTU" ]]; then
@@ -500,6 +516,8 @@ start_server() {
   VLLM_KV_G8="${VLLM_KV_G8:-}" \
   VLLM_RESAMPLE_SALT="${VLLM_RESAMPLE_SALT:-}" \
   VLLM_SALT_U="${VLLM_SALT_U:-}" \
+  VLLM_ACCEPT1="${VLLM_ACCEPT1:-}" \
+  VLLM_GDNSTAT="${VLLM_GDNSTAT:-}" \
   VLLM_ALIGN_PROBE="${VLLM_ALIGN_PROBE:-}" \
   VLLM_GDN_PROBE="${VLLM_GDN_PROBE:-}" \
   VLLM_CONVGUARD_PROBE="${VLLM_CONVGUARD_PROBE:-}" \

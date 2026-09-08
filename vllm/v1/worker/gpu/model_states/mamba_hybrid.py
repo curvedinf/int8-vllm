@@ -253,6 +253,115 @@ class MambaHybridModelState(DefaultModelState):
                     self._kvl3_err = True
                     import traceback
                     traceback.print_exc()
+        if os.environ.get("VLLM_GDNSTAT") and not torch.cuda.is_current_stream_capturing():
+            try:
+                self._gdnstat_snap(
+                    input_batch, block_tables, kv_cache_config,
+                    mamba_group_ids, num_computed_tokens,
+                )
+            except Exception:
+                if not getattr(self, "_gs_err", False):
+                    self._gs_err = True
+                    import traceback
+                    traceback.print_exc()
+
+    def _gdnstat_snap(self, input_batch, block_tables, kv_cache_config,
+                      mamba_group_ids, num_computed_tokens) -> None:
+        """Env-gated (VLLM_GDNSTAT) per-round GDN checkpoint-window values.
+
+        At preprocess (after the precopy), for every live request and ALL
+        mamba layers/state tensors, record the L2 norm of each of the 14
+        window slots (bt[r, col + rel]) plus round metadata (col, read_idx
+        = num_accepted - 1 with post-reset semantics, query length T,
+        num_computed). Every 8th round also stores a strided value slice of
+        the resumed slot (read_idx) for cross-run value comparison.
+
+        Detects: (a) the resumed slot jumping to a stale/wrong checkpoint —
+        norm discontinuity at a round that persists; (b) graded value drift
+        vs a same-tokens replay run (slice comparison). Scalars only:
+        ~6KB/round for 48 layers x 2 states.
+        """
+        out = os.environ["VLLM_GDNSTAT"]
+        self._gs_n = getattr(self, "_gs_n", 0)
+        n = self._gs_n
+        gid = mamba_group_ids[0]
+        bt = block_tables[gid]
+        width = bt.shape[1]
+        n_req = input_batch.num_reqs
+        idx_map = input_batch.idx_mapping[:n_req].cpu().tolist()
+        cols = self._mamba_state_idx_gpu.cpu().tolist()
+        nas = self.num_accepted_tokens_gpu.cpu().tolist()
+        qs = input_batch.query_start_loc.cpu().tolist()
+        ncts = num_computed_tokens.cpu().tolist()
+        fc = self.vllm_config.compilation_config.static_forward_context
+
+        cache = getattr(self, "_gs_cache", None)
+        if cache is None:
+            layout = []
+            tensors = {}
+            layer_names = kv_cache_config.kv_cache_groups[gid].layer_names
+            for ln in layer_names:
+                impl = fc.get(ln)
+                st = getattr(impl, "kv_cache", None) if impl else None
+                if not st:
+                    continue
+                for st_i, t in enumerate(st):
+                    if not torch.is_tensor(t) or t.ndim < 1:
+                        continue
+                    key = f"{ln}#st{st_i}"
+                    layout.append(key)
+                    tensors[key] = t.reshape(t.shape[0], -1)
+            cache = self._gs_cache = (layout, tensors)
+
+        layout, tensors = cache
+        do_slice = (n % 8) == 0
+        rows = []
+        for r in range(n_req):
+            rs = idx_map[r]
+            if rs < 0:
+                continue
+            col = cols[rs] if 0 <= rs < len(cols) else -1
+            if col < 0:
+                continue
+            ri = max(nas[rs] - 1, 0) if 0 <= rs < len(nas) else 0
+            rels = [rel for rel in range(14) if col + rel < width]
+            blks = [int(bt[r, col + rel]) for rel in rels]
+            keep = [
+                (rel, blk) for rel, blk in zip(rels, blks)
+                if 0 < blk < tensors[layout[0]].shape[0]
+            ]
+            if not keep:
+                continue
+            rec = {
+                "n": n, "rs": int(rs), "col": int(col), "ri": int(ri),
+                "T": int(qs[r + 1] - qs[r]) if r + 1 < len(qs) else 0,
+                "nct": int(ncts[rs]) if 0 <= rs < len(ncts) else -1,
+                "norms": {}, "slice": {},
+            }
+            for key in layout:
+                tf = tensors[key]
+                blks_k = [blk for _, blk in keep]
+                norms = tf[blks_k].float().norm(dim=tuple(range(1, tf[blks_k].ndim)))
+                rec["norms"][key] = [round(v, 4) for v in norms.cpu().tolist()]
+                if do_slice and ri in [rel for rel, _ in keep]:
+                    blk_ri = blks_k[[rel for rel, _ in keep].index(ri)]
+                    v = tf[blk_ri].float().flatten()
+                    stride = max(v.numel() // 1024, 1)
+                    rec["slice"][key] = v[::stride][:1024].to(torch.float16).cpu().tolist()
+            rows.append(rec)
+
+        recs = getattr(self, "_gs_recs", None)
+        if recs is None:
+            recs = self._gs_recs = []
+        recs.extend(rows)
+        self._gs_n = n + 1
+        if len(recs) >= 200:
+            os.makedirs(out, exist_ok=True)
+            torch.save(
+                {"layout": layout, "rounds": recs},
+                os.path.join(out, f"gdnstat_{os.getpid()}_{n}.pt"),
+            )
+            self._gs_recs = []
 
     def _kvline3_snap(self, phase, input_batch, block_tables, kv_cache_config,
                       mamba_group_ids, num_computed_tokens) -> None:
