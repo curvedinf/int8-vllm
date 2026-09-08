@@ -2220,10 +2220,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not shared:
             return
         gi, grp = shared[0]
+        # Checksum a TARGET layer's tensor, not the drafter's: target layer
+        # names carry the language_model prefix; the merged group may order
+        # the drafter's layers first.
+        tgt_names = [
+            ln_ for ln_ in grp.layer_names if ln_.startswith("language_model")
+        ]
+        if not tgt_names:
+            return
+        ln = tgt_names[0]
         bt = self.block_tables.input_block_tables[gi]
         width = bt.shape[1]
         fc = self.vllm_config.compilation_config.static_forward_context
-        ln = grp.layer_names[0]
         impl = fc.get(ln)
         kv = getattr(impl, "kv_cache", None) if impl else None
         tensors = list(kv) if isinstance(kv, (list, tuple)) else [kv]
@@ -2256,7 +2264,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     s.append(round(float(prow.float().sum().item()), 3))
                 pages.append({"col": j, "blk": blk, "sums": s})
             rows.append({
-                "phase": phase, "rs": int(rs), "r": r,
+                "phase": phase, "rs": int(rs), "r": r, "ln": ln,
                 "nct": int(ncts[rs]) if rs < len(ncts) else -1,
                 "pbs": pbs, "nblocks": nblocks, "pages": pages,
             })
