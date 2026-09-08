@@ -2187,10 +2187,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         from vllm.v1.kv_cache_interface import AttentionSpec as _AS
 
         attn_names = []
-        for grp_list in self.attn_groups:
+        _sp = getattr(self, "speculator", None)
+        _draft_groups = set(
+            getattr(_sp, "draft_kv_cache_group_ids", []) or []
+        ) if _sp is not None else None
+        for gi, grp_list in enumerate(self.attn_groups):
             for grp in grp_list:
                 if not isinstance(grp.kv_cache_spec, _AS):
                     continue  # GDN/mamba groups have no K/V rows
+                if _draft_groups is not None and gi in _draft_groups:
+                    continue  # drafter layers: own writes, not target KV
                 attn_names.extend(grp.layer_names)
         if not getattr(self, "_kvline_dbg", False):
             self._kvline_dbg = True
@@ -2224,9 +2230,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     continue
                 s = []
                 for t in tensors[:2]:
-                    # 1728-token pages (attention blocks aligned to mamba):
-                    # slot = block*1728 + offset; checksum the whole page row.
-                    blk = slot // 1728
+                    # Kernel rows: the layer view's dim0 IS the kernel block
+                    # row (get_kv_cache_shape: (num_blocks, heads, block, ...)).
+                    # A slot indexes [kernel_row, intra-row offset]; the row to
+                    # checksum is slot // kernel_block_size — NOT // 1728
+                    # (that was page math for a different layout and read the
+                    # wrong rows — see the G1B audit).
+                    kb = getattr(self, "_kvline_kbsize", None)
+                    if kb is None:
+                        kb = 64
+                        for grp_list in self.attn_groups:
+                            for grp in grp_list:
+                                if ln in grp.layer_names:
+                                    kb = int(grp.kv_cache_spec.block_size)
+                    blk = slot // kb
                     if blk >= t.shape[0]:
                         continue
                     row = t.reshape(t.shape[0], -1)[blk]
