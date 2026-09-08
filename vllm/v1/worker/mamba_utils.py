@@ -1207,12 +1207,15 @@ def seed_spec_window_kernel(
         return
     src_col = col
     dst_col = col + 1
+    # token_bias must be a tensor scalar (the copy helper calls .to on it);
+    # load-derived zero keeps it a real value while meaning identity copy.
+    zero_bias = tl.load(spec_steps_ptr + req_state_idx) * 0
     _copy_mamba_state_block(
         state_idx_flat,
         batch_idx,
         src_col,
         dst_col,
-        0,  # token_bias: identity copy of the running state
+        zero_bias,  # identity copy of the running state
         block_table_ptrs_ptr,
         block_table_stride_req,
         state_base_addrs_ptr,
