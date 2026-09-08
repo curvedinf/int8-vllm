@@ -886,6 +886,10 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
 
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         _lp = _layerprobe_proj(self)
+        _ids_flat = (
+            input_ids.flatten() if (_lp is not None and input_ids is not None)
+            else None
+        )
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
@@ -922,10 +926,16 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
                     )
                     for _ri in _rows:
                         _pi = min(_off + _ri, _pos_flat.numel() - 1)
+                        _tok = (
+                            int(_ids_flat[min(_off + _ri, _ids_flat.numel() - 1)].item())
+                            if _ids_flat is not None
+                            else -1
+                        )
                         _LAYERPROBE_RECS.append(
                             (
                                 int(_pos_flat[_pi].item()),
                                 layer_idx,
+                                _tok,
                                 (hidden_states[_ri].float() @ _lp).cpu().tolist(),
                             )
                         )
