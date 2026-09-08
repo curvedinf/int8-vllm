@@ -388,6 +388,12 @@ if [[ -f "${LOG_DIR}/DRAFTGARBAGE" ]]; then
   VLLM_DRAFT_GARBAGE=1
 fi
 
+# GDNRING flag file: per-step GDN kernel state-index rows + accepted counts
+# (exit-dumped ring; value = output dir).
+if [[ -f "${LOG_DIR}/GDNRING" ]]; then
+  VLLM_GDN_RING="$(tr -d '[:space:]' < "${LOG_DIR}/GDNRING")"
+fi
+
 # SALTU flag file: draw the acceptance-test uniform from a decorrelated
 # philox stream (same marginal; A/B lever for the wall-amplification hunt).
 if [[ -f "${LOG_DIR}/SALTU" ]]; then
@@ -526,6 +532,7 @@ start_server() {
   VLLM_ACCEPT1="${VLLM_ACCEPT1:-}" \
   VLLM_GDNSTAT="${VLLM_GDNSTAT:-}" \
   VLLM_DRAFT_GARBAGE="${VLLM_DRAFT_GARBAGE:-}" \
+  VLLM_GDN_RING="${VLLM_GDN_RING:-}" \
   VLLM_ALIGN_PROBE="${VLLM_ALIGN_PROBE:-}" \
   VLLM_GDN_PROBE="${VLLM_GDN_PROBE:-}" \
   VLLM_CONVGUARD_PROBE="${VLLM_CONVGUARD_PROBE:-}" \

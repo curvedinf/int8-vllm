@@ -357,11 +357,15 @@ class MambaHybridModelState(DefaultModelState):
                 blks_k = [blk for _, blk in keep]
                 norms = tf[blks_k].float().norm(dim=tuple(range(1, tf[blks_k].ndim)))
                 rec["norms"][key] = [round(v, 4) for v in norms.cpu().tolist()]
-                if do_slice and ri in [rel for rel, _ in keep]:
-                    blk_ri = blks_k[[rel for rel, _ in keep].index(ri)]
-                    v = tf[blk_ri].float().flatten()
-                    stride = max(v.numel() // 1024, 1)
-                    rec["slice"][key] = v[::stride][:1024].to(torch.float16).cpu().tolist()
+                if do_slice:
+                    for s_rel in (ri, 0, 1):
+                        if s_rel in [rel for rel, _ in keep]:
+                            blk_s = blks_k[[rel for rel, _ in keep].index(s_rel)]
+                            v = tf[blk_s].float().flatten()
+                            stride = max(v.numel() // 1024, 1)
+                            rec["slice"][f"{key}@{s_rel}"] = (
+                                v[::stride][:1024].to(torch.float16).cpu().tolist()
+                            )
             rows.append(rec)
 
         recs = getattr(self, "_gs_recs", None)
