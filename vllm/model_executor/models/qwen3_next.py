@@ -936,13 +936,14 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
                         from vllm.distributed import (
                             get_tensor_model_parallel_rank as _r,
                         )
-                        _os.makedirs(out, exist_ok=True)
+                        _out = os.environ["VLLM_LAYERPROBE"]
+                        _os.makedirs(_out, exist_ok=True)
                         torch.save(
                             _LAYERPROBE_RECS[:10000],
                             _os.path.join(
-                                out,
+                                _out,
                                 f"lp_r{_r()}_{_os.getpid()}_"
-                                f"{len(_LAYERPROBE_RECS)}_{_lp_n[0]}.pt",
+                                f"{_lp_n[0]}.pt",
                             ),
                         )
                         _lp_n[0] += 1
