@@ -2218,16 +2218,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 ):
                     shared.append((gi, grp))
         if not shared:
+            if not getattr(self, "_swa_dbg0", False):
+                self._swa_dbg0 = True
+                try:
+                    os.makedirs(out_dir, exist_ok=True)
+                    with open(os.path.join(out_dir, "_dbg.txt"), "a") as f:
+                        f.write(f"no shared groups: draft_groups={sorted(_draft_groups)} "
+                                f"attn_group_ids={[g.kv_cache_group_id for gl in self.attn_groups for g in gl]}\n")
+                except Exception:
+                    pass
             return
         gi, grp = shared[0]
-        # Checksum a TARGET layer's tensor, not the drafter's: target layer
-        # names carry the language_model prefix; the merged group may order
-        # the drafter's layers first.
-        tgt_names = [
-            ln_ for ln_ in grp.layer_names if ln_.startswith("language_model")
-        ]
-        if not tgt_names:
-            return
+        # The merged group orders target layers first here (model.layers.64-68
+        # — no language_model prefix on this architecture), and the draft's
+        # own layers split into their own AttentionGroup (different head
+        # count). layer_names[0] is therefore a TARGET layer; record it.
+        ln = grp.layer_names[0]
         ln = tgt_names[0]
         bt = self.block_tables.input_block_tables[gi]
         width = bt.shape[1]
