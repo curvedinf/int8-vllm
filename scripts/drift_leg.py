@@ -60,6 +60,20 @@ def main():
     path = f"/home/curved/vllm-gfx908/logs/garble/{args.tag}.txt"
     with open(path, "w") as f:
         f.write(text)
+    try:  # persist prompt token ids (exact chat template) for replay analysis
+        from transformers import AutoTokenizer
+        import torch
+        tk = AutoTokenizer.from_pretrained(
+            "/home/curved/models/Qwen3.8-27B-GPTQ-8bit-gs128")
+        ids = tk.apply_chat_template(
+            [{"role": "user", "content": corpus}],
+            tokenize=True, add_generation_prompt=True,
+            enable_thinking=True, reasoning_effort="low")["input_ids"]
+        torch.save({"prompt_ids": ids, "nonce": nonce},
+                   f"/home/curved/vllm-gfx908/logs/garble/{args.tag}_ids.pt")
+        print(f"  prompt ids saved: {len(ids)}", flush=True)
+    except Exception as e:
+        print(f"  (id-save failed: {e})", flush=True)
     print(f"[{args.tag}] {dt:.1f}s {resp['usage']} -> {path} ({len(text)} chars)",
           flush=True)
 
