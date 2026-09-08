@@ -3,10 +3,41 @@
 """Inference-only Qwen3Next model."""
 
 import os
+import atexit
 from collections.abc import Iterable
 from itertools import islice
 
 import torch
+
+# --- VLLM_LAYERPROBE diagnostic (env-gated) -------------------------------
+# Per-step, per-layer random projections of the batch's first token row
+# (verify row 0 / prefill chunk row 0). Dumped at exit; analysis compares
+# the verify path vs the clean-prefill replay of the same transcript at
+# matched positions to find the first layer whose outputs diverge.
+_LAYERPROBE_RECS: list = []
+
+
+def _layerprobe_proj(model) -> torch.Tensor | None:
+    out = os.environ.get("VLLM_LAYERPROBE")
+    if not out:
+        return None
+    proj = getattr(model, "_layerprobe_proj_buf", None)
+    if proj is None:
+        hidden = model.config.hidden_size
+        g = torch.Generator(device="cpu").manual_seed(1234)
+        proj = torch.randn(hidden, 16, generator=g).to(
+            next(model.parameters()).device, torch.float32)
+        model._layerprobe_proj_buf = proj
+
+        def _dump():
+            import os as _os
+            from vllm.distributed import get_tensor_model_parallel_rank as _r
+            _os.makedirs(out, exist_ok=True)
+            torch.save(_LAYERPROBE_RECS[:200000],
+                       _os.path.join(out, f"lp_r{_r()}_{_os.getpid()}.pt"))
+        atexit.register(_dump)
+    return proj
+# --------------------------------------------------------------------------
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
@@ -852,6 +883,7 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             assert residual is None
 
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+        _lp = _layerprobe_proj(self)
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
@@ -864,6 +896,37 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             self._maybe_add_hidden_state(
                 aux_hidden_states, layer_idx + 1, hidden_states, residual
             )
+            if (
+                _lp is not None
+                and not torch.cuda.is_current_stream_capturing()
+                and hidden_states.shape[0] > 0
+            ):
+                from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+                if gpu_sync_allowed():
+                    _n = hidden_states.shape[0]
+                    # Sequence parallel: hidden rows are TP-chunked while
+                    # `positions` is the full batch — offset the position
+                    # index by this rank's chunk start so (pos, state) pairs
+                    # are correct on every rank.
+                    from vllm.distributed import (
+                        get_tensor_model_parallel_rank as _r,
+                        get_tensor_model_parallel_world_size as _w,
+                    )
+                    _pad = (-positions.shape[-1]) % _w()
+                    _pos_flat = positions.flatten()
+                    _off = _r() * ((_pos_flat.numel() + _pad) // _w())
+                    _rows = (
+                        list(range(0, _n, 64)) if _n > 64 else [0]
+                    )
+                    for _ri in _rows:
+                        _pi = min(_off + _ri, _pos_flat.numel() - 1)
+                        _LAYERPROBE_RECS.append(
+                            (
+                                int(_pos_flat[_pi].item()),
+                                layer_idx,
+                                (hidden_states[_ri].float() @ _lp).cpu().tolist(),
+                            )
+                        )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(

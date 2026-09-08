@@ -401,6 +401,12 @@ if [[ -f "${LOG_DIR}/SWAUDIT" ]]; then
   VLLM_SWAUDIT="$(tr -d '[:space:]' < "${LOG_DIR}/SWAUDIT")"
 fi
 
+# LAYERPROBE flag file: per-step per-layer random projections of the first
+# token row (verify vs prefill path divergence localization).
+if [[ -f "${LOG_DIR}/LAYERPROBE" ]]; then
+  VLLM_LAYERPROBE="$(tr -d '[:space:]' < "${LOG_DIR}/LAYERPROBE")"
+fi
+
 # KVAUDIT flag file: byte-capture the KV rows each step writes (target
 # full-attn layers 3/31/63, output region) — verify path vs prefill-replay
 # path byte comparison (mixed-path cache consistency).
@@ -549,6 +555,7 @@ start_server() {
   VLLM_GDN_RING="${VLLM_GDN_RING:-}" \
   VLLM_SWAUDIT="${VLLM_SWAUDIT:-}" \
   VLLM_KVAUDIT="${VLLM_KVAUDIT:-}" \
+  VLLM_LAYERPROBE="${VLLM_LAYERPROBE:-}" \
   VLLM_ALIGN_PROBE="${VLLM_ALIGN_PROBE:-}" \
   VLLM_GDN_PROBE="${VLLM_GDN_PROBE:-}" \
   VLLM_CONVGUARD_PROBE="${VLLM_CONVGUARD_PROBE:-}" \
