@@ -28,6 +28,7 @@ def _layerprobe_proj(model) -> torch.Tensor | None:
         proj = torch.randn(hidden, 16, generator=g).to(
             next(model.parameters()).device, torch.float32)
         model._layerprobe_proj_buf = proj
+        _lp_n.append(0)
 
         def _dump():
             import os as _os
@@ -927,6 +928,24 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
                                 (hidden_states[_ri].float() @ _lp).cpu().tolist(),
                             )
                         )
+                    if len(_LAYERPROBE_RECS) >= 40000:
+                        # Incremental shard flush: atexit does not run on
+                        # SIGTERM stops, so stream shards as we go.
+                        import os as _os
+                        from vllm.distributed import (
+                            get_tensor_model_parallel_rank as _r,
+                        )
+                        _os.makedirs(out, exist_ok=True)
+                        torch.save(
+                            _LAYERPROBE_RECS[:40000],
+                            _os.path.join(
+                                out,
+                                f"lp_r{_r()}_{_os.getpid()}_"
+                                f"{len(_LAYERPROBE_RECS)}_{_lp_n[0]}.pt",
+                            ),
+                        )
+                        _lp_n[0] += 1
+                        del _LAYERPROBE_RECS[:]
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
