@@ -286,6 +286,9 @@ class MambaHybridModelState(DefaultModelState):
         n = self._gs_n
         gid = mamba_group_ids[0]
         bt = block_tables[gid]
+        # stash for the post-phase snap (postprocess_state has no tables arg)
+        self._gs_bt = block_tables
+        self._gs_gid = gid
         width = bt.shape[1]
         n_req = input_batch.num_reqs
         idx_map = input_batch.idx_mapping[:n_req].cpu().tolist()
@@ -380,6 +383,66 @@ class MambaHybridModelState(DefaultModelState):
                 os.path.join(out, f"gdnstat_{os.getpid()}_{n}.pt"),
             )
             self._gs_recs = []
+
+    def _gdnstat_snap_post(self, idx_mapping, num_sampled) -> None:
+        """Post-forward half of VLLM_GDNSTAT: window norms AFTER the verify
+        forward and the accepted-count scatter, BEFORE the align postcopy.
+        Records this round's true acceptance (num_sampled) so the migration
+        lineage invariant can be tested directly:
+            pre_{N+1}.st_temporal[0] == post_N.st_temporal[na_N - 1]
+        (the precopy migrates bt[src_col + na-1] -> bt[new_col])."""
+        out = os.environ["VLLM_GDNSTAT"]
+        n = self._gs_n - 1  # same logical round as the matching pre snap
+        bt = self._gs_bt[self._gs_gid]
+        width = bt.shape[1]
+        n_req = idx_mapping.shape[0]
+        idx_map = idx_mapping[:n_req].cpu().tolist()
+        cols = self._mamba_state_idx_gpu.cpu().tolist()
+        nas = num_sampled[:n_req].cpu().tolist()
+        fc = self.vllm_config.compilation_config.static_forward_context
+        cache = getattr(self, "_gs_cache", None)
+        if cache is None:
+            return
+        layout, tensors = cache
+        rows = []
+        for r in range(n_req):
+            rs = idx_map[r]
+            if rs < 0:
+                continue
+            col = cols[rs] if 0 <= rs < len(cols) else -1
+            if col < 0:
+                continue
+            na = int(nas[r])
+            rels = [rel for rel in range(14) if col + rel < width]
+            blks = [int(bt[r, col + rel]) for rel in rels]
+            keep = [
+                (rel, blk) for rel, blk in zip(rels, blks)
+                if 0 < blk < tensors[layout[0]].shape[0]
+            ]
+            if not keep:
+                continue
+            rec = {
+                "phase": "post", "n": n, "rs": int(rs), "col": int(col),
+                "na": na, "blks": blks, "norms": {},
+            }
+            for key in layout:
+                tf = tensors[key]
+                blks_k = [blk for _, blk in keep]
+                norms = tf[blks_k].float().norm(
+                    dim=tuple(range(1, tf[blks_k].ndim)))
+                rec["norms"][key] = [round(v, 4) for v in norms.cpu().tolist()]
+            rows.append(rec)
+        recs = getattr(self, "_gs_post_recs", None)
+        if recs is None:
+            recs = self._gs_post_recs = []
+        recs.extend(rows)
+        if len(recs) >= 200:
+            os.makedirs(out, exist_ok=True)
+            torch.save(
+                {"layout": layout, "rounds": recs},
+                os.path.join(out, f"gdnstatpost_{os.getpid()}_{n}.pt"),
+            )
+            self._gs_post_recs = []
 
     def _kvline3_snap(self, phase, input_batch, block_tables, kv_cache_config,
                       mamba_group_ids, num_computed_tokens) -> None:
@@ -975,6 +1038,21 @@ class MambaHybridModelState(DefaultModelState):
                     self.num_accepted_tokens_gpu,
                     max(num_sampled, 1),
                 )
+
+        if (
+            os.environ.get("VLLM_GDNSTAT")
+            and not torch.cuda.is_current_stream_capturing()
+            and getattr(self, "_gs_bt", None) is not None
+            and idx_mapping.shape[0] > 0
+            and not isinstance(num_sampled, int)
+        ):
+            try:
+                self._gdnstat_snap_post(idx_mapping, num_sampled)
+            except Exception:
+                if not getattr(self, "_gs_err", False):
+                    self._gs_err = True
+                    import traceback
+                    traceback.print_exc()
 
         if self.recoverssm is not None:
             self.recoverssm.commit_step(
