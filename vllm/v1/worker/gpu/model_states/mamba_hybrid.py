@@ -314,6 +314,17 @@ class MambaHybridModelState(DefaultModelState):
             cache = self._gs_cache = (layout, tensors)
 
         layout, tensors = cache
+        # Window-base divergence record: the GDN backend gathers its 14-slot
+        # checkpoint window at [(seq_len-1)//bs + 1, ...] (mamba_get_block_
+        # table_tensor, seq_lens-based) while the align machinery advances
+        # _mamba_state_idx on num_computed. Record both bases plus the raw
+        # block ids so analysis can detect the kernel reading blocks the
+        # align side never staged (stale/NaN checkpoints).
+        bs = self._mamba_spec.block_size if self._mamba_spec is not None else 0
+        try:
+            seq_lens = input_batch.seq_lens[:n_req].cpu().tolist()
+        except Exception:
+            seq_lens = [0] * n_req
         do_slice = (n % 8) == 0
         rows = []
         for r in range(n_req):
@@ -332,10 +343,13 @@ class MambaHybridModelState(DefaultModelState):
             ]
             if not keep:
                 continue
+            kbase = ((seq_lens[r] - 1) // bs + 1) if (bs and r < len(seq_lens)) else -1
             rec = {
                 "n": n, "rs": int(rs), "col": int(col), "ri": int(ri),
                 "T": int(qs[r + 1] - qs[r]) if r + 1 < len(qs) else 0,
                 "nct": int(ncts[rs]) if 0 <= rs < len(ncts) else -1,
+                "seq_len": int(seq_lens[r]) if r < len(seq_lens) else -1,
+                "kbase": int(kbase), "blks": blks,
                 "norms": {}, "slice": {},
             }
             for key in layout:

@@ -21,15 +21,24 @@ import torch
 
 
 def load_rounds(d):
-    shards = sorted(glob.glob(os.path.join(d, "gdnstat_*.pt")),
-                    key=lambda p: int(p.rsplit("_", 1)[1].split(".")[0]))
-    rounds = []
+    """Shards come from every TP worker (own step counter, time-aligned).
+    Partition by pid so each worker's round stream stays contiguous."""
+    shards = glob.glob(os.path.join(d, "gdnstat_*.pt"))
+    by_pid: dict[int, list] = {}
     layout = None
     for p in shards:
-        s = torch.load(p, weights_only=False)
-        layout = s["layout"]
-        rounds.extend(s["rounds"])
-    return layout, rounds
+        pid = int(os.path.basename(p).split("_")[1])
+        by_pid.setdefault(pid, []).append(p)
+    streams = []
+    for pid, paths in by_pid.items():
+        paths.sort(key=lambda p: int(p.rsplit("_", 1)[1].split(".")[0]))
+        rounds = []
+        for p in paths:
+            s = torch.load(p, weights_only=False)
+            layout = s["layout"]
+            rounds.extend(s["rounds"])
+        streams.append(rounds)
+    return layout, streams
 
 
 def main():
@@ -41,68 +50,54 @@ def main():
                     help="relative norm jump threshold")
     args = ap.parse_args()
 
-    layout, rounds = load_rounds(args.dir)
-    if not rounds:
+    layout, streams = load_rounds(args.dir)
+    if not streams or not any(streams):
         print("no rounds found")
         return
-    rss = sorted({r["rs"] for r in rounds})
-    rs = args.rs if args.rs is not None else rss[0]
-    rows = [r for r in rounds if r["rs"] == rs]
-    print(f"{len(rows)} rounds for rs={rs} (available: {rss})")
-    print(f"first nct={rows[0]['nct']} last nct={rows[-1]['nct']}")
+    all_hits = []
+    per_layer_max: dict[str, tuple[float, int]] = {}
+    for si, rounds in enumerate(streams):
+        rss = sorted({r["rs"] for r in rounds})
+        rs = args.rs if args.rs is not None else (rss[0] if rss else None)
+        rows = [r for r in rounds if r["rs"] == rs]
+        if not rows:
+            continue
+        print(f"stream {si}: {len(rows)} rounds for rs={rs} "
+              f"(available: {rss}); first nct={rows[0]['nct']} "
+              f"last nct={rows[-1]['nct']}")
 
-    # Per (layer,state): relative change of the resumed-slot norm between
-    # consecutive rounds, plus whether the window base column moved (crossing).
-    prev = {}
-    hits = []
-    for r in rows:
-        ri = r["ri"]
-        crossed = r["col"] != prev.get("col", r["col"])
-        prev["col"] = r["col"]
-        for key in layout:
-            norms = r["norms"].get(key)
-            if not norms or ri >= len(norms):
-                continue
-            v = norms[ri]
-            pv = prev.get(key)
-            prev[key] = v
-            if pv is None or pv == 0.0:
-                continue
-            rel = abs(v - pv) / pv
-            if rel > args.jump:
-                hits.append((r["n"], r["nct"], key, ri, round(rel, 3),
-                             r["T"], int(crossed)))
+        prev = {}
+        for r in rows:
+            ri = r["ri"]
+            crossed = r["col"] != prev.get("col", r["col"])
+            prev["col"] = r["col"]
+            for key in layout:
+                norms = r["norms"].get(key)
+                if not norms or ri >= len(norms):
+                    continue
+                v = norms[ri]
+                pv = prev.get(key)
+                prev[key] = v
+                if pv is None or pv == 0.0:
+                    continue
+                rel = abs(v - pv) / pv
+                if rel > args.jump:
+                    all_hits.append((r["n"], r["nct"], key, ri,
+                                     round(rel, 3), r["T"], int(crossed)))
+                m = per_layer_max.get(key)
+                if m is None or rel > m[0]:
+                    per_layer_max[key] = (rel, r["n"])
 
     print(f"\nresumed-slot norm jumps > {args.jump}:")
-    if not hits:
+    if not all_hits:
         print("  NONE")
-    for h in hits[:80]:
+    for h in sorted(all_hits, key=lambda x: -x[4])[:80]:
         print(f"  round {h[0]:5d} nct={h[1]:6d} {h[2]:40s} ri={h[3]:2d} "
               f"rel={h[4]:5.3f} T={h[5]:2d} crossed={h[6]}")
-    if len(hits) > 80:
-        print(f"  ... {len(hits) - 80} more")
 
-    # Layer-level summary: max consecutive-round relative change of the
-    # resumed-slot norm, to spot a single noisy layer even below threshold.
     print("\nper-layer max rel change (resumed slot):")
-    stats = {}
-    prev = {}
-    for r in rows:
-        ri = r["ri"]
-        for key in layout:
-            norms = r["norms"].get(key)
-            if not norms or ri >= len(norms):
-                continue
-            v = norms[ri]
-            pv = prev.get(key)
-            prev[key] = v
-            if pv is None or pv == 0.0:
-                continue
-            rel = abs(v - pv) / pv
-            m = stats.get(key)
-            if m is None or rel > m[0]:
-                stats[key] = (rel, r["n"])
-    for key, (rel, n) in sorted(stats.items(), key=lambda kv: -kv[1][0])[:12]:
+    for key, (rel, n) in sorted(per_layer_max.items(),
+                                key=lambda kv: -kv[1][0])[:12]:
         print(f"  {key:40s} max={rel:6.3f} at round {n}")
 
 
