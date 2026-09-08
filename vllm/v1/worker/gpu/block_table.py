@@ -111,7 +111,8 @@ class BlockTables:
         overwrite: bool,
     ) -> None:
         for i in range(self.num_kv_cache_groups):
-            start = self.num_blocks.np[i, req_index] if not overwrite else 0
+            prev_end = int(self.num_blocks.np[i, req_index])
+            start = prev_end if not overwrite else 0
             block_ids = new_block_ids[i]
             bpk = self.blocks_per_kv_block[i]
             if bpk > 1:
@@ -124,6 +125,17 @@ class BlockTables:
                     f"row capacity ({end} > {row_capacity})"
                 )
             self.block_tables[i].stage_write(req_index, start, block_ids)
+            # Clear the stale tail: entries beyond the new live length keep
+            # block ids from a previous request (row reuse) or from before a
+            # sliding-window eviction shrink. Speculative-decode slot
+            # computation clamps indices into the row (and reads invalid
+            # positions during prefill chunks); a stale nonzero id there
+            # routes drafter ctx-KV writes into freed-then-reallocated pages
+            # shared with target layers on the same physical tensors.
+            if end < prev_end:
+                self.block_tables[i].stage_write(
+                    req_index, end, [0] * (prev_end - end)
+                )
             self.num_blocks.np[i, req_index] = end
 
     def apply_staged_writes(self) -> None:
