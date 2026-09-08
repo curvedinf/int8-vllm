@@ -376,7 +376,7 @@ class MambaHybridModelState(DefaultModelState):
             recs = self._gs_recs = []
         recs.extend(rows)
         self._gs_n = n + 1
-        if len(recs) >= 200:
+        if len(recs) >= 40:
             os.makedirs(out, exist_ok=True)
             torch.save(
                 {"layout": layout, "rounds": recs},
@@ -436,7 +436,7 @@ class MambaHybridModelState(DefaultModelState):
         if recs is None:
             recs = self._gs_post_recs = []
         recs.extend(rows)
-        if len(recs) >= 200:
+        if len(recs) >= 40:
             os.makedirs(out, exist_ok=True)
             torch.save(
                 {"layout": layout, "rounds": recs},
