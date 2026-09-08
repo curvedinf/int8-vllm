@@ -1202,7 +1202,7 @@ def seed_spec_window_kernel(
     # while the na reset makes the next round read si[0] there.
     steps = tl.load(spec_steps_ptr + req_state_idx)
     src_col = tl.load(src_col_ptr + req_state_idx)
-    if (steps > 0) & (src_col == col_pre):
+    if steps > 0:
         if state_idx_flat == 0 and tile_idx == 0:
             tl.store(spec_steps_ptr + req_state_idx, steps + 1)
         return
