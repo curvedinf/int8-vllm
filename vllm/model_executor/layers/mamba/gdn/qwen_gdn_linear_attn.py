@@ -1671,66 +1671,71 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 except Exception:
                     _gra_snap = None
             _via_dec = os.environ.get("VLLM_GDN_SPEC_VIA_DECODE")
-            # Shape sanity gate: the boot dummy runs call this with
-            # placeholder tensors whose head dims are nonsense — only route
-            # when the layout matches the real model (a heads == v heads,
-            # q/k share head_dim).
+            _routed = False
             if (
                 _via_dec
                 and not torch.cuda.is_current_stream_capturing()
                 and query_spec.shape[-1] == self.head_k_dim
-                and a_spec.shape[-1] == value_spec.shape[-2]
+                and ssm_state.shape[-1] == self.head_k_dim
+                and ssm_state.shape[-3] == value_spec.shape[-2]
                 and query_spec.shape[-1] == key_spec.shape[-1]
                 and query_spec.shape[-1] > 0
             ):
-                # Diagnostic A/B: route the verify GDN compute through the
-                # DECODE kernel (fused_recurrent_..._packed_decode) per
-                # token, preserving the spec checkpoint protocol (init from
-                # si[na-1]; per-token state copies to si[i_t]). Slow (state
-                # copies per token per layer) — curve-flattening here
-                # convicts the spec kernel's math variant as the G1b source.
-                n_spec_r = int(attn_metadata.num_spec_decodes)  # type: ignore[attr-defined]
-                cu = spec_query_start_loc[: n_spec_r + 1].cpu().tolist()
-                na_l = num_accepted_tokens[:n_spec_r].cpu().tolist()
-                si_l = spec_state_indices_tensor[:n_spec_r].cpu().tolist()
-                HV = value_spec.shape[-2]
-                Vd = value_spec.shape[-1]
-                Hq = query_spec.shape[-2]
-                Kd = query_spec.shape[-1]
-                core_attn_out_spec = torch.empty_like(value_spec)
-                last_recurrent_state = None
-                for r in range(n_spec_r):
-                    bos, eos = cu[r], cu[r + 1]
-                    init_slot = int(si_l[r][na_l[r] - 1])
-                    cur = init_slot
-                    for t in range(bos, eos):
-                        mk = torch.cat([
-                            query_spec[t].reshape(-1),
-                            key_spec[t].reshape(-1),
-                            value_spec[t].reshape(-1),
-                        ]).unsqueeze(0).contiguous()
-                        o = torch.empty(1, 1, HV, Vd,
-                                        device=mk.device,
-                                        dtype=core_attn_out_spec.dtype)
-                        fused_recurrent_gated_delta_rule_packed_decode(
-                            mixed_qkv=mk,
-                            a=a_spec[t:t + 1].contiguous(),
-                            b=b_spec[t:t + 1].contiguous(),
-                            A_log=self.A_log,
-                            dt_bias=self.dt_bias,
-                            scale=Kd ** -0.5,
-                            initial_state=ssm_state,
-                            out=o,
-                            ssm_state_indices=torch.tensor(
-                                [cur], dtype=torch.int32, device=mk.device),
-                            use_qk_l2norm_in_kernel=True,
-                        )
-                        dst = int(si_l[r][t - bos])
-                        if dst > 0 and dst != cur:
-                            ssm_state[dst] = ssm_state[cur]
-                        cur = dst if dst > 0 else cur
-                        core_attn_out_spec[t] = o[0, 0]
-            else:
+                try:
+                    # Diagnostic A/B: route the verify GDN compute through
+                    # the DECODE kernel per token, preserving the spec
+                    # checkpoint protocol (init from si[na-1]; per-token
+                    # state copies to si[i_t]). Dummy boot runs with
+                    # garbage head shapes raise here and fall back.
+                    n_spec_r = int(attn_metadata.num_spec_decodes)  # type: ignore[attr-defined]
+                    cu = spec_query_start_loc[: n_spec_r + 1].cpu().tolist()
+                    na_l = num_accepted_tokens[:n_spec_r].cpu().tolist()
+                    si_l = spec_state_indices_tensor[:n_spec_r].cpu().tolist()
+                    HV = value_spec.shape[-2]
+                    Vd = value_spec.shape[-1]
+                    Kd = query_spec.shape[-1]
+                    core_attn_out_spec = torch.empty_like(value_spec)
+                    last_recurrent_state = None
+                    for r in range(n_spec_r):
+                        bos, eos = cu[r], cu[r + 1]
+                        init_slot = int(si_l[r][na_l[r] - 1])
+                        cur = init_slot
+                        for t in range(bos, eos):
+                            mk = torch.cat([
+                                query_spec[t].reshape(-1),
+                                key_spec[t].reshape(-1),
+                                value_spec[t].reshape(-1),
+                            ]).unsqueeze(0).contiguous()
+                            o = torch.empty(1, 1, HV, Vd,
+                                            device=mk.device,
+                                            dtype=core_attn_out_spec.dtype)
+                            fused_recurrent_gated_delta_rule_packed_decode(
+                                mixed_qkv=mk,
+                                a=a_spec[t:t + 1].contiguous(),
+                                b=b_spec[t:t + 1].contiguous(),
+                                A_log=self.A_log,
+                                dt_bias=self.dt_bias,
+                                scale=Kd ** -0.5,
+                                initial_state=ssm_state,
+                                out=o,
+                                ssm_state_indices=torch.tensor(
+                                    [cur], dtype=torch.int32,
+                                    device=mk.device),
+                                use_qk_l2norm_in_kernel=True,
+                            )
+                            dst = int(si_l[r][t - bos])
+                            if dst > 0 and dst != cur:
+                                ssm_state[dst] = ssm_state[cur]
+                            cur = dst if dst > 0 else cur
+                            core_attn_out_spec[t] = o[0, 0]
+                    _routed = True
+                except Exception:
+                    if not getattr(self, "_svd_warn", False):
+                        self._svd_warn = True
+                        logger.warning(
+                            "GDN SPEC_VIA_DECODE routing fell back (dummy "
+                            "or shape mismatch); one-shot notice.")
+            if not _routed:
                 core_attn_out_spec, last_recurrent_state = (
                     fused_sigmoid_gating_delta_rule_update(
                         A_log=self.A_log,
