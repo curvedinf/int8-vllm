@@ -1729,6 +1729,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                             cur = dst if dst > 0 else cur
                             core_attn_out_spec[t] = o[0, 0]
                     _routed = True
+                    self._svd_ok = getattr(self, "_svd_ok", 0) + 1
+                    if self._svd_ok % 200 == 0:
+                        logger.info("SPEC_VIA_DECODE routed %d rounds", self._svd_ok)
                 except Exception:
                     if not getattr(self, "_svd_warn", False):
                         self._svd_warn = True
