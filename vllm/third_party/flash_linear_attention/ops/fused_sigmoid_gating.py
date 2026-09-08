@@ -116,6 +116,15 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
                 if (num_accepted < 1) | (
                     i_t * stride_indices_tok >= stride_indices_seq
                 ):
+                    # Zero-fill o over T: o is q.new_empty upstream, so a
+                    # bare return would leave the request's logits reading
+                    # uninitialized memory (vendored from
+                    # qwen38-27b-rtx3090 PR #50021 hunk 4).
+                    b_zero = tl.zeros([BV], dtype=tl.float32)
+                    for _t in range(T):
+                        tl.store(p_o, b_zero.to(p_o.dtype.element_ty),
+                                 mask=mask_v)
+                        p_o += HV * V
                     return
             else:
                 i_t = 0
@@ -125,6 +134,11 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
             )
             # Skip if state index is invalid (NULL_BLOCK_ID=0)
             if state_idx <= 0:
+                b_zero = tl.zeros([BV], dtype=tl.float32)
+                for _t in range(T):
+                    tl.store(p_o, b_zero.to(p_o.dtype.element_ty),
+                             mask=mask_v)
+                    p_o += HV * V
                 return
             p_h0 = h0 + state_idx * stride_init_state_token
         else:

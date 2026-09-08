@@ -112,15 +112,20 @@ def chunk_fwd_kernel_o(
         # [BT, BK] @ [BK, BT] -> [BT, BT]
         b_A += tl.dot(b_q, b_k)
 
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
     if USE_G:
         g += bos * H + i_h
         p_g = tl.make_block_ptr(g, (T,), (H,), (i_t * BT,), (BT,), (0,))
         b_g = tl.load(p_g, boundary_check=(0,))
+        # Mask b_g before the exp()s: uninitialized memory in partial
+        # boundary chunks can evaluate to NaNs in Triton and poison the
+        # recurrent state (vendored from qwen38-27b-rtx3090
+        # mamba-chunked-prefill-align patch hunk 2).
+        b_g = tl.where(m_t, b_g, 0.0)
         b_o = b_o * exp(b_g)[:, None]
         b_A = b_A * exp(b_g[:, None] - b_g[None, :])
 
-    o_t = i_t * BT + tl.arange(0, BT)
-    m_t = o_t < T
     m_A = (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t)
     b_A = tl.where(m_A, b_A, 0)
 
