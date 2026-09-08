@@ -1701,11 +1701,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                         init_slot = int(si_l[r][na_l[r] - 1])
                         cur = init_slot
                         for t in range(bos, eos):
-                            mk = torch.cat([
-                                query_spec[t].reshape(-1),
-                                key_spec[t].reshape(-1),
-                                value_spec[t].reshape(-1),
-                            ]).unsqueeze(0).contiguous()
+                            # The decode wrapper expects the CONV-OUTPUT
+                            # layout (the same tensor the non-spec decode
+                            # path feeds it), not a hand-built q|k|v concat.
+                            mk = mixed_qkv_spec[t:t + 1].contiguous()
                             o = torch.empty(1, 1, HV, Vd,
                                             device=mk.device,
                                             dtype=core_attn_out_spec.dtype)
