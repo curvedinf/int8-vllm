@@ -15,6 +15,7 @@ import torch
 # the verify path vs the clean-prefill replay of the same transcript at
 # matched positions to find the first layer whose outputs diverge.
 _LAYERPROBE_RECS: list = []
+_lp_n: list = []
 
 
 def _layerprobe_proj(model) -> torch.Tensor | None:
