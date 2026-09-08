@@ -1732,8 +1732,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     if self._svd_ok == 1:
                         logger.info("SPEC_VIA_DECODE routing ACTIVE (first round)")
                 except Exception as _e:
-                    if not getattr(self, "_svd_warn", False):
-                        self._svd_warn = True
+                    _key = repr(_e)[:80]
+                    self._svd_errs = getattr(self, "_svd_errs", set())
+                    if _key not in self._svd_errs and len(self._svd_errs) < 4:
+                        self._svd_errs.add(_key)
                         logger.warning(
                             "GDN SPEC_VIA_DECODE routing fell back: %r",
                             _e)
