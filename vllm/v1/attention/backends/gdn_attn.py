@@ -412,7 +412,18 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     )
             elif os.environ.get("VLLM_GDN_RING"):
                 ring = _GDN_RING.setdefault(id(self), [])
-                ring.append((spec_state_indices_tensor, num_accepted_tokens))
+                # .clone(): the graph path reuses the persistent buffer, so a
+                # bare reference snapshots only the LAST step's content.
+                ring.append(
+                    (
+                        spec_state_indices_tensor[
+                            : int(num_spec_decodes)
+                        ].clone(),
+                        num_accepted_tokens[
+                            : int(num_spec_decodes)
+                        ].clone(),
+                    )
+                )
                 if len(ring) > 20000:
                     del ring[:10000]
             # Race-bisect lever: sleep (pure CPU delay), stream (default
