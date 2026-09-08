@@ -1671,7 +1671,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 except Exception:
                     _gra_snap = None
             _via_dec = os.environ.get("VLLM_GDN_SPEC_VIA_DECODE")
-            if _via_dec and not torch.cuda.is_current_stream_capturing():
+            # Shape sanity gate: the boot dummy runs call this with
+            # placeholder tensors whose head dims are nonsense — only route
+            # when the layout matches the real model (a heads == v heads,
+            # q/k share head_dim).
+            if (
+                _via_dec
+                and not torch.cuda.is_current_stream_capturing()
+                and a_spec.shape[-1] == value_spec.shape[-2]
+                and query_spec.shape[-1] == key_spec.shape[-1]
+                and query_spec.shape[-1] > 0
+            ):
                 # Diagnostic A/B: route the verify GDN compute through the
                 # DECODE kernel (fused_recurrent_..._packed_decode) per
                 # token, preserving the spec checkpoint protocol (init from

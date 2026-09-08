@@ -401,6 +401,12 @@ if [[ -f "${LOG_DIR}/SWAUDIT" ]]; then
   VLLM_SWAUDIT="$(tr -d '[:space:]' < "${LOG_DIR}/SWAUDIT")"
 fi
 
+# SPECVIADECODE flag file: route verify GDN through the decode kernel
+# (diagnostic routing A/B for the G1b garble source).
+if [[ -f "${LOG_DIR}/SPECVIADECODE" ]]; then
+  VLLM_GDN_SPEC_VIA_DECODE=1
+fi
+
 # LAYERPROBE flag file: per-step per-layer random projections of the first
 # token row (verify vs prefill path divergence localization).
 if [[ -f "${LOG_DIR}/LAYERPROBE" ]]; then
@@ -556,6 +562,7 @@ start_server() {
   VLLM_SWAUDIT="${VLLM_SWAUDIT:-}" \
   VLLM_KVAUDIT="${VLLM_KVAUDIT:-}" \
   VLLM_LAYERPROBE="${VLLM_LAYERPROBE:-}" \
+  VLLM_GDN_SPEC_VIA_DECODE="${VLLM_GDN_SPEC_VIA_DECODE:-}" \
   VLLM_ALIGN_PROBE="${VLLM_ALIGN_PROBE:-}" \
   VLLM_GDN_PROBE="${VLLM_GDN_PROBE:-}" \
   VLLM_CONVGUARD_PROBE="${VLLM_CONVGUARD_PROBE:-}" \
