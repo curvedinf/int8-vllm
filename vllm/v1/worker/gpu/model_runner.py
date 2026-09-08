@@ -2078,6 +2078,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self._kvline_err = True
                         import traceback
                         traceback.print_exc()
+            _swa = os.environ.get("VLLM_SWAUDIT")
+            if (
+                _swa
+                and not self._in_dummy_run
+                and not torch.cuda.is_current_stream_capturing()
+            ):
+                try:
+                    self._sw_audit(input_batch, "pre")
+                except Exception:
+                    if not getattr(self, "_swa_err", False):
+                        self._swa_err = True
+                        import traceback
+                        traceback.print_exc()
             with use_workspace_lane(self._draft_workspace_lane):
                 draft_tokens = self.speculator.propose(
                     input_batch,
@@ -2098,6 +2111,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self._kvline_snap(
                         input_batch, slot_mappings_by_layer, "post"
                     )
+                except Exception:
+                    pass
+            if _swa and not self._in_dummy_run:
+                try:
+                    self._sw_audit(input_batch, "post")
                 except Exception:
                     pass
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
@@ -2168,6 +2186,93 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.postprocess_num_computed_tokens(input_batch)
         return async_output
 
+
+    def _sw_audit(self, input_batch, phase: str) -> None:
+        """Env-gated (VLLM_SWAUDIT): checksum the SHARED SW-group KV pages
+        (group id in the drafter's group set but hosting target layers,
+        e.g. Qwen3.8 layers 64-68 sharing the DFlash group). The prior
+        KVLINE audit excluded drafter groups, so these target pages were
+        never covered. Records, per step, the last-K page checksums of each
+        live request plus the logical position coverage, so the analysis can
+        detect (a) propose-window mutations (draft leaking writes) and
+        (b) mutation of already-written pages across rounds.
+        """
+        import json as _json
+
+        out_dir = os.environ["VLLM_SWAUDIT"]
+        n_req = input_batch.num_reqs
+        idx_map = input_batch.idx_mapping[:n_req].cpu().tolist()
+        from vllm.v1.kv_cache_interface import AttentionSpec as _AS
+
+        _sp = getattr(self, "speculator", None)
+        _draft_groups = set(
+            getattr(_sp, "draft_kv_cache_group_ids", []) or []
+        ) if _sp is not None else set()
+        # shared groups: in the drafter's set AND hosting target layers
+        shared = []
+        for gi, grp_list in enumerate(self.attn_groups):
+            for grp in grp_list:
+                if (
+                    gi in _draft_groups
+                    and isinstance(grp.kv_cache_spec, _AS)
+                ):
+                    shared.append((gi, grp))
+        if not shared:
+            return
+        gi, grp = shared[0]
+        bt = self.block_tables.input_block_tables[gi]
+        width = bt.shape[1]
+        fc = self.vllm_config.compilation_config.static_forward_context
+        ln = grp.layer_names[0]
+        impl = fc.get(ln)
+        kv = getattr(impl, "kv_cache", None) if impl else None
+        tensors = list(kv) if isinstance(kv, (list, tuple)) else [kv]
+        tensors = [t for t in tensors if torch.is_tensor(t)]
+        if not tensors:
+            return
+        pbs = int(grp.kv_cache_spec.block_size)
+        ncts = input_batch.num_computed_tokens_np
+        K = 6
+        rows = []
+        for r in range(n_req):
+            rs = idx_map[r]
+            if rs < 0:
+                continue
+            row = bt[r]
+            nblocks = int((row > 0).sum().item())
+            if nblocks <= 0:
+                continue
+            pages = []
+            for j in range(max(0, nblocks - K), nblocks):
+                blk = int(row[j])
+                if blk <= 0:
+                    continue
+                s = []
+                for t in tensors[:2]:
+                    if blk >= t.shape[0]:
+                        s.append(0.0)
+                        continue
+                    prow = t.reshape(t.shape[0], -1)[blk]
+                    s.append(round(float(prow.float().sum().item()), 3))
+                pages.append({"col": j, "blk": blk, "sums": s})
+            rows.append({
+                "phase": phase, "rs": int(rs), "r": r,
+                "nct": int(ncts[rs]) if rs < len(ncts) else -1,
+                "pbs": pbs, "nblocks": nblocks, "pages": pages,
+            })
+        self._swa_n = getattr(self, "_swa_n", 0)
+        recs = getattr(self, "_swa_recs", None)
+        if recs is None:
+            recs = self._swa_recs = []
+        recs.extend(rows)
+        if phase == "post":
+            self._swa_n += 1
+        if len(recs) >= 400:
+            os.makedirs(out_dir, exist_ok=True)
+            with open(os.path.join(out_dir, f"sw_{os.getpid()}.jsonl"), "a") as f:
+                for e in recs:
+                    f.write(_json.dumps(e) + "\n")
+            self._swa_recs = []
 
     def _kvline_snap(self, input_batch, slot_mappings_by_layer, phase: str) -> None:
         """Env-gated (VLLM_KVLINE_RING): per step, per request, checksum the

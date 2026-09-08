@@ -394,6 +394,13 @@ if [[ -f "${LOG_DIR}/GDNRING" ]]; then
   VLLM_GDN_RING="$(tr -d '[:space:]' < "${LOG_DIR}/GDNRING")"
 fi
 
+# SWAUDIT flag file: shared-group (target SW layers hosting a draft group)
+# KV page checksums around the draft propose and across rounds — the surface
+# the KVLINE audit never covered (it excluded drafter groups).
+if [[ -f "${LOG_DIR}/SWAUDIT" ]]; then
+  VLLM_SWAUDIT="$(tr -d '[:space:]' < "${LOG_DIR}/SWAUDIT")"
+fi
+
 # SALTU flag file: draw the acceptance-test uniform from a decorrelated
 # philox stream (same marginal; A/B lever for the wall-amplification hunt).
 if [[ -f "${LOG_DIR}/SALTU" ]]; then
@@ -533,6 +540,7 @@ start_server() {
   VLLM_GDNSTAT="${VLLM_GDNSTAT:-}" \
   VLLM_DRAFT_GARBAGE="${VLLM_DRAFT_GARBAGE:-}" \
   VLLM_GDN_RING="${VLLM_GDN_RING:-}" \
+  VLLM_SWAUDIT="${VLLM_SWAUDIT:-}" \
   VLLM_ALIGN_PROBE="${VLLM_ALIGN_PROBE:-}" \
   VLLM_GDN_PROBE="${VLLM_GDN_PROBE:-}" \
   VLLM_CONVGUARD_PROBE="${VLLM_CONVGUARD_PROBE:-}" \
