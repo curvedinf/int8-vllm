@@ -1726,7 +1726,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                             if dst > 0 and dst != cur:
                                 ssm_state[dst] = ssm_state[cur]
                             cur = dst if dst > 0 else cur
-                            core_attn_out_spec[t] = o[0, 0]
+                            core_attn_out_spec[0, t] = o[0, 0]
                     _routed = True
                     self._svd_ok = getattr(self, "_svd_ok", 0) + 1
                     if self._svd_ok == 1:
