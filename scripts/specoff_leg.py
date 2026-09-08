@@ -47,7 +47,8 @@ def main():
         "temperature": args.temp,
         "top_p": 1.0 if args.temp == 0.0 else 0.95,
         "top_k": -1 if args.temp == 0.0 else 20,
-        "logprobs": 0,
+        "logprobs": 1,
+        "return_token_ids": True,
         "seed": 5,
     }
     req = urllib.request.Request(
@@ -59,10 +60,9 @@ def main():
     dt = time.time() - t0
     ch = resp["choices"][0]
     text = ch.get("text", "")
-    lps = [e["logprob"] if e else None
-           for e in (ch.get("logprobs") or {}).get("content", [])]
-    ids = [e["token"] if e else None
-           for e in (ch.get("logprobs") or {}).get("content", [])]
+    lpd = ch.get("logprobs") or {}
+    lps = [x for x in (lpd.get("token_logprobs") or []) if x is not None]
+    ids = ch.get("token_ids") or [t for t in (lpd.get("tokens") or [])]
     out = f"/home/curved/vllm-gfx908/logs/garble/{args.tag}"
     with open(out + ".txt", "w") as f:
         f.write(text)
