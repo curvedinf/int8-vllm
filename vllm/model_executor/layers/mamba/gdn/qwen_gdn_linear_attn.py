@@ -1732,12 +1732,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     self._svd_ok = getattr(self, "_svd_ok", 0) + 1
                     if self._svd_ok == 1:
                         logger.info("SPEC_VIA_DECODE routing ACTIVE (first round)")
-                except Exception:
+                except Exception as _e:
                     if not getattr(self, "_svd_warn", False):
                         self._svd_warn = True
                         logger.warning(
-                            "GDN SPEC_VIA_DECODE routing fell back (dummy "
-                            "or shape mismatch); one-shot notice.")
+                            "GDN SPEC_VIA_DECODE routing fell back: %r",
+                            _e)
             if not _routed:
                 core_attn_out_spec, last_recurrent_state = (
                     fused_sigmoid_gating_delta_rule_update(
