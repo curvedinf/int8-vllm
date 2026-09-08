@@ -193,6 +193,16 @@ class DFlashSpeculator(DraftModelSpeculator):
         ]
         assert self.draft_kv_cache_group_ids, "No draft attention groups found."
         self.draft_kv_cache_group_id = self.draft_kv_cache_group_ids[0]
+        # Live-window bound for ctx-KV selection (see the kernel guard): the
+        # worker-side block table is append-only, so evicted entries hold
+        # stale nonzero ids that the !=0 guard cannot detect.
+        _win = 0
+        for _grp_list in self.attn_groups:
+            for _g in _grp_list or []:
+                _sw = getattr(_g.kv_cache_spec, "sliding_window", None)
+                if _sw is not None:
+                    _win = max(_win, int(_sw))
+        self._draft_window_tokens = _win
 
         # Per-group context slot buffers for the precompute (one row per group).
         self._context_slot_mappings = torch.zeros(
@@ -501,6 +511,7 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.max_num_reqs,
                 self.max_num_tokens,
                 self.max_model_len,
+                getattr(self, "_draft_window_tokens", 0),
                 self.sample_from_anchor,
             )
 
@@ -662,6 +673,7 @@ def _prepare_dflash_inputs_kernel(
     max_num_reqs,
     max_num_tokens,
     max_model_len,
+    window_tokens,
     cp_rank,
     SAMPLE_FROM_ANCHOR: tl.constexpr,
     PAD_SLOT_ID: tl.constexpr,
@@ -712,6 +724,17 @@ def _prepare_dflash_inputs_kernel(
     # to it after eviction; rejected suffix rows are invalid context as well.
     # Neither kind of row may write draft KV into physical block 0.
     ctx_resident = is_valid_ctx & (ctx_block_id != 0)
+    if window_tokens > 0:
+        # The worker-side block table is append-only: entries the scheduler
+        # evicted when the sliding window advanced still hold their stale
+        # nonzero block ids, so the != 0 guard above cannot detect them.
+        # Bound ctx selection to the LIVE window's block range: positions
+        # below (seq_len - window) are evicted by definition.
+        seq_len = last_valid_pos + 1
+        first_live_tok = tl.maximum(seq_len - window_tokens, 0)
+        first_live_blk = first_live_tok // (block_size * CP_SIZE)
+        ctx_resident &= ctx_pos >= first_live_tok
+        ctx_resident &= ctx_block_num >= first_live_blk
     local_ctx_slot = cp_local_slot(
         ctx_pos, ctx_block_id, block_size, cp_rank, CP_SIZE, CP_INTERLEAVE, PAD_SLOT_ID
     )
@@ -860,6 +883,7 @@ def prepare_dflash_inputs(
     max_num_reqs: int,
     max_num_tokens: int,
     max_model_len: int,
+    window_tokens: int = 0,
     sample_from_anchor: bool = False,
 ) -> None:
     num_reqs = input_batch.num_reqs
@@ -901,6 +925,7 @@ def prepare_dflash_inputs(
         max_num_reqs,
         max_num_tokens,
         max_model_len,
+        window_tokens,
         cp_rank,
         SAMPLE_FROM_ANCHOR=sample_from_anchor,
         PAD_SLOT_ID=PAD_SLOT_ID,
