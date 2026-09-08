@@ -1098,6 +1098,137 @@ class MambaSpecDecodeGPUContext:
             TEMPORAL_TILES=_TEMPORAL_TILES,
         )
 
+    def run_seed_spec_window(
+        self,
+        num_reqs: int,
+        state_idx_gpu: torch.Tensor,
+        spec_steps_gpu: torch.Tensor,
+        query_start_loc_gpu: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        num_spec_tokens: int,
+    ) -> None:
+        """Seed the spec checkpoint-window base column on a request's FIRST
+        speculative round (G1b handoff fix).
+
+        Mid-block, the align-mode spec gather reads bt[r, start+1 .. start+14]
+        where start+1 == state_idx + 1, while the maintained running state
+        lives at bt[r, state_idx]. A block-boundary crossing migrates the
+        running state, but the prefill -> spec-decode handoff typically lands
+        MID-BLOCK: no crossing, no migration, and the window base column holds
+        uninitialized conv/SSM (measured: 0.2-init conv vs the real 769.6
+        running buffer). The first verify rounds then read garbage history —
+        the positions-2-30 dirt present in every leg.
+
+        This pass copies conv+SSM from bt[r, state_idx] to bt[r, state_idx+1]
+        (identity copy, bias 0) exactly once per request: on the first step
+        whose per-request query length equals num_spec_tokens+1 (a spec
+        round). ``spec_steps_gpu`` counts spec rounds per request slot and is
+        reset by add_request.
+        """
+        if num_reqs == 0 or not self.is_initialized:
+            return
+        total_states = self.num_layers * self.num_state_types
+        grid = (num_reqs, total_states, _TEMPORAL_TILES)
+        seed_spec_window_kernel[grid](
+            state_idx_gpu,
+            spec_steps_gpu,
+            query_start_loc_gpu,
+            self.block_table_ptrs,
+            self.block_table_stride_req,
+            self.state_base_addrs,
+            self.state_block_strides,
+            self.state_elem_sizes,
+            self.state_inner_sizes,
+            self.state_conv_widths,
+            self.state_group_indices,
+            self.state_dim_row_count,
+            self.state_dim_row_stride,
+            idx_mapping,
+            num_reqs,
+            num_spec_tokens,
+            COPY_BLOCK_SIZE=1024,
+            CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
+            TEMPORAL_TILES=_TEMPORAL_TILES,
+        )
+
+
+@triton.jit(do_not_specialize=["num_reqs"])
+def seed_spec_window_kernel(
+    state_idx_ptr,
+    spec_steps_ptr,
+    query_start_loc_ptr,
+    block_table_ptrs_ptr,
+    block_table_stride_req,
+    state_base_addrs_ptr,
+    state_block_strides_ptr,
+    state_elem_sizes_ptr,
+    state_inner_sizes_ptr,
+    state_conv_widths_ptr,
+    state_group_indices_ptr,
+    state_dim_row_count_ptr,
+    state_dim_row_stride_ptr,
+    idx_mapping_ptr,
+    num_reqs,
+    num_spec_tokens,
+    COPY_BLOCK_SIZE: tl.constexpr,
+    CONV_STATE_DIM_FIRST: tl.constexpr,
+    TEMPORAL_TILES: tl.constexpr,
+):
+    """Grid: (num_reqs, num_states [, TEMPORAL_TILES]). For each spec-decode
+    request on its FIRST spec round, copy conv+SSM identity from
+    bt[row, state_idx] to bt[row, state_idx + 1] (the gather-base column).
+    Also increments the per-request spec-round counter."""
+    batch_idx = tl.program_id(0)
+    state_idx_flat = tl.program_id(1)
+    tile_idx = tl.program_id(2)
+    if batch_idx >= num_reqs:
+        return
+    req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
+    if req_state_idx < 0:
+        return
+    q_start = tl.load(query_start_loc_ptr + batch_idx)
+    q_end = tl.load(query_start_loc_ptr + batch_idx + 1)
+    q_len = q_end - q_start
+    if q_len != num_spec_tokens + 1:
+        return  # not a spec round (prefill chunk or non-spec decode)
+    # First spec round only: seed. The counter is incremented by the
+    # state_idx==0 program (each (req, state) pair runs once per tile; guard
+    # the increment on tile 0 / state 0 to avoid double counts).
+    steps = tl.load(spec_steps_ptr + req_state_idx)
+    if steps > 0:
+        if state_idx_flat == 0 and tile_idx == 0:
+            tl.store(spec_steps_ptr + req_state_idx, steps + 1)
+        return
+    if state_idx_flat == 0 and tile_idx == 0:
+        tl.store(spec_steps_ptr + req_state_idx, steps + 1)
+
+    col = tl.load(state_idx_ptr + req_state_idx)
+    if col < 0:
+        return
+    src_col = col
+    dst_col = col + 1
+    _copy_mamba_state_block(
+        state_idx_flat,
+        batch_idx,
+        src_col,
+        dst_col,
+        0,  # token_bias: identity copy of the running state
+        block_table_ptrs_ptr,
+        block_table_stride_req,
+        state_base_addrs_ptr,
+        state_block_strides_ptr,
+        state_elem_sizes_ptr,
+        state_inner_sizes_ptr,
+        state_conv_widths_ptr,
+        state_group_indices_ptr,
+        state_dim_row_count_ptr,
+        state_dim_row_stride_ptr,
+        tile_idx,
+        COPY_BLOCK_SIZE,
+        CONV_STATE_DIM_FIRST,
+        TEMPORAL_TILES,
+    )
+
 
 @dataclasses.dataclass
 class MambaBuffers:

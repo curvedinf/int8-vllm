@@ -100,6 +100,12 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_src_off_gpu = torch.zeros(
                 self.max_num_reqs, dtype=torch.int32, device=self.device
             )
+            # G1b handoff fix: per-request spec-round counter. The first
+            # spec round after prefill seeds the checkpoint-window base
+            # column from the running state (see run_seed_spec_window).
+            self._spec_steps_gpu = torch.zeros(
+                self.max_num_reqs, dtype=torch.int32, device=self.device
+            )
             self._mamba_ctx: MambaSpecDecodeGPUContext | None = None
             self._mamba_group_ids: list[int] = []
             self._mamba_spec: MambaSpec | None = None
@@ -108,6 +114,8 @@ class MambaHybridModelState(DefaultModelState):
         super().add_request(req_index, new_req_data)
         # Must reset the speculative acceptance count in this idx which could be stale.
         self.num_accepted_tokens_gpu[req_index].fill_(1)
+        if self._align_mode:
+            self._spec_steps_gpu[req_index].fill_(0)
         if self._align_mode:
             # Seed the running state block from the resumed/prefilled position.
             # Divide by the mamba group's block size, NOT cache_config.block_size:
@@ -237,6 +245,21 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_src_off_gpu,
             input_batch.idx_mapping,
         )
+        # G1b handoff fix: on each request's FIRST spec round, seed the
+        # checkpoint-window base column (bt[r, state_idx+1], the column the
+        # align-mode spec gather reads) from the running state at
+        # bt[r, state_idx]. Mid-block handoffs never cross a boundary, so
+        # the migration above does not run and the base column would hold
+        # uninitialized conv/SSM history for the first verify rounds.
+        if self.vllm_config.speculative_config is not None:
+            ctx.run_seed_spec_window(
+                num_reqs,
+                self._mamba_state_idx_gpu,
+                self._spec_steps_gpu,
+                input_batch.query_start_loc,
+                input_batch.idx_mapping,
+                self.vllm_config.speculative_config.num_speculative_tokens,
+            )
         if os.environ.get("VLLM_ALIGN_PROBE") and not torch.cuda.is_current_stream_capturing():
             self._align_probe(input_batch, mamba_group_ids, block_tables,
                               kv_cache_config, phase="post", pre=_pre)
