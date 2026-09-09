@@ -1117,6 +1117,11 @@ def main():
                         "teacher lm_head stays resident; ~1.4 s/step "
                         "transfer overhead — needed for rollout-length "
                         "sequences next to two 27B bodies on 32 GiB)")
+    p.add_argument("--corpus_mix", type=int, default=0,
+                   help="with --rollout_dir: interleave N corpus batches "
+                        "after every rollout batch (keeps teacher-forced "
+                        "corpus fidelity anchored while training rollout "
+                        "states; corpus batches use the same seq_len window)")
     args = p.parse_args()
 
     rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -1503,6 +1508,16 @@ def main():
 
     for batch in itertools.islice(_cycle(rollout_train_dl if args.rollout_dir
                                          else train_dl), args.max_steps):
+        # corpus_mix: after each rollout batch, also consume N corpus batches
+        # this step (both losses update the same weights — SGD is linear)
+        extra_batches = []
+        if args.rollout_dir and args.corpus_mix > 0:
+            for _ in range(args.corpus_mix):
+                try:
+                    extra_batches.append(next(train_dl))
+                except StopIteration:
+                    train_iter_corpus = _cycle(train_dl)
+                    extra_batches.append(next(train_iter_corpus))
         # Identical RNG state on every rank: the dither draws (act/weight/KV
         # quant exploration) then match across TP ranks, so the noisy forward
         # is the same objective everywhere (SDGraft's TP routing-seed rule).
@@ -1533,6 +1548,19 @@ def main():
             lm_loss, kl_loss = chunked_forward_loss(
                 student, teacher, x, y, args.distill_temperature,
                 args.logits_chunk, args.distill_weight, pos_mask=pos_mask)
+        # corpus-mix losses: scale grads accumulate into the same opt.step();
+        # weight grads apply immediately via the per-tensor hooks (SGD linear)
+        for cb in extra_batches:
+            cx, cy = cb[0].to(device), cb[1].to(device)
+            th = _teacher_forward(cx) if args.teacher_body_offload else None
+            if world > 1:
+                tp_vocab_parallel_losses(
+                    student, teacher, cx, cy, args.distill_temperature,
+                    args.logits_chunk, args.distill_weight, t_hidden=th)
+            else:
+                chunked_forward_loss(
+                    student, teacher, cx, cy, args.distill_temperature,
+                    args.logits_chunk, args.distill_weight)
         # the loss functions ran backward internally; grads are in place.
         apply_deferred_updates(student)  # lm_head's 16 partials, one apply
         if opt is not None:
