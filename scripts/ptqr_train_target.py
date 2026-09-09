@@ -478,7 +478,7 @@ def _mem(tag: str, rank: int):
 
 def tp_vocab_parallel_losses(student, teacher, x, y, temperature: float,
                              chunk: int, distill_weight: float,
-                             pos_mask=None):
+                             pos_mask=None, t_hidden=None):
     """Vocab-parallel chunked CE+KLD (exact cross-rank logsumexp).
 
     Ported from SDGraft _tp_vocab_parallel_losses for our on-device bf16
@@ -493,9 +493,14 @@ def tp_vocab_parallel_losses(student, teacher, x, y, temperature: float,
     _mem("loss enter", 0)
     hidden = student.model(input_ids=x).last_hidden_state
     _mem("student hidden done", 0)
-    with torch.no_grad():
-        t_hidden = teacher.model(input_ids=x).last_hidden_state
+    if t_hidden is None:
+        with torch.no_grad():
+            t_hidden = teacher.model(input_ids=x).last_hidden_state
     _mem("teacher hidden done", 0)
+    # collapse eval/backward fragmentation BEFORE the chunk loop (the peak
+    # phase); without this the caching allocator held ~1 GiB of split blocks
+    # and chunk-0 backward OOM'd with 0 bytes free (measured)
+    torch.cuda.empty_cache()
 
     H = hidden.shape[-1]
     s_flat = hidden.reshape(-1, H)
@@ -1106,13 +1111,24 @@ def main():
                    help="continue from a prior run's per-rank shards "
                         "(requires --init_step)")
     p.add_argument("--init_step", type=int, default=60)
+    p.add_argument("--teacher_body_offload", action="store_true",
+                   help="cycle the teacher's decoder body GPU<->host per step "
+                        "(frees ~14 GiB during the student backward; the "
+                        "teacher lm_head stays resident; ~1.4 s/step "
+                        "transfer overhead — needed for rollout-length "
+                        "sequences next to two 27B bodies on 32 GiB)")
     args = p.parse_args()
 
     rank = int(os.environ.get("LOCAL_RANK", "0"))
     world = int(os.environ.get("WORLD_SIZE", "1"))
     if world > 1:
         import torch.distributed as dist
-        dist.init_process_group(backend="nccl")  # RCCL underneath on ROCm
+        import datetime as _dt
+        # the serialized chain build + overlay can leave a rank inside a
+        # barrier for >10 min (rank 3 swap-squeezes ~20 min behind rank 0 —
+        # measured watchdog abort at the default 600 s)
+        dist.init_process_group(backend="nccl",
+                                timeout=_dt.timedelta(hours=2))
         torch.cuda.set_device(rank)
     device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")
     dtype = torch.bfloat16
@@ -1145,6 +1161,20 @@ def main():
         import ctypes
         try:
             ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
+
+    def _pd(tag: str) -> None:
+        try:
+            with open("/proc/self/smaps_rollup") as fh:
+                d = {}
+                for line in fh:
+                    if line.startswith(("Rss", "Private_Dirty", "Swap")):
+                        k, v = line.split(":")
+                        d[k] = int(v.split()[0]) / 2**20
+            print(f"[rank {rank}][mem] {tag}: rss {d.get('Rss', 0):.1f} GiB "
+                  f"priv-dirty {d.get('Private_Dirty', 0):.1f} GiB "
+                  f"swapped {d.get('Swap', 0):.1f} GiB", flush=True)
         except Exception:
             pass
 
@@ -1187,27 +1217,9 @@ def main():
                 mod.row_reduce_group = group
         student.lm_head.tp_vocab_start = vocab_range[0]
 
-    # rung-2 continuation: overlay a prior run's per-rank masters+scales
-    # (stripped-key form; same TP geometry since sharding is deterministic)
-    if args.init_ckpt_dir:
-        init_path = (Path(args.init_ckpt_dir) /
-                     f"ptqr_target_step{args.init_step}_rank{rank}.pt")
-        if not init_path.exists() and world == 1:
-            init_path = Path(args.init_ckpt_dir) / f"ptqr_target_step{args.init_step}.pt"
-        ck = torch.load(init_path, map_location="cpu", mmap=True, weights_only=True)
-        sd = {(("model." + k) if not k.startswith("lm_head") else k): v
-              for k, v in ck["model_state_dict"].items()}
-        missing, unexpected = student.load_state_dict(sd, strict=False, assign=True)
-        student._init_ckpt_ref = ck  # keep the mmap alive
-        n_ws = sum(1 for k in sd if k.endswith(".weight") or k.endswith(".scale"))
-        fatal = [k for k in missing
-                 if (k.endswith(".weight") or k.endswith(".scale"))
-                 and (k.startswith("model.layers") or k.startswith("lm_head"))]
-        print(f"[rank {rank}] init from {init_path.name}: {len(sd)} tensors "
-              f"({n_ws} weight/scale), missing {len(missing)}, "
-              f"unexpected {len(unexpected)}", flush=True)
-        if fatal:
-            raise RuntimeError(f"init ckpt missing trainable tensors: {fatal[:6]}")
+    # rung-2 continuation happens after student.to(device) (see below) — the
+    # serialized build slot is host-RAM bound (measured wedge at rank 2 when
+    # the 15.5 GiB init mmap was faulted pre-.to and its storages retained).
 
     # Only the PTQR masters + group scales train; everything else (embeddings,
     # norms, biases, conv1d, A_log/dt_bias) is frozen at the reference values.
@@ -1221,6 +1233,7 @@ def main():
     fake_quant_embedding_(student.model.embed_tokens)
     _trim()
     _mem("student on GPU", rank)
+    _pd("student on GPU")
     print(f"[rank {rank}] student on GPU; building teacher ...", flush=True)
 
     teacher = build_lm_model(args, dtype, args.attn_impl)
@@ -1238,6 +1251,7 @@ def main():
     teacher.to(device)
     _trim()
     _mem("teacher on GPU", rank)
+    _pd("teacher on GPU")
 
     if world > 1:
         # Release reserved-but-unallocated VRAM so NCCL's first-collective
@@ -1246,6 +1260,83 @@ def main():
         torch.cuda.empty_cache()
         open(done_flag, "w").write("x")
         torch.distributed.barrier()
+
+    # rung-2 continuation: overlay a prior run's per-rank masters+scales onto
+    # the GPU-resident student. Runs AFTER all ranks finished building (the
+    # build window is host-RAM critical — overlaying inside it segfaulted
+    # rank 2/3 under pressure; measured twice). Serialized by a second chain:
+    # each overlay's transient mmap faults stay file-backed and evictable,
+    # and only one rank faults at a time.
+    if args.init_ckpt_dir:
+        import re as _re
+        if world > 1:
+            import time as _t2
+            if rank > 0:
+                while not os.path.exists(f"/tmp/ptqr_ov_{ppid}_{rank - 1}.done"):
+                    _t2.sleep(2)
+        _pd("pre-overlay")
+        init_path = (Path(args.init_ckpt_dir) /
+                     f"ptqr_target_step{args.init_step}_rank{rank}.pt")
+        if not init_path.exists() and world == 1:
+            init_path = (Path(args.init_ckpt_dir) /
+                         f"ptqr_target_step{args.init_step}.pt")
+        ck = torch.load(init_path, map_location="cpu", mmap=True,
+                        weights_only=True)
+        live = dict(student.named_parameters())
+        live.update(dict(student.named_buffers()))
+        # Pageable->GPU copies stage through torch's PINNED host cache, which
+        # never shrinks (no host_empty_cache in this build) — a direct
+        # .to(device) per tensor retained the full 15.5 GiB shard per rank
+        # (measured +14.6 GiB priv-dirty, host-exhaustion segfaults). Route
+        # every copy through ONE reused pinned scratch so the cache stays
+        # scratch-sized regardless of checkpoint size.
+        SCR_BYTES = 256 << 20
+        scr_by_dtype: dict[torch.dtype, torch.Tensor] = {}
+
+        def _h2d(p, v):
+            dt = v.dtype
+            s = scr_by_dtype.get(dt)
+            if s is None:
+                s = torch.empty(SCR_BYTES // dt.itemsize, dtype=dt,
+                                pin_memory=True)
+                scr_by_dtype[dt] = s
+            fv, fp = v.reshape(-1), p.reshape(-1)
+            nel = fv.numel()
+            step = s.numel()
+            for off in range(0, nel, step):
+                n = min(step, nel - off)
+                s[:n].copy_(fv[off:off + n])
+                fp[off:off + n].copy_(s[:n])
+
+        n_load, n_bad = 0, []
+        with torch.no_grad():
+            for k, v in ck["model_state_dict"].items():
+                tk = k if k.startswith("lm_head") else "model." + k
+                # R10 shards were saved with the gradient-checkpoint wrapper
+                # installed: layers.N.layer.* -> layers.N.*
+                tk = _re.sub(r"^(model\.layers\.\d+)\.layer\.", r"\1.", tk)
+                p = live.get(tk)
+                if p is None:
+                    n_bad.append(tk)
+                    continue
+                if v.dtype == p.dtype and v.is_contiguous() and p.is_contiguous():
+                    _h2d(p, v)
+                else:
+                    p.copy_(v.to(p.device, p.dtype))
+                n_load += 1
+        del live, ck, scr_by_dtype
+        _trim()
+        _pd("post-overlay")
+        if world > 1:
+            open(f"/tmp/ptqr_ov_{ppid}_{rank}.done", "w").write("x")
+            torch.distributed.barrier()
+        fatal = [k for k in n_bad
+                 if k.endswith((".weight", ".scale"))
+                 and (k.startswith("model.layers") or k.startswith("lm_head"))]
+        print(f"[rank {rank}] init overlay from {init_path.name}: "
+              f"{n_load} tensors copied, {len(n_bad)} unmatched", flush=True)
+        if fatal:
+            raise RuntimeError(f"init ckpt trainable tensors unmatched: {fatal[:6]}")
 
     # This HF impl never calls _gradient_checkpointing_func, so wrap the
     # decoder layers ourselves (full retention is ~5-6 GiB at 4k tokens).
@@ -1288,6 +1379,79 @@ def main():
 
     kv_state_refs = [m._ptqr_kv_state for m in student.model.modules()
                      if hasattr(m, "_ptqr_kv_state")]
+
+    # teacher-body offload helpers: the body layers swap GPU<->file-backed
+    # mmap views of a per-rank scratch file. A plain GPU->host .to('cpu')
+    # materializes 14 GiB of ANON per rank (4x = 56 GiB — host OOM-killed a
+    # run); the teacher is frozen, so file pages are exact, evictable, and
+    # ~free. The shared embedding table and the teacher lm_head never swap.
+    t_params = dict(teacher.named_parameters())
+    _T_SKIP = ("embed_tokens.", "lm_head.")
+    _t_body_names = [n for n in t_params
+                     if not any(s in n for s in _T_SKIP)]
+    _t_mck = None
+    if args.teacher_body_offload:
+        scratch_path = (Path(args.out_dir) /
+                        f"teacher_body_scratch_rank{rank}.pt")
+        if world > 1:
+            import time as _t3
+            if rank > 0:
+                while not os.path.exists(
+                        f"{scratch_path.parent}/tbs_{rank - 1}.done"):
+                    _t3.sleep(2)
+        if not scratch_path.exists():
+            _sd = {n: t_params[n].detach().cpu() for n in _t_body_names}
+            torch.save(_sd, scratch_path)
+            del _sd
+            _trim()
+        _t_mck = torch.load(scratch_path, map_location="cpu", mmap=True,
+                            weights_only=True)
+        assert set(_t_mck.keys()) == set(_t_body_names)
+        if world > 1:
+            open(f"{scratch_path.parent}/tbs_{rank}.done", "w").write("x")
+        print(f"[rank {rank}] teacher body scratch: {scratch_path.name} "
+              f"({len(_t_body_names)} tensors)", flush=True)
+
+    def _teacher_body_off():
+        if _t_mck is None:
+            return
+        for n in _t_body_names:
+            t_params[n].data = _t_mck[n]     # drop GPU refs -> freed
+        torch.cuda.empty_cache()
+
+    _pin_scratch: dict[torch.dtype, torch.Tensor] = {}
+
+    def _h2d_file(t):
+        # mmap view -> GPU through ONE reused pinned scratch per dtype (a
+        # direct .to(device) stages through the never-shrinking pinned host
+        # cache — the +14.6 GiB priv-dirty mechanism, measured)
+        dt = t.dtype
+        s = _pin_scratch.get(dt)
+        if s is None:
+            s = torch.empty((64 << 20) // dt.itemsize, dtype=dt,
+                            pin_memory=True)
+            _pin_scratch[dt] = s
+        g = torch.empty(t.shape, dtype=dt, device=device)
+        fv, gv = t.reshape(-1), g.reshape(-1)
+        for off in range(0, fv.numel(), s.numel()):
+            n2 = min(s.numel(), fv.numel() - off)
+            s[:n2].copy_(fv[off:off + n2])
+            gv[off:off + n2].copy_(s[:n2])
+        return g
+
+    def _teacher_body_on():
+        if _t_mck is None:
+            return
+        for n in _t_body_names:
+            t_params[n].data = _h2d_file(_t_mck[n])
+
+    def _teacher_forward(x):
+        _teacher_body_on()
+        with torch.no_grad():
+            t_h = teacher.model(input_ids=x).last_hidden_state
+        _teacher_body_off()
+        return t_h
+
     student.train()
     if args.no_ptqr:
         # Control run: nothing requires grad, so skip training entirely —
@@ -1327,9 +1491,12 @@ def main():
             m.tau = 0.0
         for st in kv_state_refs:
             st["tau"] = 0.0
+        _teacher_body_on()
         _rlm, _rkl = eval_kld(student, teacher, rollout_val_dl,
                               args.rollout_val_n, args.logits_chunk,
                               args.distill_temperature)
+        _teacher_body_off()
+        torch.cuda.empty_cache()
         if rank == 0:
             print(f"[eval-rollout] step 0 (init) | rollout KLD/tok {_rkl:.6f} "
                   f"| CE {_rlm:.4f}", flush=True)
@@ -1356,10 +1523,12 @@ def main():
             pos_mask = None
         if opt is not None:
             opt.zero_grad(set_to_none=True)
+        t_hidden = _teacher_forward(x) if args.teacher_body_offload else None
         if world > 1:
             lm_loss, kl_loss = tp_vocab_parallel_losses(
                 student, teacher, x, y, args.distill_temperature,
-                args.logits_chunk, args.distill_weight, pos_mask=pos_mask)
+                args.logits_chunk, args.distill_weight, pos_mask=pos_mask,
+                t_hidden=t_hidden)
         else:
             lm_loss, kl_loss = chunked_forward_loss(
                 student, teacher, x, y, args.distill_temperature,
@@ -1387,16 +1556,19 @@ def main():
                 m.tau = 0.0
             for st in kv_state_refs:
                 st["tau"] = 0.0
+            _teacher_body_on()
             ev_lm, ev_kl = eval_kld(student, teacher, val_dl, args.eval_steps,
                                     args.logits_chunk, args.distill_temperature)
-            if rank == 0:
-                print(f"[eval] step {step} | val CE {ev_lm:.4f} | val KLD/tok {ev_kl:.6f}",
-                      flush=True)
             if args.rollout_dir and rollout_val_dl is not None:
                 _rlm, _rkl = eval_kld(student, teacher, rollout_val_dl,
                                       args.rollout_val_n, args.logits_chunk,
                                       args.distill_temperature)
-                if rank == 0:
+            _teacher_body_off()
+            torch.cuda.empty_cache()
+            if rank == 0:
+                print(f"[eval] step {step} | val CE {ev_lm:.4f} | val KLD/tok {ev_kl:.6f}",
+                      flush=True)
+                if args.rollout_dir and rollout_val_dl is not None:
                     print(f"[eval-rollout] step {step} | rollout KLD/tok {_rkl:.6f} "
                           f"| CE {_rlm:.4f}", flush=True)
             for m in replaced.values():
