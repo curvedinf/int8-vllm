@@ -352,7 +352,7 @@ class MambaHybridModelState(DefaultModelState):
             seq_lens = input_batch.seq_lens[:n_req].cpu().tolist()
         except Exception:
             seq_lens = [0] * n_req
-        do_slice = (n % 8) == 0
+        do_slice = (n % 8) == 0 if not os.environ.get("VLLM_GDNSTAT_SLICE_ALL") else True
         rows = []
         for r in range(n_req):
             rs = idx_map[r]
