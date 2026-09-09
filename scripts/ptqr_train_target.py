@@ -477,7 +477,8 @@ def _mem(tag: str, rank: int):
 
 
 def tp_vocab_parallel_losses(student, teacher, x, y, temperature: float,
-                             chunk: int, distill_weight: float):
+                             chunk: int, distill_weight: float,
+                             pos_mask=None):
     """Vocab-parallel chunked CE+KLD (exact cross-rank logsumexp).
 
     Ported from SDGraft _tp_vocab_parallel_losses for our on-device bf16
@@ -501,6 +502,12 @@ def tp_vocab_parallel_losses(student, teacher, x, y, temperature: float,
     t_flat = t_hidden.reshape(-1, H)
     y_flat = y.reshape(-1)
     n_tok = s_flat.shape[0]
+    # rollout mode: loss only on student-generated (committed) positions
+    mask_flat = None
+    n_norm = float(n_tok)
+    if pos_mask is not None:
+        mask_flat = pos_mask.reshape(-1).to(s_flat.device)
+        n_norm = max(1.0, mask_flat.sum().item())
     T = temperature
     s_head, t_head = student.lm_head, teacher.lm_head
     s_v0 = int(getattr(s_head, "tp_vocab_start", 0))
@@ -538,7 +545,10 @@ def tp_vocab_parallel_losses(student, teacher, x, y, temperature: float,
         in_shard = (y_local >= 0) & (y_local < logits_c.shape[-1])
         y_safe = y_local.clamp(0, logits_c.shape[-1] - 1)
         picked = logits_c.gather(1, y_safe.unsqueeze(1)).squeeze(1)
-        ce_sum_c = (lse - torch.where(in_shard, picked, torch.zeros_like(picked))).sum()
+        ce_rows = lse - torch.where(in_shard, picked, torch.zeros_like(picked))
+        if mask_flat is not None:
+            ce_rows = ce_rows * mask_flat[i: i + chunk]
+        ce_sum_c = ce_rows.sum()
 
         with torch.no_grad():
             t_logits = t_head(t_flat[i: i + chunk]).float()
@@ -546,14 +556,19 @@ def tp_vocab_parallel_losses(student, teacher, x, y, temperature: float,
             t_logp = t_logits - t_lse.unsqueeze(-1)
             t_prob = t_logp.exp()
         s_logp = logits_c - lse.unsqueeze(-1)
-        kl_c = (t_prob * (t_logp - s_logp)).sum() * (T * T)
+        kl_rows = (t_prob * (t_logp - s_logp)).sum(-1) * (T * T)
+        if mask_flat is not None:
+            kl_rows = kl_rows * mask_flat[i: i + chunk]
+        kl_c = kl_rows.sum()
 
-        ((ce_sum_c + distill_weight * kl_c) / n_tok).backward()
+        ((ce_sum_c + distill_weight * kl_c) / n_norm).backward()
         with torch.no_grad():
             h_grad[i: i + chunk] = h_c.grad if h_c.grad is not None else torch.zeros_like(h_c)
-        ce_val_c = (lse * inv_world - torch.where(in_shard, picked, torch.zeros_like(picked))).sum()
-        lm_total += ce_val_c.item() / n_tok
-        kl_total += kl_c.item() / n_tok
+        ce_val_c = (lse * inv_world - torch.where(in_shard, picked, torch.zeros_like(picked)))
+        if mask_flat is not None:
+            ce_val_c = ce_val_c * mask_flat[i: i + chunk]
+        lm_total += ce_val_c.sum().item() / n_norm
+        kl_total += kl_c.item() / n_norm
         del logits_c, h_c
 
     torch.autograd.set_multithreading_enabled(False)
@@ -576,14 +591,22 @@ def eval_kld(student, teacher, val_iter, steps: int, chunk: int, temperature: fl
     world = dist.get_world_size() if dist.is_initialized() else 1
     student.eval()
     lm_sum, kl_sum = 0.0, 0.0
-    for i, (x, y) in enumerate(itertools.islice(val_iter, steps)):
-        x, y = x.cuda(), y.cuda()
+    for i, item in enumerate(itertools.islice(val_iter, steps)):
+        if len(item) == 3:  # rollout sample: (x, y, pos_mask)
+            x, y, mask = item
+            x, y, mask = x.cuda(), y.cuda(), mask.cuda()
+        else:
+            x, y = item
+            mask = None
+            x, y = x.cuda(), y.cuda()
         s_h = student.model(input_ids=x).last_hidden_state
         t_h = teacher.model(input_ids=x).last_hidden_state
         H = s_h.shape[-1]
         s_flat, t_flat = s_h.reshape(-1, H), t_h.reshape(-1, H)
         y_flat = y.reshape(-1)
+        mask_flat = mask.reshape(-1) if mask is not None else None
         n_tok = s_flat.shape[0]
+        nrm = mask_flat.sum().item() if mask_flat is not None else n_tok
         kl_step, lm_step = 0.0, 0.0
         s_v0 = int(getattr(student.lm_head, "tp_vocab_start", 0))
         for j in range(0, n_tok, chunk):
@@ -604,17 +627,23 @@ def eval_kld(student, teacher, val_iter, steps: int, chunk: int, temperature: fl
             s_logp = s_lc - s_lse.unsqueeze(-1)
             t_logp = t_lc - t_lse.unsqueeze(-1)
             t_prob = t_logp.exp()
-            kl_step += (t_prob * (t_logp - s_logp)).sum().item()
+            kl_rows = (t_prob * (t_logp - s_logp)).sum(-1)
             y_local = y_flat[j: j + chunk] - s_v0
             in_shard = (y_local >= 0) & (y_local < s_lc.shape[-1])
             y_safe = y_local.clamp(0, s_lc.shape[-1] - 1)
             picked = s_lc.gather(1, y_safe.unsqueeze(1)).squeeze(1)
             # every rank owns lse/world of the denominator; only the target's
             # owner carries the -logit term (exact after the cross-rank sum)
-            lm_step += (s_lse / world - torch.where(in_shard, picked, torch.zeros_like(picked))).sum().item()
+            lm_rows = s_lse / world - torch.where(in_shard, picked, torch.zeros_like(picked))
+            if mask_flat is not None:
+                m_c = mask_flat[j: j + chunk]
+                kl_rows = kl_rows * m_c
+                lm_rows = lm_rows * m_c
+            kl_step += kl_rows.sum().item()
+            lm_step += lm_rows.sum().item()
             del s_lc, t_lc, s_logp, t_logp, t_prob
-        kl_sum += kl_step / n_tok
-        lm_sum += lm_step / n_tok
+        kl_sum += kl_step / max(1.0, nrm)
+        lm_sum += lm_step / max(1.0, nrm)
         del s_h, t_h, s_flat, t_flat
     if world > 1:
         part = torch.tensor([lm_sum, kl_sum], device="cuda")
@@ -629,7 +658,7 @@ def eval_kld(student, teacher, val_iter, steps: int, chunk: int, temperature: fl
 # ---------------------------------------------------------------------------
 
 def chunked_forward_loss(student, teacher, x, y, temperature: float,
-                         chunk: int, distill_weight: float):
+                         chunk: int, distill_weight: float, pos_mask=None):
     """Token-chunked student/teacher forward + CE/KL loss (see SDGraft).
 
     Peak memory is one chunk's [chunk, V] softmax set; per-chunk detached-head
@@ -648,6 +677,11 @@ def chunked_forward_loss(student, teacher, x, y, temperature: float,
     t_flat = t_hidden.reshape(-1, H)
     y_flat = y.reshape(-1)
     n_tok = s_flat.shape[0]
+    mask_flat = None
+    n_norm = float(n_tok)
+    if pos_mask is not None:
+        mask_flat = pos_mask.reshape(-1).to(s_flat.device)
+        n_norm = max(1.0, mask_flat.sum().item())
 
     head_dev = s_flat.device
     h_grad = torch.zeros_like(s_flat)
@@ -660,21 +694,27 @@ def chunked_forward_loss(student, teacher, x, y, temperature: float,
         h_c = s_flat[i: i + chunk].detach().requires_grad_(True)
         logits_c = student_head(h_c)
         y_c = y_flat[i: i + chunk]
-        lm_c = F.cross_entropy(logits_c, y_c, reduction="sum")
+        ce_rows = F.cross_entropy(logits_c, y_c, reduction="none")
         student_log_probs = F.log_softmax(logits_c / T, dim=-1)
         del logits_c
         with torch.no_grad():
             t_logits_c = teacher_head(t_flat[i: i + chunk].to(teacher_head.weight.device)).to(head_dev)
             teacher_probs = F.softmax(t_logits_c / T, dim=-1)
             del t_logits_c
-        kl_c = F.kl_div(student_log_probs, teacher_probs, reduction="none").sum() * (T * T)
+        kl_rows = F.kl_div(student_log_probs, teacher_probs,
+                           reduction="none").sum(-1) * (T * T)
+        if mask_flat is not None:
+            m_c = mask_flat[i: i + chunk]
+            ce_rows = ce_rows * m_c
+            kl_rows = kl_rows * m_c
+        lm_c, kl_c = ce_rows.sum(), kl_rows.sum()
         del student_log_probs, teacher_probs
-        ((lm_c + distill_weight * kl_c) / n_tok).backward()
+        ((lm_c + distill_weight * kl_c) / n_norm).backward()
         with torch.no_grad():
             g = h_c.grad if h_c.grad is not None else torch.zeros_like(h_c)
             h_grad[i: i + chunk] = g
-        lm_total += lm_c.item() / n_tok
-        kl_total += kl_c.item() / n_tok
+        lm_total += lm_c.item() / n_norm
+        kl_total += kl_c.item() / n_norm
         del lm_c, kl_c, h_c
     torch.autograd.set_multithreading_enabled(False)
     hidden.backward(h_grad.reshape(hidden.shape))
@@ -965,6 +1005,62 @@ def build_dataloader(data_path: str, seq_len: int, batch_size: int,
                                        shuffle=True, drop_last=True, num_workers=0)
 
 
+class _RolloutDS(torch.utils.data.Dataset):
+    """DAgger-style rollout transcripts: (ctx tail + committed) sequences.
+
+    Loss lives only on the committed (student-generated) region; the prompt is
+    truncated to the last --ctx_window tokens (checkpoint-boundary memory makes
+    full 20k+ contexts infeasible next to two models; the Path B ranking showed
+    per-state int8 noise is context-length-independent, so the truncated-window
+    states carry the same corrective signal).
+    """
+
+    def __init__(self, items, ctx_window: int):
+        self.items = items          # list[(prompt_ids(list), committed(list), tag)]
+        self.ctx = ctx_window
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, i):
+        prompt, committed, _tag = self.items[i]
+        ctx = list(prompt[-self.ctx:])
+        seq = ctx + list(committed)
+        x = torch.tensor(seq[:-1], dtype=torch.long)
+        y = torch.tensor(seq[1:], dtype=torch.long)
+        mask = torch.zeros_like(y)
+        mask[len(ctx) - 1:] = 1     # y[j] predicts seq[j+1]; train iff committed
+        return x, y, mask
+
+
+def build_rollout_loaders(rollout_dir: str, ctx_window: int, val_n: int):
+    import glob as _glob
+    items = []
+    for f in sorted(_glob.glob(os.path.join(rollout_dir, "*_committed.pt"))):
+        tag = os.path.basename(f)[: -len("_committed.pt")]
+        ids_f = os.path.join(rollout_dir, f"{tag}_ids.pt")
+        if not os.path.exists(ids_f):
+            print(f"  [rollout] skip {tag}: no ids file", flush=True)
+            continue
+        prompt = torch.load(ids_f, weights_only=False)["prompt_ids"]
+        committed = torch.load(f, weights_only=False)["committed_ids"]
+        if len(committed) < 64:
+            print(f"  [rollout] skip {tag}: only {len(committed)} committed", flush=True)
+            continue
+        items.append((list(prompt), list(committed), tag))
+    if len(items) < val_n + 1:
+        raise RuntimeError(f"only {len(items)} usable rollout legs in {rollout_dir}")
+    val_items = items[-val_n:] if val_n else []
+    train_items = items[: len(items) - (val_n if val_n else 0)]
+    train_dl = torch.utils.data.DataLoader(_RolloutDS(train_items, ctx_window),
+                                           batch_size=1, shuffle=False, num_workers=0)
+    val_dl = torch.utils.data.DataLoader(_RolloutDS(val_items, ctx_window),
+                                         batch_size=1, shuffle=False, num_workers=0)
+    print(f"  [rollout] {len(train_items)} train legs, {len(val_items)} val legs "
+          f"(ctx_window {ctx_window})", flush=True)
+    return train_dl, val_dl
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model", default="/home/curved/models/Qwen3.8-27B-bf16-ref")
@@ -998,6 +1094,18 @@ def main():
                    help="infrastructure control: unquantized student (teacher-vs-teacher); "
                         "isolates TP/attn/checkpoint bugs from quant-stack bugs")
     p.add_argument("--attn_impl", default="rocm_triton")
+    p.add_argument("--rollout_dir", default=None,
+                   help="DAgger rollouts: dir of {tag}_ids.pt + {tag}_committed.pt "
+                        "legs; replaces the corpus train set (loss masked to "
+                        "the committed region; corpus KLD still eval'd)")
+    p.add_argument("--ctx_window", type=int, default=4096,
+                   help="rollout prompt truncation window (memory-bound)")
+    p.add_argument("--rollout_val_n", type=int, default=4,
+                   help="last N legs held out for rollout-val KLD")
+    p.add_argument("--init_ckpt_dir", default=None,
+                   help="continue from a prior run's per-rank shards "
+                        "(requires --init_step)")
+    p.add_argument("--init_step", type=int, default=60)
     args = p.parse_args()
 
     rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -1079,6 +1187,28 @@ def main():
                 mod.row_reduce_group = group
         student.lm_head.tp_vocab_start = vocab_range[0]
 
+    # rung-2 continuation: overlay a prior run's per-rank masters+scales
+    # (stripped-key form; same TP geometry since sharding is deterministic)
+    if args.init_ckpt_dir:
+        init_path = (Path(args.init_ckpt_dir) /
+                     f"ptqr_target_step{args.init_step}_rank{rank}.pt")
+        if not init_path.exists() and world == 1:
+            init_path = Path(args.init_ckpt_dir) / f"ptqr_target_step{args.init_step}.pt"
+        ck = torch.load(init_path, map_location="cpu", mmap=True, weights_only=True)
+        sd = {(("model." + k) if not k.startswith("lm_head") else k): v
+              for k, v in ck["model_state_dict"].items()}
+        missing, unexpected = student.load_state_dict(sd, strict=False, assign=True)
+        student._init_ckpt_ref = ck  # keep the mmap alive
+        n_ws = sum(1 for k in sd if k.endswith(".weight") or k.endswith(".scale"))
+        fatal = [k for k in missing
+                 if (k.endswith(".weight") or k.endswith(".scale"))
+                 and (k.startswith("model.layers") or k.startswith("lm_head"))]
+        print(f"[rank {rank}] init from {init_path.name}: {len(sd)} tensors "
+              f"({n_ws} weight/scale), missing {len(missing)}, "
+              f"unexpected {len(unexpected)}", flush=True)
+        if fatal:
+            raise RuntimeError(f"init ckpt missing trainable tensors: {fatal[:6]}")
+
     # Only the PTQR masters + group scales train; everything else (embeddings,
     # norms, biases, conv1d, A_log/dt_bias) is frozen at the reference values.
     for p_ in student.parameters():
@@ -1148,6 +1278,10 @@ def main():
     # deterministic eval: identical batches every eval (no shuffle) so KLD
     # points are directly comparable across steps and runs
     val_dl.shuffle = False
+    rollout_train_dl = rollout_val_dl = None
+    if args.rollout_dir:
+        rollout_train_dl, rollout_val_dl = build_rollout_loaders(
+            args.rollout_dir, args.ctx_window, args.rollout_val_n)
     out_dir = Path(args.out_dir)
     if rank == 0:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -1181,7 +1315,27 @@ def main():
         print("[done]", flush=True)
         return
     step = 0
-    for x, y in itertools.islice(train_dl, args.max_steps):
+
+    def _cycle(dl):
+        while True:
+            for b in dl:
+                yield b
+
+    # rollout baseline BEFORE any update (rung-2 comparability)
+    if args.rollout_dir and rollout_val_dl is not None:
+        for m in replaced.values():
+            m.tau = 0.0
+        for st in kv_state_refs:
+            st["tau"] = 0.0
+        _rlm, _rkl = eval_kld(student, teacher, rollout_val_dl,
+                              args.rollout_val_n, args.logits_chunk,
+                              args.distill_temperature)
+        if rank == 0:
+            print(f"[eval-rollout] step 0 (init) | rollout KLD/tok {_rkl:.6f} "
+                  f"| CE {_rlm:.4f}", flush=True)
+
+    for batch in itertools.islice(_cycle(rollout_train_dl if args.rollout_dir
+                                         else train_dl), args.max_steps):
         # Identical RNG state on every rank: the dither draws (act/weight/KV
         # quant exploration) then match across TP ranks, so the noisy forward
         # is the same objective everywhere (SDGraft's TP routing-seed rule).
@@ -1192,17 +1346,24 @@ def main():
         for st in kv_state_refs:
             st["tau"] = tau
 
-        x, y = x.to(device), y.to(device)
+        if len(batch) == 3:
+            x, y, pos_mask = batch
+            x, y = x.to(device), y.to(device)
+            pos_mask = pos_mask.to(device)
+        else:
+            x, y = batch
+            x, y = x.to(device), y.to(device)
+            pos_mask = None
         if opt is not None:
             opt.zero_grad(set_to_none=True)
         if world > 1:
             lm_loss, kl_loss = tp_vocab_parallel_losses(
                 student, teacher, x, y, args.distill_temperature,
-                args.logits_chunk, args.distill_weight)
+                args.logits_chunk, args.distill_weight, pos_mask=pos_mask)
         else:
             lm_loss, kl_loss = chunked_forward_loss(
                 student, teacher, x, y, args.distill_temperature,
-                args.logits_chunk, args.distill_weight)
+                args.logits_chunk, args.distill_weight, pos_mask=pos_mask)
         # the loss functions ran backward internally; grads are in place.
         apply_deferred_updates(student)  # lm_head's 16 partials, one apply
         if opt is not None:
@@ -1231,6 +1392,13 @@ def main():
             if rank == 0:
                 print(f"[eval] step {step} | val CE {ev_lm:.4f} | val KLD/tok {ev_kl:.6f}",
                       flush=True)
+            if args.rollout_dir and rollout_val_dl is not None:
+                _rlm, _rkl = eval_kld(student, teacher, rollout_val_dl,
+                                      args.rollout_val_n, args.logits_chunk,
+                                      args.distill_temperature)
+                if rank == 0:
+                    print(f"[eval-rollout] step {step} | rollout KLD/tok {_rkl:.6f} "
+                          f"| CE {_rlm:.4f}", flush=True)
             for m in replaced.values():
                 m.tau = tau
             for st in kv_state_refs:
