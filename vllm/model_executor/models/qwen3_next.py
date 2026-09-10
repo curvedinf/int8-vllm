@@ -890,15 +890,26 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             input_ids.flatten() if (_lp is not None and input_ids is not None)
             else None
         )
+        # VLLM_STEPBREAK: per-layer-type GPU time (events only; syncs at
+        # step end outside capture — see models/step_break.py)
+        from vllm.model_executor.models.step_break import StepBreak
+        _sbk = getattr(self, "_stepbreak", None)
+        if _sbk is None and os.environ.get("VLLM_STEPBREAK"):
+            _sbk = self._stepbreak = StepBreak(
+                [l.layer_type for l in self.layers])
+
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
+            _e0, _e1 = _sbk.layer(layer.layer_type) if _sbk else (None, None)
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
             )
+            if _sbk:
+                _sbk.end_layer(layer.layer_type, _e0, _e1)
             self._maybe_add_hidden_state(
                 aux_hidden_states, layer_idx + 1, hidden_states, residual
             )
@@ -963,6 +974,8 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
+        if _sbk:
+            _sbk.end_step()
         hidden_states, _ = self.norm(hidden_states, residual)
         if self.use_sequence_parallel:
             if aux_hidden_states:
