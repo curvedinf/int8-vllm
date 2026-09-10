@@ -15,7 +15,8 @@ from aiter.ops.triton.attention.unified_attention import unified_attention
 
 dev = "cuda"
 HQ, HKV, D = 6, 1, 256
-BLOCK = 512  # paged block size (rows per block in cache)
+import os
+BLOCK = int(os.environ.get("KV_BLOCK", "64"))  # engine uses 64
 
 
 def build(ctx, dtype_kv=torch.int8):
