@@ -526,7 +526,8 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             else:
                 # VLLM_ATTNTRACE: time just the unified_attention call
                 import os as _os, time as _time
-                _at = _os.environ.get("VLLM_ATTNTRACE") is not None
+                _at = _os.environ.get("VLLM_ATTN_PACE", "0") == "1" or \
+                    _os.environ.get("VLLM_ATTNTRACE") is not None
                 _at_box = getattr(self, "_attntrace", None)
                 if _at and _at_box is None:
                     _at_box = self._attntrace = {"k": 0.0, "w": 0.0, "n": 0}
