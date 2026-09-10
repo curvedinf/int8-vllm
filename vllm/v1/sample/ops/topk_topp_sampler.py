@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import os
+
 import torch
 import torch.nn as nn
 
@@ -277,18 +279,39 @@ class TopKTopPSampler(nn.Module):
         p: torch.Tensor | None,
         generators: dict[int, torch.Generator],
     ) -> torch.Tensor:
-        """Sample from logits using aiter ops."""
+        """Sample from logits using aiter ops.
+
+        SEMANTICS FIX (G1_SAMPLER_CONVENTION_DEVIATION): the reference
+        vLLM sampler (apply_top_k_top_p_pytorch) applies top-k FIRST and
+        then the top-p nucleus over the RENORMALIZED survivors. The aiter
+        fused kernel (and its top-k-first fast path) applies the top-p
+        threshold on the ORIGINAL un-renormalized mass — a different
+        sampling distribution on every joint k+p step (per-step TV up to
+        ~5%, compounding over long temp-1 trajectories). The joint path
+        below now selects+renormalizes the top-k survivors and runs the
+        nucleus at p over them — distribution-equivalent to the reference.
+        Set VLLM_SAMPLER_ORIGINAL_MASS=1 to restore the pre-fix fused
+        behavior for A/B measurement.
+        """
         assert self.aiter_ops is not None
         use_top_k = k is not None
         use_top_p = p is not None
-        # Joint k+p path
+        if os.environ.get("VLLM_SAMPLER_ORIGINAL_MASS") == "1":
+            # pre-fix behavior, A/B only
+            probs = logits.softmax(dim=-1, dtype=torch.float32).contiguous()
+            if use_top_p and use_top_k:
+                return self.aiter_ops.top_k_top_p_sampling_from_probs(
+                    probs, None, *_to_tensor_scalar_tuple(k),
+                    *_to_tensor_scalar_tuple(p), deterministic=True,
+                ).view(-1)
         if use_top_p and use_top_k:
             probs = logits.softmax(dim=-1, dtype=torch.float32).contiguous()
-            next_token_ids = self.aiter_ops.top_k_top_p_sampling_from_probs(
-                probs,
-                None,
-                *_to_tensor_scalar_tuple(k),
-                *_to_tensor_scalar_tuple(p),
+            # reference semantics: top-k -> renormalize -> nucleus p
+            renorm_probs = self.aiter_ops.top_k_renorm_probs(
+                probs, *_to_tensor_scalar_tuple(k)
+            )
+            next_token_ids = self.aiter_ops.top_p_sampling_from_probs(
+                renorm_probs, None, *_to_tensor_scalar_tuple(p),
                 deterministic=True,
             )
             return next_token_ids.view(-1)
