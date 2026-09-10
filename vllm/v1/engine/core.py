@@ -591,7 +591,21 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
+        # VLLM_STEPTRACE: wall-time split of the step phases (env-gated).
+        import os as _os, time as _time
+        _st = _os.environ.get("VLLM_STEPTRACE") is not None
+        if _st:
+            _t = {"sched": 0.0, "exec": 0.0, "out": 0.0, "n": 0}
+            _st_box = getattr(self, "_steptrace", None)
+            if _st_box is None:
+                _st_box = self._steptrace = _t
+        else:
+            _st_box = None
+        _t0 = _time.perf_counter()
         scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+        if _st_box is not None:
+            _t1 = _time.perf_counter()
+            _st_box["sched"] += _t1 - _t0
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
@@ -601,13 +615,25 @@ class EngineCore:
             model_output = future.result()
             if model_output is None:
                 model_output = self.model_executor.sample_tokens(grammar_output)
-
+        if _st_box is not None:
+            _t2 = _time.perf_counter()
+            _st_box["exec"] += _t2 - _t1
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        if _st_box is not None:
+            _t3 = _time.perf_counter()
+            _st_box["out"] += _t3 - _t2
+            _st_box["n"] += 1
+            if _st_box["n"] % 50 == 0:
+                n = _st_box["n"]
+                print(f"[steptrace] n={n} | sched {1000*_st_box['sched']/n:7.2f}ms "
+                      f"| exec {1000*_st_box['exec']/n:7.2f}ms "
+                      f"| out {1000*_st_box['out']/n:7.2f}ms", flush=True)
+                _st_box.update(sched=0.0, exec=0.0, out=0.0, n=0)
         self._attach_iteration_details(engine_core_outputs, iteration_details)
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
@@ -648,8 +674,20 @@ class EngineCore:
 
         model_executed = False
         deferred_scheduler_output = None
+        # VLLM_STEPTRACE: phase timing for the batch-queue loop (env-gated)
+        import os as _os, time as _time
+        _st = _os.environ.get("VLLM_STEPTRACE") is not None
+        _st_box = getattr(self, "_steptrace", None)
+        if _st and _st_box is None:
+            _st_box = self._steptrace = {"sched": 0.0, "exec": 0.0,
+                                         "out": 0.0, "n": 0}
+        _t0 = _time.perf_counter() if _st_box is not None else 0.0
+        _t1 = _t0
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+            if _st_box is not None:
+                _t1 = _time.perf_counter()
+                _st_box["sched"] += _t1 - _t0
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
@@ -704,12 +742,25 @@ class EngineCore:
                 exec_model_fut.result()
                 raise RuntimeError("unexpected error")
 
+        if _st_box is not None:
+            _t2 = _time.perf_counter()
+            _st_box["exec"] += _t2 - _t1
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        if _st_box is not None:
+            _t3 = _time.perf_counter()
+            _st_box["out"] += _t3 - _t2
+            _st_box["n"] += 1
+            if _st_box["n"] % 50 == 0:
+                n = _st_box["n"]
+                print(f"[steptrace-bq] n={n} | sched {1000*_st_box['sched']/n:7.2f}ms "
+                      f"| exec {1000*_st_box['exec']/n:7.2f}ms "
+                      f"| out {1000*_st_box['out']/n:7.2f}ms", flush=True)
+                _st_box.update(sched=0.0, exec=0.0, out=0.0, n=0)
         self._attach_iteration_details(engine_core_outputs, iteration_details)
 
         # NOTE(nick): We can either handle the deferred tasks here or save
