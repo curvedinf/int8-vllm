@@ -524,6 +524,15 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                     g8_v_scale=self._g8_v,
                 )
             else:
+                # VLLM_ATTNTRACE: time just the unified_attention call
+                import os as _os, time as _time
+                _at = _os.environ.get("VLLM_ATTNTRACE") is not None
+                _at_box = getattr(self, "_attntrace", None)
+                if _at and _at_box is None:
+                    _at_box = self._attntrace = {"k": 0.0, "w": 0.0, "n": 0}
+                _ev0 = torch.cuda.Event(enable_timing=True) if _at_box else None
+                if _ev0 is not None:
+                    _ev0.record()
                 self.unified_attention(
                 q=query[:num_actual_tokens],
                 k=key_cache,
@@ -546,7 +555,21 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 output_scale=output_scale,
                 k_scale_cache=k_scale_cache,
                 v_scale_cache=v_scale_cache,
-            )
+                )
+                if _at_box is not None:
+                    _ev1 = torch.cuda.Event(enable_timing=True)
+                    _ev1.record()
+                    if not torch.cuda.is_current_stream_capturing():
+                        torch.cuda.synchronize()
+                        _at_box["k"] += _ev0.elapsed_time(_ev1)
+                        _at_box["w"] += 0.0
+                        _at_box["n"] += 1
+                        if _at_box["n"] % 100 == 0:
+                            n = _at_box["n"]
+                            print(f"[attntrace] calls {n} | kernel "
+                                  f"{_at_box['k']/n*1000:8.1f} us/call", flush=True)
+                            _at_box.update(k=0.0, w=0.0, n=0)
+            import os as _os
             _ra = _os.environ.get("VLLM_UA_READAUDIT")
             if _ra and not torch.cuda.is_current_stream_capturing():
                 try:
