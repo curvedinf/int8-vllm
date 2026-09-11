@@ -44,7 +44,10 @@ def c6(in_tokens, out_tokens, streams):
     for t in threads:
         t.join()
     wall = time.time() - t0
-    total = sum(r[1] for r in results.values())
+    errs = [(i, r[1]) for i, r in sorted(results.items()) if isinstance(r[1], str)]
+    for i, e in errs:
+        print(f"stream {i} ERROR: {e}", flush=True)
+    total = sum(r[1] for r in results.values() if not isinstance(r[1], str))
     print(f"in={in_tokens} streams={streams} out_total={total} wall={wall:.1f}s "
           f"AGGREGATE={total/wall:.2f} tok/s "
           f"per-stream={[f'{r[1]/r[0]:.1f}' for r in results.values()]}", flush=True)
@@ -52,5 +55,8 @@ def c6(in_tokens, out_tokens, streams):
 
 if __name__ == "__main__":
     streams = int(sys.argv[1]) if len(sys.argv) > 1 else 6
+    # Warm the lazy tokenizer import in the main thread before any worker
+    # threads race transformers' lazy module initialization.
+    build_prompt(16, "warm")
     c6(2000, 800, streams)
     c6(20000, 800, streams)
