@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import os
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
@@ -320,6 +321,9 @@ class Scheduler(SchedulerInterface):
         # Scheduler iteration counter. Drives the V2+PP+async decode-throttle
         # cadence (`next_decode_eligible_step`).
         self.current_step = 0
+        # VLLM_SCHED_NO_MIX: consecutive steps a waiting request's admission
+        # was deferred because decodes were scheduled (anti-starvation).
+        self._nomix_admit_deferred = 0
         # DP prefill balancing: Flag to track whether the last cadence-aligned
         # prefill batch fully drained the waiting queue. Prefill throttling
         # is disabled in this case.
@@ -540,6 +544,22 @@ class Scheduler(SchedulerInterface):
             throttle_prefills and not self.prefill_capacity_bound
         ) and any(not r.is_prefill_chunk for r in self.running)
 
+        # VLLM_SCHED_NO_MIX (gfx908): steps are either all-decode (uniform,
+        # FULL-cudagraph eligible) or prefill-only. Mixed prefill+decode
+        # batches would run fully eager (piecewise graphs are banned on
+        # gfx908 at TP>1), costing ~2x step time in concurrent workloads.
+        _no_mix = os.environ.get("VLLM_SCHED_NO_MIX") == "1"
+        # Never defer decodes on a step where the DP prefill throttle is
+        # deferring prefills — that would schedule an empty batch.
+        _nomix_prefill_step = (
+            _no_mix
+            and not defer_prefills
+            and (
+                any(r.is_prefill_chunk for r in self.running)
+                or self._nomix_admit_deferred >= 2
+            )
+        )
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
@@ -572,6 +592,13 @@ class Scheduler(SchedulerInterface):
             if defer_prefills and request.is_prefill_chunk:
                 # DP prefill balancing: defer this in-progress prefill chunk to a
                 # cadence-aligned step; decodes still run to fill this step.
+                req_index += 1
+                continue
+
+            if _nomix_prefill_step and not request.is_prefill_chunk:
+                # No-mix scheduling: defer decodes while a prefill chunk is in
+                # progress (or a forced admission step) so decode batches stay
+                # uniform and FULL-cudagraph replayable.
                 req_index += 1
                 continue
 
@@ -771,6 +798,18 @@ class Scheduler(SchedulerInterface):
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
                 if input_budget <= draft_slots:
                     break
+                if _no_mix and any(
+                    not r.is_prefill_chunk for r in scheduled_running_reqs
+                ):
+                    # No-mix: decodes are scheduled this step; admitting a
+                    # new request's prefill would create a mixed (eager)
+                    # batch. Defer admission; after 2 deferred steps the
+                    # next step becomes a prefill-only admission step
+                    # (see _nomix_prefill_step).
+                    self._nomix_admit_deferred += 1
+                    break
+                if _no_mix:
+                    self._nomix_admit_deferred = 0
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
                 # in `running` but still hold a model-runner request slot.
                 num_running = len(self.running) + self.num_waiting_for_streaming_input

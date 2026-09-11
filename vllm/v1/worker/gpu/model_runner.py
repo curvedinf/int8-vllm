@@ -365,6 +365,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         self.step_timing = StepTimingCollector()
+        # VLLM_STEPPHASE: CPU wall accumulator for the worker step phases.
+        self._pphase: dict[str, float] = {
+            "reqs": 0.0,
+            "p_inputs": 0.0,
+            "p_attn": 0.0,
+            "p_state": 0.0,
+            "f_prefw": 0.0,
+            "f_replay": 0.0,
+            "f_tail": 0.0,
+            "gap": 0.0,
+            "s_logits": 0.0,
+            "s_reject": 0.0,
+            "s_tail": 0.0,
+            "propose": 0.0,
+            "post": 0.0,
+        }
+        self._pph_t0 = 0.0
 
         # General request states.
         self.req_states = RequestState(
@@ -1465,7 +1482,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         grammar_output: GrammarOutput | None,
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
         sample_hidden_states = hidden_states[input_batch.logits_indices]
+        _sph = os.environ.get("VLLM_STEPPHASE") is not None
+        _st0 = time.perf_counter() if _sph else 0.0
         logits = self.model.compute_logits(sample_hidden_states)
+        if _sph:
+            self._pphase["s_logits"] += time.perf_counter() - _st0
+            _st0 = time.perf_counter()
         if grammar_output is not None:
             # Apply grammar bitmask to the logits in-place.
             assert self.structured_outputs_worker is not None
@@ -1489,6 +1511,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # Draft logits are needed for probabilistic rejection sampling.
                 self.speculator.draft_logits,
             )
+            if _sph:
+                self._pphase["s_reject"] += time.perf_counter() - _st0
+                _st0 = time.perf_counter()
             if os.environ.get("VLLM_ASM_RING"):
                 # Emitted-token capture for the assembly audit: the accepted
                 # (emitted) token ids per request for THIS round.
@@ -1558,6 +1583,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         is_profile: bool = False,
         context_len: int = 0,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        # VLLM_STEPPHASE: CPU wall split of the worker step (env-gated).
+        _pph = os.environ.get("VLLM_STEPPHASE") is not None
+        _t0 = time.perf_counter() if _pph else 0.0
         if not dummy_run:
             # Update the request states.
             self.update_pp_decode_requests()
@@ -1613,6 +1641,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # All DP ranks have zero tokens to run.
             empty_output = self.kv_connector.no_forward(scheduler_output)
             return self._merge_ec_connector_no_forward(scheduler_output, empty_output)
+        if _pph:
+            self._pphase["reqs"] += time.perf_counter() - _t0
+            _t0 = time.perf_counter()
 
         if not dummy_run:
             # Common case.
@@ -1621,7 +1652,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch = self.prepare_inputs(
                 scheduler_output, batch_req_state, batch_desc
             )
+            if _pph:
+                self._pphase["p_inputs"] += time.perf_counter() - _t0
+                _t0 = time.perf_counter()
             block_tables, slot_mappings = self.prepare_attn(input_batch)
+            if _pph:
+                self._pphase["p_attn"] += time.perf_counter() - _t0
+                _t0 = time.perf_counter()
             # Mamba "align" pre-copy: migrate recurrent state across block
             # boundaries before the forward. Runs only on real batches, and
             # before model_state.prepare_attn gathers num_accepted_tokens so the
@@ -1853,6 +1890,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch, batch_desc.cg_mode == CUDAGraphMode.FULL
         )
         self.step_timing.forward_start()
+        if _pph:
+            _t = self._pphase
+            _t["p_state"] += time.perf_counter() - _t0
+            _t0 = time.perf_counter()
 
         # Run model.
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
@@ -1861,7 +1902,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # because they are already copied to the CUDA graph input buffers.
             assert self.cudagraph_manager is not None
             self.kv_connector.pre_forward(scheduler_output)
+            if _pph:
+                self._pphase["f_prefw"] += time.perf_counter() - _t0
+                _t0 = time.perf_counter()
             model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
+            if _pph:
+                self._pphase["f_replay"] += time.perf_counter() - _t0
+                _t0 = time.perf_counter()
         else:
             # For piecewise and eager mode, just call model().
             batch_descriptor = BatchDescriptor(
@@ -1893,6 +1940,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 else:
                     # Eager (NONE): call the raw model directly.
                     model_output = self.model(**model_inputs)
+        if _pph:
+            _t = self._pphase
+            _t["f_tail"] += time.perf_counter() - _t0
+            self._pph_t0 = time.perf_counter()
 
         if self.is_last_pp_rank:
             if self.use_aux_hidden_state_outputs:
@@ -1971,6 +2022,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
 
         # Last rank: sample tokens
+        _pph = os.environ.get("VLLM_STEPPHASE") is not None
+        _t0 = time.perf_counter() if _pph else 0.0
+        if _pph and getattr(self, "_pph_t0", 0.0):
+            self._pphase["gap"] += _t0 - self._pph_t0
         hidden_states, input_batch = pcp.maybe_restore_pcp_for_sampling(
             self.pcp_manager, hidden_states, input_batch
         )
@@ -1978,6 +2033,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
         )
+        if _pph:
+            self._pphase["s_tail"] += time.perf_counter() - _t0
+            _t0 = time.perf_counter()
 
         if self.pp_handler is not None:
             # Broadcast to non-last PP ranks (handles spec decode multi-token).
@@ -2137,6 +2195,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.adaptive_verification.record_confidences(
                     self.speculator.draft_token_confidence_probs, input_batch
                 )
+            if _pph:
+                self._pphase["propose"] += time.perf_counter() - _t0
+                _t0 = time.perf_counter()
 
         if self.num_speculative_steps > 0:
             # Spec-decode and diffusion LLMs both use draft tokens but the latter does
@@ -2151,6 +2212,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         model_runner_output.kv_connector_output = kv_connector_output
         model_runner_output.ec_connector_output = ec_connector_output
 
+        if _pph:
+            _t = self._pphase
+            _t["post"] += time.perf_counter() - _t0
+            _t["n"] = _t.get("n", 0) + 1
+            if _t["n"] % 200 == 0:
+                n = _t["n"]
+                parts = " | ".join(
+                    f"{k} {1000 * v / n:6.2f}ms"
+                    for k, v in _t.items()
+                    if k != "n"
+                )
+                print(f"[pphase] n={n} | {parts}", flush=True)
+                for k in _t:
+                    if k != "n":
+                        _t[k] = 0.0
         return async_output
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
