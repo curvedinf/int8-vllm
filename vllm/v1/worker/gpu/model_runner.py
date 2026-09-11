@@ -1636,6 +1636,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             need_eager=is_profile or skip_compiled,
             num_active_loras=num_active_loras,
         )
+        if os.environ.get("VLLM_CGDISPATCH_TRACE") and not dummy_run:
+            _d = self.__dict__.setdefault("_cgdispatch", {"n": 0, "rows": []})
+            _d["n"] = _d.get("n", 0) + 1
+            _d.setdefault("rows", []).append(
+                (
+                    num_reqs,
+                    num_toks,
+                    max_query_len,
+                    uniform_tok_count,
+                    batch_desc.cg_mode.name,
+                )
+            )
+            if _d["n"] % 100 == 0:
+                from collections import Counter as _C
+                print(
+                    f"[cgdispatch] n={_d['n']} last100="
+                    f"{dict(_C(r[4] for r in _d['rows'][-100:]))} "
+                    f"sample={_d['rows'][-3:]}",
+                    flush=True,
+                )
+                _d["rows"] = _d["rows"][-100:]
 
         if batch_desc.num_tokens == 0:
             # All DP ranks have zero tokens to run.
@@ -1942,8 +1963,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     model_output = self.model(**model_inputs)
         if _pph:
             _t = self._pphase
-            _t["f_tail"] += time.perf_counter() - _t0
+            _ftail = time.perf_counter() - _t0
+            _t["f_tail"] += _ftail
             self._pph_t0 = time.perf_counter()
+            if os.environ.get("VLLM_CGDISPATCH_TRACE"):
+                self.__dict__.setdefault("_ftail_rows", []).append(
+                    (batch_desc.cg_mode.name, round(_ftail * 1000, 1))
+                )
+                if len(self._ftail_rows) % 100 == 0:
+                    print(f"[ftail] {self._ftail_rows[-8:]}", flush=True)
 
         if self.is_last_pp_rank:
             if self.use_aux_hidden_state_outputs:
