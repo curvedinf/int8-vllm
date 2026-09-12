@@ -1345,7 +1345,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                   "a") as f:
             f.write(_json.dumps(rec) + "\n")
 
-    def _specstat(self, out_dir, si, na, conv_state, ssm_state):
+    def _specstat(self, out_dir, si, na, conv_state, ssm_state, phase="pre"):
         """Env-gated (VLLM_GDN_SPECSTAT): per spec-round ground truth of what
         the conv/SSM kernels actually read — the spec-slot ids, num_accepted,
         the conv rolling buffer's per-column norms (at the conv line), and the
@@ -1373,9 +1373,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         import hashlib as _hl
         s0 = ssm_state[conv_line].float()
         s0_hash = _hl.md5(s0.cpu().numpy().tobytes()).hexdigest()[:12]
-        rec = {"li": li, "round": cnt, "si": si_r, "na": na_l,
+        pf_line = getattr(self, "_pf_line", None)
+        pf = None
+        if pf_line is not None:
+            pv = ssm_state[pf_line].float()
+            pf = {"line": pf_line,
+                  "norm": round(float(pv.norm()), 4),
+                  "hash": _hl.md5(pv.cpu().numpy().tobytes()).hexdigest()[:12]}
+        rec = {"li": li, "round": cnt, "phase": phase, "si": si_r, "na": na_l,
                "conv_line": conv_line, "conv_norms": c_norms,
-               "ssm_norms": ssm_norms, "ssm0_hash": s0_hash}
+               "ssm_norms": ssm_norms, "ssm0_hash": s0_hash, "pf": pf}
         _os.makedirs(_os.path.dirname(out_dir) or ".", exist_ok=True)
         with open(_os.path.join(out_dir, f"specstat_{_os.getpid()}.jsonl"),
                   "a") as f:
@@ -1612,6 +1619,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # 1.2: Process the remaining part
         if attn_metadata.num_prefills > 0:
             assert mixed_qkv_non_spec is not None
+            # Stash the prefill's state-cache line id (the conv/SSM final
+            # states land at non_spec_state_indices' line): the first spec
+            # round's SPECSTAT compares si[0] against this line.
+            try:
+                self._pf_line = int(non_spec_state_indices_tensor[0].item())
+            except Exception:
+                pass
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
             # - "cache_indices" updates the conv_state cache in positions
             #   pointed to by "state_indices_tensor"
@@ -1865,6 +1879,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             if _nw_oi is not None:
                 _nanwatch({"out": core_attn_out_spec,
                            "state": last_recurrent_state}, _nw_oi, 3)
+            _ss2 = os.environ.get("VLLM_GDN_SPECSTAT")
+            if _ss2 and not torch.cuda.is_current_stream_capturing():
+                try:
+                    # Post-verify capture: the hash delta from here to the
+                    # next round's pre-forward capture = everything between
+                    # rounds (sampler + DRAFT PROPOSE + migrations).
+                    self._specstat(_ss2, spec_state_indices_tensor,
+                                   num_accepted_tokens, conv_state,
+                                   self_kv_cache[1], phase="post")
+                except Exception:
+                    pass
             _gra = os.environ.get("VLLM_GDN_ROWAUDIT")
             if _gra and not torch.cuda.is_current_stream_capturing():
                 try:
