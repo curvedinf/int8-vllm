@@ -582,7 +582,7 @@ start_server() {
   VLLM_OFFLOAD_NO_LOADS="${VLLM_OFFLOAD_NO_LOADS:-}" \
   VLLM_DFLASH_DRAFT_EAGER="${VLLM_DFLASH_DRAFT_EAGER:-}" \
       VLLM_DFLASH_AUDIT="${VLLM_DFLASH_AUDIT:-}" \
-      "${VENV}/bin/vllm" "${ARGS[@]}"
+      ${PROFILER_WRAPPER} "${VENV}/bin/vllm" "${ARGS[@]}"
   ) >"${LOG_DIR}/server.log" 2>&1 </dev/null &
 
   printf '%s\n' "$!" >"${PID_FILE}"
