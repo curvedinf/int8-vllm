@@ -241,6 +241,30 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
     ) -> GDNAttentionMetadata:
         m = common_attn_metadata
 
+        import os as _os
+        if _os.environ.get("VLLM_SLSSTAT") and not torch.cuda.is_current_stream_capturing():
+            try:
+                import json as _json
+                sls = getattr(self, "_sls_n", 0)
+                if sls < 600:
+                    self._sls_n = sls + 1
+                    import os as _os2
+                    _d = _os2.environ["VLLM_SLSSTAT"]
+                    _os2.makedirs(_os2.path.dirname(_d) or ".", exist_ok=True)
+                    with open(_os2.path.join(_d, f"sls_{_os2.getpid()}.jsonl"), "a") as _f:
+                        _f.write(_json.dumps({
+                            "n": sls,
+                            "seq_lens": m.seq_lens[:4].tolist(),
+                            "qsl": m.query_start_loc_cpu.tolist()[:8]
+                            if m.query_start_loc_cpu is not None else None,
+                            "num_actual": int(m.num_actual_tokens)
+                            if m.num_actual_tokens is not None else -1,
+                            "maxq": int(m.max_query_len)
+                            if m.max_query_len is not None else -1,
+                        }) + "\n")
+            except Exception:
+                pass
+
         query_start_loc = m.query_start_loc
         query_start_loc_cpu = m.query_start_loc_cpu
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
