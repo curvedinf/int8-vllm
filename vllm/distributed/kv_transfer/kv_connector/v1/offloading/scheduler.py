@@ -463,6 +463,15 @@ class RequestOffloadState:
         """
         num_chunks = num_offloadable_tokens // group_config.tokens_per_chunk
         is_decoding = num_offloadable_tokens > self.req.num_prompt_tokens
+        if group_config.is_eagle_group and is_decoding:
+            # G1 finalgate evidence (3a14094120): the draft group's KV is
+            # rewritten by the ctx-KV precompute EVERY round across its whole
+            # sliding window — not just the trailing chunk. Any stored draft
+            # snapshot is stale the moment the next round reprojects, and a
+            # restore overlays stale draft KV onto live rows. Never store
+            # draft-group chunks while decoding; the CPU tier keeps only the
+            # prefill-phase draft KV (stable by construction).
+            num_chunks = 0
         if (
             group_config.is_eagle_group or group_config.spec_volatile_tail
         ) and is_decoding:
