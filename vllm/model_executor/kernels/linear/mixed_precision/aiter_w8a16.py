@@ -415,105 +415,113 @@ class AiterW8A16LinearKernel(MPLinearKernel):
         # same aiter calls) so torch.compile pattern matchers can see the
         # quant, and the aiter-JIT config lookup inside gemm_a8w8_CK
         # stays opaque to fullgraph tracing.
-        if c.group_size == 128:
-            if hasattr(layer, "_ck_q"):
-                quant_op = getattr(
-                    torch.ops.vllm, "rocm_aiter_pertoken_quant_int8", None
-                )
-                gemm_op = getattr(torch.ops.vllm, "rocm_aiter_gemm_a8w8_ck", None)
-                _use_rn = (
-                    os.environ.get("VLLM_GFX908_ACT_QUANT", "aiter") == "round"
-                )
-                # The round kernel reads bf16 natively (and upcasts to fp32
-                # internally), so skip the lossy bf16->fp16 cast — one fewer
-                # [M,K] elementwise kernel per GEMM and strictly better
-                # numerics (no mantissa loss in the cast). The aiter trunc
-                # op wants fp16, so only that path pays the cast.
-                x_f16 = x_2d if _use_rn else x_2d.to(torch.float16)
-                if quant_op is not None and gemm_op is not None:
-                    # Activation quantizer selection: aiter pertoken (absmax,
-                    # trunc-toward-zero) is the default; VLLM_GFX908_ACT_QUANT=
-                    # round swaps in the fused round-to-nearest Triton kernel
-                    # (act_quant_rn) — Phase-1 replay convicted the trunc leg
-                    # at 10-15% mean rel-L2 per GEMM output.
-                    if os.environ.get("VLLM_GFX908_ACT_QUANT", "aiter") == "round":
-                        from vllm.model_executor.kernels.linear.mixed_precision.act_quant_rn import (
-                            pertoken_quant_rn,
-                        )
-
-                        # x_f16 is x_2d (bf16) in this branch — see above.
-                        x_q, x_s = pertoken_quant_rn(x_f16)
-                    else:
-                        # The fused-norm path stashes (q, scale) on the normed
-                        # tensor; consume it instead of re-quantizing. Opaque to
-                        # dynamo: the compiled path fuses at the graph level
-                        # (GFX908RMSNormInt8QuantFusionPass) instead.
-                        prequant = (
-                            None
-                            if torch.compiler.is_compiling()
-                            else getattr(x, PREQUANT_ATTR, None)
-                        )
-                        if (
-                            prequant is not None
-                            and prequant[0].shape == x_2d.shape
-                            and x_2d.dtype in (torch.float16, torch.bfloat16)
-                        ):
-                            x_q, x_s = prequant
-                        else:
-                            x_q, x_s = quant_op(x_f16)
-                    # The CK kernel supports fp16/bf16 outputs only; the
-                    # profile dummy run feeds fp32 activations whose dtype
-                    # would otherwise flow through as Y (unsupported).
-                    out_dtype = (
-                        x_2d.dtype
-                        if x_2d.dtype in (torch.float16, torch.bfloat16)
-                        else torch.float16
+        # Dispatch on the CK copy's presence first, then the checkpoint
+        # group size: the load-side per-channel requant (and the freeing of
+        # the blockscale originals) is group-agnostic, so GS32 (or any G)
+        # checkpoints that built `_ck_q` must take the CK path — the
+        # blockscale fallback would read the freed (empty) originals.
+        if (
+            hasattr(layer, "_ck_q")
+            and layer._ck_q is not None
+            and layer._ck_q.dim() == 2
+        ):
+            quant_op = getattr(
+                torch.ops.vllm, "rocm_aiter_pertoken_quant_int8", None
+            )
+            gemm_op = getattr(torch.ops.vllm, "rocm_aiter_gemm_a8w8_ck", None)
+            _use_rn = (
+                os.environ.get("VLLM_GFX908_ACT_QUANT", "aiter") == "round"
+            )
+            # The round kernel reads bf16 natively (and upcasts to fp32
+            # internally), so skip the lossy bf16->fp16 cast — one fewer
+            # [M,K] elementwise kernel per GEMM and strictly better
+            # numerics (no mantissa loss in the cast). The aiter trunc
+            # op wants fp16, so only that path pays the cast.
+            x_f16 = x_2d if _use_rn else x_2d.to(torch.float16)
+            if quant_op is not None and gemm_op is not None:
+                # Activation quantizer selection: aiter pertoken (absmax,
+                # trunc-toward-zero) is the default; VLLM_GFX908_ACT_QUANT=
+                # round swaps in the fused round-to-nearest Triton kernel
+                # (act_quant_rn) — Phase-1 replay convicted the trunc leg
+                # at 10-15% mean rel-L2 per GEMM output.
+                if os.environ.get("VLLM_GFX908_ACT_QUANT", "aiter") == "round":
+                    from vllm.model_executor.kernels.linear.mixed_precision.act_quant_rn import (
+                        pertoken_quant_rn,
                     )
-                    output = gemm_op(x_q, layer._ck_q, x_s, layer._ck_s, out_dtype)
+
+                    # x_f16 is x_2d (bf16) in this branch — see above.
+                    x_q, x_s = pertoken_quant_rn(x_f16)
                 else:
-                    from aiter import gemm_a8w8_CK, pertoken_quant
-
-                    # aiter's pertoken_quant wants fp16; x_f16 may be the
-                    # un-cast bf16 tensor when the round path is selected.
-                    x_in = (
-                        x_f16
-                        if x_f16.dtype == torch.float16
-                        else x_f16.to(torch.float16)
+                    # The fused-norm path stashes (q, scale) on the normed
+                    # tensor; consume it instead of re-quantizing. Opaque to
+                    # dynamo: the compiled path fuses at the graph level
+                    # (GFX908RMSNormInt8QuantFusionPass) instead.
+                    prequant = (
+                        None
+                        if torch.compiler.is_compiling()
+                        else getattr(x, PREQUANT_ATTR, None)
                     )
-                    x_q, x_s = pertoken_quant(x_in, quant_dtype=torch.int8)
-                    out_dtype = (
-                        x_2d.dtype
-                        if x_2d.dtype in (torch.float16, torch.bfloat16)
-                        else torch.float16
-                    )
-                    output = gemm_a8w8_CK(
-                        x_q, layer._ck_q, x_s, layer._ck_s, None, out_dtype
-                    )
-                if os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not (
-                    torch.cuda.is_current_stream_capturing()
-                ):
-                    print(
-                        f"[SPEC-DBGC] ck M={M} N={N} K={K} "
-                        f"in_abs={x_2d.abs().max().item():.3f} "
-                        f"xq_abs={x_q.abs().max().item()} "
-                        f"xs_abs={x_s.abs().max().item():.4f} "
-                        f"wq_abs={layer._ck_q.abs().max().item()} "
-                        f"ws_abs={layer._ck_s.abs().max().item():.4f} "
-                        f"out_abs={output.abs().max().item():.3f}",
-                        flush=True,
-                    )
-                from vllm import quant_audit_recorder as _qa
-
-                if _qa._enabled() and not torch.cuda.is_current_stream_capturing():
-                    _qa.record_gemm(
-                        getattr(layer, "prefix", type(layer).__name__),
-                        x_2d[: min(M, 64)],
-                        x_q[: min(M, 64)],
-                        x_s[: min(M, 64)],
-                        N,
-                        K,
-                    )
+                    if (
+                        prequant is not None
+                        and prequant[0].shape == x_2d.shape
+                        and x_2d.dtype in (torch.float16, torch.bfloat16)
+                    ):
+                        x_q, x_s = prequant
+                    else:
+                        x_q, x_s = quant_op(x_f16)
+                # The CK kernel supports fp16/bf16 outputs only; the
+                # profile dummy run feeds fp32 activations whose dtype
+                # would otherwise flow through as Y (unsupported).
+                out_dtype = (
+                    x_2d.dtype
+                    if x_2d.dtype in (torch.float16, torch.bfloat16)
+                    else torch.float16
+                )
+                output = gemm_op(x_q, layer._ck_q, x_s, layer._ck_s, out_dtype)
             else:
+                from aiter import gemm_a8w8_CK, pertoken_quant
+
+                # aiter's pertoken_quant wants fp16; x_f16 may be the
+                # un-cast bf16 tensor when the round path is selected.
+                x_in = (
+                    x_f16
+                    if x_f16.dtype == torch.float16
+                    else x_f16.to(torch.float16)
+                )
+                x_q, x_s = pertoken_quant(x_in, quant_dtype=torch.int8)
+                out_dtype = (
+                    x_2d.dtype
+                    if x_2d.dtype in (torch.float16, torch.bfloat16)
+                    else torch.float16
+                )
+                output = gemm_a8w8_CK(
+                    x_q, layer._ck_q, x_s, layer._ck_s, None, out_dtype
+                )
+            if os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not (
+                torch.cuda.is_current_stream_capturing()
+            ):
+                print(
+                    f"[SPEC-DBGC] ck M={M} N={N} K={K} "
+                    f"in_abs={x_2d.abs().max().item():.3f} "
+                    f"xq_abs={x_q.abs().max().item()} "
+                    f"xs_abs={x_s.abs().max().item():.4f} "
+                    f"wq_abs={layer._ck_q.abs().max().item()} "
+                    f"ws_abs={layer._ck_s.abs().max().item():.4f} "
+                    f"out_abs={output.abs().max().item():.3f}",
+                    flush=True,
+                )
+            from vllm import quant_audit_recorder as _qa
+
+            if _qa._enabled() and not torch.cuda.is_current_stream_capturing():
+                _qa.record_gemm(
+                    getattr(layer, "prefix", type(layer).__name__),
+                    x_2d[: min(M, 64)],
+                    x_q[: min(M, 64)],
+                    x_s[: min(M, 64)],
+                    N,
+                    K,
+                )
+        elif c.group_size == 128:
                 x_q, x_s = _quantize_activation_per_block(x_2d, block_k=128)
                 cfg = _get_aiter_w8a8_config(M, N, K, c.group_size)
                 if os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not (
