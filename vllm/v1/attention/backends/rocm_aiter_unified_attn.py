@@ -526,9 +526,18 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             else:
                 # VLLM_ATTNTRACE: time just the unified_attention call
                 import os as _os, time as _time
-                _at = _os.environ.get("VLLM_ATTN_PACE", "0") == "1" or \
+                _pace = _os.environ.get("VLLM_ATTN_PACE", "0")
+                _at = _pace == "1" or \
                     _os.environ.get("VLLM_ATTNTRACE") is not None
-                _at_box = getattr(self, "_attntrace", None)
+                # PACE=2: pace only target forwards (workspace lane 0) so the
+                # draft-verify async overlap is preserved (the spec-on
+                # regression of PACE=1); the CPU-race pathology lives in the
+                # long target forward's eager dispatch.
+                if _pace == "2":
+                    from vllm.v1.worker.workspace import _workspace_lane
+                    _at = _workspace_lane.get() == 0
+                _at_box = getattr(self, "_attntrace", None) \
+                    if _at or _os.environ.get("VLLM_ATTNTRACE") is not None else None
                 if _at and _at_box is None:
                     _at_box = self._attntrace = {"k": 0.0, "w": 0.0, "n": 0}
                 _ev0 = torch.cuda.Event(enable_timing=True) if _at_box else None
