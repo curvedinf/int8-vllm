@@ -6,7 +6,7 @@ import sys, os, json, time, threading, urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from garble_repro import build_prompt
 
-API = "http://127.0.0.1:8020/v1/chat/completions"
+API = "http://127.0.0.1:" + os.environ.get("PORT", "8020") + "/v1/chat/completions"
 KEY = os.environ.get("VLLM_API_KEY", "")
 
 PREFIX = build_prompt(int(os.environ.get("STEADY_CTX", "20000")), "shared-prefix-steady")  # same corpus for all
