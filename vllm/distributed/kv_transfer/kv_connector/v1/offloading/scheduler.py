@@ -682,10 +682,27 @@ class OffloadingConnectorScheduler:
         or None if the backend deferred a lookup."""
         hit_count = 0
         defer_lookup = False
+        import os as _os
+        _ev = _os.environ.get("VLLM_OFFLOAD_LOADLOG")
         for local_idx, key in enumerate(keys):
             result = self.manager.lookup(key, req_context)
             match result:
                 case LookupResult.HIT:
+                    if _ev and result is LookupResult.HIT:
+                        try:
+                            import json as _j
+                            import os as _os2
+                            _os2.makedirs(_os2.path.dirname(_ev) or ".", exist_ok=True)
+                            with open(_os2.path.join(
+                                    _ev, f"load_{_os2.getpid()}.jsonl"), "a") as _f:
+                                _f.write(_j.dumps({
+                                    "t": "lookup_hit", "req": req.request_id
+                                    if hasattr(req, "request_id") else str(id(req)),
+                                    "grp": group_config.group_idx,
+                                    "chunk": start_chunk_idx + local_idx,
+                                }) + "\n")
+                        except Exception:
+                            pass
                     self._events_tracker.record_lookup(
                         req,
                         group_config,
