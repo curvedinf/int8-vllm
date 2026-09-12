@@ -906,6 +906,87 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         self._rb_prev = new_prev
         self._rb_all = merged
 
+    def _kv_readback_check_g8(self, key, value, slot_mapping):
+        """Write-then-read-back audit for the grouped-int8 (g8/g128) writer:
+        reference-quantize the incoming K/V with the kernel's exact math
+        (per-head per-group absmax, fp16 scale, round-half-away), stash it,
+        and compare after the kernel runs — catches missed writes, stale
+        slots, and data/scale divergence separately."""
+        import torch as _t
+        sm = slot_mapping
+        valid = sm >= 0
+        if not valid.any():
+            self._rb_g8_pending = None
+            return
+        G = self._block_g or 8
+        n, nkv, hs = key.shape
+        hs_v = value.shape[2]
+
+        def quant_ref(x):
+            xg = x.float().view(x.shape[0], x.shape[1], x.shape[2] // G, G)
+            amax = _t.maximum(xg.abs().amax(dim=-1) / 127.0,
+                              _t.full((), 1e-6, device=x.device))
+            s16 = amax.to(_t.float16).to(_t.float32)
+            q = xg / s16.unsqueeze(-1)
+            q = _t.where(q >= 0, q + 0.5, q - 0.5)
+            q = _t.clamp(q, -128.0, 127.0).to(_t.int8)
+            return q, s16.to(_t.float16)
+
+        kc = self._k_data_cache
+        vc = self._v_data_cache
+        ks = self._g8_k
+        vs = self._g8_v
+        bs = kc.shape[1]
+        keep = valid.nonzero(as_tuple=True)[0]
+        slots = sm[keep]
+        rows = (slots // bs).long()
+        cols = (slots % bs).long()
+        kq, ksc = quant_ref(key[keep])
+        vq, vsc = quant_ref(value[keep])
+        # Pre-write snapshots for the stale detector (head 0 data + scales).
+        pre_k = kc[rows, cols, 0, :].clone()
+        pre_ks = ks[rows, cols, 0, :].clone()
+        self._rb_g8_counter = getattr(self, "_rb_g8_counter", 0) + 1
+        if self._rb_g8_counter % 200 == 1:
+            logger.warning("KV-READBACK(g8) active (call %d, layer %s)",
+                           self._rb_g8_counter,
+                           getattr(self, "_rb_layer", "?"))
+        self._rb_g8_pending = (
+            rows, cols, kq, ksc, vq, vsc, slots, pre_k, pre_ks, kc, vc,
+            ks, vs, G,
+        )
+
+    def _kv_readback_finalize_g8(self):
+        import torch as _t
+        p = self._rb_g8_pending
+        if p is None:
+            return
+        (rows, cols, kq, ksc, vq, vsc, slots, pre_k, pre_ks, kc, vc,
+         ks, vs, G) = p
+        self._rb_g8_pending = None
+        ng = kq.shape[2]
+        got_k = kc[rows, cols, 0, :].view(-1, ng, G)
+        got_ks = ks[rows, cols, 0, :]
+        ref_k = kq[:, 0]
+        ref_ks = ksc[:, 0]
+        diff = (got_k.int() - ref_k.int()).abs()
+        mism = (diff > 1).any(dim=-1)
+        sdiff = (got_ks.float() - ref_ks.float()).abs()
+        smism = sdiff > 0.02 * ref_ks.float().clamp(min=1e-8)
+        n_mism = int((mism | smism).sum())
+        if n_mism:
+            stale = 0
+            for j in range(min(n_mism, 8)):
+                idx = (mism | smism).nonzero()[j]
+                if (got_k[idx[0]] == pre_k[idx[0]].view(ng, G).int()).all():
+                    stale += 1
+            logger.warning(
+                "KVREADBACK(g8) MISMATCH layer=%s mismatches=%d/%d "
+                "data_only=%d scale_only=%d stale_pre=%d slots=%s",
+                getattr(self, "_rb_layer", "?"), n_mism, slots.numel(),
+                int(mism.sum()), int(smism.sum()), stale,
+                slots[mism | smism][:6].tolist())
+
     def do_kv_cache_update(
         self,
         layer: AttentionLayer,
@@ -925,6 +1006,15 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         # which only knows auto/fp8).
         if self._is_int8_block or getattr(self, "_g8_k", None) is not None:
             self._ensure_scale_caches(kv_cache)
+            import os as _os8
+            if (
+                _os8.environ.get("VLLM_KV_READBACK")
+                and not torch.cuda.is_current_stream_capturing()
+            ):
+                try:
+                    self._kv_readback_check_g8(key, value, slot_mapping)
+                except Exception as e:
+                    logger.warning("KV-READBACK(g8) check failed: %s", e)
             from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
                 reshape_and_cache_g8,
             )
@@ -939,6 +1029,8 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 slot_mapping,
                 group=self._block_g or 8,
             )
+            if getattr(self, "_rb_g8_pending", None) is not None:
+                self._kv_readback_finalize_g8()
             return
 
         if self._is_per_token_head_quant:
