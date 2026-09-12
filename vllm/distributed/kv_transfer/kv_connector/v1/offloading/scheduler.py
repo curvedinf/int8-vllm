@@ -463,6 +463,16 @@ class RequestOffloadState:
         """
         num_chunks = num_offloadable_tokens // group_config.tokens_per_chunk
         is_decoding = num_offloadable_tokens > self.req.num_prompt_tokens
+        if (
+            os.environ.get("VLLM_OFFLOAD_NOSTORE_DECODE") == "1"
+            and is_decoding
+        ):
+            # Diagnostic knife: no decode-phase stores at all (prefill-phase
+            # stores remain). If decode-phase legs turn clean with the tier
+            # otherwise ON, the STORE MACHINERY itself (UVA D2H copy path /
+            # staging buffers / fencing) corrupts GPU state episodically —
+            # not the stored content.
+            num_chunks = 0
         if group_config.is_eagle_group and is_decoding:
             # G1 finalgate evidence (3a14094120): the draft group's KV is
             # rewritten by the ctx-KV precompute EVERY round across its whole
