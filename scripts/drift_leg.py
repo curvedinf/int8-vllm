@@ -26,6 +26,10 @@ def main():
     p.add_argument("--out-tokens", type=int, default=4096)
     p.add_argument("--temp", type=float, default=1.0)
     p.add_argument("--seed", type=int, default=5)
+    p.add_argument("--notrunc", action="store_true",
+                   help="top_p=1.0/top_k=-1: API logprobs become raw "
+                        "distribution values, comparable with "
+                        "prompt_logprobs echoes")
     args = p.parse_args()
 
     nonce = f"{args.tag}-{int(time.time())}"
@@ -41,8 +45,8 @@ def main():
         }],
         "max_tokens": args.out_tokens,
         "temperature": args.temp,
-        "top_p": 1.0 if args.temp == 0.0 else 0.95,
-        "top_k": -1 if args.temp == 0.0 else 20,
+        "top_p": 1.0 if args.temp == 0.0 or args.notrunc else 0.95,
+        "top_k": -1 if args.temp == 0.0 or args.notrunc else 20,
         "min_p": 0.0,
         "presence_penalty": 0.0,
         "repetition_penalty": 1.0,
