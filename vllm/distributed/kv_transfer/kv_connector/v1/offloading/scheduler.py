@@ -693,7 +693,7 @@ class OffloadingConnectorScheduler:
         hit_count = 0
         defer_lookup = False
         import os as _os
-        _ev = _os.environ.get("VLLM_OFFLOAD_LOADLOG")
+        _ev = _os.environ.get("VLLM_OFFLOAD_LOADLOG") == "1"
         for local_idx, key in enumerate(keys):
             result = self.manager.lookup(key, req_context)
             match result:

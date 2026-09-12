@@ -351,15 +351,25 @@ class OffloadingConnectorWorker:
             assert success
 
     def prepare_store_kv(self, metadata: OffloadingConnectorMetadata):
+        import os as _os
+        _now = _os.environ.get("VLLM_OFFLOAD_SUBMIT_AT_FINISH") == "1"
         for job_id, entry in metadata.store_jobs.items():
             if not self._is_store_writer:
                 # Gate before queueing: no _unsubmitted_store_jobs entry.
                 self._connector_worker_meta.mark_completed(job_id)
                 continue
+            assert isinstance(entry.src_spec, GPULoadStoreSpec)
+            if _now:
+                # G1 knife 2: submit stores HERE (get_finished runs after the
+                # engine step's forward/sampling completed) instead of at the
+                # next step's start_load_kv — kills the window where the D2H
+                # copy runs concurrently with the next verify forward.
+                success = self.worker.submit_store(job_id, entry.src_spec, entry.dst_spec)
+                assert success
+                continue
             # NOTE(orozery): defer the store to the beginning of the next
             # engine step, so that offloading starts AFTER transfers related
             # to token sampling, thereby avoiding delays to token generation.
-            assert isinstance(entry.src_spec, GPULoadStoreSpec)
             self._unsubmitted_store_jobs.append(
                 (job_id, entry.src_spec, entry.dst_spec)
             )
