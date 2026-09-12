@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -142,6 +142,15 @@ class CachedRequestData:
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
+    # Sliding-window eviction propagation: per request, per kv_cache_group,
+    # the number of LEADING block-table slots the scheduler has nulled
+    # (freed + replaced with null_block). The worker zeroes those row
+    # slots so stale block ids never route KV traffic (e.g. the DFlash
+    # ctx-resident guard) into freed-then-reallocated pages. Empty/absent
+    # entries mean "no nulled prefix" (the common case).
+    nulled_prefix_blocks: list[tuple[int, ...] | None] = field(
+        default_factory=list
+    )
 
     # Version of dataclass repr with token IDs obfuscated.
     def anon_repr(self) -> str:

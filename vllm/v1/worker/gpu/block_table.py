@@ -138,6 +138,21 @@ class BlockTables:
                 )
             self.num_blocks.np[i, req_index] = end
 
+    def zero_prefix_blocks(
+        self, req_index: int, nulled_counts: tuple[int, ...]
+    ) -> None:
+        """Zero the LEADING block-table slots the scheduler has nulled via
+        sliding-window eviction. Without this the row keeps stale ids from
+        freed (and possibly reallocated) pages; consumers like the DFlash
+        ctx-resident guard (``ctx_block_id != 0``) then route KV traffic into
+        live pages owned by other requests. ``nulled_counts[i]`` is the count
+        for group ``i``.
+        """
+        for i, count in enumerate(nulled_counts):
+            if count <= 0:
+                continue
+            self.block_tables[i].stage_write(req_index, 0, [0] * count)
+
     def apply_staged_writes(self) -> None:
         if self.num_kv_cache_groups == 0:
             return

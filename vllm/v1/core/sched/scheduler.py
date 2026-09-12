@@ -1542,6 +1542,7 @@ class Scheduler(SchedulerInterface):
         req_ids: list[str] = []
         new_token_ids: list[list[int]] = []
         new_block_ids: list[tuple[list[int], ...] | None] = []
+        nulled_prefix_blocks: list[tuple[int, ...] | None] = []
         all_token_ids: dict[str, list[int]] = {}
         num_computed_tokens: list[int] = []
         num_output_tokens: list[int] = []
@@ -1551,6 +1552,25 @@ class Scheduler(SchedulerInterface):
         for idx, req in enumerate(itertools.chain(running_reqs, resumed_reqs)):
             req_id = req.request_id
             req_ids.append(req_id)
+            # Sliding-window eviction propagation: count the LEADING null
+            # slots per group so the worker can zero the matching block-table
+            # row prefix (stale ids there route KV traffic into
+            # freed-then-reallocated pages). None when nothing is nulled.
+            nulled_counts: tuple[int, ...] | None = None
+            group_blocks = self.kv_cache_manager.get_blocks(req_id).blocks
+            if group_blocks:
+                counts = []
+                for blocks in group_blocks:
+                    n = 0
+                    for blk in blocks:
+                        if getattr(blk, "is_null", False):
+                            n += 1
+                        else:
+                            break
+                    counts.append(n)
+                if any(counts):
+                    nulled_counts = tuple(counts)
+            nulled_prefix_blocks.append(nulled_counts)
             # NOTE: In PP+async scheduling, we consume token ids via a direct GPU
             # broadcast path (`input_batch.prev_sampled_token_ids`), so we can
             # omit this payload.
@@ -1588,6 +1608,7 @@ class Scheduler(SchedulerInterface):
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
             num_output_tokens=num_output_tokens,
+            nulled_prefix_blocks=nulled_prefix_blocks,
         )
 
     def _try_schedule_encoder_inputs(
