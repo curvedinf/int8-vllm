@@ -1313,6 +1313,39 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out,
         )
 
+    def _specstat(self, out_dir, si, na, conv_state, ssm_state):
+        """Env-gated (VLLM_GDN_SPECSTAT): per spec-round ground truth of what
+        the conv/SSM kernels actually read — the spec-slot ids, num_accepted,
+        the conv rolling buffer's per-column norms (at the conv line), and the
+        SSM line norms at the resume slots. First 4 layer instances only."""
+        import json as _json
+        import os as _os
+        li = getattr(self, "_ss_i", None)
+        if li is None:
+            li = type(self)._ss_next = getattr(type(self), "_ss_next", -1) + 1
+            self._ss_i = li
+        if li >= 4:
+            return
+        cnt = getattr(self, "_ss_cnt", 0)
+        if cnt >= 400:
+            return
+        self._ss_cnt = cnt + 1
+        si_r = si[0].tolist()
+        na_l = na.tolist() if na is not None else []
+        conv_line = int(si_r[0])
+        cbuf = conv_state[conv_line].float()
+        c_norms = [round(float(cbuf[:, c].norm()), 3)
+                   for c in range(cbuf.shape[-1])]
+        ssm_norms = [round(float(ssm_state[max(int(s), 0)].float().norm()), 3)
+                     for s in si_r]
+        rec = {"li": li, "round": cnt, "si": si_r, "na": na_l,
+               "conv_line": conv_line, "conv_norms": c_norms,
+               "ssm_norms": ssm_norms}
+        _os.makedirs(_os.path.dirname(out_dir) or ".", exist_ok=True)
+        with open(_os.path.join(out_dir, f"specstat_{_os.getpid()}.jsonl"),
+                  "a") as f:
+            f.write(_json.dumps(rec) + "\n")
+
     def _gdn_row0_audit(self, q, k, v, a, b, out, ssm_state, spec_idx,
                         num_accepted, n_spec, snap=None):
         """Env-gated (VLLM_GDN_ROWAUDIT): recompute the SPEC row-0 GDN output
@@ -1493,6 +1526,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             # spec_state_indices_tensor is always set when spec_sequence_masks is set
             assert spec_state_indices_tensor is not None
             _nw = os.environ.get("VLLM_GDN_NANWATCH")
+            _ss = os.environ.get("VLLM_GDN_SPECSTAT")
+            if _ss and not torch.cuda.is_current_stream_capturing():
+                try:
+                    self._specstat(_ss, spec_state_indices_tensor,
+                                   num_accepted_tokens, conv_state,
+                                   self_kv_cache[1])
+                except Exception as _e:
+                    if not getattr(self, "_ss_err", False):
+                        self._ss_err = True
+                        logger.warning("SPECSTAT failed: %s", _e)
             _nw_oi = None
             if _nw and not torch.cuda.is_current_stream_capturing():
                 cls = type(self)

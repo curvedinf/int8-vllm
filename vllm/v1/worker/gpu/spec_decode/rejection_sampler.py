@@ -66,6 +66,7 @@ def _p_ring_append(
     pos: torch.Tensor,
     idx_mapping_np: np.ndarray,
     draft_sampled: torch.Tensor | None = None,
+    raw_logits: torch.Tensor | None = None,
 ) -> None:
     """Env-gated (VLLM_P_RING) per-round committed-token probability ring.
 
@@ -75,6 +76,10 @@ def _p_ring_append(
     Decisive for the wall question: at a repetition wall, does the target
     itself put p~1 on the wall token (state attractor) or is the committed
     token a low-p token the sampler should rarely return (resample defect)?
+
+    When ``raw_logits`` is provided, the resample row's RAW distribution
+    (pre sampling-param processing) is also recorded — splits a wrong
+    verify FORWARD from wrong sampler POST-PROCESSING.
     """
     import pickle
 
@@ -126,24 +131,31 @@ def _p_ring_append(
             # Top-5 tokens of the resample row's (truncated) distribution:
             # the support the sampler saw — clean English vs salad.
             top5 = torch.topk(rrow, 5).indices.cpu().tolist()
-            pickle.dump(
-                {
-                    "rs": int(rs),
-                    "pos0": int(pos_l[start]),
-                    "n": n,
-                    "tok": toks.cpu().tolist(),
-                    "p": [round(x, 5) for x in p_tok],
-                    "top1": [round(x, 5) for x in top1],
-                    "drafts": drafts,
-                    "rejected": rejected,
-                    "row_nan": row_nan,
-                    "row_absmax": round(row_absmax, 2),
-                    "row_inf": [int(x) for x in inf_cnt],
-                    "row_famax": famax,
-                    "top5": top5,
-                },
-                f,
-            )
+            rec = {
+                "rs": int(rs),
+                "pos0": int(pos_l[start]),
+                "n": n,
+                "tok": toks.cpu().tolist(),
+                "p": [round(x, 5) for x in p_tok],
+                "top1": [round(x, 5) for x in top1],
+                "drafts": drafts,
+                "rejected": rejected,
+                "row_nan": row_nan,
+                "row_absmax": round(row_absmax, 2),
+                "row_inf": [int(x) for x in inf_cnt],
+                "row_famax": famax,
+                "top5": top5,
+            }
+            if raw_logits is not None:
+                # RAW (pre-processing) resample row: p of the committed token
+                # and top-5 straight off the forward's logits.
+                rraw = raw_logits[start + n - 1].float()
+                lraw = torch.log_softmax(rraw, dim=-1)
+                raw_p = float(lraw[toks[n - 1]].exp())
+                rec["raw_p"] = round(raw_p, 5)
+                rec["raw_top5"] = torch.topk(rraw, 5).indices.cpu().tolist()
+                rec["raw_absmax"] = round(float(rraw.abs().max()), 2)
+            pickle.dump(rec, f)
 
 
 @triton.jit
@@ -293,6 +305,7 @@ class RejectionSampler:
                 pos,
                 idx_mapping_np,
                 draft_sampled,
+                raw_logits=logits,
             )
         return processed_logits, sampled, num_sampled
 
