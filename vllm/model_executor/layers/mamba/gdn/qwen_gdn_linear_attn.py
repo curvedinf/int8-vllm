@@ -1536,6 +1536,20 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     if not getattr(self, "_ss_err", False):
                         self._ss_err = True
                         logger.warning("SPECSTAT failed: %s", _e)
+            if os.environ.get("VLLM_GDN_SLOTSEED") and not (
+                torch.cuda.is_current_stream_capturing()
+            ):
+                # Diagnostic knife: before each spec forward, overwrite the
+                # per-row checkpoint slots si[1..] (SSM + conv buffers) with
+                # slot si[0]'s content. If the drift curve drops to floor,
+                # the per-row slots were stale/foreign (seeding fault); if
+                # unchanged, slots were healthy and the fault is elsewhere.
+                with torch.no_grad():
+                    base = int(spec_state_indices_tensor[0, 0].item())
+                    for s in spec_state_indices_tensor[0, 1:].tolist():
+                        if s > 0 and s != base:
+                            self_kv_cache[1][s].copy_(self_kv_cache[1][base])
+                            conv_state[s].copy_(conv_state[base])
             _nw_oi = None
             if _nw and not torch.cuda.is_current_stream_capturing():
                 cls = type(self)
