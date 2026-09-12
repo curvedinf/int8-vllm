@@ -193,3 +193,35 @@ Inferred (moderate-high confidence): the fault lies in the driver's batched
 copy path rather than in vLLM bookkeeping — this is the remaining hypothesis
 after the alternatives were excluded, but a driver-only minimal repro
 (§7.5) has not yet been produced on our side.
+
+## 11. Post-filing correction (2026-09-13): a second, simpler defect is LIVE
+## in this call path — upstream vLLM issue #53863
+
+`swap_blocks_batch` passes a single stack `size_t` (`attrs_idx`) as the
+`attrs_idxs` array. Whenever `numAttrs > 0` and `count > 1`, the driver
+reads that scalar as an array — an out-of-bounds read of stack memory
+producing garbage per-descriptor attribute indices (fix PRs #53971/#53860,
+open at time of writing).
+
+**We verified this path is LIVE on the reporting stack** (this corrects our
+own §3 assumption): although torch is built `+rocm7.1`, the serving process
+loads `/opt/rocm` 7.14 (`LD_LIBRARY_PATH=/opt/rocm/lib`) — compile headers
+are `HIP_VERSION` 7.14 and in-process `hipRuntimeGetVersion()` returns
+71460850. Both gates (`>= 7.13`) pass, so `num_attrs = 1` and
+`srcAccessOrder = STREAM` are active, and the OOB occurs for every batched
+call with more than one descriptor.
+
+**This cannot be the sole mechanism:** with
+`VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS=1` each call has `count = 1`, making
+the OOB impossible, yet corruption persisted (seed 307 still collapsed).
+The consistent model is **two coexisting defects**:
+
+1. the #53863 OOB (live at `count > 1` on runtimes ≥ 7.13), and
+2. a `count`-independent residual (the §5 driver-race candidate), whose
+   severity scales with store/replay overlap.
+
+**Decisive experiment (planned):** apply the #53971 fix (properly sized
+`attrs_idxs` array) and rerun the canonical seeds at full batch. If
+corruption falls to or below the BD1=1 level, the OOB was a contributor and
+the residual cleanly convicts the race; if unchanged, the OOB was incidental
+on this stack and §5 stands unmodified.
