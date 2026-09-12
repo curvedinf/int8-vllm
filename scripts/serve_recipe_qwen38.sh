@@ -240,6 +240,13 @@ if [[ "${_prefix_value}" == "0" ]]; then
   ARGS+=(--no-enable-prefix-caching)
 fi
 
+# MAMBA_BLOCK_SIZE (diagnostic lever): with prefix caching on, enlarge the
+# mamba page so decode never crosses a block boundary — neutralizes the
+# align/precopy migration machinery while keeping the hybrid hash contract.
+if [[ -n "${MAMBA_BLOCK_SIZE:-}" ]]; then
+  ARGS+=(--mamba-block-size "${MAMBA_BLOCK_SIZE}")
+fi
+
 # C6 means six concurrent sequences. The target and DFlash2 draft are both
 # GPTQ INT8 GS128. The actual runtime selections are reported in the startup
 # log; do not infer AITER CAR, fused quant-out, or draft INT8 KV from this
