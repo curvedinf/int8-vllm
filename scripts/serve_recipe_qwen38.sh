@@ -218,7 +218,7 @@ else
 fi
 # (NS flag file read near the top of this script, before COMMON_ENV.)
 if [[ "${_spec_value}" != "1" ]]; then
-  ARGS+=(--speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":'"${NS:-13}"',"kv_cache_dtype":"'"${DRAFT_KV_DTYPE:-int8_block_g128}"'"}')
+  ARGS+=(--speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":'"${NS:-6}"',"kv_cache_dtype":"'"${DRAFT_KV_DTYPE:-int8_block_g128}"'"}')
 fi
 
 # LOGSTATS=1 enables periodic engine/spec-decode stat logging
