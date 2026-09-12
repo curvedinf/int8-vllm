@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
+import os
 import time
 from collections import deque
 from collections.abc import Sequence
@@ -40,6 +41,42 @@ def _select_swap_blocks_fn(
     gpu_to_cpu: bool,
 ):
     """Resolve the swap_blocks function for a handler at init time."""
+    # G1 driver-race fix (2026-09-12): hipMemcpyBatchAsync D2H stores racing
+    # CUDA-graph replay on the compute stream corrupt device memory
+    # episodically on gfx906/gfx908 (ROCm 7.x). VLLM_OFFLOAD_TRITON_STORES=1
+    # routes GPU->CPU through the Triton copy kernel instead — a normal
+    # stream-ordered kernel that does not use the driver batch API.
+    # =force additionally bypasses the <28KB page-size perf heuristic (the
+    # g128 KV pages exceed it; Triton is slower there but correct — and the
+    # host-pointer store path is verified working on gfx908).
+    _ts = os.environ.get("VLLM_OFFLOAD_TRITON_STORES")
+    if gpu_to_cpu and _ts in ("1", "force"):
+        page_sizes = [r.page_size_bytes for g in layer_refs_per_group for r in g]
+        if _ts == "force" or (
+            page_sizes
+            and max(page_sizes) < THRESHOLD_BYTES
+            and not any(s % 8 for s in page_sizes)
+        ):
+            if any(s % 8 for s in page_sizes):
+                logger.warning(
+                    "TRITON_STORES requested but pages not 8-byte aligned "
+                    "(%s); falling back to the driver batch path",
+                    sorted(set(page_sizes)),
+                )
+            else:
+                chunk = min(triton.next_power_of_2(max(page_sizes)), 8192)
+                logger.info(
+                    "TRITON_STORES ACTIVE for GPU->CPU: pages=%s chunk=%d",
+                    sorted(set(page_sizes)), chunk,
+                )
+                return functools.partial(swap_blocks_batch, bytes_per_chunk=chunk)
+        else:
+            logger.info(
+                "TRITON_STORES requested but page-size gate failed "
+                "(pages=%s threshold=%d); using the driver batch path",
+                sorted(set(page_sizes)) if page_sizes else [], THRESHOLD_BYTES,
+            )
+        return ops.swap_blocks_batch
     # GPU->CPU is bandwidth-bound; the dedicated copy engine beats Triton.
     if gpu_to_cpu:
         return ops.swap_blocks_batch
