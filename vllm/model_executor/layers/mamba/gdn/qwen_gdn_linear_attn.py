@@ -1313,6 +1313,38 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out,
         )
 
+    def _nsstat(self, out_dir, nsi, conv_state, ssm_state):
+        """Env-gated (VLLM_GDN_NSSTAT): non-spec decode path ground truth —
+        the state line id, its SSM norm + value hash, and the conv line's
+        norms, per decode step. Mirrors _specstat for boot-to-boot
+        comparison of the post-prefill state at the shared line."""
+        import hashlib as _hl
+        import json as _json
+        import os as _os
+        li = getattr(self, "_ns_i", None)
+        if li is None:
+            li = type(self)._ns_next = getattr(type(self), "_ns_next", -1) + 1
+            self._ns_i = li
+        if li >= 4:
+            return
+        cnt = getattr(self, "_ns_cnt", 0)
+        if cnt >= 200:
+            return
+        self._ns_cnt = cnt + 1
+        line = int(nsi[0].item())
+        s = ssm_state[line].float()
+        h = _hl.md5(s.cpu().numpy().tobytes()).hexdigest()[:12]
+        cbuf = conv_state[line].float()
+        c_norms = [round(float(cbuf[:, c].norm()), 3)
+                   for c in range(cbuf.shape[-1])]
+        rec = {"li": li, "step": cnt, "line": line,
+               "ssm_norm": round(float(s.norm()), 4), "ssm_hash": h,
+               "conv_norms": c_norms}
+        _os.makedirs(_os.path.dirname(out_dir) or ".", exist_ok=True)
+        with open(_os.path.join(out_dir, f"nsstat_{_os.getpid()}.jsonl"),
+                  "a") as f:
+            f.write(_json.dumps(rec) + "\n")
+
     def _specstat(self, out_dir, si, na, conv_state, ssm_state):
         """Env-gated (VLLM_GDN_SPECSTAT): per spec-round ground truth of what
         the conv/SSM kernels actually read — the spec-slot ids, num_accepted,
@@ -1338,9 +1370,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                    for c in range(cbuf.shape[-1])]
         ssm_norms = [round(float(ssm_state[max(int(s), 0)].float().norm()), 3)
                      for s in si_r]
+        import hashlib as _hl
+        s0 = ssm_state[conv_line].float()
+        s0_hash = _hl.md5(s0.cpu().numpy().tobytes()).hexdigest()[:12]
         rec = {"li": li, "round": cnt, "si": si_r, "na": na_l,
                "conv_line": conv_line, "conv_norms": c_norms,
-               "ssm_norms": ssm_norms}
+               "ssm_norms": ssm_norms, "ssm0_hash": s0_hash}
         _os.makedirs(_os.path.dirname(out_dir) or ".", exist_ok=True)
         with open(_os.path.join(out_dir, f"specstat_{_os.getpid()}.jsonl"),
                   "a") as f:
@@ -1593,6 +1628,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             ).transpose(0, 1)
         elif attn_metadata.num_decodes > 0:
             assert mixed_qkv_non_spec is not None
+            _ns = os.environ.get("VLLM_GDN_NSSTAT")
+            if _ns and not torch.cuda.is_current_stream_capturing():
+                try:
+                    self._nsstat(_ns, non_spec_state_indices_tensor,
+                                 conv_state, self_kv_cache[1])
+                except Exception as _e:
+                    if not getattr(self, "_ns_err", False):
+                        self._ns_err = True
+                        logger.warning("NSSTAT failed: %s", _e)
             mixed_qkv_non_spec = causal_conv1d_update(
                 mixed_qkv_non_spec,
                 conv_state,
@@ -2068,6 +2112,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         conv_weights = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
         )
+        _ns = os.environ.get("VLLM_GDN_NSSTAT")
+        if _ns and not torch.cuda.is_current_stream_capturing():
+            try:
+                self._nsstat(_ns, non_spec_state_indices_tensor,
+                             conv_state, self_kv_cache[1])
+            except Exception as _e:
+                if not getattr(self, "_ns_err", False):
+                    self._ns_err = True
+                    logger.warning("NSSTAT failed: %s", _e)
         mixed_qkv_non_spec = causal_conv1d_update(
             mixed_qkv,
             conv_state,

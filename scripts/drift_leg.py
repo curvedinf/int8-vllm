@@ -26,13 +26,15 @@ def main():
     p.add_argument("--out-tokens", type=int, default=4096)
     p.add_argument("--temp", type=float, default=1.0)
     p.add_argument("--seed", type=int, default=5)
+    p.add_argument("--nonce", default=None,
+                   help="fixed nonce for a reproducible prompt corpus")
     p.add_argument("--notrunc", action="store_true",
                    help="top_p=1.0/top_k=-1: API logprobs become raw "
                         "distribution values, comparable with "
                         "prompt_logprobs echoes")
     args = p.parse_args()
 
-    nonce = f"{args.tag}-{int(time.time())}"
+    nonce = args.nonce or f"{args.tag}-{int(time.time())}"
     corpus = build_prompt(args.in_tokens, nonce)
     body = {
         "model": "qwen3.8-27b-gptq8",
