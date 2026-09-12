@@ -114,6 +114,158 @@ def _fused_qk_rmsnorm_rope_gate_kernel(
         tl.store(gate_out_base + head_offs, g, mask=head_mask)
 
 
+# --- gfx908 port -----------------------------------------------------------------
+# The fused kernel above selects pointer bases with a runtime-scalar `if
+# is_k:`, which the AMD Triton backend's TritonAMDGPUCanonicalizePointers
+# pass cannot lower on gfx908 (PassManager::run failed). The port splits the
+# program into one kernel for Q heads (with the gate copy) and one for K
+# heads — no runtime branching, identical math.
+
+
+@triton.jit
+def _fused_q_rmsnorm_rope_gate_gfx908(
+    q_gate_ptr,
+    q_out_ptr,
+    gate_out_ptr,
+    q_weight_ptr,
+    cos_sin_cache_ptr,
+    positions_ptr,
+    q_gate_stride_t,
+    q_out_stride_t,
+    gate_out_stride_t,
+    cache_stride_p,
+    head_dim: tl.constexpr,
+    rotary_dim: tl.constexpr,
+    half_rotary: tl.constexpr,
+    eps: tl.constexpr,
+    INPUT_DTYPE: tl.constexpr,
+    HEAD_BLOCK: tl.constexpr,
+    ROT_HALF_BLOCK: tl.constexpr,
+    HAS_PASS: tl.constexpr,
+):
+    token = tl.program_id(0).to(tl.int64)
+    head = tl.program_id(1)
+
+    in_base = q_gate_ptr + token * q_gate_stride_t + head * 2 * head_dim
+    out_base = q_out_ptr + token * q_out_stride_t + head * head_dim
+    w_ptr = q_weight_ptr
+
+    head_offs = tl.arange(0, HEAD_BLOCK)
+    head_mask = head_offs < head_dim
+    x = tl.load(in_base + head_offs, mask=head_mask, other=0.0).to(tl.float32)
+    var = tl.sum(x * x, axis=0) / head_dim
+    inv_rms = tl.rsqrt(var + eps)
+    w = tl.load(w_ptr + head_offs, mask=head_mask, other=0.0).to(tl.float32)
+    x_norm = (x * inv_rms * w).to(INPUT_DTYPE).to(tl.float32)
+
+    if HAS_PASS:
+        pass_mask = head_mask & (head_offs >= rotary_dim)
+        tl.store(out_base + head_offs, x_norm, mask=pass_mask)
+
+    rot_offs = tl.arange(0, ROT_HALF_BLOCK)
+    rot_mask = rot_offs < half_rotary
+    x_rot1 = tl.load(in_base + rot_offs, mask=rot_mask, other=0.0).to(tl.float32)
+    x_rot2 = tl.load(in_base + half_rotary + rot_offs, mask=rot_mask, other=0.0).to(
+        tl.float32
+    )
+    w_rot1 = tl.load(w_ptr + rot_offs, mask=rot_mask, other=0.0).to(tl.float32)
+    w_rot2 = tl.load(w_ptr + half_rotary + rot_offs, mask=rot_mask, other=0.0).to(
+        tl.float32
+    )
+    x_rot1 = (x_rot1 * inv_rms * w_rot1).to(INPUT_DTYPE).to(tl.float32)
+    x_rot2 = (x_rot2 * inv_rms * w_rot2).to(INPUT_DTYPE).to(tl.float32)
+
+    pos = tl.load(positions_ptr + token).to(tl.int64)
+    cache_offset = pos * cache_stride_p
+    cos = tl.load(
+        cos_sin_cache_ptr + cache_offset + rot_offs, mask=rot_mask, other=0.0
+    ).to(tl.float32)
+    sin = tl.load(
+        cos_sin_cache_ptr + cache_offset + half_rotary + rot_offs,
+        mask=rot_mask,
+        other=0.0,
+    ).to(tl.float32)
+
+    o1 = x_rot1 * cos - x_rot2 * sin
+    o2 = x_rot2 * cos + x_rot1 * sin
+    tl.store(out_base + rot_offs, o1, mask=rot_mask)
+    tl.store(out_base + half_rotary + rot_offs, o2, mask=rot_mask)
+
+    gate_in_base = in_base + head_dim
+    gate_out_base = gate_out_ptr + token * gate_out_stride_t + head * head_dim
+    g = tl.load(gate_in_base + head_offs, mask=head_mask, other=0.0)
+    tl.store(gate_out_base + head_offs, g, mask=head_mask)
+
+
+@triton.jit
+def _fused_k_rmsnorm_rope_gfx908(
+    q_gate_ptr,
+    k_ptr,
+    k_out_ptr,
+    k_weight_ptr,
+    cos_sin_cache_ptr,
+    positions_ptr,
+    k_stride_t,
+    k_out_stride_t,
+    cache_stride_p,
+    head_dim: tl.constexpr,
+    rotary_dim: tl.constexpr,
+    half_rotary: tl.constexpr,
+    eps: tl.constexpr,
+    INPUT_DTYPE: tl.constexpr,
+    HEAD_BLOCK: tl.constexpr,
+    ROT_HALF_BLOCK: tl.constexpr,
+    HAS_PASS: tl.constexpr,
+):
+    token = tl.program_id(0).to(tl.int64)
+    head = tl.program_id(1)
+
+    in_base = k_ptr + token * k_stride_t + head * head_dim
+    out_base = k_out_ptr + token * k_out_stride_t + head * head_dim
+    w_ptr = k_weight_ptr
+
+    head_offs = tl.arange(0, HEAD_BLOCK)
+    head_mask = head_offs < head_dim
+    x = tl.load(in_base + head_offs, mask=head_mask, other=0.0).to(tl.float32)
+    var = tl.sum(x * x, axis=0) / head_dim
+    inv_rms = tl.rsqrt(var + eps)
+    w = tl.load(w_ptr + head_offs, mask=head_mask, other=0.0).to(tl.float32)
+    x_norm = (x * inv_rms * w).to(INPUT_DTYPE).to(tl.float32)
+
+    if HAS_PASS:
+        pass_mask = head_mask & (head_offs >= rotary_dim)
+        tl.store(out_base + head_offs, x_norm, mask=pass_mask)
+
+    rot_offs = tl.arange(0, ROT_HALF_BLOCK)
+    rot_mask = rot_offs < half_rotary
+    x_rot1 = tl.load(in_base + rot_offs, mask=rot_mask, other=0.0).to(tl.float32)
+    x_rot2 = tl.load(in_base + half_rotary + rot_offs, mask=rot_mask, other=0.0).to(
+        tl.float32
+    )
+    w_rot1 = tl.load(w_ptr + rot_offs, mask=rot_mask, other=0.0).to(tl.float32)
+    w_rot2 = tl.load(w_ptr + half_rotary + rot_offs, mask=rot_mask, other=0.0).to(
+        tl.float32
+    )
+    x_rot1 = (x_rot1 * inv_rms * w_rot1).to(INPUT_DTYPE).to(tl.float32)
+    x_rot2 = (x_rot2 * inv_rms * w_rot2).to(INPUT_DTYPE).to(tl.float32)
+
+    pos = tl.load(positions_ptr + token).to(tl.int64)
+    cache_offset = pos * cache_stride_p
+    cos = tl.load(
+        cos_sin_cache_ptr + cache_offset + rot_offs, mask=rot_mask, other=0.0
+    ).to(tl.float32)
+    sin = tl.load(
+        cos_sin_cache_ptr + cache_offset + half_rotary + rot_offs,
+        mask=rot_mask,
+        other=0.0,
+    ).to(tl.float32)
+
+    o1 = x_rot1 * cos - x_rot2 * sin
+    o2 = x_rot2 * cos + x_rot1 * sin
+    tl.store(out_base + rot_offs, o1, mask=rot_mask)
+    tl.store(out_base + half_rotary + rot_offs, o2, mask=rot_mask)
+
+
 def fused_qk_rmsnorm_rope_gate(
     q_gate: torch.Tensor,
     k: torch.Tensor,
@@ -167,6 +319,50 @@ def fused_qk_rmsnorm_rope_gate(
     head_block = triton.next_power_of_2(head_dim)
     rot_half_block = triton.next_power_of_2(half_rotary)
     num_warps = max(1, head_block // 64)
+
+    # gfx908: the fused kernel's runtime pointer-base selection fails the
+    # AMD TritonAMDGPUCanonicalizePointers pass; use the split port instead.
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        common = dict(
+            head_dim=head_dim,
+            rotary_dim=rotary_dim,
+            half_rotary=half_rotary,
+            eps=eps,
+            INPUT_DTYPE=tl.bfloat16 if q_gate.dtype == torch.bfloat16 else tl.float16,
+            HEAD_BLOCK=head_block,
+            ROT_HALF_BLOCK=rot_half_block,
+            HAS_PASS=rotary_dim < head_dim,
+            num_warps=num_warps,
+            num_stages=2,
+        )
+        _fused_q_rmsnorm_rope_gate_gfx908[(n_tokens, num_q_heads)](
+            q_gate,
+            q_out,
+            gate_out,
+            q_weight,
+            cos_sin_cache,
+            positions,
+            q_gate.stride(0),
+            q_out.stride(0),
+            gate_out.stride(0),
+            cos_sin_cache.stride(0),
+            **common,
+        )
+        _fused_k_rmsnorm_rope_gfx908[(n_tokens, num_kv_heads)](
+            q_gate,
+            k,
+            k_out,
+            k_weight,
+            cos_sin_cache,
+            positions,
+            k.stride(0),
+            k_out.stride(0),
+            cos_sin_cache.stride(0),
+            **common,
+        )
+        return q_out, k_out, gate_out
 
     grid = (n_tokens, num_q_heads + num_kv_heads)
     _fused_qk_rmsnorm_rope_gate_kernel[grid](
