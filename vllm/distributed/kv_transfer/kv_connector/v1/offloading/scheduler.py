@@ -105,6 +105,16 @@ class GroupOffloadConfig(NamedTuple):
     # of these groups is volatile and lacks a stable hash, so it must
     # be excluded from store and load scheduling.
     is_eagle_group: bool = False
+    # True for EVERY group while speculative decoding is active: under spec
+    # verify, rejected-draft rows write KV at positions that are later
+    # corrected by subsequent rounds, so each group's trailing chunk is
+    # volatile even for the target model. Storing that snapshot and later
+    # restoring it overwrites corrected KV with stale draft KV (the
+    # late-onset drift: tier-off legs are clean, tier-on legs collapse
+    # episodically as eviction cycles restore stale snapshots).
+    # Unlike is_eagle_group this changes ONLY the trailing-chunk store
+    # exclusion — no drop semantics, no reachable-tail adjustments.
+    spec_volatile_tail: bool = False
 
 
 def get_sliding_window_size_in_chunks(
@@ -310,6 +320,9 @@ class SchedulerOffloadConfig(NamedTuple):
                     ),
                     kv_event_group_spec=get_offloading_event_group_spec(kv_cache_group),
                     is_eagle_group=idx in eagle_groups,
+                    spec_volatile_tail=(
+                        vllm_config.speculative_config is not None
+                    ),
                     requires_cow_source=(
                         isinstance(kv_spec, MambaSpec)
                         and kv_spec.mamba_cache_mode == "align"
@@ -450,7 +463,9 @@ class RequestOffloadState:
         """
         num_chunks = num_offloadable_tokens // group_config.tokens_per_chunk
         is_decoding = num_offloadable_tokens > self.req.num_prompt_tokens
-        if group_config.is_eagle_group and is_decoding:
+        if (
+            group_config.is_eagle_group or group_config.spec_volatile_tail
+        ) and is_decoding:
             num_chunks = max(0, num_chunks - 1)
         num_allocated_chunks = (
             len(group_state.block_ids) // self.config.blocks_per_chunk
