@@ -417,11 +417,19 @@ class AiterW8A16LinearKernel(MPLinearKernel):
         # stays opaque to fullgraph tracing.
         if c.group_size == 128:
             if hasattr(layer, "_ck_q"):
-                x_f16 = x_2d.to(torch.float16)
                 quant_op = getattr(
                     torch.ops.vllm, "rocm_aiter_pertoken_quant_int8", None
                 )
                 gemm_op = getattr(torch.ops.vllm, "rocm_aiter_gemm_a8w8_ck", None)
+                _use_rn = (
+                    os.environ.get("VLLM_GFX908_ACT_QUANT", "aiter") == "round"
+                )
+                # The round kernel reads bf16 natively (and upcasts to fp32
+                # internally), so skip the lossy bf16->fp16 cast — one fewer
+                # [M,K] elementwise kernel per GEMM and strictly better
+                # numerics (no mantissa loss in the cast). The aiter trunc
+                # op wants fp16, so only that path pays the cast.
+                x_f16 = x_2d if _use_rn else x_2d.to(torch.float16)
                 if quant_op is not None and gemm_op is not None:
                     # Activation quantizer selection: aiter pertoken (absmax,
                     # trunc-toward-zero) is the default; VLLM_GFX908_ACT_QUANT=
@@ -433,6 +441,7 @@ class AiterW8A16LinearKernel(MPLinearKernel):
                             pertoken_quant_rn,
                         )
 
+                        # x_f16 is x_2d (bf16) in this branch — see above.
                         x_q, x_s = pertoken_quant_rn(x_f16)
                     else:
                         # The fused-norm path stashes (q, scale) on the normed
@@ -464,7 +473,14 @@ class AiterW8A16LinearKernel(MPLinearKernel):
                 else:
                     from aiter import gemm_a8w8_CK, pertoken_quant
 
-                    x_q, x_s = pertoken_quant(x_f16, quant_dtype=torch.int8)
+                    # aiter's pertoken_quant wants fp16; x_f16 may be the
+                    # un-cast bf16 tensor when the round path is selected.
+                    x_in = (
+                        x_f16
+                        if x_f16.dtype == torch.float16
+                        else x_f16.to(torch.float16)
+                    )
+                    x_q, x_s = pertoken_quant(x_in, quant_dtype=torch.int8)
                     out_dtype = (
                         x_2d.dtype
                         if x_2d.dtype in (torch.float16, torch.bfloat16)
