@@ -400,8 +400,12 @@ def kernel_unified_attention(
     acc = tl.zeros([BLOCK_M, HEAD_SIZE_PADDED], dtype=tl.float32)
     if USE_G8_2GRP:
         # Half-width accumulators (one per 128-dim group); merged back
-        # into ``acc`` at the epilogue.
+        # into ``acc`` at the epilogue. Q's group split is hoisted here
+        # as well (Q is loop-invariant).
         acc0 = tl.zeros([BLOCK_M, HEAD_SIZE // 2], dtype=tl.float32)
+        q0, q1 = tl.split(
+            tl.permute(tl.reshape(Q, (BLOCK_M, 2, HEAD_SIZE // 2)), (0, 2, 1))
+        )
         acc1 = tl.zeros([BLOCK_M, HEAD_SIZE // 2], dtype=tl.float32)
     score_scale = scale
     value_scale = 1.0
@@ -606,8 +610,7 @@ def kernel_unified_attention(
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
         if USE_G8_2GRP:
             # Per-group partial dots with the group scales folded in:
-            # S = (Q0 @ K0) * s_k0 + (Q1 @ K1) * s_k1
-            q0, q1 = tl.split(tl.permute(tl.reshape(Q, (BLOCK_M, 2, HEAD_SIZE // 2)), (0, 2, 1)))
+            # S = (Q0 @ K0) * s_k0 + (Q1 @ K1) * s_k1  (q0/q1 hoisted)
             S += tl.dot(q0, k0) * (score_scale * s_k0[None, :])
             S += tl.dot(q1, k1) * (score_scale * s_k1[None, :])
         elif USE_PER_TOKEN_HEAD_SCALES:
@@ -1098,9 +1101,15 @@ def unified_attention(
     TILE_SIZE_PREFILL = _get_tile_size(
         head_size, sliding_window_val, q.element_size(), is_prefill=True
     )
+    # VLLM_UA_TILE: env override for the decode KV tile (E10 tuning lever;
+    # default unchanged). Wider tiles halve iteration count + scale loads
+    # on the g8 partial-dot path.
+    _env_tile = os.environ.get("VLLM_UA_TILE")
     TILE_SIZE_DECODE = _get_tile_size(
         head_size, sliding_window_val, q.element_size(), is_prefill=False
     )
+    if _env_tile:
+        TILE_SIZE_DECODE = min(int(_env_tile), block_size)
 
     # Wider KV tile for the tuned large-head path (see above). Only the 2D
     # path (used when max_seqlen_q > 1) reads TILE_SIZE_PREFILL.
