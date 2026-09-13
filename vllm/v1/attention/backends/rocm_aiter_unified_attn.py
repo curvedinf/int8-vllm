@@ -603,6 +603,23 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                     g8_v_scale=self._g8_v,
                     **_segm_kw,
                 )
+                _ra8 = os.environ.get("VLLM_UA_READAUDIT_G8") or (
+                    os.path.exists(
+                        "/home/curved/vllm-gfx908/logs/serve_recipe_qwen38/READAUDITG8"
+                    )
+                    and "/home/curved/vllm-gfx908/logs/garble/readauditg8"
+                )
+                if _ra8 and not torch.cuda.is_current_stream_capturing():
+                    try:
+                        self._ua_read_audit_g8(
+                            query, output, key_cache, value_cache,
+                            cu_seqlens_q, seqused_k, block_table,
+                            softmax_scale, num_actual_tokens,
+                        )
+                    except Exception as e:
+                        if not getattr(self, "_ra8_err", False):
+                            self._ra8_err = True
+                            logger.warning("UA-READAUDIT-G8 failed: %s", e)
             else:
                 # VLLM_ATTNTRACE: time just the unified_attention call
                 import os as _os, time as _time
@@ -721,6 +738,69 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
 
         return output
 
+
+    def _ua_read_audit_g8(
+        self, query, output, key_cache, value_cache, cu_seqlens_q,
+        seqused_k, block_table, softmax_scale, num_actual_tokens,
+    ):
+        """Flag/env-gated (VLLM_UA_READAUDIT_G8 / READAUDITG8 flag): for the
+        leading request's LAST query row, reference-attend from the g128
+        cache bytes with exact group-scale dequant (fp32 softmax) and
+        compare against the kernel's output row. A large rel divergence at
+        high context convicts the read path; small quantization-level rel
+        (~1e-2) exonerates it."""
+        import json as _json
+        import os as _os
+
+        ln = getattr(self, "_ra8_layer", None)
+        if ln is None:
+            n = type(self)._ra8_inst = getattr(type(self), "_ra8_inst", 0)
+            type(self)._ra8_inst = n + 1
+            self._ra8_layer = ln = n
+        if ln >= 4:
+            return
+        if cu_seqlens_q.shape[0] < 2:
+            return
+        q1 = int(cu_seqlens_q[1].item())
+        if q1 < 1 or q1 > num_actual_tokens:
+            return
+        row = q1 - 1  # last query row of the leading request
+        sk = int(seqused_k[0].item())
+        ctx = sk  # causal: this row attends [0, sk) when row == sk-1
+        if ctx <= 0 or ctx > 40000:
+            return
+        bs = key_cache.shape[1]
+        nblk = (ctx + bs - 1) // bs
+        bt0 = block_table[0, :nblk].long()
+        K = key_cache[bt0].float()          # [nblk, bs, h, d]
+        V = value_cache[bt0].float()
+        ks = self._g8_k[bt0].float()        # [nblk, bs, h, groups]
+        vs = self._g8_v[bt0].float()
+        g = K.shape[-1] // ks.shape[-1]
+        K = K * ks.repeat_interleave(g, dim=-1)
+        V = V * vs.repeat_interleave(g, dim=-1)
+        K = K.reshape(-1, K.shape[-2], K.shape[-1])[:ctx]
+        V = V.reshape(-1, V.shape[-2], V.shape[-1])[:ctx]
+        q = query[row].float()
+        got = output[row].float()
+        num_h, num_kv = q.shape[0], K.shape[1]
+        rel = []
+        for h in range(num_h):
+            kv_h = h * num_kv // num_h
+            s = (K[:, kv_h, :] @ q[h]) * softmax_scale
+            s = s - s.max()
+            p = torch.softmax(s, dim=-1)
+            o = p @ V[:, kv_h, :]
+            gg = got[h]
+            rel.append(float((o - gg).abs().max() / gg.abs().max().clamp(min=1e-6)))
+        rec = {"layer": ln, "call": getattr(self, "_ra8_call", 0),
+               "ctx": ctx, "row": row, "rel": round(max(rel), 4)}
+        self._ra8_call = getattr(self, "_ra8_call", 0) + 1
+        out = _os.environ.get("VLLM_UA_READAUDIT_G8") or \
+            "/home/curved/vllm-gfx908/logs/garble/readauditg8"
+        _os.makedirs(out, exist_ok=True)
+        with open(_os.path.join(out, f"rag8_{_os.getpid()}.jsonl"), "a") as f:
+            f.write(_json.dumps(rec) + "\n")
 
     def _ua_read_audit(
         self,
