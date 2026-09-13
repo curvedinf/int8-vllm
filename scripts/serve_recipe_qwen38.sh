@@ -105,7 +105,7 @@ ARGS=(
   --served-model-name "${SERVED_MODEL_NAME}"
   --host "${HOST}"
   --port "${PORT}"
-  --tensor-parallel-size 4
+  --tensor-parallel-size "${TPS:-4}"
   # Target compute dtype. DEFAULT bfloat16 since 2026-09-01: the fp16 residual
   # stream overflows (>65504) when a repetition attractor grows activations at
   # long context, producing inf -> NaN logits and the token-1023 'duct' lock
