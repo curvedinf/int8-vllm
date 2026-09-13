@@ -4377,6 +4377,33 @@ class GPUModelRunner(
             # Update persistent batch states.
             deferred_state_corrections_fn = self._update_states(scheduler_output)
 
+            # VLLM_INPUTTRACE: hash the worker-side input token stream the
+            # model will actually embed (G1 bisection: compare against the
+            # engine-core _all_token_ids trajectory; divergence convicts the
+            # scheduler_output -> worker input build path).
+            _it = os.environ.get("VLLM_INPUTTRACE") or (
+                os.path.exists(
+                    "/home/curved/vllm-gfx908/logs/serve_recipe_qwen38/INPUTTRACE"
+                )
+                and "/home/curved/vllm-gfx908/logs/garble/inputtrace"
+            )
+            if _it and num_scheduled_tokens:
+                import hashlib as _hl
+                import json as _json
+                _ids = self.input_ids.cpu[:num_scheduled_tokens].tolist()
+                self._it_n = getattr(self, "_it_n", 0) + 1
+                with open(f"{_it}/input_{os.getpid()}.jsonl", "a") as _f:
+                    _f.write(_json.dumps({
+                        "n": self._it_n,
+                        "reqs": len(scheduler_output.num_scheduled_tokens),
+                        "toks": num_scheduled_tokens,
+                        "first": _ids[0],
+                        "last": _ids[-1],
+                        "md5": _hl.md5(
+                            b"".join(int(t).to_bytes(4, "little") for t in _ids)
+                        ).hexdigest()[:10],
+                    }) + "\n")
+
             if has_ec_transfer() and not get_ec_transfer().is_consumer:
                 with self.maybe_get_ec_connector_output(
                     scheduler_output,

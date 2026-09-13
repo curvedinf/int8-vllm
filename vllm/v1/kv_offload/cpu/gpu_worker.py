@@ -8,6 +8,18 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import NamedTuple
 
+
+def _offload_knife(name: str) -> bool:
+    """Diagnostic knife switch: env var OR flag file. The flag file lives
+    next to the serve script's other diagnostic flags and survives any
+    process-boundary env sanitization (worker env propagation proved
+    unreliable for shell-exported vars)."""
+    if os.environ.get(f"VLLM_OFFLOAD_{name}") == "1":
+        return True
+    return os.path.exists(
+        "/home/curved/vllm-gfx908/logs/serve_recipe_qwen38/" + name
+    )
+
 import numpy as np
 import torch
 
@@ -662,10 +674,7 @@ class SingleDirectionOffloadingHandler:
         # store/compute concurrency BY CONSTRUCTION (diagnostic knife for the
         # episodic decode-phase corruption; see
         # docs/recipes/bug_rocm_batch_memcpy_graph_replay_race.md).
-        serialize_on_compute = (
-            self.gpu_to_cpu
-            and os.environ.get("VLLM_OFFLOAD_COMPUTE_STREAM_STORES") == "1"
-        )
+        serialize_on_compute = self.gpu_to_cpu and _offload_knife("COMPUTE_STREAM_STORES")
         if serialize_on_compute:
             stream = current_platform.current_stream()
         else:
@@ -704,21 +713,27 @@ class SingleDirectionOffloadingHandler:
         # writing; we must keep STREAM ordering so source reads are gated
         # by the transfer stream's wait_stream(compute) barrier.
         is_src_access_order_any = not self.gpu_to_cpu
+        _noev = _offload_knife("NOEVENTS")
         with current_platform.stream(stream):
-            start_event.record(stream)
+            if not _noev:
+                start_event.record(stream)
             # VLLM_OFFLOAD_FAKESTORES=1: exercise the ENTIRE store machinery
             # (descriptors, events, pools, completion bookkeeping, CPU-tier
             # metadata) but never issue the driver copy — bisection knife:
             # clean => the hipMemcpyBatchAsync/batch driver call is the
             # trigger; corrupt => the CPU-side machinery is the trigger.
-            if op_idx > 0 and os.environ.get("VLLM_OFFLOAD_FAKESTORES") != "1":
+            # VLLM_OFFLOAD_NOEVENTS=1: also skip hipEventRecord — the last
+            # GPU-side common denominator of the store path (bisection knife
+            # for the gfx908 event-record disturbance hypothesis).
+            if op_idx > 0 and not _offload_knife("FAKESTORES"):
                 self._swap_blocks_batch(
                     src,
                     dst,
                     sizes,
                     is_src_access_order_any=is_src_access_order_any,
                 )
-            end_event.record(stream)
+            if not _noev:
+                end_event.record(stream)
 
         self._transfer_events[job_id] = end_event
         self._transfers.append(
@@ -742,9 +757,12 @@ class SingleDirectionOffloadingHandler:
 
     def get_finished(self) -> list[TransferResult]:
         results: list[TransferResult] = []
-        while self._transfers and self._transfers[0].end_event.query():
+        _noev = _offload_knife("NOEVENTS")
+        while self._transfers and (
+            _noev or self._transfers[0].end_event.query()
+        ):
             transfer = self._transfers.popleft()
-            transfer_time = (
+            transfer_time = 0.0 if _noev else (
                 transfer.start_event.elapsed_time(transfer.end_event) * 1e-3
             )  # elapsed_time is in milliseconds
             result = TransferResult(

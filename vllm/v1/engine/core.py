@@ -606,6 +606,30 @@ class EngineCore:
         if _st_box is not None:
             _t1 = _time.perf_counter()
             _st_box["sched"] += _t1 - _t0
+        # VLLM_SCHEDTRACE: per-step per-request scheduler-visible state
+        # (num_computed_tokens + output token stream length/tail). The
+        # corruption bridge from the store control plane must cross this
+        # boundary; a backward jump or repeat here convicts the scheduler
+        # side, monotone consistency exonerates it (fault in forward).
+        _sx = _os.environ.get("VLLM_SCHEDTRACE")
+        if _sx:
+            import json as _json
+            _sx_n = getattr(self, "_schedtrace_n", 0) + 1
+            self._schedtrace_n = _sx_n
+            rows = []
+            try:
+                for rid, req in self.scheduler.running.items():
+                    toks = req._all_token_ids
+                    rows.append((
+                        rid[:8],
+                        req.num_computed_tokens,
+                        len(toks),
+                        int(toks[-1]) if len(toks) else -1,
+                    ))
+            except Exception:
+                pass
+            with open(f"{_sx}/sched_{_os.getpid()}.jsonl", "a") as _f:
+                _f.write(_json.dumps({"n": _sx_n, "r": rows}) + "\n")
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
@@ -688,6 +712,40 @@ class EngineCore:
             if _st_box is not None:
                 _t1 = _time.perf_counter()
                 _st_box["sched"] += _t1 - _t0
+            # VLLM_SCHEDTRACE: per-step per-request scheduler-visible state
+            # (num_computed_tokens + token stream length/tail). The G1
+            # corruption bridge from the store control plane must cross
+            # this boundary; a backward jump/repeat convicts the scheduler
+            # side, monotone consistency exonerates it (fault downstream).
+            _sx = _os.environ.get("VLLM_SCHEDTRACE")
+            if _sx:
+                import json as _json
+                _sx_n = getattr(self, "_schedtrace_n", 0) + 1
+                self._schedtrace_n = _sx_n
+                rows = []
+                try:
+                    for req in self.scheduler.running:
+                        toks = req._all_token_ids
+                        # settled-prefix checksum: token ids behind the
+                        # rolling 64-token tail must never change; a change
+                        # = mid-list mutation of the model's input stream
+                        import hashlib as _hl
+                        _cut = max(len(toks) - 64, 0)
+                        _h = _hl.md5(
+                            b"".join(int(t).to_bytes(4, "little")
+                                     for t in toks[:_cut])
+                        ).hexdigest()[:10] if _cut else ""
+                        rows.append((
+                            req.request_id[:8],
+                            req.num_computed_tokens,
+                            len(toks),
+                            int(toks[-1]) if len(toks) else -1,
+                            _h,
+                        ))
+                except Exception:
+                    pass
+                with open(f"{_sx}/sched_{_os.getpid()}.jsonl", "a") as _f:
+                    _f.write(_json.dumps({"n": _sx_n, "r": rows}) + "\n")
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
