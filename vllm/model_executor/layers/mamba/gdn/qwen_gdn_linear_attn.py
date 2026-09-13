@@ -184,11 +184,16 @@ def _gdn_statehash_record(
     import json as _json
 
     idx = -1
+    win: list = []
     if (
         attn_metadata.num_spec_decodes > 0
         and attn_metadata.spec_state_indices_tensor is not None
     ):
         idx = int(attn_metadata.spec_state_indices_tensor[0, 0].item())
+        # Full 7-slot window hashes (G1 content-continuity audit): at a
+        # crossing, the precopy dest (new col 0) must carry the source
+        # checkpoint's content; a mismatch = content-level teleport.
+        win = attn_metadata.spec_state_indices_tensor[0].tolist()
     elif (
         attn_metadata.non_spec_state_indices_tensor is not None
         and attn_metadata.non_spec_state_indices_tensor.numel() > 0
@@ -212,6 +217,13 @@ def _gdn_statehash_record(
     }
     if idx < 0:
         rec["fixed"] = "0-2"
+    if win and li in (0, 1):
+        rec["win"] = [
+            (int(b), _gdn_statehash_md5(conv_state[b]),
+             _gdn_statehash_md5(ssm_state[b]))
+            if b > 0 else (int(b), "", "")
+            for b in win
+        ]
     os.makedirs(out_dir, exist_ok=True)
     with open(os.path.join(out_dir, f"gdnstate_{os.getpid()}.jsonl"), "a") as f:
         f.write(_json.dumps(rec) + "\n")
