@@ -1643,6 +1643,18 @@ class MambaManager(SingleTypeKVCacheManager):
                     block_idx, source_block = partial_hit
                     cow_block = new_blocks[0]
                     new_blocks = new_blocks[1:]
+                    if os.environ.get("VLLM_COWTRACE") or os.path.exists(
+                        "/home/curved/vllm-gfx908/logs/serve_recipe_qwen38/COWTRACE"
+                    ):
+                        logger.warning(
+                            "[cowtrace] req=%s group=%d blocks_allocated=%s "
+                            "prev_len=%d block_idx=%d src=%d cow=%d "
+                            "producer=%s",
+                            request_id, self.kv_cache_group_id, blocks_allocated,
+                            prev_block_len, block_idx, source_block.block_id,
+                            cow_block.block_id,
+                            self._producer_partial_tail_reqs.get(request_id),
+                        )
                     if blocks_allocated:
                         # The worker block table of a running request is
                         # append-only, so the request must stay on
@@ -1765,6 +1777,16 @@ class MambaManager(SingleTypeKVCacheManager):
             block_size=self.block_size,
         )
         if partial_hash is not None:
+            if os.environ.get("VLLM_COWTRACE") or os.path.exists(
+                "/home/curved/vllm-gfx908/logs/serve_recipe_qwen38/COWTRACE"
+            ):
+                logger.warning(
+                    "[cowtrace-arm] req=%s group=%d num_tokens=%d block_idx=%d "
+                    "src=%d running=%s",
+                    request.request_id, self.kv_cache_group_id, num_tokens,
+                    block_idx, source_block.block_id,
+                    request.request_id in self._allocated_block_reqs,
+                )
             self._partial_hit_reqs[request.request_id] = (block_idx, source_block)
             self.num_cached_block[request.request_id] = block_idx
             # Producer of this partial tail: the boundary state currently lives
