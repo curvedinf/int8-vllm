@@ -5,6 +5,7 @@
 from typing import ClassVar
 
 import os as _os
+os = _os
 
 from dataclasses import replace
 
@@ -483,6 +484,45 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             k_scale_cache = None
             v_scale_cache = None
 
+        _sc = os.environ.get("VLLM_KV_STABLECHECK")
+        if (
+            _sc
+            and not torch.cuda.is_current_stream_capturing()
+            and attn_metadata.block_table is not None
+            and key_cache is not None
+            and attn_metadata.block_table.shape[0] > 0
+        ):
+            try:
+                self._stable_kv_check(
+                    attn_metadata.block_table, kv_cache,
+                    attn_metadata.seq_lens,
+                )
+            except Exception:
+                if not getattr(self, "_sc_err", False):
+                    self._sc_err = True
+                    logger.warning("KV-STABLECHECK failed", exc_info=True)
+
+        _bt = os.environ.get("VLLM_KV_BTSCHECK")
+        if (
+            _bt
+            and not torch.cuda.is_current_stream_capturing()
+            and attn_metadata.block_table is not None
+            and attn_metadata.seq_lens is not None
+            and attn_metadata.block_table.shape[0] > 0
+        ):
+            try:
+                self._bt_stable_check(
+                    attn_metadata.block_table, attn_metadata.seq_lens,
+                    attn_metadata.slot_mapping,
+                    attn_metadata.query_start_loc,
+                    attn_metadata.num_actual_tokens,
+                    attn_metadata.max_query_len,
+                )
+            except Exception:
+                if not getattr(self, "_bt_err", False):
+                    self._bt_err = True
+                    logger.warning("KV-BTSCHECK failed", exc_info=True)
+
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
         max_seqlen_q = attn_metadata.max_query_len
@@ -491,11 +531,31 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
 
         if attn_metadata.causal:
             if getattr(self, "_g8_k", None) is not None:
-                # G8 diagnostic mode: route through the vLLM triton unified
-                # kernel (slower than aiter, quality-identical measurement).
+                # int8_block_g* / G8 diagnostic mode: route through the vLLM
+                # triton unified kernel. E10 speed fix: (a) the kernel folds
+                # the per-group scales into per-group partial dots (no
+                # full-tile fp32 dequant), and (b) multi-token verify batches
+                # (q<=8) use the 3D split-K path with preallocated segment
+                # buffers — at C6/20k this took the attention call from
+                # ~16.5ms to ~2ms. Kill-switch: VLLM_G128_ATTN3D=0.
                 from vllm.v1.attention.ops.triton_unified_attention import (
                     unified_attention as triton_unified_attention,
                 )
+
+                _attn3d = os.environ.get("VLLM_G128_ATTN3D", "1") == "1"
+                _segm_kw = {}
+                if _attn3d:
+                    if not hasattr(self, "_segm_buffers"):
+                        self._alloc_segm_buffers(kv_cache.device)
+                    _segm_kw = dict(
+                        num_par_softmax_segments=self._segm_splits,
+                        softmax_segm_output=self._segm_out,
+                        softmax_segm_max=self._segm_max,
+                        softmax_segm_expsum=self._segm_sum,
+                        seq_threshold_3D=self._segm_seq_threshold,
+                        max_flash_decoding_splits=self._segm_splits,
+                    )
+                    os.environ.setdefault("VLLM_UA_3D_MAXQ", "8")
 
                 triton_unified_attention(
                     q=query[:num_actual_tokens],
@@ -522,6 +582,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                     v_scale_cache=v_scale_cache,
                     g8_k_scale=self._g8_k,
                     g8_v_scale=self._g8_v,
+                    **_segm_kw,
                 )
             else:
                 # VLLM_ATTNTRACE: time just the unified_attention call
@@ -914,6 +975,154 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         merged.update(new_prev)
         self._rb_prev = new_prev
         self._rb_all = merged
+
+    _SC_CAP = 8192
+    _SC_DUMP_EVERY = 256
+
+    _SEGM_POOL: dict = {}
+
+    def _alloc_segm_buffers(self, device) -> None:
+        """Allocate (once per (device, num_heads)) the 3D split-K segment
+        buffers shared by every layer's backend instance. Sized for
+        verify-shaped decode batches: rows = max q tokens (seqs x q_len),
+        splits = 64 (adaptive picker stays under this)."""
+        key = (str(device), self.num_heads)
+        cached = RocmAiterUnifiedAttentionImpl._SEGM_POOL.get(key)
+        if cached is None:
+            import math
+
+            hp = 1 << (int(math.log2(self.head_size - 1)) + 1)  # next pow2
+            rows = 256
+            splits = 64
+            cached = (
+                torch.empty((rows, self.num_heads, splits, hp),
+                            dtype=torch.float32, device=device),
+                torch.empty((rows, self.num_heads, splits),
+                            dtype=torch.float32, device=device),
+                torch.empty((rows, self.num_heads, splits),
+                            dtype=torch.float32, device=device),
+                splits,
+                256,  # seq threshold (num_seqs gate; generous)
+            )
+            RocmAiterUnifiedAttentionImpl._SEGM_POOL[key] = cached
+        (self._segm_out, self._segm_max, self._segm_sum,
+         self._segm_splits, self._segm_seq_threshold) = cached
+
+
+    def _bt_stable_check(self, block_table, seq_lens, slot_mapping,
+                         query_start_loc, num_actual_tokens, max_query_len):
+        """Env-gated (VLLM_KV_BTSCHECK): per-forward md5 of the GPU block
+        table's SETTLED prefix (entries [0, uw-2)) for scheduler rows 0/1,
+        plus seq_lens, the slot_mapping (KV write targeting for this step's
+        new tokens) and query_start_loc (query positions). The settled
+        prefix of a running request must never change during decode;
+        slot_mapping for a decode step must target the frontier slots.
+        A change in either = forward-metadata corruption (the exact tensors
+        attention consumes), which scrambles which KV blocks are read or
+        written while leaving stored KV bytes intact."""
+        import hashlib as _hl
+        import json as _json
+
+        self._bt_n = getattr(self, "_bt_n", 0) + 1
+        if self._bt_n > 20000:
+            return
+        if not hasattr(self, "_bt_inst"):
+            cls = type(self)
+            cls._bt_registry = getattr(cls, "_bt_registry", {})
+            self._bt_inst = cls._bt_registry.setdefault(
+                id(self), len(cls._bt_registry))
+        out = os.environ["VLLM_KV_BTSCHECK"]
+        recs = []
+        for r in range(min(block_table.shape[0], 2)):
+            uw = int((block_table[r] > 0).count_nonzero())
+            settled = max(uw - 2, 0)
+            h = _hl.md5(
+                block_table[r, :settled].cpu().numpy().tobytes()
+            ).hexdigest()[:10]
+            # aliasing detector: a physical page handed to the frontier
+            # that is still referenced at an earlier position = duplicate bid
+            bids_np = block_table[r, :uw].cpu().numpy()
+            uniq = len(set(bids_np.tolist()))
+            dup = uw - uniq
+            tail3 = bids_np[-3:].tolist() if uw >= 3 else bids_np.tolist()
+            recs.append((settled, int(seq_lens[r]), h, dup, tail3))
+        sm = slot_mapping[:num_actual_tokens]
+        first_slots = sm[:min(8, sm.numel())].cpu().tolist()
+        path = f"{out}/bt_{os.getpid()}.jsonl"
+        os.makedirs(out, exist_ok=True)
+        with open(path, "a") as f:
+            f.write(_json.dumps({
+                "n": self._bt_n,
+                "inst": self._bt_inst,
+                "bt": recs,
+                "q": [num_actual_tokens, max_query_len],
+                "sm": _hl.md5(sm.cpu().numpy().tobytes()).hexdigest()[:10],
+                "s0": first_slots,
+            }) + "\n")
+
+    def _stable_kv_check(self, block_table, kv_cache, seq_lens=None):
+        """Env-gated (VLLM_KV_STABLECHECK): per-forward byte-checksum of the
+        FULL stable KV region (all blocks behind the write frontier, K+V+
+        scales via the raw packed tensor) for the first two scheduler rows.
+
+        Sums are computed on-GPU into a preallocated buffer (no per-step
+        CPU sync, to avoid fencing any copy-engine/compute race) and dumped
+        every _SC_DUMP_EVERY steps with a stable-region bid fingerprint and
+        seq_lens. A sum change with an unchanged bid fingerprint = device
+        KV corruption; an unchanged sum across a glitched step = compute/
+        read-path disturbance."""
+        import hashlib as _hl
+        import json as _json
+
+        self._sc_n = getattr(self, "_sc_n", 0) + 1
+        n = self._sc_n
+        if n > self._SC_CAP:
+            return
+        out = os.environ["VLLM_KV_STABLECHECK"]
+        if not hasattr(self, "_sc_inst"):
+            cls = type(self)
+            cls._sc_registry = getattr(cls, "_sc_registry", {})
+            self._sc_inst = cls._sc_registry.setdefault(id(self), len(cls._sc_registry))
+        if not hasattr(self, "_sc_buf"):
+            self._sc_buf = torch.zeros(
+                self._SC_CAP, 2, 2, dtype=torch.int64, device=kv_cache.device
+            )
+            self._sc_dumped = 0
+
+        raw = kv_cache.view(torch.uint8)
+        for r in range(min(block_table.shape[0], 2)):
+            uw = int((block_table[r] > 0).count_nonzero())
+            stable = uw - 2  # keep the 2 frontier blocks out
+            if stable <= 0:
+                continue
+            bids = block_table[r, :stable].to(torch.long)
+            s = raw.index_select(0, bids).sum(dtype=torch.int64)
+            self._sc_buf[n - 1, r, 0].copy_(s, non_blocking=True)
+            self._sc_buf[n - 1, r, 1].fill_(stable)
+
+        if n % self._SC_DUMP_EVERY == 0:
+            rows = self._sc_buf[self._sc_dumped : n].cpu().tolist()
+            fp, sl = [], []
+            for r in range(min(block_table.shape[0], 2)):
+                uw = int((block_table[r] > 0).count_nonzero())
+                stable = max(uw - 2, 0)
+                fp.append(_hl.md5(
+                    block_table[r, :stable].cpu().numpy().tobytes()
+                ).hexdigest()[:10])
+                if seq_lens is not None:
+                    sl.append(int(seq_lens[r]))
+            path = f"{out}/stable_{os.getpid()}.jsonl"
+            os.makedirs(out, exist_ok=True)
+            with open(path, "a") as f:
+                f.write(_json.dumps({
+                    "inst": self._sc_inst,
+                    "n0": self._sc_dumped + 1,
+                    "n1": n,
+                    "sums": rows,
+                    "fp": fp,
+                    "sl": sl,
+                }) + "\n")
+            self._sc_dumped = n
 
     def _kv_readback_check_g8(self, key, value, slot_mapping):
         """Write-then-read-back audit for the grouped-int8 (g8/g128) writer:

@@ -268,6 +268,10 @@ def kernel_unified_attention(
     stride_g8_slot: int | None = None,
     USE_G8: tl.constexpr = False,
     G8_GROUP: tl.constexpr = 8,
+    # Exactly-two-groups specialization (e.g. G128 with head 256): the
+    # group scales fold into per-group partial dots instead of a
+    # full-tile dequant multiply.
+    USE_G8_2GRP: tl.constexpr = False,
     # ``tl.int64`` cannot be combined with a ``None`` default — Triton's JIT
     # rejects ``Optional[tl.int64]`` / ``tl.int64 | None`` at trace time, and
     # plain ``tl.int64 = None`` raises ``TypeError: 'NoneType' object cannot
@@ -394,6 +398,11 @@ def kernel_unified_attention(
     L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     # acc : (BLOCK_M, HEAD_SIZE_PADDED)
     acc = tl.zeros([BLOCK_M, HEAD_SIZE_PADDED], dtype=tl.float32)
+    if USE_G8_2GRP:
+        # Half-width accumulators (one per 128-dim group); merged back
+        # into ``acc`` at the epilogue.
+        acc0 = tl.zeros([BLOCK_M, HEAD_SIZE // 2], dtype=tl.float32)
+        acc1 = tl.zeros([BLOCK_M, HEAD_SIZE // 2], dtype=tl.float32)
     score_scale = scale
     value_scale = 1.0
     if USE_FP8_Q_DESCALE:
@@ -507,7 +516,25 @@ def kernel_unified_attention(
         V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
 
         # G8: dequant K/V per 8-dim group before the dots.
-        if USE_G8:
+        if USE_G8_2GRP:
+            # Two-group fast path: split the bf16 tiles into halves and
+            # fold the (TILE,)-sized group scales into the partial dots
+            # below — no full-tile dequant multiply, no (HEAD, TILE)
+            # scale gather (which redundantly loaded each scalar
+            # G8_GROUP times and materialized fp32 intermediates).
+            H2: tl.constexpr = HEAD_SIZE // 2
+            k0, k1 = tl.split(tl.permute(tl.reshape(K, (2, H2, TILE_SIZE)), (1, 2, 0)))
+            v0, v1 = tl.split(tl.permute(tl.reshape(V, (TILE_SIZE, 2, H2)), (0, 2, 1)))
+            g8_base = (
+                physical_block_idx * stride_g8_blk
+                + kv_head_idx * stride_g8_head
+                + (seq_offset % BLOCK_SIZE) * stride_g8_slot
+            )
+            s_k0 = tl.load(g8_k_scale_ptr + g8_base + 0, mask=tile_mask, other=1.0)
+            s_k1 = tl.load(g8_k_scale_ptr + g8_base + 1, mask=tile_mask, other=1.0)
+            s_v0 = tl.load(g8_v_scale_ptr + g8_base + 0, mask=tile_mask, other=1.0)
+            s_v1 = tl.load(g8_v_scale_ptr + g8_base + 1, mask=tile_mask, other=1.0)
+        elif USE_G8:
             # K tile is (HEAD_SIZE, TILE_SIZE); scale tile same layout.
             k_g8_off = (
                 physical_block_idx[None, :] * stride_g8_blk
@@ -577,7 +604,13 @@ def kernel_unified_attention(
 
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
-        if USE_PER_TOKEN_HEAD_SCALES:
+        if USE_G8_2GRP:
+            # Per-group partial dots with the group scales folded in:
+            # S = (Q0 @ K0) * s_k0 + (Q1 @ K1) * s_k1
+            q0, q1 = tl.split(tl.permute(tl.reshape(Q, (BLOCK_M, 2, HEAD_SIZE // 2)), (0, 2, 1)))
+            S += tl.dot(q0, k0) * (score_scale * s_k0[None, :])
+            S += tl.dot(q1, k1) * (score_scale * s_k1[None, :])
+        elif USE_PER_TOKEN_HEAD_SCALES:
             # Per-token-head quant: fuse softmax_scale with per-head k_scale
             # to avoid a separate BLOCK_M × TILE_SIZE multiply on S.
             S += tl.dot(Q, K) * (score_scale * k_token_head_scales[None, :])
@@ -602,7 +635,11 @@ def kernel_unified_attention(
             )
 
         M, L, P, alpha = softmax_step(S, M, L)
-        acc = acc * alpha[:, None]
+        if USE_G8_2GRP:
+            acc0 = acc0 * alpha[:, None]
+            acc1 = acc1 * alpha[:, None]
+        else:
+            acc = acc * alpha[:, None]
 
         if SLIDING_WINDOW:
             qpos_lo = q_block_local_idx * BLOCK_Q
@@ -618,8 +655,17 @@ def kernel_unified_attention(
                 sw_mask_v = dist < SLIDING_WINDOW
             else:
                 sw_mask_v = (dist < SLIDING_WINDOW) & (dist > -SLIDING_WINDOW)
-            V = tl.where(sw_mask_v, V, 0.0)
-        if USE_PER_TOKEN_HEAD_SCALES:
+            if USE_G8_2GRP:
+                v0 = tl.where(sw_mask_v, v0, 0.0)
+                v1 = tl.where(sw_mask_v, v1, 0.0)
+            else:
+                V = tl.where(sw_mask_v, V, 0.0)
+        if USE_G8_2GRP:
+            # V group scales folded onto P per group:
+            # O += (P * s_v0) @ V0 + (P * s_v1) @ V1
+            acc0 += tl.dot((P * s_v0[None, :]).to(v0.dtype), v0)
+            acc1 += tl.dot((P * s_v1[None, :]).to(v1.dtype), v1)
+        elif USE_PER_TOKEN_HEAD_SCALES:
             # Per-token-head quant: apply v_scale to P instead of V.
             P_v = (P * v_token_head_scales[None, :]).to(V.dtype)
             acc += tl.dot(P_v, V)
@@ -627,6 +673,14 @@ def kernel_unified_attention(
             acc += tl.dot(P.to(V.dtype), V)
 
     # ---- Epilogue ---------------------------------------------------------
+    if USE_G8_2GRP:
+        # Merge the per-group half accumulators back into a head-wide
+        # ``acc``: join -> (M, H2, 2) -> permute -> (M, 2, H2) -> reshape,
+        # i.e. column range [g * H2 + d].
+        acc = tl.reshape(
+            tl.permute(tl.join(acc0, acc1), (0, 2, 1)),
+            (BLOCK_M, HEAD_SIZE_PADDED),
+        )
     if IS_3D:
         if USE_FP8_Q_DESCALE:
             acc *= value_scale
@@ -1104,13 +1158,20 @@ def unified_attention(
     # 2. The batch includes at least one prefill request, or
     # 3. The number of sequences exceeds the configured threshold, or
     # 4. Batch invariance is enabled
+    #
+    # VLLM_UA_3D_MAXQ (default 1): allow the 3D split-K path for
+    # multi-token queries up to this q_len (spec-decode verify batches,
+    # e.g. q=7 for NS=6). The 2D fallback serially walks each sequence's
+    # KV with a tiny grid (~num_seqs CTAs), which is catastrophically
+    # slow at long context on MI100.
+    _ua_3d_maxq = int(os.environ.get("VLLM_UA_3D_MAXQ", "1"))
     use_3d = not (
         seq_threshold_3D is None
         or num_par_softmax_segments is None
         or softmax_segm_output is None
         or softmax_segm_max is None
         or softmax_segm_expsum is None
-        or max_seqlen_q > 1
+        or max_seqlen_q > _ua_3d_maxq
         or num_seqs > seq_threshold_3D
         or is_batch_invariant
     )
@@ -1212,6 +1273,7 @@ def unified_attention(
         stride_g8_slot=g8_slot,
         USE_G8=use_g8,
         G8_GROUP=(head_size // g8_k_scale.shape[-1]) if use_g8 else 8,
+        USE_G8_2GRP=use_g8 and g8_k_scale.shape[-1] == 2,
         scale=softmax_scale,
         q_scale=q_descale,
         k_scale=k_descale,

@@ -657,9 +657,23 @@ class SingleDirectionOffloadingHandler:
         dst = dst[:op_idx]
         sizes = sizes[:op_idx]
 
-        stream = (
-            self._stream_pool.pop() if self._stream_pool else current_platform.Stream()
+        # VLLM_OFFLOAD_COMPUTE_STREAM_STORES=1: D2H stores run directly on
+        # the compute stream instead of a transfer side stream. This removes
+        # store/compute concurrency BY CONSTRUCTION (diagnostic knife for the
+        # episodic decode-phase corruption; see
+        # docs/recipes/bug_rocm_batch_memcpy_graph_replay_race.md).
+        serialize_on_compute = (
+            self.gpu_to_cpu
+            and os.environ.get("VLLM_OFFLOAD_COMPUTE_STREAM_STORES") == "1"
         )
+        if serialize_on_compute:
+            stream = current_platform.current_stream()
+        else:
+            stream = (
+                self._stream_pool.pop()
+                if self._stream_pool
+                else current_platform.Stream()
+            )
         start_event = (
             self._event_pool.pop()
             if self._event_pool
@@ -675,12 +689,14 @@ class SingleDirectionOffloadingHandler:
         # Loads must wait for pending writes (including zeroing) to their
         # destination blocks; otherwise an earlier transfer can be overwritten
         # by compute-stream work that was already queued when the load began.
-        stream.wait_stream(current_platform.current_stream())
-        if self._transfers:
-            last_transfer: Transfer = self._transfers[-1]
-            last_event = last_transfer.end_event
-            # assure job will start only after the previous one completes
-            stream.wait_event(last_event)
+        # On the compute stream both orderings are implicit (stream order).
+        if not serialize_on_compute:
+            stream.wait_stream(current_platform.current_stream())
+            if self._transfers:
+                last_transfer: Transfer = self._transfers[-1]
+                last_event = last_transfer.end_event
+                # assure job will start only after the previous one completes
+                stream.wait_event(last_event)
         # CPU->GPU reads from host pinned memory, which is never written
         # by a concurrent GPU stream, so CU_MEMCPY_SRC_ACCESS_ORDER_ANY is
         # safe and lets the driver pipeline source reads. GPU->CPU reads
@@ -690,7 +706,12 @@ class SingleDirectionOffloadingHandler:
         is_src_access_order_any = not self.gpu_to_cpu
         with current_platform.stream(stream):
             start_event.record(stream)
-            if op_idx > 0:
+            # VLLM_OFFLOAD_FAKESTORES=1: exercise the ENTIRE store machinery
+            # (descriptors, events, pools, completion bookkeeping, CPU-tier
+            # metadata) but never issue the driver copy — bisection knife:
+            # clean => the hipMemcpyBatchAsync/batch driver call is the
+            # trigger; corrupt => the CPU-side machinery is the trigger.
+            if op_idx > 0 and os.environ.get("VLLM_OFFLOAD_FAKESTORES") != "1":
                 self._swap_blocks_batch(
                     src,
                     dst,
@@ -712,6 +733,9 @@ class SingleDirectionOffloadingHandler:
                 batch_sizes=batch_sizes,
             )
         )
+        if serialize_on_compute:
+            # Never recycle the compute stream into the side-stream pool.
+            self._transfers[-1].on_compute_stream = True
 
         # success
         return True
@@ -731,7 +755,8 @@ class SingleDirectionOffloadingHandler:
             )
 
             results.append(result)
-            self._stream_pool.append(transfer.stream)
+            if not getattr(transfer, "on_compute_stream", False):
+                self._stream_pool.append(transfer.stream)
             self._event_pool.append(transfer.end_event)
             self._event_pool.append(transfer.start_event)
             self._buffer_pool.append(
