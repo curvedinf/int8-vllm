@@ -523,6 +523,25 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                     self._bt_err = True
                     logger.warning("KV-BTSCHECK failed", exc_info=True)
 
+        _ns = os.environ.get("VLLM_KV_NANSCAN") or (
+            os.path.exists(
+                "/home/curved/vllm-gfx908/logs/serve_recipe_qwen38/KVNANSCAN"
+            )
+            and "/home/curved/vllm-gfx908/logs/garble/kvnanscan"
+        )
+        if (
+            _ns
+            and not torch.cuda.is_current_stream_capturing()
+            and attn_metadata.block_table is not None
+            and kv_cache is not None
+        ):
+            try:
+                self._kv_nanscan(attn_metadata.block_table, kv_cache, _ns)
+            except Exception:
+                if not getattr(self, "_ns_err", False):
+                    self._ns_err = True
+                    logger.warning("KV-NANSCAN failed", exc_info=True)
+
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
         max_seqlen_q = attn_metadata.max_query_len
@@ -1008,6 +1027,38 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         (self._segm_out, self._segm_max, self._segm_sum,
          self._segm_splits, self._segm_seq_threshold) = cached
 
+
+    def _kv_nanscan(self, block_table, kv_cache, out_dir):
+        """Env/flag-gated (VLLM_KV_NANSCAN): one-shot health scan (at the
+        400th forward) of row 0's attention-KV blocks: per-page nonzero-int8
+        fraction and non-finite fp16 count. Pages whose data is all-zero or
+        whose scales are non-finite read as uninformative to attention —
+        the suspected G1 content failure at long context."""
+        import json as _json
+        import os as _os
+
+        self._ns_n = getattr(self, "_ns_n", 0) + 1
+        if self._ns_n != 400:
+            return
+        row = 0
+        uw = int((block_table[row] > 0).count_nonzero())
+        if uw < 2:
+            return
+        stats = []
+        raw = kv_cache.view(torch.uint8)
+        for c in range(uw):
+            bid = int(block_table[row, c])
+            if bid <= 0:
+                continue
+            page = raw[bid]
+            nz = int((page != 0).sum())
+            f16 = page.view(torch.float16)
+            ninf = int(torch.isinf(f16).sum()) + int(torch.isnan(f16).sum())
+            stats.append((c, bid, nz, page.numel(), ninf))
+        path = f"{out_dir}/nanscan_{_os.getpid()}.jsonl"
+        _os.makedirs(out_dir, exist_ok=True)
+        with open(path, "a") as f:
+            f.write(_json.dumps({"n": self._ns_n, "uw": uw, "pages": stats[:64]}) + "\n")
 
     def _bt_stable_check(self, block_table, seq_lens, slot_mapping,
                          query_start_loc, num_actual_tokens, max_query_len):
