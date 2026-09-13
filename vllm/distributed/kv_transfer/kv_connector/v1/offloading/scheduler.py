@@ -473,6 +473,20 @@ class RequestOffloadState:
             # staging buffers / fencing) corrupts GPU state episodically —
             # not the stored content.
             num_chunks = 0
+        if group_config.requires_cow_source and (
+            os.environ.get("VLLM_OFFLOAD_NOSTORE_MAMBA") == "1"
+            or os.path.exists(
+                "/home/curved/vllm-gfx908/logs/serve_recipe_qwen38/NOSTORE_MAMBA"
+            )
+        ):
+            # G1 knife (gs_301 evidence): mamba-align stores arm the
+            # BlockStored -> shared/cached mamba block -> mid-decode CoW
+            # migration chain. gs_301 showed ALL 48 GDN layers migrating the
+            # running request's state slot at steps 410/1127 with the text
+            # derail at the second migration. This knife keeps mamba chunks
+            # out of the CPU tier entirely (attention groups still store) so
+            # the recurrent pool is never CoW-migrated mid-decode.
+            num_chunks = 0
         if group_config.is_eagle_group and is_decoding:
             # G1 finalgate evidence (3a14094120): the draft group's KV is
             # rewritten by the ctx-KV precompute EVERY round across its whole

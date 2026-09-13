@@ -140,6 +140,82 @@ logger = init_logger(__name__)
 MAX_FUSED_GDN_MTP_TOKENS = 8
 FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
 
+# Env-gated (VLLM_GDN_STATEHASH, or the GDNSTATEHASH flag file which selects
+# the default outdir): per-step md5 checksum of the first live request's GDN
+# recurrent state (conv_state + ssm_state lines at its state index), one
+# jsonl line per layer per step, to detect state corruption during decode.
+# The flag file mirrors _offload_knife (vllm/v1/kv_offload/cpu/gpu_worker.py)
+# because worker processes lose shell-exported env vars.
+_GDN_STATEHASH_FLAG_FILE = (
+    "/home/curved/vllm-gfx908/logs/serve_recipe_qwen38/GDNSTATEHASH"
+)
+_GDN_STATEHASH_DEFAULT_DIR = "/home/curved/vllm-gfx908/logs/garble/gdnstate"
+_GDN_STATEHASH: dict = {"n": 0, "nested": False}
+
+
+def _gdn_statehash_dir() -> str | None:
+    out = os.environ.get("VLLM_GDN_STATEHASH")
+    if out:
+        return out
+    if os.path.exists(_GDN_STATEHASH_FLAG_FILE):
+        return _GDN_STATEHASH_DEFAULT_DIR
+    return None
+
+
+def _gdn_statehash_md5(t: torch.Tensor) -> str:
+    import hashlib as _hl
+
+    buf = t.float().flatten()[:8192].cpu().numpy().tobytes()
+    return _hl.md5(buf).hexdigest()[:10]
+
+
+def _gdn_statehash_record(
+    layer: "QwenGatedDeltaNetAttention",
+    attn_metadata: GDNAttentionMetadata,
+    out_dir: str,
+) -> None:
+    """Append {layer, n, idx, conv, ssm} to <out_dir>/gdnstate_<pid>.jsonl:
+    md5[:10] of the first live request's conv/ssm state cache lines, taken
+    PRE-forward (what the layer inherits this step; a hash change between
+    consecutive steps beyond the kernels' own updates is corruption).
+    `layer` is a stable per-process instance ordinal; `n` is a global step
+    counter advanced by the first layer of each sweep. Without a reachable
+    state index, hashes fixed rows 0-2 and notes it via idx=-1."""
+    import json as _json
+
+    idx = -1
+    if (
+        attn_metadata.num_spec_decodes > 0
+        and attn_metadata.spec_state_indices_tensor is not None
+    ):
+        idx = int(attn_metadata.spec_state_indices_tensor[0, 0].item())
+    elif (
+        attn_metadata.non_spec_state_indices_tensor is not None
+        and attn_metadata.non_spec_state_indices_tensor.numel() > 0
+    ):
+        idx = int(attn_metadata.non_spec_state_indices_tensor[0].item())
+
+    li = getattr(layer, "_gdnsh_i", None)
+    if li is None:
+        li = type(layer)._gdnsh_next = getattr(type(layer), "_gdnsh_next", -1) + 1
+        layer._gdnsh_i = li
+    if li == 0:
+        _GDN_STATEHASH["n"] += 1
+
+    conv_state, ssm_state = layer.kv_cache[0], layer.kv_cache[1]
+    rec: dict = {
+        "layer": li,
+        "n": _GDN_STATEHASH["n"],
+        "idx": idx,
+        "conv": _gdn_statehash_md5(conv_state[:3] if idx < 0 else conv_state[idx]),
+        "ssm": _gdn_statehash_md5(ssm_state[:3] if idx < 0 else ssm_state[idx]),
+    }
+    if idx < 0:
+        rec["fixed"] = "0-2"
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, f"gdnstate_{os.getpid()}.jsonl"), "a") as f:
+        f.write(_json.dumps(rec) + "\n")
+
 
 # Env-gated row-0 diagnostic ring (VLLM_ROW0_RING): GDN init-state norms.
 _ROW0_RING: dict = {}
@@ -1283,6 +1359,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         attn_metadata = attn_metadata_raw[self.prefix]  # type: ignore[index]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
 
+        _gdnsh = _gdn_statehash_dir()
+        if _gdnsh is not None and not torch.cuda.is_current_stream_capturing():
+            try:
+                _gdn_statehash_record(self, attn_metadata, _gdnsh)
+            except Exception as _e:
+                if not getattr(self, "_gdnsh_err", False):
+                    self._gdnsh_err = True
+                    logger.warning("GDNSTATEHASH failed: %s", _e)
+
         # The AITER fused reshape/conv kernel expects Qwen3-Next's interleaved
         # GQA layout. Qwen3.5 uses a non-interleaved q/k/v/z layout and must use
         # the generic path below to split/rearrange inputs correctly.
@@ -1306,12 +1391,18 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             qkvz, ba, num_tokens_all
         )
         z_out[:] = z
-        self._forward_core(
-            mixed_qkv=mixed_qkv,
-            b=b,
-            a=a,
-            core_attn_out=core_attn_out,
-        )
+        # GDNSTATEHASH: this funnel already recorded the layer's pre-forward
+        # state; suppress _forward_core's own hook for the same step.
+        _GDN_STATEHASH["nested"] = True
+        try:
+            self._forward_core(
+                mixed_qkv=mixed_qkv,
+                b=b,
+                a=a,
+                core_attn_out=core_attn_out,
+            )
+        finally:
+            _GDN_STATEHASH["nested"] = False
 
     def _nsstat(self, out_dir, nsi, conv_state, ssm_state):
         """Env-gated (VLLM_GDN_NSSTAT): non-spec decode path ground truth —
@@ -1504,6 +1595,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         assert isinstance(attn_metadata_raw, dict)
         attn_metadata = attn_metadata_raw[self.prefix]  # type: ignore[index]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
+
+        if not _GDN_STATEHASH["nested"]:
+            _gdnsh = _gdn_statehash_dir()
+            if _gdnsh is not None and not torch.cuda.is_current_stream_capturing():
+                try:
+                    _gdn_statehash_record(self, attn_metadata, _gdnsh)
+                except Exception as _e:
+                    if not getattr(self, "_gdnsh_err", False):
+                        self._gdnsh_err = True
+                        logger.warning("GDNSTATEHASH failed: %s", _e)
 
         if (
             self.enable_packed_recurrent_decode
