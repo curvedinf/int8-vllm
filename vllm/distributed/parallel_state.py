@@ -25,6 +25,7 @@ If you only need to use the distributed environment without model/pipeline
 
 import contextlib
 import gc
+import os
 import pickle
 import weakref
 from collections import namedtuple
@@ -149,11 +150,39 @@ def _apply_to_device_comms(
         action(dc)
 
 
+def _tp_ar_fp32_mode() -> str:
+    """VLLM_TP_AR_FP32: fix 16-bit TP all-reduce size-invariance (G1).
+
+    "1" = reduce in fp32; "gather" = bitwise gather + fixed-order local
+    sum. Empty/"0" = off. Cached env read.
+    """
+    global _TP_AR_FP32
+    if _TP_AR_FP32 is None:
+        _TP_AR_FP32 = os.environ.get("VLLM_TP_AR_FP32", "") or "0"
+    return _TP_AR_FP32
+
+
+_TP_AR_FP32: str | None = None
+
+
 def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
     assert group_name in _groups, f"Group {group_name} is not found."
     group = _groups[group_name]()
     if group is None:
         raise ValueError(f"Group {group_name} is destroyed.")
+    if _tp_ar_fp32_mode() and tensor.dtype in (torch.float16, torch.bfloat16):
+        if _tp_ar_fp32_mode() == "gather":
+            _n = tensor.shape[0]
+            _buf = torch.empty(
+                (group.world_size * _n,) + tuple(tensor.shape[1:]),
+                dtype=tensor.dtype, device=tensor.device)
+            torch.distributed.all_gather_into_tensor(
+                _buf, tensor.contiguous(), group=group.device_group)
+            out = _buf[:_n].float()
+            for _i in range(1, group.world_size):
+                out += _buf[_i * _n:(_i + 1) * _n].float()
+            return out.to(tensor.dtype).reshape(tensor.shape)
+        return group._all_reduce_out_place(tensor.float()).to(tensor.dtype)
     return group._all_reduce_out_place(tensor)
 
 
@@ -678,6 +707,41 @@ class GroupCoordinator:
         if self.world_size == 1:
             return input_
 
+        # G1 fix (VLLM_TP_AR_FP32=1|gather): 16-bit all-reduces are NOT
+        # message-size-invariant on this stack — RCCL selects different
+        # algorithms/chunk splits by size and the custom AR switches
+        # 1-shot/2-shot, changing the bf16/fp16 summation order (measured:
+        # 34% of elements differ by 1-2 ulp between a 1664-row and a
+        # 2048-row reduce of identical data; ledger
+        # G1_AR_SIZE_INVARIANCE_ROOT_CAUSE). The engine's forwards then
+        # depend on scheduler-chunk geometry and decode-vs-prefill batch
+        # shape, which amplifies at long context into the drift garble.
+        # Two modes:
+        #   "1"     — reduce in fp32: order-insensitive to ~1e-7, but rare
+        #             rounding-boundary flips still seed (measured: a
+        #             single-ulp seed at one GDN layer amplifies to full
+        #             corruption by layer 56 at 20k context).
+        #   "gather" — all_gather the 16-bit partials (bitwise copies) and
+        #             sum locally in fp32 in FIXED rank order: bitwise
+        #             invariant for every message size and path.
+        _arfix = _tp_ar_fp32_mode()
+        if _arfix and input_.dtype in (torch.float16, torch.bfloat16):
+            if _arfix == "gather" and input_.dim() >= 1:
+                _n = input_.shape[0]
+                _buf = torch.empty(
+                    (self.world_size * _n,) + tuple(input_.shape[1:]),
+                    dtype=input_.dtype, device=input_.device)
+                torch.distributed.all_gather_into_tensor(
+                    _buf, input_.contiguous(), group=self.device_group)
+                out = _buf[:_n].float()
+                for _i in range(1, self.world_size):
+                    out += _buf[_i * _n:(_i + 1) * _n].float()
+                return out.to(input_.dtype).reshape(input_.shape)
+            return self._all_reduce_dispatch(input_.float()).to(input_.dtype)
+
+        return self._all_reduce_dispatch(input_)
+
+    def _all_reduce_dispatch(self, input_: torch.Tensor) -> torch.Tensor:
         if self.use_custom_op_call:
             return torch.ops.vllm.all_reduce(input_, group_name=self.unique_name)
         else:
