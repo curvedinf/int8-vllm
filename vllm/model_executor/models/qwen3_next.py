@@ -715,10 +715,27 @@ class Qwen3NextDecoderLayer(nn.Module):
         if self.layer_type == "linear_attention":
             hidden_states = self.linear_attn(hidden_states=hidden_states)
         elif self.layer_type == "full_attention":
+            _attninf_on = os.environ.get("VLLM_ATTNINF") or os.path.exists(
+                "/home/curved/vllm-gfx908/logs/serve_recipe_qwen38/ATTNINF")
+            _ain = torch.isfinite(hidden_states).all().item() if (
+                _attninf_on and not torch.cuda.is_current_stream_capturing()
+            ) else True
             hidden_states = self.self_attn(
                 hidden_states=hidden_states,
                 positions=positions,
             )
+            if not _ain or not torch.isfinite(hidden_states).all().item():
+                if _attninf_on and not torch.cuda.is_current_stream_capturing():
+                    li = getattr(self, "_attninf_layer", None)
+                    if li is None:
+                        cls = type(self)
+                        cls._attninf_n = getattr(cls, "_attninf_n", 0) + 1
+                        li = self._attninf_layer = cls._attninf_n - 1
+                    if li < 8:
+                        _aout = torch.isfinite(hidden_states).all().item()
+                        print(f"[attninf] layer_inst={li} in_finite={_ain} "
+                              f"out_finite={_aout} shape={tuple(hidden_states.shape)}",
+                              flush=True)
         else:
             raise ValueError("Invalid layer_type")
 
@@ -776,7 +793,23 @@ class Qwen3NextDecoderLayer(nn.Module):
                 already_sequence_parallel=True,
             )
         else:
+            _ai_on = os.environ.get("VLLM_ATTNINF") or os.path.exists(
+                "/home/curved/vllm-gfx908/logs/serve_recipe_qwen38/ATTNINF")
+            _min_f = torch.isfinite(hidden_states).all().item() if (
+                _ai_on and not torch.cuda.is_current_stream_capturing()
+            ) else True
             hidden_states = self.mlp(hidden_states)
+            if _ai_on and not torch.cuda.is_current_stream_capturing():
+                _mout_f = torch.isfinite(hidden_states).all().item()
+                if (not _min_f or not _mout_f):
+                    li = getattr(self, "_attninf_layer", None)
+                    if li is None:
+                        cls = type(self)
+                        cls._attninf_n = getattr(cls, "_attninf_n", 0) + 1
+                        li = self._attninf_layer = cls._attninf_n - 1
+                    if li < 8:
+                        print(f"[mlpinf] layer_inst={li} in_finite={_min_f} "
+                              f"out_finite={_mout_f}", flush=True)
 
         if self.layer_scale:
             if len(hidden_states.shape) == 2:
