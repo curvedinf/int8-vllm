@@ -1135,11 +1135,21 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             if page.dtype == torch.uint8:
                 nz = int((page != 0).sum())
                 f16 = page.view(torch.float16)
-                ninf = int(torch.isinf(f16).sum()) + int(torch.isnan(f16).sum())
+                bad = (~torch.isfinite(f16))
+                ninf = int(bad.sum())
             else:
                 nz = int((page != 0).sum())
-                ninf = int((~torch.isfinite(page)).sum())
-            stats.append((c, bid, nz, page.numel(), ninf))
+                bad = (~torch.isfinite(page))
+                ninf = int(bad.sum())
+            # slot histogram of non-finite entries: 8 buckets over the page
+            # slots. Non-finite mass below the write frontier (early slots
+            # of settled pages) = real stored-KV corruption; mass only in
+            # late/unwritten slots = allocator garbage (never read).
+            bsz = max(page.shape[1] if page.dim() > 1 else page.numel(), 1)
+            flat = bad.reshape(bsz, -1).any(dim=1)
+            hist = [int(flat[i * bsz // 8:(i + 1) * bsz // 8].sum())
+                    for i in range(8)]
+            stats.append((c, bid, nz, page.numel(), ninf, hist))
         path = f"{out_dir}/nanscan_{_os.getpid()}.jsonl"
         _os.makedirs(out_dir, exist_ok=True)
         with open(path, "a") as f:
