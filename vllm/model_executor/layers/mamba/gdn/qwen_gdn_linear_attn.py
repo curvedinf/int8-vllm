@@ -2085,6 +2085,40 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert prefill_has_initial_state is not None
             initial_state = ssm_state[prefill_state_indices]
             initial_state[~prefill_has_initial_state, ...] = 0
+            _gch = os.environ.get("VLLM_GDN_COREHASH")
+            _gch_pre = None
+            if _gch and not torch.cuda.is_current_stream_capturing():
+                try:
+                    import hashlib as _hl
+
+                    li = getattr(self, "_gch_i", None)
+                    if li is None:
+                        li = type(self)._gch_n = getattr(type(self), "_gch_n", -1) + 1
+                        self._gch_i = li
+
+                    def _h(_t):
+                        return _hl.md5(
+                            _t.detach().contiguous().float().cpu().numpy().tobytes()
+                        ).hexdigest()[:10]
+
+                    _rows = slice(1498, 1664)
+                    _gch_pre = {
+                        "li": li,
+                        "ci": _h(attn_metadata.chunk_indices.float()),
+                        "co": _h(attn_metadata.chunk_offsets.float()),
+                        "cu": attn_metadata.prefill_query_start_loc.cpu().tolist(),
+                        "conv": _h(mixed_qkv_non_spec[_rows]),
+                        "q": _h(query_non_spec[0, _rows]),
+                        "k": _h(key_non_spec[0, _rows]),
+                        "v": _h(value_non_spec[0, _rows]),
+                        "g": _h(g_non_spec[0, _rows]),
+                        "beta": _h(beta_non_spec[0, _rows]),
+                        "h0": _h(initial_state[0]),
+                    }
+                except Exception as _e:
+                    if not getattr(self, "_gch_err", False):
+                        self._gch_err = True
+                        logger.warning("GDN_COREHASH pre failed: %s", _e)
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
@@ -2101,6 +2135,29 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 chunk_offsets=attn_metadata.chunk_offsets,
                 use_qk_l2norm_in_kernel=False,
             )
+            if _gch_pre is not None:
+                try:
+                    import hashlib as _hl
+                    import json as _json
+                    import os as _os2
+
+                    def _h2(_t):
+                        return _hl.md5(
+                            _t.detach().contiguous().float().cpu().numpy().tobytes()
+                        ).hexdigest()[:10]
+
+                    _gch_pre["T"] = int(core_attn_out_non_spec.shape[1])
+                    _gch_pre["out"] = _h2(core_attn_out_non_spec[0, slice(1498, 1664)])
+                    _gch_pre["fin"] = _h2(last_recurrent_state[0])
+                    _os2.makedirs(_gch, exist_ok=True)
+                    with open(_os2.path.join(
+                        _gch, f"gch_{_os2.getpid()}.jsonl"), "a"
+                    ) as _f:
+                        _f.write(_json.dumps(_gch_pre) + "\n")
+                except Exception as _e:
+                    if not getattr(self, "_gch_err2", False):
+                        self._gch_err2 = True
+                        logger.warning("GDN_COREHASH post failed: %s", _e)
             # Init cache
             from vllm import quant_audit_recorder as _qa
 

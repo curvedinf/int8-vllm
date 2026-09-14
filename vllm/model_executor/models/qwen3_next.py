@@ -680,11 +680,46 @@ class Qwen3NextDecoderLayer(nn.Module):
     ):
         full_num_tokens = positions.shape[-1]
 
+        _gch = os.environ.get("VLLM_GDN_COREHASH")
+
+        def _seam(_tag, _hs):
+            if not _gch or torch.cuda.is_current_stream_capturing():
+                return
+            if positions is None or _hs.shape[0] != positions.shape[-1]:
+                return
+            try:
+                import hashlib as _hl
+                import json as _json
+                import os as _os2
+                li = getattr(self, "_gch_li", None)
+                if li is None:
+                    cls = type(self)
+                    li = self._gch_li = getattr(cls, "_gch_ln", 0)
+                    cls._gch_ln = li + 1
+                if li > 2:
+                    return
+                _mask = (positions >= 19930) & (positions < 20096)
+                if not bool(_mask.any()):
+                    return
+                _sel = _mask.nonzero().flatten()
+                _h = _hl.md5(
+                    _hs[_sel].detach().contiguous().float().cpu().numpy().tobytes()
+                ).hexdigest()[:10]
+                _os2.makedirs(_gch, exist_ok=True)
+                with open(_os2.path.join(_gch, f"seam_{_os2.getpid()}.jsonl"), "a") as _f:
+                    _f.write(_json.dumps({
+                        "li": li, "seam": _tag, "T": int(_hs.shape[0]),
+                        "n": int(_sel.numel()), "h": _h}) + "\n")
+            except Exception:
+                if not getattr(self, "_gch_serr", False):
+                    self._gch_serr = True
+
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        _seam("post_input_ln", hidden_states)
 
         if self.use_attn_reduce_scatter_for_moe:
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
@@ -739,6 +774,8 @@ class Qwen3NextDecoderLayer(nn.Module):
         else:
             raise ValueError("Invalid layer_type")
 
+        _seam("post_attn", hidden_states)
+
         if e3_ar is not None:
             # One fused launch replaces: the AR that used to fire inside
             # out_proj + the post_attention_layernorm residual add & norm +
@@ -787,6 +824,7 @@ class Qwen3NextDecoderLayer(nn.Module):
             hidden_states, residual = self.post_attention_layernorm(
                 hidden_states, residual
             )
+        _seam("post_attn_ln", hidden_states)
         if self.use_attn_reduce_scatter_for_moe:
             hidden_states = self.mlp(
                 hidden_states,
@@ -799,6 +837,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 _ai_on and not torch.cuda.is_current_stream_capturing()
             ) else True
             hidden_states = self.mlp(hidden_states)
+            _seam("post_mlp", hidden_states)
             if _ai_on and not torch.cuda.is_current_stream_capturing():
                 _mout_f = torch.isfinite(hidden_states).all().item()
                 if (not _min_f or not _mout_f):
@@ -957,39 +996,54 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
                     # Sequence parallel: hidden rows are TP-chunked while
                     # `positions` is the full batch — offset the position
                     # index by this rank's chunk start so (pos, state) pairs
-                    # are correct on every rank.
+                    # are correct on every rank. WITHOUT sequence parallel
+                    # every rank holds ALL rows 1:1 with `positions`; the
+                    # offset must stay 0 or records get keyed by another
+                    # token's position (the cross-run pairing artifact).
                     from vllm.distributed import (
                         get_tensor_model_parallel_rank as _r,
                         get_tensor_model_parallel_world_size as _w,
                     )
-                    _pad = (-positions.shape[-1]) % _w()
                     _pos_flat = positions.flatten()
-                    _off = _r() * ((_pos_flat.numel() + _pad) // _w())
-                    _rows = (
-                        list(range(0, _n, 1)) if _n > 64 else [0]
-                    )
-                    for _ri in _rows:
-                        _gi = _off + _ri
-                        # Skip padded/overhanging rows: the global index
-                        # must be within BOTH the positions and ids tensors
-                        # (pad rows record bogus positions and poison every
-                        # downstream cross-run comparison).
-                        if _gi >= _pos_flat.numel():
-                            continue
-                        if (
-                            _ids_flat is not None
-                            and _gi >= _ids_flat.numel()
-                        ):
-                            continue
-                        _LAYERPROBE_RECS.append(
-                            (
-                                int(_pos_flat[_gi].item()),
-                                layer_idx,
-                                int(_ids_flat[_gi].item())
-                                if _ids_flat is not None else -1,
-                                (hidden_states[_ri].float() @ _lp).cpu().tolist(),
-                            )
+                    _off = (
+                        _r()
+                        * (
+                            (_pos_flat.numel() + (-_pos_flat.numel()) % _w())
+                            // _w()
                         )
+                        if self.use_sequence_parallel
+                        else 0
+                    )
+                    _lo = int(os.environ.get("VLLM_LAYERPROBE_POSLO") or -1)
+                    _hi = int(os.environ.get("VLLM_LAYERPROBE_POSHI") or -1)
+                    # Vectorized selection + ONE host sync per layer (the old
+                    # per-row .item()/.cpu() loop synced per row).
+                    _gis = torch.arange(_off, _off + _n,
+                                        device=_pos_flat.device)
+                    _nids = (_ids_flat.numel()
+                             if _ids_flat is not None else _pos_flat.numel())
+                    _valid = _gis < min(_pos_flat.numel(), _nids)
+                    _ps = _pos_flat[_gis.clamp(max=_pos_flat.numel() - 1)]
+                    if _lo >= 0:
+                        _valid &= (_ps >= _lo) & (_ps <= _hi)
+                    _sel = _valid.nonzero().flatten()
+                    if _sel.numel() > 0:
+                        _proj = (hidden_states[_sel].float() @ _lp).cpu()
+                        _psel = _ps[_sel].cpu()
+                        _tsel = (
+                            _ids_flat[_gis[_sel]].cpu()
+                            if _ids_flat is not None
+                            else torch.full_like(_psel, -1)
+                        )
+                        for _k in range(_sel.numel()):
+                            _LAYERPROBE_RECS.append(
+                                (
+                                    int(_psel[_k].item()),
+                                    layer_idx,
+                                    int(_tsel[_k].item()),
+                                    _proj[_k].tolist(),
+                                )
+                            )
                     if len(_LAYERPROBE_RECS) >= 10000:
                         # Incremental shard flush: atexit does not run on
                         # SIGTERM stops, so stream shards as we go.
