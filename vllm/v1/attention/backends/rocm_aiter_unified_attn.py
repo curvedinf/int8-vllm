@@ -1118,22 +1118,27 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         import os as _os
 
         self._ns_n = getattr(self, "_ns_n", 0) + 1
-        if self._ns_n != 400:
+        if self._ns_n % 500 != 0 or self._ns_n < 500:
             return
         row = 0
         uw = int((block_table[row] > 0).count_nonzero())
         if uw < 2:
             return
         stats = []
-        raw = kv_cache.view(torch.uint8)
+        raw = kv_cache if kv_cache.dtype in (torch.bfloat16, torch.float16, torch.float32) \
+            else kv_cache.view(torch.uint8)
         for c in range(uw):
             bid = int(block_table[row, c])
             if bid <= 0:
                 continue
             page = raw[bid]
-            nz = int((page != 0).sum())
-            f16 = page.view(torch.float16)
-            ninf = int(torch.isinf(f16).sum()) + int(torch.isnan(f16).sum())
+            if page.dtype == torch.uint8:
+                nz = int((page != 0).sum())
+                f16 = page.view(torch.float16)
+                ninf = int(torch.isinf(f16).sum()) + int(torch.isnan(f16).sum())
+            else:
+                nz = int((page != 0).sum())
+                ninf = int((~torch.isfinite(page)).sum())
             stats.append((c, bid, nz, page.numel(), ninf))
         path = f"{out_dir}/nanscan_{_os.getpid()}.jsonl"
         _os.makedirs(out_dir, exist_ok=True)
