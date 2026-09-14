@@ -112,7 +112,7 @@ ARGS=(
   # (garble hunt pass 75). bf16 has fp32 range; the int8 W8A8/int8-PTH stack
   # is input-dtype-agnostic. Revert per-boot via the DTYPE flag file.
   --dtype "${DTYPE:-bfloat16}"
-  --max-model-len 262144
+  --max-model-len "${MAXLEN:-262144}"
   --max-num-seqs 6
   --gpu-memory-utilization 0.92
   # KVMEM flag file / env: pin the KV arena size in bytes (gpu_worker reports
