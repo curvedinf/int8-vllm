@@ -237,6 +237,10 @@ def fused_sigmoid_gating_delta_rule_update(
     assert NK == 1, "NK > 1 is not supported yet"
     num_stages = 3
     num_warps = 4
+    # G1 fp32 probe: fp32 tiles double shared-memory use and gfx908's 64KB
+    # limit overflows at the default 3-stage pipelining.
+    if q.dtype == torch.float32:
+        num_stages = 1
 
     if cu_seqlens is not None and q.shape[0] != 1:
         raise ValueError(
