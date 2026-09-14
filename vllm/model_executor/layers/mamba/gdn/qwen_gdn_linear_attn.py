@@ -2147,7 +2147,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 t_max = int(
                     (cu_p[1:] - cu_p[:-1]).max().item()
                 ) if n_seq > 0 else 0
-                if n_seq > 0 and t_max > 0:
+                # Real-prefill gate (T >= 64): spec-verify-sized multi-token
+                # batches (T = NS+1 <= 14) also arrive on this branch and the
+                # serial exact kernel on them cost ~20% of C6 steady TPOT
+                # (ledger G2_LEVER_ATTRIBUTION). The quality-critical surface
+                # is the long chunked prefill; short verify-shaped chunks take
+                # the fast chunked path.
+                _exact_min_t = int(
+                    os.environ.get("VLLM_GDN_PREFILL_EXACT_MIN_T") or 64
+                )
+                if n_seq > 0 and t_max >= _exact_min_t:
                     si_p = (
                         prefill_state_indices[:n_seq]
                         .to(torch.int32)
