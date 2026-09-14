@@ -49,18 +49,23 @@ def swap_blocks_classic(
     device_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> None:
     """Classic executor: one plain hipMemcpyAsync per descriptor, enqueued
-    on the CURRENT stream (callers run inside their transfer-stream
-    context). The boring per-copy API that upstream vLLM used for years —
-    neither the hipMemcpyBatchAsync driver path (races CUDA-graph replay on
-    gfx908) nor shader stores to host pointers. hipMemcpyDeviceToHost=2.
+    on the CALLER'S CURRENT stream (callers run inside their
+    transfer-stream context — passing literal stream 0 would order the
+    copy on the default stream instead, racing the compute stream's
+    writes and the transfer event bookkeeping; the 2026-09-14 flaky-leg
+    root cause). The boring per-copy API that upstream vLLM used for
+    years — neither the hipMemcpyBatchAsync driver path (races
+    CUDA-graph replay on gfx908) nor shader stores to host pointers.
+    hipMemcpyDeviceToHost=2.
     """
     hip = _hip_lib()
+    stream = torch.cuda.current_stream().cuda_stream
     for sp, dp, n in zip(
         src_addrs.tolist(), dst_addrs.tolist(), sizes.tolist()
     ):
         rc = hip.hipMemcpyAsync(
             ctypes.c_void_p(dp), ctypes.c_void_p(sp),
-            ctypes.c_size_t(n), 2, ctypes.c_void_p(0),
+            ctypes.c_size_t(n), 2, ctypes.c_void_p(stream),
         )
         if rc != 0:
             raise RuntimeError(f"hipMemcpyAsync failed rc={rc}")
