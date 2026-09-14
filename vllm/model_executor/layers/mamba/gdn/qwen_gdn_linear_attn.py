@@ -2126,10 +2126,65 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     if not getattr(self, "_gch_err", False):
                         self._gch_err = True
                         logger.warning("GDN_COREHASH pre failed: %s", _e)
-            (
-                core_attn_out_non_spec,
-                last_recurrent_state,
-            ) = self.chunk_gated_delta_rule(
+            _exact_prefill = (
+                os.environ.get("VLLM_GDN_PREFILL_EXACT", "0") == "1"
+            )
+            last_recurrent_state = None
+            core_attn_out_non_spec = None
+            if _exact_prefill:
+                # G1 exact-prefill route (ledger G1_RESIDUAL_SEED_NARROWED_
+                # GDN_PREFILL / G1_PREFILL_FP32_IMPLEMENTATION_BLOCKER): run
+                # the prefill GDN through the SAME exact fp32 recurrence the
+                # decode path uses (fused_sigmoid_gating kernel, sequential
+                # in-kernel state, fp32 pool slots) instead of the chunked
+                # WY scan whose bf16 intermediates put ~4e-3 error into the
+                # prompt states/outputs that decode then builds on. Per-seq
+                # state line broadcast over the token axis: each token
+                # overwrites the line with the running state, so the final
+                # state lands in the pool directly.
+                cu_p = attn_metadata.prefill_query_start_loc
+                n_seq = cu_p.numel() - 1
+                t_max = int(
+                    (cu_p[1:] - cu_p[:-1]).max().item()
+                ) if n_seq > 0 else 0
+                if n_seq > 0 and t_max > 0:
+                    si_p = (
+                        prefill_state_indices[:n_seq]
+                        .to(torch.int32)
+                        .view(n_seq, 1)
+                        .expand(n_seq, t_max)
+                        .contiguous()
+                    )
+                    ssm_state[prefill_state_indices[
+                        ~prefill_has_initial_state[:n_seq]
+                    ]] = 0
+                    (
+                        q_ex, k_ex, v_ex,
+                    ) = self.rearrange_mixed_qkv(conv_output_prefill)
+                    core_attn_out_non_spec, _fin = (
+                        fused_sigmoid_gating_delta_rule_update(
+                            A_log=self.A_log,
+                            a=a_prefill.contiguous(),
+                            b=b_prefill.contiguous(),
+                            dt_bias=self.dt_bias,
+                            q=q_ex.contiguous(),
+                            k=k_ex.contiguous(),
+                            v=v_ex.contiguous(),
+                            initial_state=ssm_state,
+                            inplace_final_state=True,
+                            cu_seqlens=cu_p,
+                            ssm_state_indices=si_p,
+                            num_accepted_tokens=None,
+                            use_qk_l2norm_in_kernel=True,
+                        )
+                    )
+                    core_attn_out_non_spec = core_attn_out_non_spec.contiguous()
+                    last_recurrent_state = None
+            if core_attn_out_non_spec is None:
+                (
+                    core_attn_out_non_spec,
+                    last_recurrent_state,
+                ) = self.chunk_gated_delta_rule(
                 q=query_non_spec,
                 k=key_non_spec,
                 v=value_non_spec,
@@ -2142,7 +2197,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 chunk_offsets=attn_metadata.chunk_offsets,
                 use_qk_l2norm_in_kernel=False,
             )
-            if _gch_pre is not None:
+            if _gch_pre is not None and last_recurrent_state is not None:
                 try:
                     import hashlib as _hl
                     import json as _json
@@ -2168,11 +2223,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             # Init cache
             from vllm import quant_audit_recorder as _qa
 
-            if _qa._enabled():
-                _qa.record_gdn_state(
-                    getattr(self, "prefix", "gdn"), last_recurrent_state[:8], 0
-                )
-            ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
+            if last_recurrent_state is not None:
+                if _qa._enabled():
+                    _qa.record_gdn_state(
+                        getattr(self, "prefix", "gdn"), last_recurrent_state[:8], 0
+                    )
+                ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
+            # exact mode: the fused kernel wrote the running state into the
+            # pool line in place — no writeback needed.
 
             if split_non_spec:
                 # Stitch the peeled decode outputs in front of the prefill

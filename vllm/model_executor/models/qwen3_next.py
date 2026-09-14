@@ -680,7 +680,7 @@ class Qwen3NextDecoderLayer(nn.Module):
     ):
         full_num_tokens = positions.shape[-1]
 
-        _gch = os.environ.get("VLLM_GDN_COREHASH")
+        _gch = os.environ.get("VLLM_SEAMHASH")
 
         def _seam(_tag, _hs):
             if not _gch or torch.cuda.is_current_stream_capturing():
@@ -696,20 +696,27 @@ class Qwen3NextDecoderLayer(nn.Module):
                     cls = type(self)
                     li = self._gch_li = getattr(cls, "_gch_ln", 0)
                     cls._gch_ln = li + 1
-                if li > 2:
+                if li > 64:
                     return
-                _mask = (positions >= 19930) & (positions < 20096)
+                _lo2 = int(os.environ.get("VLLM_LAYERPROBE_POSLO") or 20035)
+                _hi2 = int(os.environ.get("VLLM_LAYERPROBE_POSHI") or 20096)
+                _mask = (positions >= _lo2) & (positions < _hi2)
                 if not bool(_mask.any()):
                     return
                 _sel = _mask.nonzero().flatten()
-                _h = _hl.md5(
-                    _hs[_sel].detach().contiguous().float().cpu().numpy().tobytes()
-                ).hexdigest()[:10]
+                _rows_cpu = (
+                    _hs[_sel].detach().contiguous().float().cpu().numpy()
+                )
+                _pos_cpu = positions[_sel].cpu().tolist()
                 _os2.makedirs(_gch, exist_ok=True)
-                with open(_os2.path.join(_gch, f"seam_{_os2.getpid()}.jsonl"), "a") as _f:
-                    _f.write(_json.dumps({
-                        "li": li, "seam": _tag, "T": int(_hs.shape[0]),
-                        "n": int(_sel.numel()), "h": _h}) + "\n")
+                with open(_os2.path.join(
+                        _gch, f"seam_{_os2.getpid()}.jsonl"), "a") as _f:
+                    for _ri in range(_rows_cpu.shape[0]):
+                        _h = _hl.md5(_rows_cpu[_ri].tobytes()).hexdigest()[:10]
+                        _f.write(_json.dumps({
+                            "li": li, "seam": _tag, "T": int(_hs.shape[0]),
+                            "pos": int(_pos_cpu[_ri]),
+                            "h": _h}) + "\n")
             except Exception:
                 if not getattr(self, "_gch_serr", False):
                     self._gch_serr = True
