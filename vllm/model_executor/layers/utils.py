@@ -459,6 +459,15 @@ def rocm_unquantized_gemm_gfx908_impl(
         and weight.dtype in (torch.float16, torch.bfloat16)
         and k % 8 == 0
         and weight.is_contiguous()
+        # G1 path-unification lever (VLLM_GFX908_NO_SKINNY_GEMM=1): the
+        # LLMM1/wvSplitK decode kernels deviate from rocBLAS by 3-6e-3
+        # relative on ~54% of elements (measured, ledger
+        # G1_AR_GATHER_FIX_RESULT) — with the M-dispatch, decode and
+        # prefill forwards compute the SAME math through DIFFERENT kernel
+        # numerics, and at long context those ~1e-3 seeds amplify into
+        # the seam burst and drift garble. Setting this env routes every
+        # M through the same rocBLAS GEMM as prefill.
+        and os.environ.get("VLLM_GFX908_NO_SKINNY_GEMM", "0") != "1"
     )
     if skinny_ok:
         x_view = x.reshape(-1, x.size(-1))
