@@ -72,9 +72,18 @@ class UvaBufferPool:
         # Round robin to the next buffer.
         self._curr = (self._curr + 1) % self.max_concurrency
         buf = self._uva_bufs[self._curr]
+        n = len(x)
+        # Demand growth: the staged-write payload can exceed the pool's
+        # construction-time size once request churn grows the block tables
+        # (crash observed at steady C6 load: numpy "could not broadcast
+        # input array from shape (100,) into shape (90,)" — the assignment
+        # below silently truncated at capacity, then raised). Regrow the
+        # round-robin slot to fit; the UVA view is recreated with it.
+        if n > buf.cpu.shape[0]:
+            new_size = max(n, buf.cpu.shape[0] * 2)
+            self._uva_bufs[self._curr] = buf = UvaBuffer(new_size, self.dtype)
         # CPU-to-CPU copy
         dst = buf.cpu if isinstance(x, torch.Tensor) else buf.np
-        n = len(x)
         dst[:n] = x
         return buf.uva[:n]
 
