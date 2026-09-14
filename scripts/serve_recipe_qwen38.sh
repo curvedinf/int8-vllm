@@ -269,6 +269,12 @@ ARGS+=(--kv-cache-memory "${KVMEM}")
 if [[ -f "${LOG_DIR}/EAGERALL" ]]; then
   ARGS+=(--enforce-eager)
 fi
+# TORCHPROF flag file: mount /start_profile//stop_profile (torch profiler,
+# no stacks). Drive with a SHORT window during steady decode; traces land
+# in /tmp/torchprof and can be large.
+if [[ -f "${LOG_DIR}/TORCHPROF" ]]; then
+  ARGS+=(--profiler-config '{"profiler":"torch","torch_profiler_dir":"/tmp/torchprof","torch_profiler_with_stack":false}')
+fi
 # GDNDUMP: optional dir for the spec-rewind audit lever (gdn_attn.py dumps
 # per-token state indices + accepted counts per step when non-empty).
 _gdndump_flag="${LOG_DIR}/GDNDUMP"
