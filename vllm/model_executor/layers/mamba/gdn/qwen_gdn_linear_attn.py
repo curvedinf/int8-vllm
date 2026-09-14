@@ -137,6 +137,13 @@ if GDN_AITER_TRITON_AVAILABLE:
 
 logger = init_logger(__name__)
 
+# One-shot env canary: worker-side visibility of the G1 diagnostic levers
+# (the /proc/<pid>/environ view proved unreliable for forked workers).
+_CANARY = ("VLLM_TP_AR_FP32", "VLLM_GFX908_NO_SKINNY_GEMM",
+           "VLLM_GFX908_DEBUG_DISPATCH")
+logger.info("ENVCANARY %s", {k: os.environ.get(k, "<unset>") for k in _CANARY})
+
+
 MAX_FUSED_GDN_MTP_TOKENS = 8
 FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
 
