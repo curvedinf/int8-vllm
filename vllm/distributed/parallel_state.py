@@ -726,7 +726,17 @@ class GroupCoordinator:
         #             invariant for every message size and path.
         _arfix = _tp_ar_fp32_mode()
         if _arfix and input_.dtype in (torch.float16, torch.bfloat16):
-            if _arfix == "gather" and input_.dim() >= 1:
+            # Gather only for large-M (prefill-chunk) messages: decode-size
+            # messages run inside compiled/captured decode graphs, where
+            # dist.all_gather_into_tensor is not capture-safe (hipError-
+            # StreamCaptureUnsupported) — and the gather path can be baked
+            # into the traced graph before runtime. A shape-based branch
+            # traces correctly; small messages take the capture-safe fp32
+            # dispatch. Prefill-vs-prefill chunk geometry (the G1 seed)
+            # stays bitwise-unified.
+            if _arfix == "gather" and input_.dim() >= 1 and (
+                input_.shape[0] >= 256
+            ):
                 _n = input_.shape[0]
                 _buf = torch.empty(
                     (self.world_size * _n,) + tuple(input_.shape[1:]),
