@@ -594,11 +594,6 @@ start_server() {
   VLLM_SWAUDIT="${VLLM_SWAUDIT:-}" \
   VLLM_KVAUDIT="${VLLM_KVAUDIT:-}" \
   VLLM_LAYERPROBE="${VLLM_LAYERPROBE:-}" \
-  # G1 numerics-unification levers (2026-09-14, ledger G1_PROD_GATE_SEEDS_
-  # PARTIAL): bitwise gather AR for prefill-size messages + exact-recurrence
-  # GDN prefill + shared 2D attention kernel with pinned decode tile.
-  # Production gates 301/307 fully clean, 305/unseeded still drift - strict
-  # improvement over 0/4; keep ON by default, override per-boot to disable.
   VLLM_TP_AR_FP32="${VLLM_TP_AR_FP32:-gather}" \
   VLLM_GDN_PREFILL_EXACT="${VLLM_GDN_PREFILL_EXACT:-1}" \
   AITER_UA_FORCE_2D="${AITER_UA_FORCE_2D:-1}" \
@@ -619,6 +614,12 @@ start_server() {
   VLLM_DFLASH_DRAFT_EAGER="${VLLM_DFLASH_DRAFT_EAGER:-}" \
       VLLM_DFLASH_AUDIT="${VLLM_DFLASH_AUDIT:-}" \
       ${PROFILER_WRAPPER:-} "${VENV}/bin/vllm" "${ARGS[@]}"
+  # G1 numerics-unification levers (2026-09-14, ledger G1_PROD_GATE_SEEDS_
+  # PARTIAL): VLLM_TP_AR_FP32=gather (bitwise gather AR for prefill-size
+  # messages), VLLM_GDN_PREFILL_EXACT=1 (exact-recurrence GDN prefill),
+  # AITER_UA_FORCE_2D=1 + AITER_UA_PIN_TILE=1 (decode shares the prefill 2D
+  # attention kernel and tile). Production gates 301/307 clean vs 0/4
+  # pre-fix; override per-boot to disable.
   ) >"${LOG_DIR}/server.log" 2>&1 </dev/null &
 
   printf '%s\n' "$!" >"${PID_FILE}"
