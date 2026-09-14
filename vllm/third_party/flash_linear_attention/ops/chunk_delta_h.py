@@ -8,6 +8,8 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # ruff: noqa: E501
 
+import os
+
 import torch
 
 from vllm.triton_utils import tl, triton
@@ -19,6 +21,13 @@ from .utils import FLA_CHUNK_SIZE, use_cuda_graph
 NUM_WARPS = [2, 4, 8, 16]
 # Triton's AMD backend fails to lower this kernel with num_stages=4.
 _CHUNK_DELTA_H_NUM_STAGES = [2, 3] if torch.version.hip else [2, 3, 4]
+# G1 fp32-prefill mode (VLLM_GDN_PREFILL_FP32=1): fp32 tiles double the
+# shared-memory footprint and stage-3 pipelining exceeds gfx908's 64KB.
+if os.environ.get("VLLM_GDN_PREFILL_FP32", "0") == "1":
+    _CHUNK_DELTA_H_NUM_STAGES = [2]
+    _CHUNK_DELTA_H_BV = [32]
+else:
+    _CHUNK_DELTA_H_BV = [32, 64]
 
 
 @triton.heuristics(
@@ -36,7 +45,7 @@ _CHUNK_DELTA_H_NUM_STAGES = [2, 3] if torch.version.hip else [2, 3, 4]
         triton.Config({"BV": BV}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4]
         for num_stages in _CHUNK_DELTA_H_NUM_STAGES
-        for BV in [32, 64]
+        for BV in _CHUNK_DELTA_H_BV
     ],
     key=["H", "K", "V", "BT"],
     use_cuda_graph=use_cuda_graph,

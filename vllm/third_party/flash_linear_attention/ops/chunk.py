@@ -8,6 +8,8 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # ruff: noqa: E501
 
+import os
+
 import torch
 
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h
@@ -210,7 +212,22 @@ def chunk_gated_delta_rule(
         )
     """
     assert q.dtype == k.dtype == v.dtype
-    assert q.dtype != torch.float32, (
+    # G1 prefill-precision lever (VLLM_GDN_PREFILL_FP32=1): the chunked
+    # prefill's bf16 intermediates (A_inv via solve_tril output_dtype=k.dtype,
+    # w/u, per-chunk h snapshots, chunk_o accumulation) put ~4e-3 error into
+    # the prompt's GDN states and outputs while the decode recurrence is
+    # exact (1.45e-7 vs fp64) — every long prompt is prefilled through the
+    # sloppy path, and decode builds on that context (ledger
+    # G1_RESIDUAL_SEED_NARROWED_GDN_PREFILL). Running the whole chain in
+    # fp32 (intermediates are dtype-follows-tensor) aligns the prefill with
+    # the decode recurrence. Prefill-only cost; decode kernels untouched.
+    _fp32_prefill = os.environ.get("VLLM_GDN_PREFILL_FP32", "0") == "1"
+    _orig_dtype = q.dtype
+    if _fp32_prefill and q.dtype in (torch.float16, torch.bfloat16):
+        q = q.float()
+        k = k.float()
+        v = v.float()
+    assert q.dtype != torch.float32 or _fp32_prefill, (
         "ChunkGatedDeltaRuleFunction does not support float32. Please use bfloat16."
     )
     assert len(beta.shape) == 3, "beta must be of shape [B, T, H]."
@@ -218,7 +235,7 @@ def chunk_gated_delta_rule(
         if q.shape[0] != 1:
             raise ValueError(
                 f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                f"Please flatten variable-length inputs before processing."
+                f"Please flatten variable-length inputs before calling chunk_gated_delta_rule."
             )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
             raise ValueError(
@@ -242,4 +259,4 @@ def chunk_gated_delta_rule(
         use_qk_l2norm_in_kernel,
         core_attn_out,
     )
-    return o, final_state
+    return o.to(_orig_dtype), final_state
