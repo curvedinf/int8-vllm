@@ -181,14 +181,41 @@ def _tp_ar_gather_min_m() -> int:
 _TP_AR_GATHER_MIN_M: int | None = None
 
 
+def _tp_car_max_bytes() -> int:
+    """VLLM_TP_CAR_MAX_BYTES: CAR envelope for the car1 mode (8MB, matching
+    CustomAllreduce's default max_size). Messages beyond this take the
+    gather path."""
+    global _TP_CAR_MAX_BYTES
+    try:
+        if _TP_CAR_MAX_BYTES is None:
+            _TP_CAR_MAX_BYTES = int(
+                os.environ.get("VLLM_TP_CAR_MAX_BYTES") or 8 * 1024 * 1024
+            )
+    except ValueError:
+        _TP_CAR_MAX_BYTES = 8 * 1024 * 1024
+    return _TP_CAR_MAX_BYTES
+
+
+_TP_CAR_MAX_BYTES: int | None = None
+
+
 def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
     assert group_name in _groups, f"Group {group_name} is not found."
     group = _groups[group_name]()
     if group is None:
         raise ValueError(f"Group {group_name} is destroyed.")
     if _tp_ar_fp32_mode() and tensor.dtype in (torch.float16, torch.bfloat16):
-        if _tp_ar_fp32_mode() == "gather" and (
-            tensor.dim() >= 1 and tensor.shape[0] >= _tp_ar_gather_min_m()
+        if _tp_ar_fp32_mode() == "car1" and (
+            tensor.numel() * tensor.element_size() < _tp_car_max_bytes()
+        ):
+            # bf16 straight to CAR's 1-stage kernel (fp32 accumulate,
+            # single downcast — same bitwise contract as gather). Mirror of
+            # the GroupCoordinator.all_reduce car1 branch.
+            return group._all_reduce_out_place(tensor)
+        if (
+            _tp_ar_fp32_mode() in ("gather", "car1")
+            and tensor.dim() >= 1
+            and tensor.shape[0] >= _tp_ar_gather_min_m()
         ):
             _n = tensor.shape[0]
             _buf = torch.empty(
@@ -725,7 +752,7 @@ class GroupCoordinator:
         if self.world_size == 1:
             return input_
 
-        # G1 fix (VLLM_TP_AR_FP32=1|gather): 16-bit all-reduces are NOT
+        # G1 fix (VLLM_TP_AR_FP32=1|gather|car1): 16-bit all-reduces are NOT
         # message-size-invariant on this stack — RCCL selects different
         # algorithms/chunk splits by size and the custom AR switches
         # 1-shot/2-shot, changing the bf16/fp16 summation order (measured:
@@ -734,28 +761,53 @@ class GroupCoordinator:
         # G1_AR_SIZE_INVARIANCE_ROOT_CAUSE). The engine's forwards then
         # depend on scheduler-chunk geometry and decode-vs-prefill batch
         # shape, which amplifies at long context into the drift garble.
-        # Two modes:
+        # Modes:
         #   "1"     — reduce in fp32: order-insensitive to ~1e-7, but rare
         #             rounding-boundary flips still seed (measured: a
         #             single-ulp seed at one GDN layer amplifies to full
         #             corruption by layer 56 at 20k context).
         #   "gather" — all_gather the 16-bit partials (bitwise copies) and
         #             sum locally in fp32 in FIXED rank order: bitwise
-        #             invariant for every message size and path.
+        #             invariant for every message size and path. Decode-size
+        #             messages fall to the fp32 dispatch (capture-safe).
+        #   "car1"  — bitwise via the custom AR's 1-stage kernel, which by
+        #             source (csrc/custom_all_reduce.cuh
+        #             cross_device_reduce_1stage -> packed_reduce) computes
+        #             upcast(ptr[0]) + ... + upcast(ptr[n-1]) sequentially
+        #             in fp32 with ONE downcast — the identical contract to
+        #             "gather", fused and capture-safe. Requires
+        #             VLLM_CUSTOM_ALLREDUCE_ALGO=1stage so the dispatch
+        #             never selects the order-rotating 2-stage kernel (the
+        #             serve script sets it with this mode). Messages beyond
+        #             the CAR size envelope (VLLM_TP_CAR_MAX_BYTES, default
+        #             8MB) fall back to the gather path.
         _arfix = _tp_ar_fp32_mode()
         if _arfix and input_.dtype in (torch.float16, torch.bfloat16):
-            # Gather only for large-M (prefill-chunk) messages by default:
-            # decode-size messages run inside compiled/captured decode
-            # graphs, where dist.all_gather_into_tensor is not capture-safe
-            # (hipErrorStreamCaptureUnsupported during cudagraph warmup) and
-            # the gather path can be baked into the traced graph before
-            # runtime. A shape-based branch traces correctly. EAGER boots
-            # can lower the threshold (VLLM_TP_AR_GATHER_MIN_M=1) to unify
-            # decode ARs through the same gather+fixed-order-sum as prefill
-            # — closing the last decode-vs-prefill reduction-order seed.
-            if _arfix == "gather" and input_.dim() >= 1 and (
+            _large_m = input_.dim() >= 1 and (
                 input_.shape[0] >= _tp_ar_gather_min_m()
-            ):
+            )
+            if _arfix == "car1":
+                _bytes = input_.numel() * input_.element_size()
+                if _bytes < _tp_car_max_bytes():
+                    # bf16 straight to CAR: 1-stage accumulates fp32
+                    # internally and downcasts once — no python-side
+                    # upcast, halving message bytes.
+                    return self._all_reduce_dispatch(input_)
+                # beyond the CAR envelope: gather (same bitwise contract)
+                _gather = True
+            elif _arfix == "gather":
+                # Gather only for large-M (prefill-chunk) messages by
+                # default: decode-size messages run inside compiled/
+                # captured decode graphs, where all_gather_into_tensor is
+                # not capture-safe (hipErrorStreamCaptureUnsupported) and
+                # the gather path can be baked into the traced graph. A
+                # shape-based branch traces correctly. EAGER boots can
+                # lower VLLM_TP_AR_GATHER_MIN_M to unify decode through
+                # the gather as well.
+                _gather = _large_m
+            else:
+                _gather = False
+            if _gather:
                 _n = input_.shape[0]
                 _buf = torch.empty(
                     (self.world_size * _n,) + tuple(input_.shape[1:]),

@@ -537,6 +537,12 @@ start_server() {
   api_key="$(read_api_key)"
 
   (
+    # car1 mode needs CAR pinned to the order-preserving 1-stage kernel
+    # (VLLM_CUSTOM_ALLREDUCE_ALGO=1stage) so the dispatch never selects
+    # the order-rotating 2-stage kernel. Default it when car1 is requested.
+    if [[ "${VLLM_TP_AR_FP32:-}" == "car1" && -z "${VLLM_CUSTOM_ALLREDUCE_ALGO:-}" ]]; then
+      export VLLM_CUSTOM_ALLREDUCE_ALGO=1stage
+    fi
     cd "${WORKDIR}"
     exec setsid taskset -c "${CPUSET}" env -u HSA_OVERRIDE_GFX_VERSION \
       VLLM_API_KEY="${api_key}" \
@@ -595,6 +601,8 @@ start_server() {
   VLLM_KVAUDIT="${VLLM_KVAUDIT:-}" \
   VLLM_LAYERPROBE="${VLLM_LAYERPROBE:-}" \
   VLLM_TP_AR_FP32="${VLLM_TP_AR_FP32:-gather}" \
+  VLLM_TP_CAR_MAX_BYTES="${VLLM_TP_CAR_MAX_BYTES:-}" \
+  VLLM_CUSTOM_ALLREDUCE_ALGO="${VLLM_CUSTOM_ALLREDUCE_ALGO:-}" \
   VLLM_GDN_PREFILL_EXACT="${VLLM_GDN_PREFILL_EXACT:-1}" \
   VLLM_GDN_PREFILL_EXACT_MIN_T="${VLLM_GDN_PREFILL_EXACT_MIN_T:-}" \
   AITER_UA_FORCE_2D="${AITER_UA_FORCE_2D:-1}" \
