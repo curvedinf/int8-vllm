@@ -1149,7 +1149,20 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             flat = bad.reshape(bsz, -1).any(dim=1)
             hist = [int(flat[i * bsz // 8:(i + 1) * bsz // 8].sum())
                     for i in range(8)]
-            stats.append((c, bid, nz, page.numel(), ninf, hist))
+            # one-shot layout debug: shape/stride/dtype + first non-finite
+            # element's full index
+            dbg = None
+            if ninf and not getattr(self, "_ns_dbg", False):
+                self._ns_dbg = True
+                idx2d = bad.reshape(bsz, -1).nonzero()[0].tolist()
+                full = bad.nonzero()[0].tolist()
+                dbg = {
+                    "shape": list(page.shape), "stride": list(page.stride()),
+                    "dtype": str(page.dtype),
+                    "first_slot": idx2d, "first_flat_idx": full,
+                    "val": float(page.reshape(-1)[full[0]]) if full else None,
+                }
+            stats.append((c, bid, nz, page.numel(), ninf, hist, dbg))
         path = f"{out_dir}/nanscan_{_os.getpid()}.jsonl"
         _os.makedirs(out_dir, exist_ok=True)
         with open(path, "a") as f:
