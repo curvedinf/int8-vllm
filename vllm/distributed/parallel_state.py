@@ -165,13 +165,31 @@ def _tp_ar_fp32_mode() -> str:
 _TP_AR_FP32: str | None = None
 
 
+def _tp_ar_gather_min_m() -> int:
+    """VLLM_TP_AR_GATHER_MIN_M: minimum M for the gather AR path (256)."""
+    global _TP_AR_GATHER_MIN_M
+    try:
+        if _TP_AR_GATHER_MIN_M is None:
+            _TP_AR_GATHER_MIN_M = int(
+                os.environ.get("VLLM_TP_AR_GATHER_MIN_M") or 256
+            )
+    except ValueError:
+        _TP_AR_GATHER_MIN_M = 256
+    return _TP_AR_GATHER_MIN_M
+
+
+_TP_AR_GATHER_MIN_M: int | None = None
+
+
 def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
     assert group_name in _groups, f"Group {group_name} is not found."
     group = _groups[group_name]()
     if group is None:
         raise ValueError(f"Group {group_name} is destroyed.")
     if _tp_ar_fp32_mode() and tensor.dtype in (torch.float16, torch.bfloat16):
-        if _tp_ar_fp32_mode() == "gather":
+        if _tp_ar_fp32_mode() == "gather" and (
+            tensor.dim() >= 1 and tensor.shape[0] >= _tp_ar_gather_min_m()
+        ):
             _n = tensor.shape[0]
             _buf = torch.empty(
                 (group.world_size * _n,) + tuple(tensor.shape[1:]),
@@ -726,16 +744,17 @@ class GroupCoordinator:
         #             invariant for every message size and path.
         _arfix = _tp_ar_fp32_mode()
         if _arfix and input_.dtype in (torch.float16, torch.bfloat16):
-            # Gather only for large-M (prefill-chunk) messages: decode-size
-            # messages run inside compiled/captured decode graphs, where
-            # dist.all_gather_into_tensor is not capture-safe (hipError-
-            # StreamCaptureUnsupported) — and the gather path can be baked
-            # into the traced graph before runtime. A shape-based branch
-            # traces correctly; small messages take the capture-safe fp32
-            # dispatch. Prefill-vs-prefill chunk geometry (the G1 seed)
-            # stays bitwise-unified.
+            # Gather only for large-M (prefill-chunk) messages by default:
+            # decode-size messages run inside compiled/captured decode
+            # graphs, where dist.all_gather_into_tensor is not capture-safe
+            # (hipErrorStreamCaptureUnsupported during cudagraph warmup) and
+            # the gather path can be baked into the traced graph before
+            # runtime. A shape-based branch traces correctly. EAGER boots
+            # can lower the threshold (VLLM_TP_AR_GATHER_MIN_M=1) to unify
+            # decode ARs through the same gather+fixed-order-sum as prefill
+            # — closing the last decode-vs-prefill reduction-order seed.
             if _arfix == "gather" and input_.dim() >= 1 and (
-                input_.shape[0] >= 256
+                input_.shape[0] >= _tp_ar_gather_min_m()
             ):
                 _n = input_.shape[0]
                 _buf = torch.empty(
