@@ -279,11 +279,12 @@ class CustomAllreduce {
     auto bytes = size * sizeof(typename packed_t<T>::P);
     int blocks = std::min(block_limit, (size + threads - 1) / threads);
 
-    // Check environment variable once
+    // Check environment variable once. Treat an empty value as unset (a
+    // shell `${VAR:-}` passthrough exports "" which is not a selection).
     const char* env_algo = std::getenv("VLLM_CUSTOM_ALLREDUCE_ALGO");
     bool force_1stage = false;
     bool force_2stage = false;
-    if (env_algo != nullptr) {
+    if (env_algo != nullptr && *env_algo != '\0') {
       if (std::strcmp(env_algo, "1stage") == 0 ||
           std::strcmp(env_algo, "oneshot") == 0) {
         force_1stage = true;

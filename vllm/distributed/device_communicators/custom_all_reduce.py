@@ -4,6 +4,8 @@
 from contextlib import contextmanager
 from typing import cast
 
+import os
+
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
@@ -66,12 +68,15 @@ class CustomAllreduce:
     _DEFAULT_REDUCE_SCATTER_MAX_SIZE = 16 * 1024 * 1024
     _DEFAULT_MNNVL_REDUCE_SCATTER_MAX_SIZE = 16 * 1024 * 1024
 
-    # max_size: max supported allreduce size
+    # max_size: max supported allreduce size. When not passed explicitly it
+    # defaults to VLLM_TP_CAR_MAX_BYTES (8MB), the same envelope the car1
+    # mode's dispatch guard reads — raising the env raises both the CAR
+    # eligibility check and the meta/staging buffer allocation together.
     def __init__(
         self,
         group: ProcessGroup,
         device: int | str | torch.device,
-        max_size=8192 * 1024,
+        max_size=None,
         max_all_gather_size=_DEFAULT_ALL_GATHER_MAX_SIZE,
         max_mnnvl_all_gather_size=None,
         max_reduce_scatter_size=_DEFAULT_REDUCE_SCATTER_MAX_SIZE,
@@ -88,6 +93,10 @@ class CustomAllreduce:
         is bind to a unique device, and all communicators in this group
         are in the same node.
         """
+        if max_size is None:
+            max_size = int(
+                os.environ.get("VLLM_TP_CAR_MAX_BYTES") or 8192 * 1024
+            )
         self._IS_CAPTURING = False
         self._ptr = 0
         self.disabled = True
@@ -228,6 +237,24 @@ class CustomAllreduce:
         self.rank_data = torch.empty(
             8 * 1024 * 1024, dtype=torch.uint8, device=self.device
         )
+        # Layout-mediation probe lever: mimic the VA footprint of a larger
+        # envelope WITHOUT enlarging the actual CAR buffers, to separate
+        # "prefill rides CAR" from "boot-time allocation layout shifted".
+        _pad = int(os.environ.get("VLLM_AR_LAYOUT_PAD") or 0)
+        if _pad > 0:
+            self._layout_pad_cached = torch.empty(
+                _pad, dtype=torch.uint8, device=self.device)
+            try:
+                _ptr = torch.cuda.caching_allocator_alloc(_pad, device=self.device)
+                self._layout_pad_uncached_ptr = _ptr  # freed only at GC/close
+            except Exception as e:  # pragma: no cover
+                self._layout_pad_uncached_ptr = None
+                self._layout_pad_uncached = torch.empty(
+                    _pad, dtype=torch.uint8, device=self.device)
+                logger.info("AR_LAYOUT_PAD: uncached alloc fallback: %s", e)
+            logger.info(
+                "AR_LAYOUT_PAD: %d cached + %d uncached bytes allocated",
+                _pad, _pad)
         self.max_size = max_size
         self.max_all_gather_size = max_all_gather_size
         if max_mnnvl_all_gather_size is None:

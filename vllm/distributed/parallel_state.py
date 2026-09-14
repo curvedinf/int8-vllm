@@ -199,6 +199,63 @@ def _tp_car_max_bytes() -> int:
 _TP_CAR_MAX_BYTES: int | None = None
 
 
+def _tp_ar_audit_min_bytes() -> int:
+    """VLLM_AR_AUDIT_MIN_BYTES: when set, car1 ARs at/above this size are
+    checked against the gather reference inline (eager only). 0 = off."""
+    try:
+        return int(os.environ.get("VLLM_AR_AUDIT_MIN_BYTES") or 0)
+    except ValueError:
+        return 0
+
+
+_AR_AUDIT_IDX = 0
+
+
+def _audit_car_vs_gather(group, input_: torch.Tensor, out: torch.Tensor):
+    """Compare a car1 all-reduce result against the gather reference.
+    EAGER ONLY (caller must not be capturing/tracing): doubles the cost of
+    audited ARs. Logs row-level mismatch detail on divergence."""
+    global _AR_AUDIT_IDX
+    try:
+        if torch.cuda.is_current_stream_capturing():
+            return out
+    except Exception:
+        return out
+    _AR_AUDIT_IDX += 1
+    _n = input_.shape[0]
+    _buf = torch.empty(
+        (group.world_size * _n,) + tuple(input_.shape[1:]),
+        dtype=input_.dtype, device=input_.device)
+    torch.distributed.all_gather_into_tensor(
+        _buf, input_.contiguous(), group=group.device_group)
+    _ref = _buf[:_n].float()
+    for _i in range(1, group.world_size):
+        _ref += _buf[_i * _n:(_i + 1) * _n].float()
+    _ref = _ref.to(input_.dtype).reshape(input_.shape)
+    _bad = out.reshape(-1) != _ref.reshape(-1)
+    _cnt = int(_bad.sum().item())
+    if _cnt:
+        _flat = _bad.nonzero().flatten()[:8].tolist()
+        _rows = _bad.reshape(_n, -1).any(dim=1).nonzero().flatten().tolist()
+        _d = (out.float() - _ref.float()).abs()
+        print(f"AR_AUDIT #{_AR_AUDIT_IDX} shape={tuple(input_.shape)} "
+              f"mismatches={_cnt}/{input_.numel()} rows={_rows[:16]} "
+              f"flat={_flat} maxdiff={_d.max().item():.3e}", flush=True)
+    return out
+
+
+def _trace_big_ar(group, input_: torch.Tensor, _bytes: int):
+    """One line per big car1 AR: would CAR actually take it? A decline here
+    means the AR silently falls through to RCCL (non-bitwise, unaudited)."""
+    from vllm.distributed.utils import is_weak_contiguous
+    ca = getattr(group.device_communicator, "ca_comm", None)
+    takes = ca is not None and not ca.disabled and ca.should_custom_ar(input_)
+    print(f"AR_TRACE shape={tuple(input_.shape)} dt={input_.dtype} "
+          f"contig={input_.is_contiguous()} weak={is_weak_contiguous(input_)} "
+          f"nbytes={_bytes} mod16={_bytes % 16} ptr16={input_.data_ptr() % 16} "
+          f"car_takes={takes}", flush=True)
+
+
 def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
     assert group_name in _groups, f"Group {group_name} is not found."
     group = _groups[group_name]()
@@ -211,7 +268,14 @@ def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
             # bf16 straight to CAR's 1-stage kernel (fp32 accumulate,
             # single downcast — same bitwise contract as gather). Mirror of
             # the GroupCoordinator.all_reduce car1 branch.
-            return group._all_reduce_out_place(tensor)
+            _out = group._all_reduce_out_place(tensor)
+            _aud = _tp_ar_audit_min_bytes()
+            if _aud and tensor.numel() * tensor.element_size() >= _aud:
+                return _audit_car_vs_gather(group, tensor, _out)
+            _trc = int(os.environ.get("VLLM_AR_TRACE_MIN_BYTES") or 0)
+            if _trc and tensor.numel() * tensor.element_size() >= _trc:
+                _trace_big_ar(group, tensor, tensor.numel() * tensor.element_size())
+            return _out
         if (
             _tp_ar_fp32_mode() in ("gather", "car1")
             and tensor.dim() >= 1
@@ -792,7 +856,14 @@ class GroupCoordinator:
                     # bf16 straight to CAR: 1-stage accumulates fp32
                     # internally and downcasts once — no python-side
                     # upcast, halving message bytes.
-                    return self._all_reduce_dispatch(input_)
+                    _out = self._all_reduce_dispatch(input_)
+                    _aud = _tp_ar_audit_min_bytes()
+                    if _aud and _bytes >= _aud and not self.use_custom_op_call:
+                        return _audit_car_vs_gather(self, input_, _out)
+                    _trc = int(os.environ.get("VLLM_AR_TRACE_MIN_BYTES") or 0)
+                    if _trc and _bytes >= _trc and not self.use_custom_op_call:
+                        _trace_big_ar(self, input_, _bytes)
+                    return _out
                 # beyond the CAR envelope: gather (same bitwise contract)
                 _gather = True
             elif _arfix == "gather":

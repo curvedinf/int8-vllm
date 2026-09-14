@@ -43,6 +43,7 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.swap_blocks_triton import (
     THRESHOLD_BYTES,
     swap_blocks_batch,
+    swap_blocks_classic,
 )
 
 logger = init_logger(__name__)
@@ -61,7 +62,34 @@ def _select_swap_blocks_fn(
     # =force additionally bypasses the <28KB page-size perf heuristic (the
     # g128 KV pages exceed it; Triton is slower there but correct — and the
     # host-pointer store path is verified working on gfx908).
+    # 2026-09-14 root-cause confirmation: with car1 prefill ARs (no gather
+    # transient allocs), the driver batch path corrupted live activations
+    # deterministically (seam burst -17.6nat outliers, 4 rows) and hard-
+    # faulted under a mid-forward host sync. TRITON_STORES=force on the
+    # same config: zero divergence on the 256-token seam probe — but LONG
+    # legs (20k in / 4k out) drift heavily with the Triton host-store
+    # kernel in EITHER AR mode (gather or car1), even serialized on the
+    # compute stream and with persistent descriptor staging; FAKESTORES
+    # (no copies) is clean. Both executors are unsafe on gfx908. The
+    # classic per-descriptor hipMemcpyAsync executor ("classic") is clean
+    # on the full car1 stack (91-line 4k leg read in full, 2026-09-14) —
+    # gfx908 DEFAULTS to it; set VLLM_OFFLOAD_TRITON_STORES=driver|force|1
+    # to override, =0 to use the historical page-size gating.
     _ts = os.environ.get("VLLM_OFFLOAD_TRITON_STORES")
+    if _ts is None and gpu_to_cpu:
+        try:
+            from vllm.platforms.rocm import on_gfx908
+            if on_gfx908():
+                _ts = "classic"
+        except Exception:
+            pass
+    if _ts in ("driver", "0"):
+        _ts = None
+    if _ts == "classic" and gpu_to_cpu:
+        # Per-descriptor hipMemcpyAsync — the third executor, for when both
+        # the driver batch API and the Triton host-store kernel are
+        # suspect.
+        return swap_blocks_classic
     if gpu_to_cpu and _ts in ("1", "force"):
         page_sizes = [r.page_size_bytes for g in layer_refs_per_group for r in g]
         if _ts == "force" or (
@@ -384,6 +412,36 @@ class SingleDirectionOffloadingHandler:
         self._event_pool: list[torch.Event] = []
         # list of pinned descriptor buffer sets available for re-use
         self._buffer_pool: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+        # Persistent device-side descriptor staging for the Triton swap
+        # path. Transfers are event-chained (strictly ordered), so a single
+        # shared set is safe; keeping them out of the caching allocator's
+        # general pool prevents cross-stream reuse of a block whose H2D
+        # descriptor copy is still queued (device-memory corruption,
+        # 2026-09-14). Grown on demand.
+        self._desc_dev: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = (
+            None
+        )
+        self._swap_is_triton = getattr(
+            self._swap_blocks_batch, "func", None
+        ) is swap_blocks_batch
+
+    def _device_desc_buffers(
+        self, n: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        cur = self._desc_dev
+        if cur is None or cur[0].numel() < n:
+            keep = cur[0].numel() if cur is not None else 0
+            want = max(n, keep * 2, 1024)
+            dev = torch.empty(
+                want, dtype=torch.int64, device=self.src_tensors[0].device
+            )
+            cur = (
+                dev,
+                torch.empty_like(dev),
+                torch.empty_like(dev),
+            )
+            self._desc_dev = cur
+        return cur
 
     def _estimate_max_copy_ops(self, group_sizes: Sequence[int]) -> int:
         """Upper bound on the number of copy descriptors for a transfer.
@@ -726,12 +784,21 @@ class SingleDirectionOffloadingHandler:
             # GPU-side common denominator of the store path (bisection knife
             # for the gfx908 event-record disturbance hypothesis).
             if op_idx > 0 and not _offload_knife("FAKESTORES"):
-                self._swap_blocks_batch(
-                    src,
-                    dst,
-                    sizes,
-                    is_src_access_order_any=is_src_access_order_any,
-                )
+                if self._swap_is_triton:
+                    self._swap_blocks_batch(
+                        src,
+                        dst,
+                        sizes,
+                        is_src_access_order_any=is_src_access_order_any,
+                        device_buffers=self._device_desc_buffers(op_idx),
+                    )
+                else:
+                    self._swap_blocks_batch(
+                        src,
+                        dst,
+                        sizes,
+                        is_src_access_order_any=is_src_access_order_any,
+                    )
             if not _noev:
                 end_event.record(stream)
 

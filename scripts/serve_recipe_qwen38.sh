@@ -572,7 +572,7 @@ start_server() {
   VLLM_OFFLOAD_NOSTORE_DECODE="${VLLM_OFFLOAD_NOSTORE_DECODE:-0}" \
   VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS="${VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS:-0}" \
   VLLM_OFFLOAD_SUBMIT_AT_FINISH="${VLLM_OFFLOAD_SUBMIT_AT_FINISH:-0}" \
-  VLLM_OFFLOAD_TRITON_STORES="${VLLM_OFFLOAD_TRITON_STORES:-1}" \
+  VLLM_OFFLOAD_TRITON_STORES="${VLLM_OFFLOAD_TRITON_STORES:-classic}" \
   VLLM_KV_STABLECHECK="${VLLM_KV_STABLECHECK:-}" \
   VLLM_KVLINE3="${VLLM_KVLINE3:-}" \
   VLLM_KV_READBACK="${VLLM_KV_READBACK:-}" \
@@ -600,15 +600,18 @@ start_server() {
   VLLM_SWAUDIT="${VLLM_SWAUDIT:-}" \
   VLLM_KVAUDIT="${VLLM_KVAUDIT:-}" \
   VLLM_LAYERPROBE="${VLLM_LAYERPROBE:-}" \
-  VLLM_TP_AR_FP32="${VLLM_TP_AR_FP32:-gather}" \
-  VLLM_TP_CAR_MAX_BYTES="${VLLM_TP_CAR_MAX_BYTES:-}" \
-  VLLM_CUSTOM_ALLREDUCE_ALGO="${VLLM_CUSTOM_ALLREDUCE_ALGO:-}" \
+  VLLM_TP_AR_FP32="${VLLM_TP_AR_FP32:-car1}" \
+  VLLM_TP_CAR_MAX_BYTES="${VLLM_TP_CAR_MAX_BYTES:-41943040}" \
+  VLLM_AR_AUDIT_MIN_BYTES="${VLLM_AR_AUDIT_MIN_BYTES:-}" \
+  VLLM_AR_LAYOUT_PAD="${VLLM_AR_LAYOUT_PAD:-}" \
+  VLLM_AR_TRACE_MIN_BYTES="${VLLM_AR_TRACE_MIN_BYTES:-}" \
   VLLM_GDN_PREFILL_EXACT="${VLLM_GDN_PREFILL_EXACT:-1}" \
   VLLM_GDN_PREFILL_EXACT_MIN_T="${VLLM_GDN_PREFILL_EXACT_MIN_T:-}" \
   AITER_UA_FORCE_2D="${AITER_UA_FORCE_2D:-1}" \
   AITER_UA_PIN_TILE="${AITER_UA_PIN_TILE:-1}" \
   VLLM_GFX908_NO_SKINNY_GEMM="${VLLM_GFX908_NO_SKINNY_GEMM:-}" \
   VLLM_GDN_COREHASH="${VLLM_GDN_COREHASH:-}" \
+  VLLM_SEAMHASH="${VLLM_SEAMHASH:-}" \
   VLLM_LAYERPROBE_POSLO="${VLLM_LAYERPROBE_POSLO:-}" \
   VLLM_LAYERPROBE_POSHI="${VLLM_LAYERPROBE_POSHI:-}" \
   VLLM_GDN_SPEC_VIA_DECODE="${VLLM_GDN_SPEC_VIA_DECODE:-}" \
@@ -624,11 +627,17 @@ start_server() {
       VLLM_DFLASH_AUDIT="${VLLM_DFLASH_AUDIT:-}" \
       ${PROFILER_WRAPPER:-} "${VENV}/bin/vllm" "${ARGS[@]}"
   # G1 numerics-unification levers (2026-09-14, ledger G1_PROD_GATE_SEEDS_
-  # PARTIAL): VLLM_TP_AR_FP32=gather (bitwise gather AR for prefill-size
-  # messages), VLLM_GDN_PREFILL_EXACT=1 (exact-recurrence GDN prefill),
+  # PARTIAL → G2_PHASEB_CAR_ENVELOPE_AND_OFFLOAD_FIX): VLLM_TP_AR_FP32=car1
+  # + VLLM_TP_CAR_MAX_BYTES=40MB (ALL ARs — decode and prefill chunks — ride
+  # the CAR 1-stage kernel: fixed rank-order fp32 accumulate, single
+  # downcast, message-size-invariant), VLLM_OFFLOAD_TRITON_STORES=classic
+  # (GPU→CPU KV stores via per-descriptor hipMemcpyAsync — the driver batch
+  # API races compute on gfx908 and the Triton host-store kernel corrupts
+  # long outputs; classic verified clean by full-read 4k legs),
+  # VLLM_GDN_PREFILL_EXACT=1 (exact-recurrence GDN prefill),
   # AITER_UA_FORCE_2D=1 + AITER_UA_PIN_TILE=1 (decode shares the prefill 2D
-  # attention kernel and tile). Production gates 301/307 clean vs 0/4
-  # pre-fix; override per-boot to disable.
+  # attention kernel and tile). Production gates: seeds 301/307/305 clean;
+  # cfix-nonce legs 91/61 lines read in full; seam 0/256 ×2.
   ) >"${LOG_DIR}/server.log" 2>&1 </dev/null &
 
   printf '%s\n' "$!" >"${PID_FILE}"
