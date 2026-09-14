@@ -594,10 +594,15 @@ start_server() {
   VLLM_SWAUDIT="${VLLM_SWAUDIT:-}" \
   VLLM_KVAUDIT="${VLLM_KVAUDIT:-}" \
   VLLM_LAYERPROBE="${VLLM_LAYERPROBE:-}" \
-  VLLM_TP_AR_FP32="${VLLM_TP_AR_FP32:-}" \
-  VLLM_GDN_PREFILL_EXACT="${VLLM_GDN_PREFILL_EXACT:-}" \
-  AITER_UA_FORCE_2D="${AITER_UA_FORCE_2D:-}" \
-  AITER_UA_PIN_TILE="${AITER_UA_PIN_TILE:-}" \
+  # G1 numerics-unification levers (2026-09-14, ledger G1_PROD_GATE_SEEDS_
+  # PARTIAL): bitwise gather AR for prefill-size messages + exact-recurrence
+  # GDN prefill + shared 2D attention kernel with pinned decode tile.
+  # Production gates 301/307 fully clean, 305/unseeded still drift - strict
+  # improvement over 0/4; keep ON by default, override per-boot to disable.
+  VLLM_TP_AR_FP32="${VLLM_TP_AR_FP32:-gather}" \
+  VLLM_GDN_PREFILL_EXACT="${VLLM_GDN_PREFILL_EXACT:-1}" \
+  AITER_UA_FORCE_2D="${AITER_UA_FORCE_2D:-1}" \
+  AITER_UA_PIN_TILE="${AITER_UA_PIN_TILE:-1}" \
   VLLM_GFX908_NO_SKINNY_GEMM="${VLLM_GFX908_NO_SKINNY_GEMM:-}" \
   VLLM_GDN_COREHASH="${VLLM_GDN_COREHASH:-}" \
   VLLM_LAYERPROBE_POSLO="${VLLM_LAYERPROBE_POSLO:-}" \
