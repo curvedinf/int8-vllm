@@ -969,17 +969,24 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
                         list(range(0, _n, 1)) if _n > 64 else [0]
                     )
                     for _ri in _rows:
-                        _pi = min(_off + _ri, _pos_flat.numel() - 1)
-                        _tok = (
-                            int(_ids_flat[min(_off + _ri, _ids_flat.numel() - 1)].item())
-                            if _ids_flat is not None
-                            else -1
-                        )
+                        _gi = _off + _ri
+                        # Skip padded/overhanging rows: the global index
+                        # must be within BOTH the positions and ids tensors
+                        # (pad rows record bogus positions and poison every
+                        # downstream cross-run comparison).
+                        if _gi >= _pos_flat.numel():
+                            continue
+                        if (
+                            _ids_flat is not None
+                            and _gi >= _ids_flat.numel()
+                        ):
+                            continue
                         _LAYERPROBE_RECS.append(
                             (
-                                int(_pos_flat[_pi].item()),
+                                int(_pos_flat[_gi].item()),
                                 layer_idx,
-                                _tok,
+                                int(_ids_flat[_gi].item())
+                                if _ids_flat is not None else -1,
                                 (hidden_states[_ri].float() @ _lp).cpu().tolist(),
                             )
                         )
