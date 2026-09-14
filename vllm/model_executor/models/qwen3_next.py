@@ -766,18 +766,26 @@ class Qwen3NextDecoderLayer(nn.Module):
                 hidden_states=hidden_states,
                 positions=positions,
             )
-            if not _ain or not torch.isfinite(hidden_states).all().item():
-                if _attninf_on and not torch.cuda.is_current_stream_capturing():
-                    li = getattr(self, "_attninf_layer", None)
-                    if li is None:
-                        cls = type(self)
-                        cls._attninf_n = getattr(cls, "_attninf_n", 0) + 1
-                        li = self._attninf_layer = cls._attninf_n - 1
-                    if li < 8:
-                        _aout = torch.isfinite(hidden_states).all().item()
-                        print(f"[attninf] layer_inst={li} in_finite={_ain} "
-                              f"out_finite={_aout} shape={tuple(hidden_states.shape)}",
-                              flush=True)
+            # The isfinite check does a host sync (.item()) and must never
+            # run during graph capture — and only when ATTNINF is on at
+            # all (the previous form evaluated the .item() unconditionally
+            # via the `not _ain or ...` short-circuit, which killed every
+            # cudagraph-capture boot with hipErrorStreamCaptureUnsupported).
+            if (
+                _attninf_on
+                and not torch.cuda.is_current_stream_capturing()
+                and not torch.isfinite(hidden_states).all().item()
+            ):
+                li = getattr(self, "_attninf_layer", None)
+                if li is None:
+                    cls = type(self)
+                    cls._attninf_n = getattr(cls, "_attninf_n", 0) + 1
+                    li = self._attninf_layer = cls._attninf_n - 1
+                if li < 8:
+                    _aout = torch.isfinite(hidden_states).all().item()
+                    print(f"[attninf] layer_inst={li} in_finite={_ain} "
+                          f"out_finite={_aout} shape={tuple(hidden_states.shape)}",
+                          flush=True)
         else:
             raise ValueError("Invalid layer_type")
 
