@@ -527,8 +527,94 @@ def kernel_unified_attention(
             # scale gather (which redundantly loaded each scalar
             # G8_GROUP times and materialized fp32 intermediates).
             H2: tl.constexpr = HEAD_SIZE // 2
-            k0, k1 = tl.split(tl.permute(tl.reshape(K, (2, H2, TILE_SIZE)), (1, 2, 0)))
-            v0, v1 = tl.split(tl.permute(tl.reshape(V, (TILE_SIZE, 2, H2)), (0, 2, 1)))
+            # Contiguity hints: the half-dim axis is the packed row's fast
+            # axis (stride 1, H2-contiguous). Without them the blocked
+            # layout put the fast axis on the token axis (520B stride) and
+            # the kernel emitted per-BYTE loads (64x buffer_load_ubyte in
+            # SASS, ~27GB/s ceiling on gfx908, 2026-09-14).
+            offs_h = tl.max_contiguous(
+                tl.multiple_of(tl.arange(0, H2), H2), H2
+            )
+            # K halves: token-major (TILE_SIZE, H2) loads — coalesced along
+            # the packed row's dim axis.
+            # Block-pointer loads: the plain pointer-arithmetic form let
+            # the int8->bf16 cast pull a per-byte load layout (64x
+            # buffer_load_ubyte in SASS). Explicit block pointers with
+            # order=(1,0) declare the dim axis fastest and let the load
+            # vectorize independent of the consumer's layout.
+            # Tiles never straddle a KV page (BLOCK_SIZE % TILE_SIZE == 0,
+            # tiles page-aligned), so a single scalar base per tile + the
+            # regular token stride describes the whole tile.
+            first_tok_off = (j * TILE_SIZE) % BLOCK_SIZE
+            first_blk_scalar = tl.load(
+                block_tables_ptr
+                + block_table_offset
+                + (j * TILE_SIZE) // BLOCK_SIZE
+            ).to(tl.int64)
+            kv_base_k = (
+                key_cache_ptr
+                + first_blk_scalar * stride_k_cache_0
+                + kv_head_idx * stride_k_cache_2
+                + first_tok_off * stride_k_cache_1
+            )
+            kv_base_v = (
+                value_cache_ptr
+                + first_blk_scalar * stride_v_cache_0
+                + kv_head_idx * stride_v_cache_2
+                + first_tok_off * stride_v_cache_1
+            )
+            k0t = tl.load(
+                tl.make_block_ptr(
+                    base=kv_base_k,
+                    shape=(TILE_SIZE, H2),
+                    strides=(stride_k_cache_1, 1),
+                    offsets=(0, 0),
+                    block_shape=(TILE_SIZE, H2),
+                    order=(1, 0),
+                ),
+                boundary_check=(0, 1),
+                padding_option="zero",
+            )
+            k1t = tl.load(
+                tl.make_block_ptr(
+                    base=(kv_base_k + H2),
+                    shape=(TILE_SIZE, H2),
+                    strides=(stride_k_cache_1, 1),
+                    offsets=(0, 0),
+                    block_shape=(TILE_SIZE, H2),
+                    order=(1, 0),
+                ),
+                boundary_check=(0, 1),
+                padding_option="zero",
+            )
+            v0t = tl.load(
+                tl.make_block_ptr(
+                    base=kv_base_v,
+                    shape=(TILE_SIZE, H2),
+                    strides=(stride_v_cache_1, 1),
+                    offsets=(0, 0),
+                    block_shape=(TILE_SIZE, H2),
+                    order=(1, 0),
+                ),
+                boundary_check=(0, 1),
+                padding_option="zero",
+            )
+            v1t = tl.load(
+                tl.make_block_ptr(
+                    base=(kv_base_v + H2),
+                    shape=(TILE_SIZE, H2),
+                    strides=(stride_v_cache_1, 1),
+                    offsets=(0, 0),
+                    block_shape=(TILE_SIZE, H2),
+                    order=(1, 0),
+                ),
+                boundary_check=(0, 1),
+                padding_option="zero",
+            )
+            k0 = _cast_kv_tile(k0t.T, Q, k_scale, KV_QUANT_MODE)
+            k1 = _cast_kv_tile(k1t.T, Q, k_scale, KV_QUANT_MODE)
+            v0 = _cast_kv_tile(v0t, Q, v_scale, KV_QUANT_MODE)
+            v1 = _cast_kv_tile(v1t, Q, v_scale, KV_QUANT_MODE)
             g8_base = (
                 physical_block_idx * stride_g8_blk
                 + kv_head_idx * stride_g8_head
