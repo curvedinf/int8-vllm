@@ -86,6 +86,14 @@ INT8 conversion and ran fp16 KV. `—` = not measured under that definition.
 | 2026-06-11 | Qwen3.6-27B + AITER UA + MTP n=3 | TP4, fp16 KV | 212 (c=8) | — | — | +29% at 16K ctx; +15% on 4k-in/6k-out batch; UA ≈ TRITON without MTP |
 | 2026-08-25 | Qwen3.8-27B INT8 GS128 + DFlash2 | current recipe: W8A8 everywhere, int8-PTH KV both models, UA, fp32 GDN state, round act quant, TP4/C8 | 348 | — | 2,175 | INT8 conversion + accuracy program; NS=15 selected (NS=17 acceptance collapses to ~30%); TPOT 12.52 ms; ~71% draft acceptance; KLD median 0.0153 vs BF16; PP from the 8×8192 prefill leg |
 | 2026-08-26 | Qwen3.8-27B + tuned aiter gfx908 GEMMs | same recipe + 299-row gfx908 tuned a8w8 CSV, rebuilt `module_gemm_a8w8` (45 tuned kernels), NS=13, TP4/C8 | 288 | 648 | 2,776 | aiter tuning program merged (int8-aiter); kernel-level decode GEMM 1.37× geo (max 2.64×); NS=13 per same-session sweep (full NS table in recipes README) |
+| 2026-09-15 | Qwen3.8-27B PTQR numerics-closure stack | PTQR R10S60 target + PTQR r1 draft, int8_block_g128 KV, bitwise car1 AR, classic stream-0 stores, GDN-exact + FORCE_2D levers, NS=6, TP4/**C6/20k steady** | — | ~101 (median-of-4; 123 fresh-boot) | ~1,048 (cold single-stream 20k) | different bench definition than the rows above (6×20k-in steady vs 8×32-in): long-context steady, not comparable cell-to-cell. **17 distinct numerics/correctness defects root-caused and fixed** in this campaign (4 custom-AR, 4 KV-offload-store, 4 GDN-state, 2 attention-path, 3 PTQR-checkpoint); conditions improved: 20k-in/4k-out garbles eliminated (all seeds full-read clean), decode-vs-prefill seam bitwise-consistent, boot-to-boot determinism restored, draft acceptance 3.88/13 ≥ bf16 3.67 |
+
+> [!NOTE]
+> The 2026-09-15 row uses the C6/20k-context steady benchmark (6 streams,
+> 20k-token shared-prefix prompts) — the quality-gated workload of the
+> numerics campaign. The older rows are C8 short-input serving benches;
+> do not compare across definitions.
+ |
 
 > [!NOTE]
 > Higher numbers than the ones above may appear in historical logs. Those

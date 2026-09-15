@@ -81,15 +81,31 @@ retired qwen36 unit).
 
 ## Models
 
-- Target: [`curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128`](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128), deployed at
-  `<models>/Qwen3.8-27B-PTQR-R10S60` (30G; original gptqmodel checkpoint kept at `Qwen3.8-27B-GPTQ-8bit-gs128`)
+**PTQR** (Post-Training Quantization with Retraining) is this fork's
+finetuning program that settles INT8 weights *and* group scales against a
+frozen BF16 reference, minimizing KLD on serving-shaped traffic — as opposed
+to one-shot GPTQ calibration. PTQR checkpoints are still standard GPTQ-format
+INT8 GS128 (config says `gptq`); the difference is that the weights/scales
+were retrained to close the quantization-induced distribution gap that
+one-shot calibration leaves (target: KLD 0.0069 vs 0.0110 one-shot; draft:
+quantized top-1 fidelity 0.042 == bf16). The retrained pair is what makes
+the long-context garble class stay closed under the unified-kernel levers.
+
+- Target: PTQR R10S60 retrained export, deployed at
+  `<models>/Qwen3.8-27B-PTQR-R10S60` (30G). Published HF link: **TBD**
+  (will be added when provided; original one-shot gptqmodel checkpoint:
+  [`curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128`](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128),
+  kept at `Qwen3.8-27B-GPTQ-8bit-gs128` as wrapper source + rollback).
 - Drafter (serving default since 2026-09-06): PTQR rung-1 export at
   `<models>/dflash2-ptqr-r1` (wrapper: the published
   [`curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128`](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128)
   gptqmodel checkpoint, cached at `~/.cache/huggingface/dflash2-int8/`;
   quantized fidelity top-1 0.042 == the bf16 draft, acceptance 3.83/13 at
-  42k — ledger `PTQR_P2_R1DRAFT_FINAL`). The bf16 draft
-  (`dflash2-bf16-with-tokenizer`) remains the fidelity/rollback reference.
+  42k — ledger `PTQR_P2_R1DRAFT_FINAL`). Published HF link for the PTQR
+  draft export: **TBD**. The bf16 draft
+  (`dflash2-bf16-with-tokenizer`) remains the fidelity/rollback reference —
+  note it garbles long outputs on every tested config (pre-PTQR class;
+  ledger `G4_FASTEST_ACCURATE_MODE_VERDICT`).
   A fresh gptqmodel rebuild still needs the post-bake remap below.
 
 ## Quantization recipes
@@ -260,6 +276,33 @@ NS-to-NS deltas inside 10-14; treat the valley as provisional until an
 interleaved multi-rep protocol (>=3 reps/NS on a quiet node) confirms it.
 Robust findings: NS=15 is consistently worst on both metrics (both
 sessions); NS=5 leads wall-clock and is coherence-verified (30/30).
+
+## NS sweep — 2026-09-15, PTQR numerics-closure stack (current recipe)
+
+Fresh boot per NS, real 20k shared-prefix prompts, C6 steady
+(`scripts/c6_steady.py`), 2 runs each + a 1024-token quality screen; the
+top candidate additionally gated with a full-read 4k canary + seam probe.
+This supersedes the 2026-08-26 table for the current stack (different
+models — PTQR pair vs one-shot GS128 — and different draft).
+
+| NS | steady run 1 / run 2 (tok/s) | quality |
+|---|---|---|
+| 1 (floor control) | 55.8 / 55.8 | clean |
+| 2 | 91.3 / 69.1 | clean |
+| 3 | 96.8 / 88.0 | clean |
+| 4 | 72.6 / 73.4 | clean |
+| 5 | 92.8 / 93.2 | 1024-screen clean, **4k canary garbled** (this session) |
+| **6** | 71.7 / 99.9 (historical median-of-4: 102.6; fresh 123) | **proven repeatedly (all G1/G4 gates)** |
+| **7** | 99.5 / 119.8 (+ confirm boot 97.9 / 94.9) | **full-read 4k canary CLEAN + seam pass** |
+| 8 | 53.7 / 54.0 (collapse) | clean |
+
+Shape: floor at 1–2, rise to 3, dip at 4, **plateau at 6–7**
+(statistically indistinguishable; NS=7 median ~98.7 across four runs,
+NS=6 median 102.6 accumulated), cliff at 8. **NS=6 stays the default** for
+its accumulated gate depth; NS=7 is the measured-best alternative, gated
+clean. NS=5 is off the menu (garbled 4k leg despite clean screens). Ledger:
+`G5_NS_MATRIX_CURRENT_RECIPE`.
+
 
 ## History
 
