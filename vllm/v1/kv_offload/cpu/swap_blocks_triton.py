@@ -59,13 +59,12 @@ def swap_blocks_classic(
     hipMemcpyDeviceToHost=2.
     """
     hip = _hip_lib()
-    stream = torch.cuda.current_stream().cuda_stream
     for sp, dp, n in zip(
         src_addrs.tolist(), dst_addrs.tolist(), sizes.tolist()
     ):
         rc = hip.hipMemcpyAsync(
             ctypes.c_void_p(dp), ctypes.c_void_p(sp),
-            ctypes.c_size_t(n), 2, ctypes.c_void_p(stream),
+            ctypes.c_size_t(n), 2, ctypes.c_void_p(0),
         )
         if rc != 0:
             raise RuntimeError(f"hipMemcpyAsync failed rc={rc}")
