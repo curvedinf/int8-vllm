@@ -488,6 +488,43 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     )
         time_after_load = time.perf_counter()
 
+        # VLLM_WEIGHTHASH=1: checksum key tensors post-load (rank-local
+        # view). Boot-time weight-load corruption discriminator for the
+        # flaky-leg class (ledger G2_FLAKY_LEG_ROOT_CAUSE_NARROWED_BOOT_TIME)
+        # — within-boot probes are blind to bad weights; this makes them
+        # visible across boots.
+        if os.environ.get("VLLM_WEIGHTHASH"):
+            import hashlib as _hl
+
+            def _whash(m, tag):
+                digests = []
+                n_small = 0
+                for name, p in sorted(m.named_parameters()):
+                    key = ".".join(name.split(".")[-3:])
+                    t = p.detach().flatten()
+                    if p.numel() <= 32_000_000:
+                        if n_small >= 96:
+                            continue
+                        n_small += 1
+                    else:
+                        t = t[:: max(p.numel() // 4_000_000, 1)]
+                    b = t.contiguous().cpu().view(torch.uint8).numpy().tobytes()
+                    digests.append(f"{key}:{_hl.md5(b).hexdigest()[:8]}")
+                logger.warning("WEIGHTHASH[%s] %s", tag, " ".join(digests))
+
+            try:
+                _whash(self.model, "target")
+                draft = getattr(self.speculator, "draft_model", None)
+                if draft is None:
+                    for mn, mod in self.model.named_children():
+                        if "draft" in mn.lower():
+                            draft = mod
+                            break
+                if draft is not None:
+                    _whash(draft, "draft")
+            except Exception:
+                logger.warning("WEIGHTHASH failed", exc_info=True)
+
         self.model_memory_usage = m.consumed_memory
         logger.info(
             "Model loading took %s GiB memory and %.6f seconds",
