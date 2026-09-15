@@ -486,6 +486,16 @@ class DFlashSpeculator(DraftModelSpeculator):
                 sorted(draft_ids), sorted(target_ids), sorted(overlap),
             )
         # Support multiple draft KV cache groups by preparing inputs once for each
+        # VLLM_ACCEPTLOG: throttled per-round accepted-length dump
+        # (measurement boots only - .tolist() forces a sync).
+        if os.environ.get("VLLM_ACCEPTLOG"):
+            self._acc_n = getattr(self, "_acc_n", 0) + 1
+            if self._acc_n % 20 == 1:
+                nr = num_rejected[: num_sampled.shape[0]].tolist()
+                ns = num_sampled.tolist()
+                acc = [s - r for s, r in zip(ns, nr)]
+                print(f"ACCEPT round={self._acc_n} n={len(acc)} "
+                      f"acc={acc}", flush=True)
         for i, gid in enumerate(self.draft_kv_cache_group_ids):
             prepare_dflash_inputs(
                 self.input_buffers,

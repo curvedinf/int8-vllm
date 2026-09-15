@@ -1671,6 +1671,15 @@ class GPUModelRunner(
         num_reqs = output_token_ids.size(0)
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
 
+        # VLLM_ACCEPTLOG=1: throttled per-round accepted-length dump
+        # (measurement boots only - .tolist() forces a sync).
+        if os.environ.get("VLLM_ACCEPTLOG"):
+            self._acc_n = getattr(self, "_acc_n", 0) + 1
+            if self._acc_n % 20 == 1:
+                vals = self.num_accepted_tokens.gpu[:num_reqs].tolist()
+                print(f"ACCEPT round={self._acc_n} n={num_reqs} "
+                      f"acc={vals}", flush=True)
+
         if self.cache_config.mamba_cache_mode == "align":
             # Fused GPU postprocess: state copies + per-request accepted-token
             # update without CPU-GPU sync. The metadata
