@@ -17,13 +17,20 @@ it wins, with measured float exceptions where precision actually matters.
 > [!NOTE]
 > **Optimized configuration:**
 >
-> - Models: [Qwen3.8-27B GPTQ INT8 W8A8 GS128](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128)
->   + its matching [DFlash2 GPTQ INT8 W8A8 GS128 draft](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128)
+> - Models: [Qwen3.8-27B GPTQ INT8 W8A8 GS128 **PTQR**](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128-PTQR)
+>   + its matching [DFlash2 GPTQ INT8 W8A8 GS128 **PTQR** draft](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128-PTQR)
+>   (PTQR = post-training quantization **with retraining** — weights and
+>   group scales finetuned against a frozen BF16 reference to minimize KLD;
+>   the original one-shot checkpoints
+>   [target](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128)
+>   / [draft](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128)
+>   remain as wrapper sources and rollback)
 > - Compute: AITER CK W8A8 INT8 GEMMs at every decode/prefill shape, INT8
 >   lm_head
-> - Attention/KV: AITER unified attention; INT8 per-token-head KV on both
+> - Attention/KV: AITER unified attention; INT8 block-g128 KV on both
 >   target and draft
-> - Topology: TP4 over XGMI, 8 concurrent sequences (C8)
+> - Topology: TP4 over XGMI, 6 concurrent sequences (C6) at 20k context,
+>   DFlash2 speculative decoding at NS=6
 >
 > Other models and settings generally work, but only this combination is
 > tuned and gated.
@@ -151,10 +158,17 @@ attention tuning
 
 ## Models
 
-- **[Qwen3.8-27B-GPTQ-INT8-W8A8-GS128](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128)**
-  (matching target model; local deployment: `<models>/Qwen3.8-27B-GPTQ-8bit-gs128`)
-- **[Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128)**
-  (required speculative-decoding companion; not standalone; local deployment:
+- **[Qwen3.8-27B-GPTQ-INT8-W8A8-GS128-PTQR](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128-PTQR)**
+  (recipe default — PTQR-retrained target; local deployment:
+  `<models>/Qwen3.8-27B-PTQR-R10S60`). The one-shot original
+  **[Qwen3.8-27B-GPTQ-INT8-W8A8-GS128](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128)**
+  stays as wrapper source + rollback (local:
+  `<models>/Qwen3.8-27B-GPTQ-8bit-gs128`)
+- **[Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128-PTQR](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128-PTQR)**
+  (recipe default — PTQR rung-1 draft, not standalone; local deployment:
+  `<models>/dflash2-ptqr-r1`). The one-shot original
+  **[Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128)**
+  stays as wrapper source (local:
   `<models>/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit`)
 - Quantization recipe: `<models>/quantize_qwen38_27b_gptq8.py` (outside the repo)
   (GPTQModel 7.3.4; bits=8, group_size=128, sym, true-sequential; 512 mixed
