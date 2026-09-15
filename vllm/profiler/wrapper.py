@@ -311,6 +311,21 @@ class TorchProfilerWrapper(WorkerProfiler):
 
         profiler_config = self.profiler_config
         rank = self.local_rank
+        # Explicit chrome-trace export: profiler.stop() alone never fires
+        # on_trace_ready (schedule-only), so worker timelines were silently
+        # dropped - only summary tables landed. The timeline (kernel
+        # ts/dur) is required for draft-vs-verify phase analysis.
+        try:
+            import os as _os
+
+            trace_dir = profiler_config.torch_profiler_dir
+            if trace_dir and not _is_uri_path(trace_dir):
+                _os.makedirs(trace_dir, exist_ok=True)
+                self.profiler.export_profiler_trace(
+                    _os.path.join(trace_dir, f"worker{rank}.trace.json.gz")
+                )
+        except Exception:
+            logger.warning("worker chrome trace export failed", exc_info=True)
         if profiler_config.torch_profiler_dump_cuda_time_total:
             table = self._build_profiler_table(sort_key="self_cuda_time_total")
             self._write_profiler_table(rank, table)
