@@ -1003,6 +1003,9 @@ def _get_tile_size(
     return 16 if element_size >= 2 else 32
 
 
+_GEO_DUMPED = False
+
+
 def unified_attention(
     q,
     k,
@@ -1132,6 +1135,29 @@ def unified_attention(
     use_qq_bias = qq_bias is not None
 
     block_size = v.shape[1]
+
+    # VLLM_UA_GEODUMP: one-shot engine-geometry dump (strides, shapes,
+    # alignment) at the first g8 call — reconciles bench constructions
+    # with the real layout (the i32-unpack engine failure taught that the
+    # hard way).
+    if os.environ.get("VLLM_UA_GEODUMP") and not _GEO_DUMPED:
+        try:
+            UnifiedAttentionGeoDump = True  # noqa: F841
+            print(
+                f"UA_GEO q={tuple(q.shape)}{q.dtype} "
+                f"k={tuple(k.shape)}{k.dtype} kstride={k.stride()} "
+                f"vstride={v.stride()} kptr%4={k.data_ptr() % 4} "
+                f"vptr%4={v.data_ptr() % 4} blk={block_size} "
+                f"g8_k={tuple(g8_k_scale.shape) if g8_k_scale is not None else None} "
+                f"g8kstride={g8_k_scale.stride() if g8_k_scale is not None else None} "
+                f"maxq={max_seqlen_q} nseq={len(seqused_k)} "
+                f"quant={kv_quant_mode}",
+                flush=True,
+            )
+        except Exception:
+            pass
+        finally:
+            globals()["_GEO_DUMPED"] = True
     num_seqs = len(seqused_k)
     num_query_heads = q.shape[1]
     num_kv_heads = k.shape[2]
