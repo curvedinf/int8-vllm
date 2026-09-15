@@ -91,18 +91,19 @@ one-shot calibration leaves (target: KLD 0.0069 vs 0.0110 one-shot; draft:
 quantized top-1 fidelity 0.042 == bf16). The retrained pair is what makes
 the long-context garble class stay closed under the unified-kernel levers.
 
-- Target: PTQR R10S60 retrained export, deployed at
-  `<models>/Qwen3.8-27B-PTQR-R10S60` (30G). Published HF link: **TBD**
-  (will be added when provided; original one-shot gptqmodel checkpoint:
+- Target (recipe default): **PTQR R10S60 retrained export** —
+  [`curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128-PTQR`](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128-PTQR),
+  deployed at `<models>/Qwen3.8-27B-PTQR-R10S60` (30G). Original one-shot
+  gptqmodel checkpoint (wrapper source + rollback):
   [`curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128`](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128),
-  kept at `Qwen3.8-27B-GPTQ-8bit-gs128` as wrapper source + rollback).
-- Drafter (serving default since 2026-09-06): PTQR rung-1 export at
-  `<models>/dflash2-ptqr-r1` (wrapper: the published
+  kept at `Qwen3.8-27B-GPTQ-8bit-gs128`.
+- Drafter (recipe default since 2026-09-06): **PTQR rung-1 export** —
+  [`curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128-PTQR`](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128-PTQR),
+  deployed at `<models>/dflash2-ptqr-r1`. Original one-shot checkpoint:
   [`curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128`](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128)
-  gptqmodel checkpoint, cached at `~/.cache/huggingface/dflash2-int8/`;
-  quantized fidelity top-1 0.042 == the bf16 draft, acceptance 3.83/13 at
-  42k — ledger `PTQR_P2_R1DRAFT_FINAL`). Published HF link for the PTQR
-  draft export: **TBD**. The bf16 draft
+  (cached at `~/.cache/huggingface/dflash2-int8/`; quantized fidelity
+  top-1 0.042 == the bf16 draft, acceptance 3.83/13 at 42k — ledger
+  `PTQR_P2_R1DRAFT_FINAL`). The bf16 draft
   (`dflash2-bf16-with-tokenizer`) remains the fidelity/rollback reference —
   note it garbles long outputs on every tested config (pre-PTQR class;
   ledger `G4_FASTEST_ACCURATE_MODE_VERDICT`).

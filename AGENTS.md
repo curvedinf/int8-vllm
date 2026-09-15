@@ -183,12 +183,15 @@ gs 128) before serving.
 
 ## Model assets
 
-- Published target: `curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128`, deployed at
-  `<models>/Qwen3.8-27B-PTQR-R10S60` (PTQR-retrained export; the original
-  gptqmodel checkpoint `Qwen3.8-27B-GPTQ-8bit-gs128` remains the wrapper
-  source and rollback).
-- DFlash2 draft (serving default since 2026-09-06): PTQR rung-1 export at
-  `<models>/dflash2-ptqr-r1` (wrapper template: the published
+- Published target (recipe default): PTQR-retrained export
+  [`curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128-PTQR`](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128-PTQR),
+  deployed at `<models>/Qwen3.8-27B-PTQR-R10S60`. Original one-shot
+  checkpoint: `curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128`
+  (`<models>/Qwen3.8-27B-GPTQ-8bit-gs128`) remains the wrapper
+  source and rollback.
+- DFlash2 draft (recipe default since 2026-09-06): PTQR rung-1 export
+  [`curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128-PTQR`](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128-PTQR),
+  deployed at `<models>/dflash2-ptqr-r1` (wrapper template: the original
   `curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128` gptqmodel checkpoint,
   cached at `~/.cache/huggingface/dflash2-int8/`; training source:
   `<models>/ptqr_draft_r1/draft_final.pt`). The bf16 draft
