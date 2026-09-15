@@ -15,7 +15,7 @@ the native dtype** across the whole model surface and exploits it everywhere
 it wins, with measured float exceptions where precision actually matters.
 
 > [!NOTE]
-> **Optimized configuration:**
+> **Optimized configuration (updated 9/15/26 - multiple numerics bugs fixed)**
 >
 > - Models: [Qwen3.8-27B GPTQ INT8 W8A8 GS128 **PTQR**](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128-PTQR)
 >   + its matching [DFlash2 GPTQ INT8 W8A8 GS128 **PTQR** draft](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128-PTQR)
