@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom normalization layers."""
 
+import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,8 +14,56 @@ from vllm import envs, ir
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.batch_invariant import rms_norm_batch_invariant
+from vllm.triton_utils import tl, triton
 
 logger = init_logger(__name__)
+
+
+@triton.jit
+def _gemma_fused_add_rmsnorm_kernel(
+    X,
+    RES,
+    W,
+    OUT,
+    RES_OUT,
+    N: tl.constexpr,
+    EPS: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    # One program per row (GOALOPT decode small-M path). Replicates the
+    # ir-native Gemma op order exactly: fp32 add -> bf16 residual store ->
+    # fp32 mean-of-squares -> fp32 normalize -> fp32 (1+w) multiply ->
+    # bf16 out. Only the variance reduction tree may differ from torch's
+    # mean kernel (1e-7-class on fp32).
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK)
+    mask = cols < N
+    x = tl.load(X + row * N + cols, mask=mask, other=0.0).to(tl.float32)
+    r = tl.load(RES + row * N + cols, mask=mask, other=0.0).to(tl.float32)
+    s = x + r
+    tl.store(RES_OUT + row * N + cols, s.to(tl.bfloat16), mask=mask)
+    var = tl.sum(s * s, axis=0) / N
+    inv = tl.rsqrt(var + EPS)
+    w = tl.load(W + cols, mask=mask, other=0.0).to(tl.float32)
+    out = (s * inv * w).to(tl.bfloat16)
+    tl.store(OUT + row * N + cols, out, mask=mask)
+
+
+def _gemma_fused_add_rmsnorm(
+    x_2d: torch.Tensor,
+    residual_2d: torch.Tensor,
+    weight_fp32: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    m, n = x_2d.shape
+    out = torch.empty_like(x_2d)
+    res_out = torch.empty_like(residual_2d)
+    _gemma_fused_add_rmsnorm_kernel[(m,)](
+        x_2d, residual_2d, weight_fp32, out, res_out,
+        N=n, EPS=eps, BLOCK=triton.next_power_of_2(n),
+        num_warps=8,
+    )
+    return out, res_out
 
 
 def poly_norm(
@@ -290,6 +340,13 @@ class GemmaRMSNorm(CustomOp):
             return ir.ops.rms_norm(x, weight, self.variance_epsilon)
         return ir.ops.fused_add_rms_norm(x, residual, weight, self.variance_epsilon)
 
+    def _fused_weight_fp32(self) -> torch.Tensor:
+        cached = getattr(self, "_cached_fused_w", None)
+        if cached is None:
+            cached = (self.weight.float() + 1.0).contiguous()
+            self._cached_fused_w = cached
+        return cached
+
     def forward_cuda(
         self,
         x: torch.Tensor,
@@ -305,19 +362,37 @@ class GemmaRMSNorm(CustomOp):
         """ROCm path: use AITER Triton RMSNorm for large-M tensors.
 
         Mirrors RMSNorm.forward_hip but applies the Gemma (1 + w) weight
-        adjustment before dispatching to AITER.
+        adjustment before dispatching to AITER. Small-M decode batches
+        (m < 256) default to the single-launch fused kernel (GOALOPT):
+        the ir-native decomposition costs ~10 kernel launches per norm
+        call (~182 chains per C6 decode step in the rank-0 trace).
+        VLLM_GFX908_SMALLM_NORM selects: fused (default) | native.
         """
-        from aiter.ops.triton.normalization.rmsnorm import (
-            rms_norm as aiter_rms_norm,
-            rmsnorm2d_fwd_with_add as aiter_rmsnorm_add,
-        )
-
         orig_shape = x.shape
         x_2d = x.reshape(-1, orig_shape[-1]).contiguous()
         m = x_2d.shape[0]
 
         if m < 256:
-            return self.forward_native(x, residual)
+            mode = os.environ.get("VLLM_GFX908_SMALLM_NORM", "fused")
+            if mode == "native":
+                return self.forward_native(x, residual)
+            # GOALOPT fused path: one launch, native op order, cached fp32
+            # (1 + w) weight.
+            w = self._fused_weight_fp32()
+            if residual is None:
+                zero = torch.zeros_like(x_2d)
+                out, _ = _gemma_fused_add_rmsnorm(x_2d, zero, w, self.variance_epsilon)
+                return out.reshape(orig_shape)
+            residual_2d = residual.reshape(-1, orig_shape[-1]).contiguous()
+            out, res_out = _gemma_fused_add_rmsnorm(
+                x_2d, residual_2d, w, self.variance_epsilon
+            )
+            return out.reshape(orig_shape), res_out.reshape(residual.shape)
+
+        from aiter.ops.triton.normalization.rmsnorm import (
+            rms_norm as aiter_rms_norm,
+            rmsnorm2d_fwd_with_add as aiter_rmsnorm_add,
+        )
 
         weight = (self.weight.float() + 1.0).to(x_2d.dtype)
         eps = self.variance_epsilon
