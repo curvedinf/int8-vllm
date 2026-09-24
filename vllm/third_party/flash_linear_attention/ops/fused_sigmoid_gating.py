@@ -53,6 +53,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     stride_indices_tok: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
     INPLACE_FINAL_STATE: tl.constexpr,  # whether to store final state inplace
+    STORE_FINAL_STATE_ONLY: tl.constexpr,  # skip per-token state stores
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     IS_CONTINUOUS_BATCHING: tl.constexpr,
@@ -182,15 +183,24 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
 
         # keep the states for multi-query tokens
         if INPLACE_FINAL_STATE:
-            # Load state index and check for invalid entries
-            final_state_idx = tl.load(
-                ssm_state_indices + i_n * stride_indices_seq + i_t
-            ).to(tl.int64)
-            # Only store if state index is valid (not NULL_BLOCK_ID=0)
-            if final_state_idx > 0:
-                p_ht = ht + final_state_idx * stride_final_state_token
-                p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
-                tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+            if STORE_FINAL_STATE_ONLY:
+                # GOALOPT 2026-09-24: the chunked-prefill exact path maps
+                # every token of a sequence to the SAME pool slot (si_p is
+                # the per-seq index expanded over the token axis), so the
+                # per-token 16KB state stores are 2048 redundant writes to
+                # one line. Defer to a single store after the loop; the
+                # memory content after the kernel is bit-identical.
+                pass
+            else:
+                # Load state index and check for invalid entries
+                final_state_idx = tl.load(
+                    ssm_state_indices + i_n * stride_indices_seq + i_t
+                ).to(tl.int64)
+                # Only store if state index is valid (not NULL_BLOCK_ID=0)
+                if final_state_idx > 0:
+                    p_ht = ht + final_state_idx * stride_final_state_token
+                    p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
+                    tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
         else:
             p_ht = ht + (bos + i_t) * stride_final_state_token
             p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
@@ -203,6 +213,20 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         p_v += HV * V
         p_b += HV
         p_a += HV
+
+    if INPLACE_FINAL_STATE and STORE_FINAL_STATE_ONLY and T > 0:
+        # Single trailing store of the running state to the sequence's pool
+        # slot. Valid when the caller's ssm_state_indices mapping is
+        # constant across the token axis (the chunked-prefill exact path).
+        final_state_idx = tl.load(
+            ssm_state_indices
+            + i_n * stride_indices_seq
+            + (T - 1) * stride_indices_tok
+        ).to(tl.int64)
+        if final_state_idx > 0:
+            p_ht = ht + final_state_idx * stride_final_state_token
+            p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
+            tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
 def fused_sigmoid_gating_delta_rule_update(
@@ -223,6 +247,7 @@ def fused_sigmoid_gating_delta_rule_update(
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     is_kda: bool = False,
+    store_final_state_only: bool = False,
 ):
     """
     Fused triton implementation of sigmoid gating delta rule update.
@@ -301,6 +326,7 @@ def fused_sigmoid_gating_delta_rule_update(
         stride_indices_seq=stride_indices_seq,
         stride_indices_tok=stride_indices_tok,
         INPLACE_FINAL_STATE=inplace_final_state,
+        STORE_FINAL_STATE_ONLY=store_final_state_only,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         IS_KDA=is_kda,
         num_warps=num_warps,

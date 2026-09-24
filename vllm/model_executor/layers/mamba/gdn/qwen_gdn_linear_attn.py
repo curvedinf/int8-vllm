@@ -7,6 +7,15 @@ import os
 _gdn_state_stats: list = []
 from typing import Literal
 
+
+def _gdn_prefill_final_store_only() -> bool:
+    """GOALOPT 2026-09-24: skip the per-token GDN state stores on the
+    chunked-prefill exact-recurrence path (every token maps to the same
+    pool slot, so only the trailing store matters; bit-exact). Env lever
+    VLLM_GDN_PREFILL_FINAL_STORE_ONLY=0 restores the per-token stores."""
+    return os.environ.get("VLLM_GDN_PREFILL_FINAL_STORE_ONLY", "1") == "1"
+
+
 _NANWATCH_STATE: dict = {"ring": [], "n": 0}
 
 
@@ -2207,6 +2216,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                             ssm_state_indices=si_p,
                             num_accepted_tokens=None,
                             use_qk_l2norm_in_kernel=True,
+                            # si_p maps every token of a sequence to one pool
+                            # slot, so only the trailing state store matters;
+                            # skipping the per-token stores is bit-exact and
+                            # removes 2048 redundant 16KB writes per call.
+                            store_final_state_only=(
+                                _gdn_prefill_final_store_only()
+                            ),
                         )
                     )
                     core_attn_out_non_spec = core_attn_out_non_spec.contiguous()
