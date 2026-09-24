@@ -299,6 +299,16 @@ fi
 if [[ -f "${LOG_DIR}/G128_DRAFT_GLUON" ]]; then
   VLLM_G128_DRAFT_GLUON="$(tr -d '[:space:]' < "${LOG_DIR}/G128_DRAFT_GLUON")"
 fi
+# GOALOPT 2026-09-24: G128 prefill MFMA core (64 tokens x one head per CTA).
+# 3.9-5.3x over the generic 2D kernel on 2048-token chunks at 32k; solo 32k
+# TTFT 36.2 -> 23.5-24.3s, mixed 3-decode/3-prefill gate -26% end-to-end.
+# Oracle rank gate vs a same-protocol baseline control: 0/1/0 vs 0/0/1
+# rank>20 events over 6144 committed tokens (stochastic parity), acceptance
+# at parity, micro PASS, battery 4/4. Size-gated to max_seqlen_q >= 256 so
+# short-prompt trajectories stay on the generic kernel. G128PF=0 disables.
+if [[ -f "${LOG_DIR}/G128PF" ]]; then
+  VLLM_G128_PREFILL_GLUON="$(tr -d '[:space:]' < "${LOG_DIR}/G128PF")"
+fi
 # Keep the GDN b/a projection in BF16, using a direct small-batch kernel.
 if [[ -f "${LOG_DIR}/GDN_TINY_BA" ]]; then
   VLLM_GFX908_TINY_BA="$(tr -d '[:space:]' < "${LOG_DIR}/GDN_TINY_BA")"
@@ -582,6 +592,7 @@ start_server() {
   VLLM_G128_ATTN3D="${VLLM_G128_ATTN3D:-1}" \
   VLLM_G128_GLUON="${VLLM_G128_GLUON:-1}" \
   VLLM_G128_DRAFT_GLUON="${VLLM_G128_DRAFT_GLUON:-1}" \
+  VLLM_G128_PREFILL_GLUON="${VLLM_G128_PREFILL_GLUON:-1}" \
   VLLM_GFX908_TINY_BA="${VLLM_GFX908_TINY_BA:-1}" \
   VLLM_PROMPT_LOGPROBS_CHUNK_SIZE="${VLLM_PROMPT_LOGPROBS_CHUNK_SIZE:-64}" \
   VLLM_INPUTTRACE="${VLLM_INPUTTRACE:-}" \
