@@ -1376,10 +1376,11 @@ def unified_attention(
     if launch_num_stages is not None:
         launch_kwargs["num_stages"] = launch_num_stages
 
-    # Gfx908 grouped-int8 decode: reuse each vectorized KV tile across five
-    # query positions. Prefill and unsupported shapes use the general kernel.
+    # Gfx908 grouped-int8 decode: reuse each vectorized KV tile across the
+    # verify query rows. Prefill and unsupported shapes use the general kernel.
+    g128_gluon_mode = os.environ.get("VLLM_G128_GLUON")
     if (
-        os.environ.get("VLLM_G128_GLUON") == "1"
+        g128_gluon_mode in ("1", "32", "64")
         and use_3d
         and use_g8
         and kv_quant_mode == KVQuantMode.INT8_BLOCK_G128
@@ -1411,9 +1412,22 @@ def unified_attention(
         and g8_k_scale.stride() == g8_v_scale.stride()
         and block_table.stride(1) == 1
     ):
-        from vllm.v1.attention.ops.gfx908_g128_gluon import g128_core
+        if g128_gluon_mode != "32":
+            from vllm.v1.attention.ops.gfx908_g128_gluon_m64 import g128_core
 
-        g128_core[(q.shape[0] // 5 + num_seqs, num_kv_heads, actual_num_splits)](
+            query_block = 10
+            num_warps = 4
+        else:
+            from vllm.v1.attention.ops.gfx908_g128_gluon import g128_core
+
+            query_block = 5
+            num_warps = 2
+
+        g128_core[(
+            q.shape[0] // query_block + num_seqs,
+            num_kv_heads,
+            actual_num_splits,
+        )](
             q, k, v, g8_k_scale, g8_v_scale, block_table, seqused_k,
             cu_seqlens_q, softmax_segm_output, softmax_segm_max,
             softmax_segm_expsum,
@@ -1435,7 +1449,7 @@ def unified_attention(
             S_STRIDE0=g8_k_scale.stride(0),
             S_STRIDE1=g8_k_scale.stride(1),
             S_STRIDE2=g8_k_scale.stride(2),
-            num_warps=2,
+            num_warps=num_warps,
         )
         reduce_segments[(q.shape[0], num_query_heads)](
             output_ptr=out,
@@ -1453,7 +1467,7 @@ def unified_attention(
             HEAD_SIZE=head_size,
             HEAD_SIZE_PADDED=head_size_padded,
             query_start_len_ptr=cu_seqlens_q,
-            BLOCK_Q=5,
+            BLOCK_Q=query_block,
             NUM_SEGMENTS_PER_SEQ=actual_num_splits,
             USE_FP8=False,
         )
