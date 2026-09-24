@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Production-shape g128 decode-attention bench.
+"""Historical 64-token-page g128 decode-attention bench.
 
-Replicates the exact tensors/args the RocmAiterUnifiedAttentionImpl forward
-passes for int8_block_g128 at C6/20k decode: packed KV (NB, 1, 64, 520)
-int8 with inline fp16 group scales, 6 seqs x 20k ctx, 42 q-tokens
-(7/seq), 6 q-heads, 1 kv-head, head 256, scattered block table.
+The current hybrid Mamba recipe enlarges attention pages to 1664 tokens.
+Use bench_attn_g128_egeo.py for the current serving geometry. This older
+bench uses packed KV (NB, 1, 64, 520) with inline fp16 group scales,
+6 seqs x 20k context, 42 query tokens (7/seq), 6 query heads, one KV head,
+head size 256, and a scattered block table.
 
 Times: (a) the current vLLM triton path (g8 scales), (b) the same under
 VLLM_GFX908_ATTN_WARPS/STAGES sweeps, (c) the aiter kernel with a scalar

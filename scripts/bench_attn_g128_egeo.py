@@ -2,7 +2,7 @@
 """Production-shape g128 decode-attention bench.
 
 Replicates the exact tensors/args the RocmAiterUnifiedAttentionImpl forward
-passes for int8_block_g128 at C6/20k decode: packed KV (NB, 1, 64, 520)
+passes for int8_block_g128 at C6/20k decode: packed KV (NB, 1, 1664, 520)
 int8 with inline fp16 group scales, 6 seqs x 20k ctx, 42 q-tokens
 (7/seq), 6 q-heads, 1 kv-head, head 256, scattered block table.
 
