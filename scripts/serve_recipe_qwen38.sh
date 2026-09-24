@@ -296,6 +296,9 @@ fi
 if [[ -f "${LOG_DIR}/G128_GLUON" ]]; then
   VLLM_G128_GLUON="$(tr -d '[:space:]' < "${LOG_DIR}/G128_GLUON")"
 fi
+if [[ -f "${LOG_DIR}/G128_DRAFT_GLUON" ]]; then
+  VLLM_G128_DRAFT_GLUON="$(tr -d '[:space:]' < "${LOG_DIR}/G128_DRAFT_GLUON")"
+fi
 
 # DFCACHEBYPASS flag file: dense draft-logits cache rewrite (diagnostic
 # A/B for the garble; requires DFLEAGER since python must run per round).
@@ -574,6 +577,8 @@ start_server() {
   VLLM_OFFLOAD_COMPUTE_STREAM_STORES="${VLLM_OFFLOAD_COMPUTE_STREAM_STORES:-}" \
   VLLM_G128_ATTN3D="${VLLM_G128_ATTN3D:-1}" \
   VLLM_G128_GLUON="${VLLM_G128_GLUON:-1}" \
+  VLLM_G128_DRAFT_GLUON="${VLLM_G128_DRAFT_GLUON:-1}" \
+  VLLM_PROMPT_LOGPROBS_CHUNK_SIZE="${VLLM_PROMPT_LOGPROBS_CHUNK_SIZE:-64}" \
   VLLM_INPUTTRACE="${VLLM_INPUTTRACE:-}" \
   VLLM_KV_BTSCHECK="${VLLM_KV_BTSCHECK:-}" \
   VLLM_GDN_DUMP_DIR="${VLLM_GDN_DUMP_DIR:-}" \

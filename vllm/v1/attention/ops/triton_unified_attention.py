@@ -1376,6 +1376,95 @@ def unified_attention(
     if launch_num_stages is not None:
         launch_kwargs["num_stages"] = launch_num_stages
 
+    # DFlash2's noncausal sliding verify attends only to the tail window.
+    # Split that window across CTAs instead of scanning the full 32k prefix.
+    if (
+        os.environ.get("VLLM_G128_DRAFT_GLUON") == "1"
+        and use_3d
+        and use_g8
+        and kv_quant_mode == KVQuantMode.INT8_BLOCK_G128
+        and g8_k_scale.shape[-1] == 1
+        and head_size == 128
+        and num_queries_per_kv == 4
+        and num_kv_heads == 2
+        and BLOCK_Q == 4
+        and max_seqlen_q <= 8
+        and q.dtype == torch.bfloat16
+        and q.stride(2) == 1
+        and block_size % 32 == 0
+        and tile_size == 32
+        and not use_causal
+        and sliding_window_val == 2049
+        and not use_per_seq_causal
+        and not use_mm_prefix
+        and not use_rswa
+        and not use_alibi_slopes
+        and not use_qq_bias
+        and sinks is None
+        and softcap == 0
+        and output_scale is None
+        and q_descale is None
+        and k_descale is None
+        and v_descale is None
+        and k.stride(3) == 1
+        and v.stride(3) == 1
+        and g8_k_scale.stride(3) == 1
+        and g8_k_scale.stride() == g8_v_scale.stride()
+        and block_table.stride(1) == 1
+    ):
+        from vllm.v1.attention.ops.gfx908_g128_gluon_draft import draft_g128_core
+
+        draft_g128_core[(
+            q.shape[0] // 8 + num_seqs,
+            num_kv_heads,
+            actual_num_splits,
+        )](
+            q, k, v, g8_k_scale, g8_v_scale, block_table, seqused_k,
+            cu_seqlens_q, softmax_segm_output, softmax_segm_max,
+            softmax_segm_expsum,
+            SCALE=softmax_scale,
+            WINDOW=sliding_window_val,
+            NUM_SEQS=num_seqs,
+            NUM_QHEADS=num_query_heads,
+            NQ_PER_KV=num_queries_per_kv,
+            BLOCK_SIZE=block_size,
+            SPLITS=actual_num_splits,
+            BT_STRIDE=block_table.stride(0),
+            Q_STRIDE0=q.stride(0),
+            Q_STRIDE1=q.stride(1),
+            K_STRIDE0=k.stride(0),
+            K_STRIDE1=k.stride(1),
+            K_STRIDE2=k.stride(2),
+            V_STRIDE0=v.stride(0),
+            V_STRIDE1=v.stride(1),
+            V_STRIDE2=v.stride(2),
+            S_STRIDE0=g8_k_scale.stride(0),
+            S_STRIDE1=g8_k_scale.stride(1),
+            S_STRIDE2=g8_k_scale.stride(2),
+            num_warps=4,
+        )
+        reduce_segments[(q.shape[0], num_query_heads)](
+            output_ptr=out,
+            segm_output_ptr=softmax_segm_output,
+            segm_max_ptr=softmax_segm_max,
+            segm_expsum_ptr=softmax_segm_expsum,
+            seq_lens_ptr=seqused_k,
+            num_seqs=num_seqs,
+            num_query_heads=num_query_heads,
+            out_scale_inv=1.0,
+            output_stride_0=out.stride(0),
+            output_stride_1=out.stride(1),
+            block_table_stride=block_table.stride(0),
+            TILE_SIZE=TILE_SIZE_DECODE,
+            HEAD_SIZE=head_size,
+            HEAD_SIZE_PADDED=head_size_padded,
+            query_start_len_ptr=cu_seqlens_q,
+            BLOCK_Q=8,
+            NUM_SEGMENTS_PER_SEQ=actual_num_splits,
+            USE_FP8=False,
+        )
+        return
+
     # Gfx908 grouped-int8 decode: reuse each vectorized KV tile across the
     # verify query rows. Prefill and unsupported shapes use the general kernel.
     g128_gluon_mode = os.environ.get("VLLM_G128_GLUON")

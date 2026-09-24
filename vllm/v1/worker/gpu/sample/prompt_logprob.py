@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from collections.abc import Callable
 
 import numpy as np
@@ -205,7 +206,7 @@ def compute_prompt_logprobs_with_chunking(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # Since materializing the full prompt logits can take too much memory,
     # we compute it in chunks.
-    CHUNK_SIZE = 1024
+    CHUNK_SIZE = max(1, int(os.getenv("VLLM_PROMPT_LOGPROBS_CHUNK_SIZE", "1024")))
     token_ids = []
     scores = []
     ranks = []

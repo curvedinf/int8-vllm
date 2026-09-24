@@ -697,6 +697,24 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 unified_attention as triton_unified_attention,
             )
 
+            _segm_kw = {}
+            if (
+                os.environ.get("VLLM_G128_DRAFT_GLUON") == "1"
+                and getattr(self, "_g8_k", None) is not None
+                and max_seqlen_q <= 8
+            ):
+                if not hasattr(self, "_segm_buffers"):
+                    self._alloc_segm_buffers(kv_cache.device)
+                _segm_kw = dict(
+                    num_par_softmax_segments=self._segm_splits,
+                    softmax_segm_output=self._segm_out,
+                    softmax_segm_max=self._segm_max,
+                    softmax_segm_expsum=self._segm_sum,
+                    seq_threshold_3D=self._segm_seq_threshold,
+                    max_flash_decoding_splits=self._segm_splits,
+                )
+                os.environ.setdefault("VLLM_UA_3D_MAXQ", "8")
+
             descale_shape = (cu_seqlens_q.shape[0] - 1, key_cache.shape[2])
             triton_unified_attention(
                 q=query[:num_actual_tokens],
@@ -734,6 +752,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 v_scale_cache=v_scale_cache,
                 g8_k_scale=getattr(self, "_g8_k", None),
                 g8_v_scale=getattr(self, "_g8_v", None),
+                **_segm_kw,
             )
 
         return output
