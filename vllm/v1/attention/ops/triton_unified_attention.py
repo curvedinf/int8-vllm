@@ -1399,40 +1399,62 @@ def unified_attention(
 
     # DFlash2's noncausal sliding verify attends only to the tail window.
     # Split that window across CTAs instead of scanning the full 32k prefix.
-    if (
-        os.environ.get("VLLM_G128_DRAFT_GLUON") == "1"
-        and use_3d
-        and use_g8
-        and kv_quant_mode == KVQuantMode.INT8_BLOCK_G128
-        and g8_k_scale.shape[-1] == 1
-        and head_size == 128
-        and num_queries_per_kv == 4
-        and num_kv_heads == 2
-        and BLOCK_Q == 4
-        and max_seqlen_q <= 8
-        and q.dtype == torch.bfloat16
-        and q.stride(2) == 1
-        and block_size % 32 == 0
-        and tile_size == 32
-        and not use_causal
-        and sliding_window_val == 2049
-        and not use_per_seq_causal
-        and not use_mm_prefix
-        and not use_rswa
-        and not use_alibi_slopes
-        and not use_qq_bias
-        and sinks is None
-        and softcap == 0
-        and output_scale is None
-        and q_descale is None
-        and k_descale is None
-        and v_descale is None
-        and k.stride(3) == 1
-        and v.stride(3) == 1
-        and g8_k_scale.stride(3) == 1
-        and g8_k_scale.stride() == g8_v_scale.stride()
-        and block_table.stride(1) == 1
-    ):
+    _draft_gluon_conds = (
+        os.environ.get("VLLM_G128_DRAFT_GLUON") == "1",
+        use_3d,
+        use_g8,
+        kv_quant_mode == KVQuantMode.INT8_BLOCK_G128,
+        g8_k_scale.shape[-1] == 1,
+        head_size == 128,
+        num_queries_per_kv == 4,
+        num_kv_heads == 2,
+        BLOCK_Q == 4,
+        max_seqlen_q <= 8,
+        q.dtype == torch.bfloat16,
+        q.stride(2) == 1,
+        block_size % 32 == 0,
+        tile_size == 32,
+        not use_causal,
+        # Draft SWA plumbing has used both conventions across revisions
+        # (window_size 2047 -> SLIDING 2048, and 2048 -> 2049); the core is
+        # parameterized on the span either way. Capture-time debug showed
+        # live calls arriving with 2048, which the previous 2049-only check
+        # silently dropped onto the generic 3D kernel.
+        sliding_window_val in (2048, 2049),
+        not use_per_seq_causal,
+        not use_mm_prefix,
+        not use_rswa,
+        not use_alibi_slopes,
+        not use_qq_bias,
+        sinks is None,
+        softcap == 0,
+        output_scale is None,
+        q_descale is None,
+        k_descale is None,
+        v_descale is None,
+        k.stride(3) == 1,
+        v.stride(3) == 1,
+        g8_k_scale.stride(3) == 1,
+        g8_k_scale.stride() == g8_v_scale.stride(),
+        block_table.stride(1) == 1,
+    )
+    if os.environ.get("VLLM_DRAFT_GUARD_DEBUG"):
+        _names = (
+            "env", "use_3d", "use_g8", "quant_mode", "scales1", "head128",
+            "gqa4", "nkv2", "blockq4", "maxq8", "bf16", "qstride",
+            "blk32", "tile32", "noncausal", "win2049", "noperseq",
+            "nommprefix", "norswa", "noalibi", "noqqbias", "nosinks",
+            "nosoftcap", "nooutscale", "noqdescale", "nokdescale",
+            "novdescale", "kstride", "vstride", "gsstride", "gsame",
+            "btstride",
+        )
+        _miss = [n for n, c in zip(_names, _draft_gluon_conds) if not c]
+        print(f"[DRAFT-GUARD] q={q.shape[0]} maxq={max_seqlen_q} "
+              f"head={head_size} gqa={num_queries_per_kv} "
+              f"win={sliding_window_val} causal={use_causal} "
+              f"seqs={num_seqs} fires={all(_draft_gluon_conds)} "
+              f"miss={_miss}", flush=True)
+    if all(_draft_gluon_conds):
         from vllm.v1.attention.ops.gfx908_g128_gluon_draft import draft_g128_core
 
         draft_g128_core[(
