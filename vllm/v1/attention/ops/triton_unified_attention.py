@@ -1457,6 +1457,15 @@ def unified_attention(
     if all(_draft_gluon_conds):
         from vllm.v1.attention.ops.gfx908_g128_gluon_draft import draft_g128_core
 
+        # GOALOPT: fp16 MFMA at 2x the bf16 rate on gfx908. The draft core
+        # dequantizes K/V explicitly, so fp16 keeps the same exact values
+        # (sk*int8 products fit fp16's 11-bit mantissa at production
+        # scales; gates decide). VLLM_G128_DRAFT_GLUON_MMA: fp16 | bf16.
+        from triton.experimental.gluon import language as _gl
+
+        _draft_mode = os.environ.get("VLLM_G128_DRAFT_GLUON_MMA", "fp16")
+        _draft_dt = _gl.float16 if _draft_mode == "fp16" else _gl.bfloat16
+
         draft_g128_core[(
             q.shape[0] // 8 + num_seqs,
             num_kv_heads,
@@ -1484,6 +1493,8 @@ def unified_attention(
             S_STRIDE0=g8_k_scale.stride(0),
             S_STRIDE1=g8_k_scale.stride(1),
             S_STRIDE2=g8_k_scale.stride(2),
+            MMA_DT=_draft_dt,
+            MMA_FP16=(_draft_mode == "fp16"),
             num_warps=4,
         )
         reduce_segments[(q.shape[0], num_query_heads)](
@@ -1555,6 +1566,13 @@ def unified_attention(
             query_block = 5
             num_warps = 2
 
+        # GOALOPT: fp16 MFMA at 2x the bf16 rate on gfx908 (int8 K/V and
+        # bf16 Q exact in fp16). VLLM_G128_GLUON_MMA selects fp16 | bf16.
+        from triton.experimental.gluon import language as _gl
+
+        _m64_mode = os.environ.get("VLLM_G128_GLUON_MMA", "fp16")
+        _m64_dt = _gl.float16 if _m64_mode == "fp16" else _gl.bfloat16
+
         g128_core[(
             q.shape[0] // query_block + num_seqs,
             num_kv_heads,
@@ -1581,6 +1599,8 @@ def unified_attention(
             S_STRIDE0=g8_k_scale.stride(0),
             S_STRIDE1=g8_k_scale.stride(1),
             S_STRIDE2=g8_k_scale.stride(2),
+            MMA_DT=_m64_dt,
+            MMA_FP16=(_m64_mode == "fp16"),
             num_warps=num_warps,
         )
         reduce_segments[(q.shape[0], num_query_heads)](
@@ -1647,6 +1667,17 @@ def unified_attention(
             g128_prefill_core,
         )
 
+        # gfx908 fp16 MFMA runs at 2x the bf16 rate (measured 1.98x,
+        # scripts/bench_mfma_rate.py; CDNA1 quirk). int8 K/V values and
+        # bf16 Q activations are exact in fp16, so the fp32-accumulated
+        # dots see identical operand values - the numerics stay in the
+        # same class (gates decide). VLLM_G128_PREFILL_GLUON_MMA selects
+        # fp16 (default) | bf16.
+        from triton.experimental.gluon import language as _gl
+
+        _mma_mode = os.environ.get("VLLM_G128_PREFILL_GLUON_MMA", "fp16")
+        _mma_dt = _gl.float16 if _mma_mode == "fp16" else _gl.bfloat16
+
         g128_prefill_core[(
             q.shape[0] // 64 + num_seqs,
             num_query_heads,
@@ -1672,6 +1703,8 @@ def unified_attention(
             S_STRIDE2=g8_k_scale.stride(2),
             OUT_STRIDE0=out.stride(0),
             OUT_STRIDE1=out.stride(1),
+            MMA_DT=_mma_dt,
+            MMA_FP16=(_mma_mode == "fp16"),
             num_warps=4,
         )
         return

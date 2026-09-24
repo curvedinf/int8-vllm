@@ -37,6 +37,8 @@ def draft_g128_core(
     S_STRIDE0: gl.constexpr,
     S_STRIDE1: gl.constexpr,
     S_STRIDE2: gl.constexpr,
+    MMA_DT: gl.constexpr,
+    MMA_FP16: gl.constexpr,
 ):
     block_id = gl.program_id(0)
     kv_head = gl.program_id(1)
@@ -72,10 +74,16 @@ def draft_g128_core(
         size_per_thread=[1, 8], threads_per_warp=[4, 16],
         warps_per_cta=[4, 1], order=[1, 0]
     )
-    mma: gl.constexpr = gl.amd.AMDMFMALayout(
-        version=1, instr_shape=[16, 16, 8],
-        transposed=True, warps_per_cta=[4, 1]
-    )
+    if MMA_FP16:
+        mma: gl.constexpr = gl.amd.AMDMFMALayout(
+            version=1, instr_shape=[16, 16, 16],
+            transposed=True, warps_per_cta=[4, 1]
+        )
+    else:
+        mma: gl.constexpr = gl.amd.AMDMFMALayout(
+            version=1, instr_shape=[16, 16, 8],
+            transposed=True, warps_per_cta=[4, 1]
+        )
     out_layout: gl.constexpr = gl.BlockedLayout(
         size_per_thread=[1, 2], threads_per_warp=[16, 4],
         warps_per_cta=[4, 1], order=[1, 0]
@@ -89,7 +97,7 @@ def draft_g128_core(
         Q + (q_start + qpos[:, None]) * Q_STRIDE0
         + qhead[:, None] * Q_STRIDE1 + qd[None, :]
     )
-    q = gl.load(qptr, mask=qvalid[:, None], other=0.0)
+    q = gl.load(qptr, mask=qvalid[:, None], other=0.0).to(MMA_DT)
     q = gl.convert_layout(q, gl.DotOperandLayout(0, mma, k_width=2))
 
     score_rows = gl.arange(0, 32, layout=gl.SliceLayout(1, mma))
@@ -132,8 +140,8 @@ def draft_g128_core(
             sv = gl.load(sptr_v, mask=valid_t, other=1.0).to(gl.float32)
         # Dequantize before MFMA to match the generic draft path's BF16
         # rounding at the K and V interfaces.
-        k = (k.to(gl.float32) * sk[:, None]).to(gl.bfloat16)
-        v = (v.to(gl.float32) * sv[:, None]).to(gl.bfloat16)
+        k = (k.to(gl.float32) * sk[:, None]).to(MMA_DT)
+        v = (v.to(gl.float32) * sv[:, None]).to(MMA_DT)
         k = gl.convert_layout(
             gl.permute(k, (1, 0)), gl.DotOperandLayout(1, mma, k_width=2)
         )
@@ -156,7 +164,7 @@ def draft_g128_core(
         l = l * alpha + gl.sum(p, axis=1)
         m = m_new
         acc = acc * alpha[:, None]
-        p = gl.convert_layout(p.to(gl.bfloat16), gl.DotOperandLayout(0, mma, k_width=4))
+        p = gl.convert_layout(p.to(MMA_DT), gl.DotOperandLayout(0, mma, k_width=4))
         acc = gl.amd.cdna3.mfma(p, v, acc)
 
     acc = gl.convert_layout(acc, out_layout)
