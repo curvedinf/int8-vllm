@@ -1012,7 +1012,29 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if GDN_AITER_TRITON_AVAILABLE:
             num_tokens = hidden_states.size(0)
             projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
-            projected_states_ba, _ = self.in_proj_ba(hidden_states)
+            ba_weight = getattr(self.in_proj_ba, "weight", None)
+            use_tiny_ba = (
+                os.environ.get("VLLM_GFX908_TINY_BA") == "1"
+                and 0 < num_tokens <= 64
+                and hidden_states.dtype == torch.bfloat16
+                and hidden_states.is_contiguous()
+                and ba_weight is not None
+                and ba_weight.dtype == torch.bfloat16
+                and ba_weight.is_contiguous()
+                and ba_weight.ndim == 2
+                and ba_weight.shape[1] == hidden_states.shape[1]
+                and ba_weight.shape[0] <= 64
+                and hidden_states.shape[1] % 128 == 0
+                and getattr(self.in_proj_ba, "bias", None) is None
+            )
+            if use_tiny_ba:
+                from vllm.model_executor.layers.mamba.gdn.gfx908_tiny_ba import (
+                    tiny_ba_projection,
+                )
+
+                projected_states_ba = tiny_ba_projection(hidden_states, ba_weight)
+            else:
+                projected_states_ba, _ = self.in_proj_ba(hidden_states)
             projected_states_qkvz = projected_states_qkvz.view(num_tokens, -1)
             projected_states_ba = projected_states_ba.view(num_tokens, -1)
             core_attn_out = torch.empty(

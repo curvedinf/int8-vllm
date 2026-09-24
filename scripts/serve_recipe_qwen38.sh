@@ -299,6 +299,10 @@ fi
 if [[ -f "${LOG_DIR}/G128_DRAFT_GLUON" ]]; then
   VLLM_G128_DRAFT_GLUON="$(tr -d '[:space:]' < "${LOG_DIR}/G128_DRAFT_GLUON")"
 fi
+# Keep the GDN b/a projection in BF16, using a direct small-batch kernel.
+if [[ -f "${LOG_DIR}/GDN_TINY_BA" ]]; then
+  VLLM_GFX908_TINY_BA="$(tr -d '[:space:]' < "${LOG_DIR}/GDN_TINY_BA")"
+fi
 
 # DFCACHEBYPASS flag file: dense draft-logits cache rewrite (diagnostic
 # A/B for the garble; requires DFLEAGER since python must run per round).
@@ -578,6 +582,7 @@ start_server() {
   VLLM_G128_ATTN3D="${VLLM_G128_ATTN3D:-1}" \
   VLLM_G128_GLUON="${VLLM_G128_GLUON:-1}" \
   VLLM_G128_DRAFT_GLUON="${VLLM_G128_DRAFT_GLUON:-1}" \
+  VLLM_GFX908_TINY_BA="${VLLM_GFX908_TINY_BA:-1}" \
   VLLM_PROMPT_LOGPROBS_CHUNK_SIZE="${VLLM_PROMPT_LOGPROBS_CHUNK_SIZE:-64}" \
   VLLM_INPUTTRACE="${VLLM_INPUTTRACE:-}" \
   VLLM_KV_BTSCHECK="${VLLM_KV_BTSCHECK:-}" \
