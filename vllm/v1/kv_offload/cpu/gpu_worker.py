@@ -733,6 +733,7 @@ class SingleDirectionOffloadingHandler:
         # episodic decode-phase corruption; see
         # docs/recipes/bug_rocm_batch_memcpy_graph_replay_race.md).
         serialize_on_compute = self.gpu_to_cpu and _offload_knife("COMPUTE_STREAM_STORES")
+        classic_default_stream_copy = self._swap_blocks_batch is swap_blocks_classic
         if serialize_on_compute:
             stream = current_platform.current_stream()
         else:
@@ -772,9 +773,24 @@ class SingleDirectionOffloadingHandler:
         # by the transfer stream's wait_stream(compute) barrier.
         is_src_access_order_any = not self.gpu_to_cpu
         _noev = _offload_knife("NOEVENTS")
+        if _noev and classic_default_stream_copy:
+            raise RuntimeError(
+                "NOEVENTS cannot be used with classic stream-0 offload copies"
+            )
         with current_platform.stream(stream):
             if not _noev:
                 start_event.record(stream)
+            # The classic HIP executor passes literal stream 0. The transfer
+            # stream's wait_stream(compute) does not order that DMA, and an
+            # end event on the transfer stream can report completion while the
+            # stream-0 D2H copy is still reading live KV pages. Explicitly
+            # bridge transfer -> default before the copy and record completion
+            # on the stream that actually owns it. This also keeps the source
+            # block fence and pinned descriptor buffers alive until DMA ends.
+            copy_stream = stream
+            if classic_default_stream_copy:
+                copy_stream = torch.cuda.default_stream()
+                copy_stream.wait_event(start_event)
             # VLLM_OFFLOAD_FAKESTORES=1: exercise the ENTIRE store machinery
             # (descriptors, events, pools, completion bookkeeping, CPU-tier
             # metadata) but never issue the driver copy — bisection knife:
@@ -800,7 +816,10 @@ class SingleDirectionOffloadingHandler:
                         is_src_access_order_any=is_src_access_order_any,
                     )
             if not _noev:
-                end_event.record(stream)
+                end_event.record(copy_stream)
+                if serialize_on_compute and classic_default_stream_copy:
+                    # Preserve the diagnostic knob's promised serialization.
+                    stream.wait_event(end_event)
 
         self._transfer_events[job_id] = end_event
         self._transfers.append(

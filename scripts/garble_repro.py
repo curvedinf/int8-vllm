@@ -7,6 +7,7 @@ repetition per window) so the onset position is visible without eyeballing
 4k tokens.
 """
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -36,8 +37,13 @@ TOPICS = [
 ]
 
 
+def seed_for_nonce(nonce: str) -> int:
+    """Keep A/B prompts identical across Python processes and server boots."""
+    return int.from_bytes(hashlib.sha256(nonce.encode()).digest()[:8], "big")
+
+
 def make_corpus(target_tokens: int, nonce: str) -> str:
-    rng = random.Random(hash(nonce) & 0xFFFF)
+    rng = random.Random(seed_for_nonce(nonce))
     parts = [f"Reference dossier {nonce}. Below are independent notes."]
     n = 60
     while True:

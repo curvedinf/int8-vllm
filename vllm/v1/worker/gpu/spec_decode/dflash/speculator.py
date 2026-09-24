@@ -212,19 +212,16 @@ class DFlashSpeculator(DraftModelSpeculator):
             device=self.device,
         )
 
-        # Groups whose slot-mappings row the draft OVERWRITES but a target
-        # layer also consumes. NOTE (2026-09-08): on Qwen3.8 + DFlash2 the
+        # Groups with both draft and target attention metadata. NOTE
+        # (2026-09-08): on Qwen3.8 + DFlash2 the
         # draft is a 5-layer MTP-style continuation whose attention layers
         # are numbered 64-68 and named "model.layers.N.self_attn.attn"
         # (target layers are "language_model.model.layers.N..." — the
         # language_model prefix distinguishes them). Group 14 therefore
         # hosts the DRAFT'S OWN attention; it appears in the target's
         # attn_groups because the configs merge. The target verify's
-        # per-layer slot dict references that same mutable row, so the
-        # draft's prepare_dflash_inputs would redirect the TARGET's verify
-        # KV writes to draft-computed slots (rejection-pattern-dependent ->
-        # the temp>0 garble). Snapshot/restore those rows around the draft
-        # forward (2026-08-30; see logs/garble/NOTES.md pass 6).
+        # per-layer slot dict references that same mutable row. The draft's
+        # private slot rows below keep its query writes off that target row.
         self._shared_group_ids: list[int] = []
         for grp_list in target_attn_groups or []:
             for grp in grp_list:
@@ -233,24 +230,15 @@ class DFlashSpeculator(DraftModelSpeculator):
         if self._shared_group_ids:
             logger.warning(
                 "DFlash draft shares KV group(s) %s with target attention "
-                "layers; enabling slot-mapping snapshot/restore around the "
-                "draft forward.",
+                "layers; using private draft slot rows.",
                 sorted(set(self._shared_group_ids)),
             )
-        self._shared_slot_backup = torch.zeros(
-            len(self._shared_group_ids),
-            self.max_num_tokens,
-            dtype=torch.int64,
-            device=self.device,
-        )
 
         # Private slot rows for the draft. The shared BlockTables row for a
-        # draft group is ALSO baked into the TARGET's verify CUDA graphs
-        # (same buffer address); writing draft slots there — even with the
-        # snapshot/restore above — leaves a window where the target's
-        # replayed graph can read draft-written slot ids, misdirecting the
-        # target's verify KV writes (the temp>0 garble). The draft now uses
-        # rows the target's graphs never reference (2026-08-30 pass 9).
+        # draft group is also baked into TARGET verify graphs. The old
+        # snapshot/restore still wrote that shared row after private rows
+        # landed, potentially replacing a concurrent target update with stale
+        # slot IDs. The draft uses only these private rows for its KV writes.
         self._draft_slot_rows = torch.full(
             (len(self.draft_kv_cache_group_ids), self.max_num_tokens),
             PAD_SLOT_ID,
@@ -457,8 +445,8 @@ class DFlashSpeculator(DraftModelSpeculator):
             )
             return self.draft_tokens[:num_reqs]
 
-        # The query slot mapping is written into the shared BlockTables slot_mappings.
-        # That buffer's address is what the captured CUDA graph reads from at replay.
+        # Query slots are written into private draft rows; captured draft
+        # graphs also read those private rows.
         assert self.draft_kv_cache_group_id >= 0
         if os.environ.get("VLLM_SLOT_DEBUG"):
             # One-shot per boot: assert the draft's group rows are disjoint
@@ -615,17 +603,6 @@ class DFlashSpeculator(DraftModelSpeculator):
         # so the real token count is num_query_tokens.
         self._prepare_eplb_forward(num_query_tokens)
 
-        # Snapshot the shared rows the draft is about to overwrite, and
-        # restore them right after the draft forward so the TARGET verify's
-        # slot dict (same mutable row) sees the target's own slots again.
-        shared_num = max(num_tokens_padded, num_target_tokens)
-        if self._shared_group_ids and not dummy_run:
-            for bi, gid in enumerate(self._shared_group_ids):
-                self._shared_slot_backup[bi, :shared_num].copy_(
-                    self.block_tables.slot_mappings[gid, :shared_num],
-                    non_blocking=True,
-                )
-
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
             assert self.query_cudagraph_manager is not None
             self.query_cudagraph_manager.run_fullgraph(batch_desc)
@@ -638,13 +615,6 @@ class DFlashSpeculator(DraftModelSpeculator):
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=batch_desc.cg_mode,
             )
-
-        if self._shared_group_ids and not dummy_run:
-            for bi, gid in enumerate(self._shared_group_ids):
-                self.block_tables.slot_mappings[gid, :shared_num].copy_(
-                    self._shared_slot_backup[bi, :shared_num],
-                    non_blocking=True,
-                )
 
         if os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not torch.cuda.is_current_stream_capturing():
             dt = self.draft_tokens[:num_reqs]

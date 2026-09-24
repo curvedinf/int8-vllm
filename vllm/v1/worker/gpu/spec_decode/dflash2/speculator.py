@@ -8,6 +8,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
@@ -331,6 +332,11 @@ class DFlash2Speculator(DFlashSpeculator):
         # rtx3090 kvarn-v2 fix. Pure GPU op, cudagraph-capture-safe.
         scores = torch.nan_to_num(scores, nan=-1e30, posinf=1e30, neginf=-1e30)
         self._sample_path(candidate_ids, scores, num_reqs)
+        if os.environ.get("VLLM_TP_SAMPLE_SYNC") == "1":
+            # The target verify must see the same draft path on every TP rank.
+            # A rank-local selector decision otherwise changes the verify
+            # inputs and can leave the ranks with different accepted counts.
+            get_tp_group().broadcast(self.draft_tokens[:num_reqs], src=0)
         if os.environ.get("VLLM_DFLASH_AUDIT"):
             from vllm import quant_audit_recorder as _qa
 

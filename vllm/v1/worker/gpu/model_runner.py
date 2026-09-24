@@ -76,6 +76,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
+    get_tp_group,
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
@@ -2108,6 +2109,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
         )
+        if os.environ.get("VLLM_TP_SAMPLE_SYNC") == "1" and self.speculator is not None:
+            # Every TP rank advances its own token and recurrent-state buffers.
+            # Use the driver's committed output if local rejection decisions
+            # differ, so the next forward starts from one shared sequence.
+            tp_group = get_tp_group()
+            tp_group.broadcast(sampler_output.sampled_token_ids, src=0)
+            tp_group.broadcast(num_sampled, src=0)
+            tp_group.broadcast(num_rejected, src=0)
         if _pph:
             self._pphase["s_tail"] += time.perf_counter() - _t0
             _t0 = time.perf_counter()

@@ -17,8 +17,8 @@ alternative production recipes.
 
 The published pair is designed to run together:
 
-- Target: [`curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128`](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128)
-- Draft: [`curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128`](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128)
+- Target: [`curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128-PTQR`](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128-PTQR)
+- Draft: [`curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128-PTQR`](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128-PTQR)
 
 The DFlash2 checkpoint is not standalone. It drafts speculative tokens for
 the linked target model, which verifies them.
@@ -31,27 +31,28 @@ The production script uses local copies of those artifacts. The model-facing
 core of the same recipe is:
 
 ```bash
-TARGET_MODEL=curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128
-DRAFT_MODEL=curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128
+TARGET_MODEL=curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128-PTQR
+DRAFT_MODEL=curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128-PTQR
 
 VLLM_ROCM_USE_AITER=1 \
 VLLM_ROCM_USE_AITER_CUSTOM_AR=0 \
 VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1 \
 VLLM_GFX908_ACT_QUANT=round \
+VLLM_TP_SAMPLE_SYNC=1 \
 VLLM_DISABLED_KERNELS=TritonW8A16LinearKernel \
 .venv/bin/vllm serve "$TARGET_MODEL" \
   --tensor-parallel-size 4 \
-  --max-num-seqs 8 \
+  --max-num-seqs 6 \
   --dtype bfloat16 \
-  --kv-cache-dtype int8_per_token_head \
+  --kv-cache-dtype int8_block_g128 \
   --mamba-ssm-cache-dtype float32 \
   --compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","pass_config":{"fuse_allreduce_rms":false}}' \
-  --speculative-config '{"method":"dflash","model":"'"$DRAFT_MODEL"'","num_speculative_tokens":13,"kv_cache_dtype":"int8_per_token_head"}'
+  --speculative-config '{"method":"dflash","model":"'"$DRAFT_MODEL"'","num_speculative_tokens":6,"kv_cache_dtype":"int8_block_g128"}'
 ```
 
 The top-level KV flag configures the target. The `kv_cache_dtype` inside the
 speculative JSON independently configures the DFlash2 draft; both are
-deliberately `int8_per_token_head`.
+deliberately `int8_block_g128`.
 
 The script encodes the full intended feature set:
 
@@ -63,14 +64,15 @@ The script encodes the full intended feature set:
 | KV cache | **`int8_block_g128`** (PTQR-era, since 2026-09-06; was `int8_block_g16` since 2026-09-04) | REQUIRED for long context: int8 KV noise at its measured mathematical floor garbles beyond ~16-20k (pass 107/108; greedy acceptance 2.88/14 @40k int8 vs 4.51/14 bf16, baseline 4.96); fp16 storage is lossless for bf16-computed K/V (measured RMS 0). Cost: 867,834-token GPU capacity (C6 avg 144k). `int8_block_g{G}` family is the long-context int8 fallback (see its table below) |
 | Mamba/GDN state | `float32` (`--mamba-ssm-cache-dtype float32`) | REQUIRED: the fp16 state round-trip broke delta-rule cancellation and blew states to 63k (4% under fp16 ceiling) — the KLD-tail generator; int8 state corrupts in the int8-KV combo (bisect 2026-08-25); fp32 is the checkpoint's own declared dtype |
 | Act quantizer | round-to-nearest (`VLLM_GFX908_ACT_QUANT=round`, fused Triton kernel) | halved the dominant 10-15% act-quant error leg; fixed 10x first-token-stop inflation (empty responses); also faster than the 4-pass eager aiter chain |
-| Sampling default | `repetition_penalty=1.05` in the override-generation-config (since 2026-09-01) | at temp 1.0 on long structured output this model enters p→1.0 repetition attractors under ANY faithful sampler (engine proven exact — garble-hunt class B); the 1.05 default breaks the locks via the existing penalty machinery (validated 1/8 vs 4-6/8 without). Per-request override still works |
+| Sampling default | `repetition_penalty=1.0` in the override-generation-config | The 1.05 loop-suppression trial varied across legs and was not a reliable quality fix; per-request override remains available. |
 | Embedding lookup | int8 gather | half embedding bandwidth; it is not a GEMM exception |
-| Speculative decoding | **DFlash2, ns=13, int8 drafter, int8 draft KV — ON, non-negotiable** | NS=13 per the 2026-08-26 tuned-aiter sweep: best measured TPOT 12.34 ms (single rep; see NS table below). Prior NS=15 default measured 18.89 ms same-session; NS=17 collapses: 29.7% acceptance |
+| Speculative decoding | **DFlash2, NS=6, int8 drafter, int8 draft KV — ON** | PTQR-era NS sweep and long-context gates favor NS=6 for this model pair; the older NS=13 sweep used a different checkpoint pair. |
+| TP speculative sample sync | `VLLM_TP_SAMPLE_SYNC=1` | Broadcast draft proposals and committed token IDs/counts from TP0. Without this, workers accepted different numbers of tokens in the same round and their recurrent states drifted; the 2026-09-24 mixed API-stream gate is recorded in the ledger. |
 | Attention backend | **AITER unified attention** | target and draft both use the recipe KV dtype (int8_block_g128 since 2026-09-06) |
 | All-reduce | **vLLM CUSTOM all-reduce** (`VLLM_ROCM_USE_AITER_CUSTOM_AR=0`) | audited TP4/C8 rerun: vLLM CUSTOM 63.49 tok/s beats AITER CAR 58.34 and PYNCCL 53.04; AITER CAR gfx908 forces the naive kernel until tuned — CAR stays a tuning lever, not the default |
 | Fused epilogue | OFF (`fuse_allreduce_rms=false`) | the fused INT8 epilogue path is implemented but inactive; enable only after the gfx908 graph integration work lands |
-| GPU util | 0.86 (spec drafter and embedding dequant transient need headroom) | |
-| TP / concurrency / graphs | **TP4, C8**, FULL_AND_PIECEWISE (forced FULL_DECODE_ONLY on gfx908) | `--tensor-parallel-size 4 --max-num-seqs 8` |
+| GPU util | 0.92, with the deployed KV arena pinned separately | |
+| TP / concurrency / graphs | **TP4, C6**, FULL_AND_PIECEWISE (forced FULL_DECODE_ONLY on gfx908) | `--tensor-parallel-size 4 --max-num-seqs 6` |
 
 `AiterW8A16LinearKernel` is a compatibility name in the registry. For GS128
 the implementation dispatches AITER A8W8 at every M. The launcher blocklists

@@ -27,7 +27,7 @@ torch.manual_seed(0)
 G = 128
 BLOCK = 1664
 NQ, NKV, D = 6, 1, 256
-SEQS, CTX, QTOK = 6, 20000, 7
+SEQS, CTX, QTOK = 6, int(os.environ.get("G128_CTX", "20000")), 7
 
 PAD = D + 2 * (D // G)            # 260 per half
 CONTENT = 2 * PAD                 # 520
@@ -62,8 +62,14 @@ g8_v = torch.as_strided(
     (block_f16, slot_f16, head_f16, 1),
     storage_offset=f16u(PAD + D),
 )
-g8_k.copy_(torch.rand_like(g8_k) * 0.02 + 0.99)
-g8_v.copy_(torch.rand_like(g8_v) * 0.02 + 0.99)
+if os.environ.get("G128_EQUIV") == "1":
+    # int8 values span [-127, 127]; scales near 0.01 give realistic K/V
+    # magnitudes so the comparison is not hidden by saturated softmax.
+    g8_k.copy_(torch.rand_like(g8_k) * 0.005 + 0.01)
+    g8_v.copy_(torch.rand_like(g8_v) * 0.005 + 0.01)
+else:
+    g8_k.copy_(torch.rand_like(g8_k) * 0.02 + 0.99)
+    g8_v.copy_(torch.rand_like(g8_v) * 0.02 + 0.99)
 
 q = torch.randn(SEQS * QTOK, NQ, D, device=dev, dtype=torch.bfloat16)
 out = torch.empty_like(q)
@@ -74,11 +80,20 @@ bt = perm.view(SEQS, -1).contiguous()
 scale = D ** -0.5
 
 
-def run_vllm(**extra):
+def run_vllm(
+    *,
+    query=q,
+    result=out,
+    query_starts=cu_q,
+    sequence_lengths=seqused,
+    max_query_len=QTOK,
+    max_sequence_len=CTX,
+    **extra,
+):
     unified_attention(
-        q, k_data, v_data, out,
-        cu_seqlens_q=cu_q, max_seqlen_q=QTOK,
-        seqused_k=seqused, max_seqlen_k=CTX,
+        query, k_data, v_data, result,
+        cu_seqlens_q=query_starts, max_seqlen_q=max_query_len,
+        seqused_k=sequence_lengths, max_seqlen_k=max_sequence_len,
         softmax_scale=scale, causal=True,
         alibi_slopes=None, window_size=(-1, -1),
         block_table=bt, softcap=0.0,
@@ -95,13 +110,15 @@ def run_vllm(**extra):
 # First dim sized for total q-blocks (q>1 verify batches overflow a
 # seqs-sized buffer).
 SPLITS = 64
-SEGM_ROWS = 512
+SEGM_ROWS = (
+    max(64, SEQS * QTOK) if os.environ.get("G128_EQUIV") == "1" else 512
+)
 segm_out = torch.empty((SEGM_ROWS, NQ, SPLITS, D), dtype=torch.float32, device=dev)
 segm_max = torch.empty((SEGM_ROWS, NQ, SPLITS), dtype=torch.float32, device=dev)
 segm_sum = torch.empty((SEGM_ROWS, NQ, SPLITS), dtype=torch.float32, device=dev)
 
 
-def run_vllm_3d():
+def run_vllm_3d(**extra):
     run_vllm(
         num_par_softmax_segments=SPLITS,
         softmax_segm_output=segm_out,
@@ -109,6 +126,7 @@ def run_vllm_3d():
         softmax_segm_expsum=segm_sum,
         seq_threshold_3D=SEQS,
         max_flash_decoding_splits=SPLITS,
+        **extra,
     )
 
 
@@ -142,6 +160,36 @@ if __name__ == "__main__":
         rel = diff / ref.float().abs().clamp_min(1e-3)
         print(f"3D vs 2D numerics: max_abs={diff.max():.4e} "
               f"mean_rel={rel.mean():.4e} p99_rel={rel.flatten().kthvalue(int(rel.numel()*0.99)).values:.4e}")
+        if os.environ.get("G128_EQUIV") == "1":
+            # Each speculative verify row must match a one-token query at
+            # the same causal prefix length. Keep Q and backing KV identical.
+            verify_rows = out.reshape(SEQS, QTOK, NQ, D).clone()
+            verify_first = verify_rows[:, 0]
+            first_diff = (verify_first.float() -
+                          ref.reshape(SEQS, QTOK, NQ, D)[:, 0].float()).abs()
+            print(f"3D vs 2D row-0: max_abs={first_diff.max():.4e} "
+                  f"mean_abs={first_diff.mean():.4e}")
+            one_q = q.reshape(SEQS, QTOK, NQ, D)[:, 0].contiguous()
+            one_out = torch.empty_like(one_q)
+            one_starts = torch.arange(SEQS + 1, device=dev, dtype=torch.int32)
+            one_len = CTX - QTOK + 1
+            one_seqlens = torch.full(
+                (SEQS,), one_len, device=dev, dtype=torch.int32
+            )
+            for row in range(QTOK):
+                row_len = one_len + row
+                one_q.copy_(q.reshape(SEQS, QTOK, NQ, D)[:, row])
+                one_seqlens.fill_(row_len)
+                run_vllm_3d(
+                    query=one_q, result=one_out, query_starts=one_starts,
+                    sequence_lengths=one_seqlens, max_query_len=1,
+                    max_sequence_len=row_len,
+                )
+                torch.cuda.synchronize()
+                err = (verify_rows[:, row].float() - one_out.float()).abs()
+                print(f"3D q=7 row-{row} vs q=1 at ctx={row_len}: "
+                      f"max_abs={err.max():.4e} mean_abs={err.mean():.4e} "
+                      f"frac_nonzero={(err != 0).float().mean():.4f}")
         t = bench(run_vllm_3d)
         print(f"vLLM triton g128 3D split-K (q=7): {t:9.1f} us/call")
     except Exception as ex:

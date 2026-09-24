@@ -6,11 +6,6 @@ VENV="${ROOT_DIR}/.venv"
 MODEL_DIR="${MODEL_DIR:-${HOME}/models/Qwen3.8-27B-PTQR-R10S60}"  # PTQR-retrained (ledger PTQR_P1_R10S60_FINAL: KLD 0.0069 vs 0.0110 deployed, acceptance 3.88)
 SERVED_MODEL_NAME="qwen3.8-27b-gptq8"
 LOG_DIR="${ROOT_DIR}/logs/serve_recipe_qwen38"
-# The OffloadingConnector's CPU tier mmaps /dev/shm; an unclean kill leaks
-# the 12 GiB buffer and (with psm_* churn segments) exhausts the tmpfs,
-# crash-looping every subsequent boot during KV-cache init. Clean orphans
-# before starting (safe: no live server exists at this point).
-find /dev/shm -maxdepth 1 -user "$(id -un)" \( -name 'vllm_offload_*.mmap' -o -name 'psm_*' \) -delete 2>/dev/null || true
 PID_FILE="${LOG_DIR}/server.pid"
 API_KEY_FILE="/etc/llama/llama-api.key"
 WORKDIR="/tmp"
@@ -151,26 +146,17 @@ ARGS=(
   # itself declares mamba_ssm_dtype float32; int8 state remains banned
   # (corruption bisect 2026-08-25) until a scaled-int8 kernel exists.
   # MAMBADT env remains the bisect lever.
-  # KV dtype bfloat16 since 2026-09-04: the int8-PTH cache
-  # is the proven garble driver at long context (pass 107/108 — the noise at
-  # its mathematical floor reshuffles verify decisions across tens of k keys;
-  # greedy acceptance 2.88/14 at 40k vs 4.51/14 lossless 16-bit storage, short-prompt baseline
-  # 4.96). fp16 storage is lossless for bf16-computed K/V (K/V magnitudes are
-  # O(1-10), well inside fp16 range; measured RMS 0).
-  # Capacity: 867,834 tokens @ 20.2GB arena (C6 avg 144k context).
-  # KV_DTYPE env remains the lever (int8_per_token_head = old default,
-  # int8_block_g{4..128} = the long-context int8 family; see README table).
+  # PTQR-era int8_block_g128 KV is the gated long-context dtype for both
+  # target and draft. KV_DTYPE remains a diagnostic lever; older per-token-head
+  # INT8 and 16-bit KV results are recorded in the recipe ledger.
   --kv-cache-dtype "${KV_DTYPE:-int8_block_g128}" --mamba-ssm-cache-dtype "${MAMBADT:-float32}"
-  # NS=13 default per the 2026-08-26 tuned-aiter sweep (see docs/recipes
-  # README history): best measured TPOT 12.34 ms / TG 639-equivalent regime.
-  # NS=15 prior default (2026-08-24 sweep) measured 18.89 ms same-session;
-  # NS=17 collapses (29.7% acceptance — under investigation).
-  # Draft KV int8-PTH: full-W8A8 doctrine.
+  # NS=6 is the PTQR target+draft long-context default. Older NS=13/15
+  # measurements used a different checkpoint pair; see the recipe NS sweep.
   # SPECOFF=1 drops the draft entirely (diagnostic target-only legs).
   # The speculative-config is appended conditionally after ARGS below.
   # CPU KV second tier: 12 GiB total (cross-worker) host DRAM via the native
-  # OffloadingConnector. Blocks are copied as raw bytes, so int8-PTH inline
-  # scales and the fp32 mamba state pages transfer dtype-safely. L2 reuse
+  # OffloadingConnector. Blocks are copied as raw bytes, so grouped INT8 KV
+  # scales and fp32 mamba state pages transfer dtype-safely. L2 reuse
   # cache only — the live arena stays on-GPU.
   # 2026-08-30: the connector's dflash draft-group misclassification was
   # fixed (eagle catch-all flagged every group incl. mamba -> misaligned
@@ -203,13 +189,10 @@ if [[ -f "${_offload_flag}" ]]; then
   fi
 fi
 
-# Draft KV BF16 (2026-09-04): explicit fp16 draft KV kills the draft
-# completely (live-measured mean_k=1.01, every draft rejected — matches the
-# historical 'draft ctx-KV projection bf16 > fp16 > int8' note). The target
-# runs fp16 as requested; the draft is a bf16-compute model whose KV
-# projection is only healthy in bf16. SPECOFF=1 drops the draft for
-# diagnostic target-only legs. Flag-file override mirrors the levers above
-# (systemd-driven restarts cannot pass per-boot env).
+# Draft KV defaults to int8_block_g128. The draft model's compute dtype still
+# resolves from its bf16 checkpoint; forcing fp16 onto its residual stream
+# overflows it. SPECOFF=1 drops the draft for diagnostic target-only legs.
+# Flag-file override mirrors the levers above for systemd-driven restarts.
 _spec_flag="${LOG_DIR}/SPECOFF"
 if [[ -f "${_spec_flag}" ]]; then
   _spec_value="$(tr -d '[:space:]' < "${_spec_flag}")"
@@ -219,6 +202,14 @@ fi
 # (NS flag file read near the top of this script, before COMMON_ENV.)
 if [[ "${_spec_value}" != "1" ]]; then
   ARGS+=(--speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":'"${NS:-6}"',"kv_cache_dtype":"'"${DRAFT_KV_DTYPE:-int8_block_g128}"'"}')
+fi
+# Diagnostic target-only token-trace replay. Requires SPECOFF=1; the flag file
+# keeps normal systemd boots on the production recipe after it is removed.
+if [[ "${TRACE_REPLAY:-0}" == "1" || -f "${LOG_DIR}/TRACE_REPLAY" ]]; then
+  ARGS+=(--enable-trace-replay)
+  # The DFlash2 recipe selects Model Runner V2 automatically. A target-only
+  # boot needs the explicit override for trace replay's V2 sampler hook.
+  COMMON_ENV+=(VLLM_USE_V2_MODEL_RUNNER=1)
 fi
 
 # LOGSTATS=1 enables periodic engine/spec-decode stat logging
@@ -290,6 +281,17 @@ fi
 # OFFLOAD_LAYOUT flag file: dump connector group/tensor geometry at boot.
 if [[ -f "${LOG_DIR}/OFFLOAD_LAYOUT" ]]; then
   VLLM_OFFLOAD_LAYOUT_DUMP=1
+fi
+# Serialize classic stream-0 KV stores with model execution for the
+# concurrent-prefill/decode corruption A/B. Remove the flag to restore the
+# production overlap without changing the connector configuration.
+if [[ -f "${LOG_DIR}/COMPUTE_STREAM_STORES" ]]; then
+  VLLM_OFFLOAD_COMPUTE_STREAM_STORES=1
+fi
+# Switch the grouped-int8 attention verify path between the split-K and
+# serial kernels for the long-context quality A/B.
+if [[ -f "${LOG_DIR}/G128_ATTN3D" ]]; then
+  VLLM_G128_ATTN3D="$(tr -d '[:space:]' < "${LOG_DIR}/G128_ATTN3D")"
 fi
 
 # DFCACHEBYPASS flag file: dense draft-logits cache rewrite (diagnostic
@@ -387,7 +389,7 @@ if [[ -f "${LOG_DIR}/ACCEPT1" ]]; then
   VLLM_ACCEPT1=1
 fi
 
-# GDNSTAT flag file: per-round GDN checkpoint-window norms (all mamba layers,
+# GDNSTAT flag file: per-round GDN checkpoint-window norms (sampled mamba group,
 # 14 window slots) + strided value slices every 8th round, saved as .pt
 # shards (value file contains the output dir path).
 if [[ -f "${LOG_DIR}/GDNSTAT" ]]; then
@@ -531,6 +533,11 @@ start_server() {
     return 0
   fi
 
+  # The CPU tier mmaps /dev/shm. Clean leftovers only after confirming no
+  # server is running: status and stop must never unlink a live tier's files.
+  find /dev/shm -maxdepth 1 -user "$(id -un)" \
+    \( -name 'vllm_offload_*.mmap' -o -name 'psm_*' \) -delete 2>/dev/null || true
+
   mkdir -p "${LOG_DIR}"
   rm -f "${PID_FILE}"
   rotate_log
@@ -562,6 +569,7 @@ start_server() {
   VLLM_OFFLOAD_FAKESTORES="${VLLM_OFFLOAD_FAKESTORES:-}" \
   VLLM_OFFLOAD_NOEVENTS="${VLLM_OFFLOAD_NOEVENTS:-}" \
   VLLM_OFFLOAD_COMPUTE_STREAM_STORES="${VLLM_OFFLOAD_COMPUTE_STREAM_STORES:-}" \
+  VLLM_G128_ATTN3D="${VLLM_G128_ATTN3D:-1}" \
   VLLM_INPUTTRACE="${VLLM_INPUTTRACE:-}" \
   VLLM_KV_BTSCHECK="${VLLM_KV_BTSCHECK:-}" \
   VLLM_GDN_DUMP_DIR="${VLLM_GDN_DUMP_DIR:-}" \
@@ -589,6 +597,7 @@ start_server() {
   VLLM_SALT_U="${VLLM_SALT_U:-}" \
   VLLM_ACCEPT1="${VLLM_ACCEPT1:-}" \
   VLLM_GDNSTAT="${VLLM_GDNSTAT:-}" \
+  VLLM_TP_SAMPLE_SYNC="${VLLM_TP_SAMPLE_SYNC:-1}" \
   VLLM_GDN_SPECSTAT="${VLLM_GDN_SPECSTAT:-}" \
   VLLM_GDN_NSSTAT="${VLLM_GDN_NSSTAT:-}" \
   VLLM_GDN_SLOTSEED="${VLLM_GDN_SLOTSEED:-}" \
@@ -750,5 +759,3 @@ case "${1:-}" in
     exit 2
     ;;
 esac
-
-

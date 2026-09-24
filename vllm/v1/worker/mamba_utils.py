@@ -1103,7 +1103,6 @@ class MambaSpecDecodeGPUContext:
         num_reqs: int,
         state_idx_gpu: torch.Tensor,
         spec_steps_gpu: torch.Tensor,
-        src_col_gpu: torch.Tensor,
         query_start_loc_gpu: torch.Tensor,
         idx_mapping: torch.Tensor,
         num_spec_tokens: int,
@@ -1121,10 +1120,8 @@ class MambaSpecDecodeGPUContext:
         the positions-2-30 dirt present in every leg.
 
         This pass copies conv+SSM from bt[r, state_idx] to bt[r, state_idx+1]
-        (identity copy, bias 0) exactly once per request: on the first step
-        whose per-request query length equals num_spec_tokens+1 (a spec
-        round). ``spec_steps_gpu`` counts spec rounds per request slot and is
-        reset by add_request.
+        (identity copy, bias 0) on the first speculative round. The per-request
+        marker is reset by add_request.
         """
         if num_reqs == 0 or not self.is_initialized:
             return
@@ -1133,7 +1130,6 @@ class MambaSpecDecodeGPUContext:
         seed_spec_window_kernel[grid](
             state_idx_gpu,
             spec_steps_gpu,
-            src_col_gpu,
             query_start_loc_gpu,
             self.block_table_ptrs,
             self.block_table_stride_req,
@@ -1152,13 +1148,49 @@ class MambaSpecDecodeGPUContext:
             CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
             TEMPORAL_TILES=_TEMPORAL_TILES,
         )
+        # The copy grid has one program per state/layer. Update the per-request
+        # first-round marker only after every copy program has read it: doing
+        # this inside that grid races the other programs and seeds a random
+        # subset of the layers.
+        mark_spec_window_seeded_kernel[(triton.cdiv(num_reqs, 128),)](
+            state_idx_gpu,
+            spec_steps_gpu,
+            query_start_loc_gpu,
+            idx_mapping,
+            num_reqs,
+            num_spec_tokens,
+            BLOCK_SIZE=128,
+        )
+
+
+@triton.jit(do_not_specialize=["num_reqs"])
+def mark_spec_window_seeded_kernel(
+    state_idx_ptr,
+    spec_steps_ptr,
+    query_start_loc_ptr,
+    idx_mapping_ptr,
+    num_reqs,
+    num_spec_tokens,
+    BLOCK_SIZE: tl.constexpr,
+):
+    rows = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    valid = rows < num_reqs
+    req_indices = tl.load(idx_mapping_ptr + rows, mask=valid, other=-1)
+    valid &= req_indices >= 0
+    safe_indices = tl.maximum(req_indices, 0)
+    q_start = tl.load(query_start_loc_ptr + rows, mask=valid, other=0)
+    q_end = tl.load(query_start_loc_ptr + rows + 1, mask=valid, other=0)
+    state_idx = tl.load(state_idx_ptr + safe_indices, mask=valid, other=-1)
+    first_round = tl.load(spec_steps_ptr + safe_indices, mask=valid, other=1) == 0
+    mark = valid & (q_end - q_start == num_spec_tokens + 1)
+    mark &= (state_idx >= 0) & first_round
+    tl.store(spec_steps_ptr + safe_indices, 1, mask=mark)
 
 
 @triton.jit(do_not_specialize=["num_reqs"])
 def seed_spec_window_kernel(
     state_idx_ptr,
     spec_steps_ptr,
-    src_col_ptr,
     query_start_loc_ptr,
     block_table_ptrs_ptr,
     block_table_stride_req,
@@ -1177,10 +1209,11 @@ def seed_spec_window_kernel(
     CONV_STATE_DIM_FIRST: tl.constexpr,
     TEMPORAL_TILES: tl.constexpr,
 ):
-    """Grid: (num_reqs, num_states [, TEMPORAL_TILES]). For each spec-decode
-    request on its FIRST spec round, copy conv+SSM identity from
+    """Grid: (num_reqs, num_states [, TEMPORAL_TILES]). On the first spec
+    round, copy conv+SSM identity from
     bt[row, state_idx] to bt[row, state_idx + 1] (the gather-base column).
-    Also increments the per-request spec-round counter."""
+    The per-request first-round marker is updated by a separate kernel after
+    this grid completes, so every layer observes the same predicate."""
     batch_idx = tl.program_id(0)
     state_idx_flat = tl.program_id(1)
     tile_idx = tl.program_id(2)
@@ -1194,29 +1227,18 @@ def seed_spec_window_kernel(
     q_len = q_end - q_start
     if q_len != num_spec_tokens + 1:
         return  # not a spec round (prefill chunk or non-spec decode)
-    col_pre = tl.load(state_idx_ptr + req_state_idx)
-    # Seed on the FIRST spec round and on every state_idx ADVANCE (block
-    # crossing): the postprocess/precopy migrations seed bt[state_idx], but
-    # the spec gather reads its window at bt[state_idx+1], which no
-    # migration targets — after a crossing it again holds stale/INIT data
-    # while the na reset makes the next round read si[0] there.
-    steps = tl.load(spec_steps_ptr + req_state_idx)
-    src_col = tl.load(src_col_ptr + req_state_idx)
-    if steps > 0:
-        if state_idx_flat == 0 and tile_idx == 0:
-            tl.store(spec_steps_ptr + req_state_idx, steps + 1)
-        return
-    if state_idx_flat == 0 and tile_idx == 0:
-        tl.store(spec_steps_ptr + req_state_idx, steps + 1)
-
     col = tl.load(state_idx_ptr + req_state_idx)
+    # The first-round marker is unchanged until this entire grid completes.
+    steps = tl.load(spec_steps_ptr + req_state_idx)
+    if steps > 0:
+        return
     if col < 0:
         return
     src_col = col
     dst_col = col + 1
     # token_bias must be a tensor scalar (the copy helper calls .to on it);
     # load-derived zero keeps it a real value while meaning identity copy.
-    zero_bias = tl.load(spec_steps_ptr + req_state_idx) * 0
+    zero_bias = steps * 0
     _copy_mamba_state_block(
         state_idx_flat,
         batch_idx,

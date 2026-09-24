@@ -256,7 +256,6 @@ class MambaHybridModelState(DefaultModelState):
                 num_reqs,
                 self._mamba_state_idx_gpu,
                 self._spec_steps_gpu,
-                self._mamba_src_col_gpu,
                 input_batch.query_start_loc,
                 input_batch.idx_mapping,
                 self.vllm_config.speculative_config.num_speculative_tokens,
@@ -293,8 +292,8 @@ class MambaHybridModelState(DefaultModelState):
                       mamba_group_ids, num_computed_tokens) -> None:
         """Env-gated (VLLM_GDNSTAT) per-round GDN checkpoint-window values.
 
-        At preprocess (after the precopy), for every live request and ALL
-        mamba layers/state tensors, record the L2 norm of each of the 14
+        At preprocess (after the precopy), for every live request and the
+        sampled mamba group, record the L2 norm of each of the 14
         window slots (bt[r, col + rel]) plus round metadata (col, read_idx
         = num_accepted - 1 with post-reset semantics, query length T,
         num_computed). Every 8th round also stores a strided value slice of
@@ -341,12 +340,8 @@ class MambaHybridModelState(DefaultModelState):
             cache = self._gs_cache = (layout, tensors)
 
         layout, tensors = cache
-        # Window-base divergence record: the GDN backend gathers its 14-slot
-        # checkpoint window at [(seq_len-1)//bs + 1, ...] (mamba_get_block_
-        # table_tensor, seq_lens-based) while the align machinery advances
-        # _mamba_state_idx on num_computed. Record both bases plus the raw
-        # block ids so analysis can detect the kernel reading blocks the
-        # align side never staged (stale/NaN checkpoints).
+        # The GDN backend gathers its checkpoint window starting at
+        # (seq_len - 1) // bs. Record this alongside the align state column.
         bs = self._mamba_spec.block_size if self._mamba_spec is not None else 0
         try:
             seq_lens = input_batch.seq_lens[:n_req].cpu().tolist()
@@ -370,7 +365,7 @@ class MambaHybridModelState(DefaultModelState):
             ]
             if not keep:
                 continue
-            kbase = ((seq_lens[r] - 1) // bs + 1) if (bs and r < len(seq_lens)) else -1
+            kbase = ((seq_lens[r] - 1) // bs) if (bs and r < len(seq_lens)) else -1
             rec = {
                 "n": n, "rs": int(rs), "col": int(col), "ri": int(ri),
                 "T": int(qs[r + 1] - qs[r]) if r + 1 < len(qs) else 0,

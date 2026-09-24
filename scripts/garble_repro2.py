@@ -14,7 +14,7 @@ MODEL = "qwen3.8-27b-gptq8"
 API = "http://127.0.0.1:8020/v1/chat/completions"
 TOKENIZER_PATH = "/home/curved/models/Qwen3.8-27B-GPTQ-8bit-gs128"
 
-from garble_repro import WORDS, TOPICS, scan  # reuse corpus + scanner
+from garble_repro import WORDS, TOPICS, scan, seed_for_nonce  # reuse corpus + scanner
 
 
 CODE_SNIPPETS = [
@@ -26,7 +26,7 @@ CODE_SNIPPETS = [
 
 
 def build_code_corpus(tok, target_tokens, nonce):
-    rng = random.Random(hash(nonce) & 0xFFFF)
+    rng = random.Random(seed_for_nonce(nonce))
     parts = [f"# module: synthlib/{nonce}", "# Agrab the full module below.", ""]
     n = 0
     while True:
@@ -45,7 +45,7 @@ def get_tok():
 
 
 def build_corpus(tok, target_tokens, nonce):
-    rng = random.Random(hash(nonce) & 0xFFFF)
+    rng = random.Random(seed_for_nonce(nonce))
     parts = [f"Reference dossier {nonce}. Below are independent notes."]
     n = 60
     while True:
@@ -115,7 +115,7 @@ def leg_single(args, tok):
 
 
 def leg_multiturn(args, tok):
-    nonce = f"{args.tag}-{int(time.time())}"
+    nonce = args.nonce or f"{args.tag}-{int(time.time())}"
     corpus = build_corpus(tok, args.in_tokens, nonce)
     msgs = [{"role": "user", "content": (
         "You are given reference notes. Write a long, coherent chronological "
@@ -132,7 +132,7 @@ def leg_multiturn(args, tok):
 
 
 def leg_concurrent(args, tok):
-    nonce = f"{args.tag}-{int(time.time())}"
+    nonce = args.nonce or f"{args.tag}-{int(time.time())}"
     def one(i):
         corpus = build_corpus(tok, args.in_tokens, f"{nonce}-{i}")
         msgs = [{"role": "user", "content": (

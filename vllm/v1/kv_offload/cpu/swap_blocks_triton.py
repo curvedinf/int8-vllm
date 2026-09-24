@@ -48,14 +48,12 @@ def swap_blocks_classic(
     *,
     device_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> None:
-    """Classic executor: one plain hipMemcpyAsync per descriptor, enqueued
-    on the CALLER'S CURRENT stream (callers run inside their
-    transfer-stream context — passing literal stream 0 would order the
-    copy on the default stream instead, racing the compute stream's
-    writes and the transfer event bookkeeping; the 2026-09-14 flaky-leg
-    root cause). The boring per-copy API that upstream vLLM used for
-    years — neither the hipMemcpyBatchAsync driver path (races
-    CUDA-graph replay on gfx908) nor shader stores to host pointers.
+    """Enqueue per-descriptor D2H copies on HIP's legacy default stream.
+
+    The caller explicitly makes stream 0 wait for the transfer stream's source
+    readiness and records completion on stream 0. The copy cannot be treated
+    as complete by an event recorded on the transfer stream. This executor
+    avoids the hipMemcpyBatchAsync graph-replay race on gfx908.
     hipMemcpyDeviceToHost=2.
     """
     hip = _hip_lib()
