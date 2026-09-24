@@ -1177,6 +1177,22 @@ def unified_attention(
     launch_num_warps: int | None = int(_env_warps) if _env_warps else None
     launch_num_stages: int | None = int(_env_stages) if _env_stages else None
 
+    # gfx908 prefill tuning levers (GOALOPT): the generic defaults
+    # (BLOCK_M=16 -> BLOCK_Q=2 at GQA 6:1, KV tile 32, 2 warps) leave the
+    # 2D prefill kernel latency-bound at long context on MI100. These envs
+    # only apply when the batch is prefill-shaped (max_seqlen_q > 1).
+    if max_seqlen_q > 1:
+        _pf_blockm = os.environ.get("VLLM_UA_PREFILL_BLOCKM")
+        if _pf_blockm:
+            BLOCK_M = max(16, int(_pf_blockm))
+            BLOCK_Q = BLOCK_M // num_queries_per_kv
+        _pf_warps = os.environ.get("VLLM_UA_PREFILL_WARPS")
+        if _pf_warps:
+            launch_num_warps = int(_pf_warps)
+        _pf_stages = os.environ.get("VLLM_UA_PREFILL_STAGES")
+        if _pf_stages:
+            launch_num_stages = int(_pf_stages)
+
     # head_size 256 with many query rows per sequence (e.g. diffusion-gemma
     # bidirectional canvas passes) is prefill-shaped, but the decode-oriented
     # defaults (BLOCK_Q=8, TILE=32, 4 warps) under-tile it. A wider KV tile +
@@ -1217,6 +1233,11 @@ def unified_attention(
     TILE_SIZE_PREFILL = _get_tile_size(
         head_size, sliding_window_val, q.element_size(), is_prefill=True
     )
+    # GOALOPT prefill KV-tile lever (gfx908): wider KV tiles cut the
+    # per-CTA iteration count at long context.
+    _pf_tile = os.environ.get("VLLM_UA_PREFILL_TILE")
+    if _pf_tile:
+        TILE_SIZE_PREFILL = int(_pf_tile)
     # VLLM_UA_TILE: env override for the decode KV tile (E10 tuning lever;
     # default unchanged). Wider tiles halve iteration count + scale loads
     # on the g8 partial-dot path.
@@ -1559,6 +1580,77 @@ def unified_attention(
             BLOCK_Q=query_block,
             NUM_SEGMENTS_PER_SEQ=actual_num_splits,
             USE_FP8=False,
+        )
+        return
+
+    # Gfx908 grouped-int8 prefill (GOALOPT): the generic 2D kernel runs at
+    # ~5 TFLOP/s on the 2048q x long-context g128 shape while the MFMA
+    # decode core's math reaches ~8x that on the same packed format. Same
+    # guard structure as the decode core, inverted to the 2D (prefill-
+    # shaped) batch: 64 query tokens x one head per CTA, no split-K.
+    if (
+        os.environ.get("VLLM_G128_PREFILL_GLUON") == "1"
+        and not use_3d
+        and max_seqlen_q >= 256
+        and use_g8
+        and kv_quant_mode == KVQuantMode.INT8_BLOCK_G128
+        and g8_k_scale.shape[-1] == 2
+        and head_size == 256
+        and num_queries_per_kv == 6
+        and num_kv_heads == 1
+        and q.dtype == torch.bfloat16
+        and q.stride(2) == 1
+        and out.stride(2) == 1
+        and block_size % 32 == 0
+        and use_causal
+        and not use_per_seq_causal
+        and sliding_window_val == 0
+        and not use_mm_prefix
+        and not use_rswa
+        and not use_alibi_slopes
+        and not use_qq_bias
+        and sinks is None
+        and softcap == 0
+        and output_scale is None
+        and q_descale is None
+        and k_descale is None
+        and v_descale is None
+        and k.stride(3) == 1
+        and v.stride(3) == 1
+        and g8_k_scale.stride(3) == 1
+        and g8_k_scale.stride() == g8_v_scale.stride()
+        and block_table.stride(1) == 1
+    ):
+        from vllm.v1.attention.ops.gfx908_g128_gluon_prefill import (
+            g128_prefill_core,
+        )
+
+        g128_prefill_core[(
+            q.shape[0] // 64 + num_seqs,
+            num_query_heads,
+        )](
+            q, k, v, g8_k_scale, g8_v_scale, block_table, seqused_k,
+            cu_seqlens_q, out,
+            SCALE=softmax_scale,
+            NUM_SEQS=num_seqs,
+            NUM_QHEADS=num_query_heads,
+            NQ_PER_KV=num_queries_per_kv,
+            BLOCK_SIZE=block_size,
+            BT_STRIDE=block_table.stride(0),
+            Q_STRIDE0=q.stride(0),
+            Q_STRIDE1=q.stride(1),
+            K_STRIDE0=k.stride(0),
+            K_STRIDE1=k.stride(1),
+            K_STRIDE2=k.stride(2),
+            V_STRIDE0=v.stride(0),
+            V_STRIDE1=v.stride(1),
+            V_STRIDE2=v.stride(2),
+            S_STRIDE0=g8_k_scale.stride(0),
+            S_STRIDE1=g8_k_scale.stride(1),
+            S_STRIDE2=g8_k_scale.stride(2),
+            OUT_STRIDE0=out.stride(0),
+            OUT_STRIDE1=out.stride(1),
+            num_warps=4,
         )
         return
 
