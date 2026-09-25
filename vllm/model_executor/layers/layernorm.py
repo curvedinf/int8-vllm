@@ -26,15 +26,21 @@ def _gemma_fused_add_rmsnorm_kernel(
     W,
     OUT,
     RES_OUT,
+    Q,
+    S,
     N: tl.constexpr,
     EPS: tl.constexpr,
     BLOCK: tl.constexpr,
+    EMIT_QUANT: tl.constexpr,
 ):
     # One program per row (GOALOPT decode small-M path). Replicates the
     # ir-native Gemma op order exactly: fp32 add -> bf16 residual store ->
     # fp32 mean-of-squares -> fp32 normalize -> fp32 (1+w) multiply ->
     # bf16 out. Only the variance reduction tree may differ from torch's
-    # mean kernel (1e-7-class on fp32).
+    # mean kernel (1e-7-class on fp32). EMIT_QUANT additionally produces
+    # the round-to-nearest per-token int8 of the normed output (matching
+    # act_quant_rn numerics) so the W8A8 GEMM consumer can skip its
+    # separate pertoken_quant launch.
     row = tl.program_id(0)
     cols = tl.arange(0, BLOCK)
     mask = cols < N
@@ -47,6 +53,15 @@ def _gemma_fused_add_rmsnorm_kernel(
     w = tl.load(W + cols, mask=mask, other=0.0).to(tl.float32)
     out = (s * inv * w).to(tl.bfloat16)
     tl.store(OUT + row * N + cols, out, mask=mask)
+    if EMIT_QUANT:
+        of = out.to(tl.float32)
+        absmax = tl.max(tl.abs(of), axis=0)
+        scale = tl.maximum(absmax, 0.0) / 127.0
+        scale = tl.where(scale == 0.0, 1.0, scale)
+        q = tl.floor(of / scale + 0.5)
+        q = tl.minimum(tl.maximum(q, -127.0), 127.0)
+        tl.store(Q + row * N + cols, q.to(tl.int8), mask=mask)
+        tl.store(S + row, scale)
 
 
 def _gemma_fused_add_rmsnorm(
@@ -60,10 +75,32 @@ def _gemma_fused_add_rmsnorm(
     res_out = torch.empty_like(residual_2d)
     _gemma_fused_add_rmsnorm_kernel[(m,)](
         x_2d, residual_2d, weight_fp32, out, res_out,
+        out, out.new_empty(m, dtype=torch.float32),
         N=n, EPS=eps, BLOCK=triton.next_power_of_2(n),
+        EMIT_QUANT=False,
         num_warps=8,
     )
     return out, res_out
+
+
+def _gemma_fused_add_rmsnorm_quant(
+    x_2d: torch.Tensor,
+    residual_2d: torch.Tensor,
+    weight_fp32: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    m, n = x_2d.shape
+    out = torch.empty_like(x_2d)
+    res_out = torch.empty_like(residual_2d)
+    q = torch.empty(m, n, dtype=torch.int8, device=x_2d.device)
+    s = torch.empty(m, dtype=torch.float32, device=x_2d.device)
+    _gemma_fused_add_rmsnorm_kernel[(m,)](
+        x_2d, residual_2d, weight_fp32, out, res_out, q, s,
+        N=n, EPS=eps, BLOCK=triton.next_power_of_2(n),
+        EMIT_QUANT=True,
+        num_warps=8,
+    )
+    return out, res_out, q, s
 
 
 def poly_norm(
@@ -384,6 +421,22 @@ class GemmaRMSNorm(CustomOp):
                 out, _ = _gemma_fused_add_rmsnorm(x_2d, zero, w, self.variance_epsilon)
                 return out.reshape(orig_shape)
             residual_2d = residual.reshape(-1, orig_shape[-1]).contiguous()
+            # GOALOPT iter 13: also emit the round-to-nearest per-token
+            # int8 of the normed output and stash it for the W8A8 GEMM
+            # consumer (PREQUANT_ATTR), skipping its separate
+            # pertoken_quant launch. VLLM_GFX908_SMALLM_NORM_QUANT=0
+            # restores the quant-free norm.
+            if os.environ.get("VLLM_GFX908_SMALLM_NORM_QUANT", "0") == "1":
+                from vllm.model_executor.layers.rms_norm_int8_quant import (
+                    PREQUANT_ATTR,
+                )
+
+                out, res_out, q, s = _gemma_fused_add_rmsnorm_quant(
+                    x_2d, residual_2d, w, self.variance_epsilon
+                )
+                out = out.reshape(orig_shape)
+                setattr(out, PREQUANT_ATTR, (q, s))
+                return out, res_out.reshape(residual.shape)
             out, res_out = _gemma_fused_add_rmsnorm(
                 x_2d, residual_2d, w, self.variance_epsilon
             )
