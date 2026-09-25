@@ -78,6 +78,8 @@ The script encodes the full intended feature set:
 | fp16 MFMA attention dots | Gluon cores run QK/PV dots in fp16 (since 2026-09-24; `VLLM_G128_PREFILL_GLUON_MMA`/`VLLM_G128_GLUON_MMA`/`VLLM_G128_DRAFT_GLUON_MMA=fp16`) | CDNA1 fp16 MFMA = 2x bf16 (measured 1.98x). int8 K/V and bf16 Q are exact in fp16, so fp32-accumulated dots see identical operand values (the p-cast gains mantissa). Prefill core 1.32x, decode core 1.24x, draft 1.06x. TTFT 21.1-22.6s and short C6 339.0 tok/s (stack records); steady per-stream to 33 tok/s; oracle 0/0/0. Scope: attention-core dots only — the bf16 residual stream, W8A8 GEMM dtype, and int8 KV storage are unchanged. |
 | Small-M a8w8 tuned rows | 48 tuned rows M=7..49 in the aiter CSV (since 2026-09-25; aiter `2676d4b1f`) | The C6 verify batch (M=42) ran the splitK=0 default at 3-10x the weight-traffic floor. Tuned: qkv 2.48x, gate_up 1.82x, down 1.85x, lm_head 1.50x. Interleaved paired A/B: 32k six-stream decode overlap +10.5% mean (3/3 pairs) — production-default leg 324.2 tok/s overlap / 168.7 aggregate; short-C6 -3.1% (splitK reduction launches cost the latency-bound short regime — accepted tradeoff, long context is the target). Oracle 0/0/0; rollback = revert the aiter commit. The interleaved-boot harness (scripts/ab_interleaved.sh) is now the standard for small-effect gates. |
 | GDN prefill WY-fp32 | Chunked-WY pipeline with fp32 upcast (`VLLM_GDN_PREFILL_EXACT=0 VLLM_GDN_PREFILL_FP32=1`, since 2026-09-25; requires the chunk fwd_h num_stages=1 clamp under the env) | Replaces the exact serial per-token scan (34% of TTFT) with a chunk-parallel pipeline at identical numerics class: outputs max_abs 2.3e-4, final state 5e-7 vs the serial kernel (the bf16-WY 4e-3 error that motivated the exact path stays retired). 6.64x per call. Solo 32k TTFT 21.8 -> 15.1-15.3s (-58% vs goal start); mixed gate decoders finish 145-148s (cumulative -47%); per-stream steady to 37.6 tok/s; oracle 0/0/0. Exact serial path remains the rollback (env). |
+| Prefill-mixed a8w8 rows | Retuned M=2048 + new M=2055..2090 rows (aiter `d4c503e90`, since 2026-09-25) | The 2026-08 M=2048 rows were stale (gate_up 7796 -> 2779us isolated) and the 2048+7k mixed prefill+decode batches had no rows at all. Interleaved pairs: steady overlap +6.0/+6.4% (2/2); record leg 209.6 aggregate / 344.8 overlap with all six streams 34.9-35.5 tok/s; mixed-gate decoders 124.5-138.1s (cumulative -52%); oracle 0/0/0. |
+| GOALOPT closed screens (kept env-gated off, mechanisms in the ledger) | MNBT=4096; eager AR+norm+quant epilogue; small-M aiter-norm reroute; GQA-packed prefill core; AR envelope routing; lookup-assisted drafting (greedy + exact non-greedy one-hot-q mode); wide-KV int32-lane loads (numerics exact, 20% slower — register unpack exceeds load savings); norm+quant PREQUANT stash | Each closed with a measured mechanism: launch-count reductions are absorbed by the AR-wait slack at 99% GPU busy; the workload's 46% copy rate is semantic synthesis, not span continuation; int8 QxK MFMA is blocked at the Triton/AMDGPU MLIR level on this build. The int8-Q prize (2x fp16 rate) needs a hand-written HIP kernel. |
 | G128 draft verify core | Gluon grouped-int8 split-window attention (`VLLM_G128_DRAFT_GLUON=1`) | The DFlash2 noncausal 2048-token sliding window uses a dedicated BF16-MFMA G128 core for verify queries of at most eight tokens. A six-stream 32k/800 screen measured 288.48 and 262.40 aggregate decode-overlap tok/s; a 32k/2048 run measured 176.29 as draft acceptance declined during generation. The standard C6 32-input/1000-output benchmark measured 299.43 output tok/s. Mixed 3-decode/3-prefill HTTP streams stayed readable, and all 6144 exact decoder tokens ranked within the clean target's top 20. Window-guard fix (2026-09-24): the dispatch guard demanded SLIDING 2049 while live calls carry 2048, so the core silently never fired; accepting both makes it fire (3.45x vs generic at 32k, oracle 0/0/0, best 32k steady legs of the day). |
 | Prompt logprob memory | `VLLM_PROMPT_LOGPROBS_CHUNK_SIZE=64` | Keeps full 32k-plus-output clean-target replay within the normal 20.2 GB KV reservation; the prior 1024-row logits chunk exhausted GPU memory during this diagnostic. Generation without prompt logprobs does not use this path. |
 | All-reduce | **vLLM CUSTOM all-reduce** (`VLLM_ROCM_USE_AITER_CUSTOM_AR=0`) | audited TP4/C8 rerun: vLLM CUSTOM 63.49 tok/s beats AITER CAR 58.34 and PYNCCL 53.04; AITER CAR gfx908 forces the naive kernel until tuned — CAR stays a tuning lever, not the default |
@@ -234,21 +236,38 @@ and prefill-only by design, so production keeps the epilogue OFF
 Per-group int8 variant (fp16-scale format for the Triton blockscale path)
 remains available for the fallback path only.
 
-## Current production status (2026-08-25, fp32-state + round-quant stack)
+## Current production status (2026-09-25, post-GOALOPT iterations 1-13)
+
+THE canonical component/accuracy/perf state after the GOALOPT optimization
+program (8 adopted iterations, 2026-09-24/25). Deployed-stock verification:
+greedy short C6 350.23 tok/s (all-time-best band 319-352), 32k six-stream
+steady aggregate 192.3/184.6 with per-stream peaks to 43.8 tok/s, solo 32k
+TTFT ~15.2-16s (was 36.2s), mixed 3-decode/3-prefill gate ~125-138s (was
+271s), decode step ~46ms GPU (was 93ms at the mid-program rebaseline).
+Cumulative: TTFT -58%, mixed gate -52%, sustained decode roughly doubled,
+with the clean-target oracle passing 0 rank>20 misses on every adopted
+change. The interleaved-boot paired harness (scripts/ab_interleaved.sh) is
+the standard gate for small effects; the rank-0 trace summarizer
+(scripts/trace_kernel_summary.py) is the standard profile tool. The A/B
+ledger lives at docs/recipes/surface_experiments_ledger.jsonl (GOALOPT_*
+entries; every screen records its mechanism).
 
 THE canonical component/accuracy/perf state. Other docs (README.md,
 AGENTS.md, INT8_AUDIT_RESULTS.md) link here; they do not restate this table.
 
 | Component | State |
 |---|---|
-| Target/draft GEMMs | CK W8A8 (per-channel weights, per-token activations) |
-| Act quantizer | round-to-nearest fused Triton kernel (`VLLM_GFX908_ACT_QUANT=round`, default; aiter trunc via `=aiter`) |
+| Target/draft GEMMs | CK W8A8 (per-channel weights, per-token activations); a8w8 CSV carries GOALOPT small-M + prefill-mixed + retuned M=2048 rows |
+| GEMM kernels | CK W8A8 with per-token int8 activations via the round-to-nearest Triton quant (`VLLM_GFX908_ACT_QUANT=round`) |
+| Target attention | Gluon MFMA cores (decode m64 / prefill 64-token / draft windowed), fp16 dots, all G128 int8 KV |
+| GDN prefill | fp32-WY chunked pipeline (`VLLM_GDN_PREFILL_EXACT=0 VLLM_GDN_PREFILL_FP32=1`); exact serial is the env rollback |
+| GDN decode recurrence | fused_sigmoid_gating exact fp32 serial per-token scan |
 | lm_head | int8 W8A8 (`VLLM_GFX908_INT8_LM_HEAD=1`) |
-| Target + draft KV | int8-PTH both |
+| Target + draft KV | int8_block_g128 both |
 | GDN state | **float32** — REQUIRED (int8 corrupts with int8 KV; fp16 round-trip blew states to 63k = KLD-tail generator; fp32 = checkpoint-declared dtype) |
 | DFlash2 surfaces | conv + selector projections W8A8; codebooks bf16 (audited) |
 | Draft ctx-KV projection | bf16 dense (dtype ladder: 71.2 > 69.2 > 66.0% acceptance) |
-| Fused norm+quant | landed, default OFF (acceptance gate 71.2 -> 46.5%; numerics fix future) |
+| Fused epilogue / norm+quant stash | built, default OFF (mechanisms in the GOALOPT ledger) |
 | All-reduce | vLLM CUSTOM (63.49 tok/s beats AITER CAR 58.34, PYNCCL 53.04 at TP4/C8) |
 | NS | 15 |
 
