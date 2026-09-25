@@ -1678,6 +1678,47 @@ def unified_attention(
         _mma_mode = os.environ.get("VLLM_G128_PREFILL_GLUON_MMA", "fp16")
         _mma_dt = _gl.float16 if _mma_mode == "fp16" else _gl.bfloat16
 
+        # GOALOPT iter 9: GQA-packed variant packs all 6 query heads per
+        # CTA row block (10 tokens x 6 heads) so K/V tile and group-scale
+        # loads feed all heads' dots and Q rows are contiguous.
+        # VLLM_G128_PREFILL_PACKED selects packed (default) | per-head.
+        if os.environ.get("VLLM_G128_PREFILL_PACKED", "0") == "1":
+            from vllm.v1.attention.ops.gfx908_g128_gluon_prefill_packed import (
+                g128_prefill_core_packed,
+            )
+
+            g128_prefill_core_packed[(
+                q.shape[0] // 10 + num_seqs,
+                num_kv_heads,
+            )](
+                q, k, v, g8_k_scale, g8_v_scale, block_table, seqused_k,
+                cu_seqlens_q, out,
+                SCALE=softmax_scale,
+                NUM_SEQS=num_seqs,
+                NUM_QHEADS=num_query_heads,
+                NQ_PER_KV=num_queries_per_kv,
+                BLOCK_SIZE=block_size,
+                QTOKENS_PER_CTA=10,
+                BT_STRIDE=block_table.stride(0),
+                Q_STRIDE0=q.stride(0),
+                Q_STRIDE1=q.stride(1),
+                K_STRIDE0=k.stride(0),
+                K_STRIDE1=k.stride(1),
+                K_STRIDE2=k.stride(2),
+                V_STRIDE0=v.stride(0),
+                V_STRIDE1=v.stride(1),
+                V_STRIDE2=v.stride(2),
+                S_STRIDE0=g8_k_scale.stride(0),
+                S_STRIDE1=g8_k_scale.stride(1),
+                S_STRIDE2=g8_k_scale.stride(2),
+                OUT_STRIDE0=out.stride(0),
+                OUT_STRIDE1=out.stride(1),
+                MMA_DT=_mma_dt,
+                MMA_FP16=(_mma_mode == "fp16"),
+                num_warps=4,
+            )
+            return
+
         g128_prefill_core[(
             q.shape[0] // 64 + num_seqs,
             num_query_heads,
