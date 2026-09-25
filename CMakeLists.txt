@@ -1195,6 +1195,23 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       message(STATUS
         "Building fused KDA decode for HIP archs: ${FUSED_KDA_DECODE_HIP_ARCHS}")
     endif()
+
+    # HIP counterpart of the FUSED_GDN_DECODE block above: same
+    # `fused_gdn_decode_post_conv_mtp` op, same VLLM_ENABLE_FUSED_GDN_DECODE
+    # guard in torch_bindings.cpp. The ROCm port stages state chunks with
+    # synchronous copies instead of cp.async, so it targets CDNA1 (gfx908)
+    # as well as the newer CDNA parts. The runtime gate in
+    # qwen_gdn_linear_attn.py (head dims, state dtypes, spec metadata) keeps
+    # the kernel off unsupported configurations.
+    set(FUSED_GDN_DECODE_HIP_ARCHS ${VLLM_GPU_ARCHES})
+    list(FILTER FUSED_GDN_DECODE_HIP_ARCHS INCLUDE REGEX "gfx908|gfx942|gfx950")
+    if(FUSED_GDN_DECODE_HIP_ARCHS)
+      set(FUSED_GDN_DECODE_HIP_SRC
+        "csrc/libtorch_stable/gdn/fused_gdn_decode_kernel_rocm.cu")
+      list(APPEND VLLM_STABLE_EXT_SRC "${FUSED_GDN_DECODE_HIP_SRC}")
+      message(STATUS
+        "Building fused GDN decode for HIP archs: ${FUSED_GDN_DECODE_HIP_ARCHS}")
+    endif()
   endif()
 
   message(STATUS "Enabling C_stable extension.")
@@ -1244,6 +1261,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     if(FUSED_KDA_DECODE_HIP_SRC)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_FUSED_KDA_DECODE=1)
+    endif()
+    if(FUSED_GDN_DECODE_HIP_SRC)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_FUSED_GDN_DECODE=1)
     endif()
   endif()
 

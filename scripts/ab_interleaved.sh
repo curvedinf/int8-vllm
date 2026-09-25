@@ -58,7 +58,11 @@ for p in $(seq 1 "$PAIRS"); do
   if [ $((p % 2)) -eq 1 ]; then order="base cand"; else order="cand base"; fi
   for arm in $order; do
     if [ "$arm" = "cand" ]; then
-      boot_leg cand "$p" "AITER_CONFIG_GEMM_A8W8=$CAND_CSV"
+      if [ -n "${CAND_ENV:-}" ]; then
+        boot_leg cand "$p" "$CAND_ENV"
+      else
+        boot_leg cand "$p" "AITER_CONFIG_GEMM_A8W8=$CAND_CSV"
+      fi
     else
       boot_leg base "$p" ""
     fi

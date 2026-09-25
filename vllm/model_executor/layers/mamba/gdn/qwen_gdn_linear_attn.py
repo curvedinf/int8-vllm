@@ -1057,6 +1057,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 device=projected_states_qkvz.device,
             )
 
+            self._fused_spec_last = False
             torch.ops.vllm.qwen_gdn_attention_core(
                 projected_states_qkvz,
                 projected_states_ba,
@@ -1066,6 +1067,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 use_aiter=True,
             )
 
+            if getattr(self, "_fused_spec_last", False):
+                # The fused MTP kernel applied the gated RMSNorm epilogue
+                # in-kernel; skip _output_projection's norm and only run the
+                # output projection.
+                output, _ = self.out_proj(core_attn_out.flatten(-2))
+                return output
             return self._output_projection(core_attn_out, z)
         else:
             return self.forward_cuda(hidden_states)
@@ -1441,6 +1448,49 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             qkvz, ba, num_tokens_all
         )
         z_out[:] = z
+        # Spec-decode steps with the fused MTP post-conv kernel available:
+        # replace the Triton rearrange + fused_sigmoid_gating + layernorm
+        # chain (one kernel per GDN layer).
+        _fused_dbg = os.environ.get("VLLM_GDN_FUSED_DEBUG")
+        if (
+            self.enable_fused_gdn_decode
+            and attn_metadata.num_prefills == 0
+            and self._can_use_fused_gdn_mtp_decode(attn_metadata)
+        ):
+            if _fused_dbg == "2":
+                # Single-path eager mode: fused only, no triton follow-up.
+                self._fused_spec_last = True
+                self._forward_core_decode_spec_fused_norm(
+                    mixed_qkv=mixed_qkv,
+                    b=b,
+                    a=a,
+                    output_gate=z,
+                    core_attn_out=core_attn_out,
+                    attn_metadata=attn_metadata,
+                )
+                return
+            self._fused_spec_last = True
+            _dbg_buf = (
+                torch.empty_like(core_attn_out) if _fused_dbg == "1" else core_attn_out
+            )
+            self._forward_core_decode_spec_fused_norm(
+                mixed_qkv=mixed_qkv,
+                b=b,
+                a=a,
+                output_gate=z,
+                core_attn_out=_dbg_buf,
+                attn_metadata=attn_metadata,
+            )
+            if not _fused_dbg:
+                return
+            _dbg_n = getattr(self, "_fused_dbg_n", 0)
+            if _dbg_n < 3 and not torch.cuda.is_current_stream_capturing():
+                self._fused_dbg_n = _dbg_n + 1
+                fused_snapshot = _dbg_buf[: attn_metadata.num_actual_tokens].clone()
+            else:
+                fused_snapshot = None
+        else:
+            fused_snapshot = None
         # GDNSTATEHASH: this funnel already recorded the layer's pre-forward
         # state; suppress _forward_core's own hook for the same step.
         _GDN_STATEHASH["nested"] = True
@@ -1453,6 +1503,57 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
         finally:
             _GDN_STATEHASH["nested"] = False
+        if fused_snapshot is not None:
+            triton_out = core_attn_out[: attn_metadata.num_actual_tokens]
+            d = (fused_snapshot - triton_out).abs()
+            if not getattr(self, "_fused_diff_logged", False):
+                self._fused_diff_logged = True
+                logger.info(
+                    "GDN fused-vs-triton first diff: prefix=%s "
+                    "maxdiff=%.5f meandiff=%.6f",
+                    self.prefix,
+                    float(d.max()),
+                    float(d.mean()),
+                )
+                _dump_dir = os.environ.get("VLLM_GDN_FUSED_DUMP")
+                if _dump_dir:
+                    import os as _os
+                    _os.makedirs(_dump_dir, exist_ok=True)
+                    _rk = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+                    _keep = torch.unique(
+                        attn_metadata.spec_state_indices_tensor.flatten().cpu()
+                    )
+                    _keep = _keep[_keep > 0].to(self.kv_cache[1].device)
+                    torch.save(
+                        {
+                            "mixed_qkv": mixed_qkv[: attn_metadata.num_actual_tokens].detach().cpu(),
+                            "b": b[: attn_metadata.num_actual_tokens].detach().cpu(),
+                            "a": a[: attn_metadata.num_actual_tokens].detach().cpu(),
+                            "z": z[: attn_metadata.num_actual_tokens].detach().cpu(),
+                            "A_log": self.A_log.detach().cpu(),
+                            "dt_bias": self.dt_bias.detach().cpu(),
+                            "norm_weight": self.norm.weight.detach().cpu(),
+                            "si": attn_metadata.spec_state_indices_tensor.detach().cpu(),
+                            "cu": attn_metadata.spec_query_start_loc.detach().cpu(),
+                            "na": attn_metadata.num_accepted_tokens.detach().cpu(),
+                            "state": self.kv_cache[1][_keep].detach().cpu(),
+                            "keep_slots": _keep.cpu(),
+                            "conv_state": self.kv_cache[0][_keep].detach().cpu(),
+                            "conv_weight": self.conv1d.weight.detach().cpu(),
+                            "conv_bias": (
+                                self.conv1d.bias.detach().cpu()
+                                if self.conv1d.bias is not None
+                                else None
+                            ),
+                            "activation": self.activation,
+                            "fused_out": fused_snapshot.cpu(),
+                            "triton_out": triton_out.detach().cpu(),
+                            "num_actual_tokens": attn_metadata.num_actual_tokens,
+                            "num_spec_decodes": attn_metadata.num_spec_decodes,
+                        },
+                        f"{_dump_dir}/gdn_layer_rank{_rk}.pt",
+                    )
+                    logger.info("GDN fused debug dump written to %s rank %d", _dump_dir, _rk)
 
     def _nsstat(self, out_dir, nsi, conv_state, ssm_state):
         """Env-gated (VLLM_GDN_NSSTAT): non-spec decode path ground truth —
@@ -2568,7 +2669,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self, attn_metadata: GDNAttentionMetadata
     ) -> bool:
         state_indices = attn_metadata.spec_state_indices_tensor
-        return (
+        ok = (
             attn_metadata.spec_sequence_masks is not None
             and attn_metadata.num_decodes == 0
             and attn_metadata.num_spec_decodes > 0
@@ -2580,6 +2681,25 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and state_indices.size(1) <= MAX_FUSED_GDN_MTP_TOKENS
             and hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp")
         )
+        if not ok and not getattr(self, "_fused_gdn_gate_logged", False):
+            self._fused_gdn_gate_logged = True
+            logger.info(
+                "Fused GDN MTP decode gate blocked: spec_masks=%s "
+                "num_decodes=%s num_spec_decodes=%s state_dtype=%s kernel=%s "
+                "ratio=%s state_indices=%s op=%s",
+                attn_metadata.spec_sequence_masks is not None,
+                attn_metadata.num_decodes,
+                attn_metadata.num_spec_decodes,
+                self.kv_cache[1].dtype,
+                self.gdn_decode_kernel,
+                self.num_v_heads // self.num_k_heads,
+                state_indices is not None,
+                hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"),
+            )
+        if ok and not getattr(self, "_fused_gdn_gate_ok_logged", False):
+            self._fused_gdn_gate_ok_logged = True
+            logger.info("Fused GDN MTP decode gate PASSED (first time)")
+        return ok
 
     def _rms_norm_gated_cuda(
         self,
