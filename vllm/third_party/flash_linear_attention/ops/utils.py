@@ -28,7 +28,7 @@ FLA_CI_ENV = os.getenv("FLA_CI_ENV") == "1"
 SUPPRESS_LEVEL = int(os.getenv("GDN_RECOMPUTE_SUPPRESS_LEVEL", "0"))
 
 # Default chunk size used across FLA triton kernels (kda, chunk, chunk_o, etc.)
-FLA_CHUNK_SIZE = 64
+FLA_CHUNK_SIZE = int(os.getenv("VLLM_FLA_CHUNK_SIZE", "64"))
 
 
 def tensor_cache(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
