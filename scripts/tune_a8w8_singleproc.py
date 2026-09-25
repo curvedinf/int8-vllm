@@ -22,7 +22,8 @@ from aiter import gemm_a8w8_tune  # noqa: E402
 
 dev = "cuda"
 torch.manual_seed(0)
-SPLIT_CAP = 4
+import os
+SPLIT_CAP = int(os.environ.get("TUNE_SPLIT_CAP", "4"))
 
 
 def bench_config(xq, w, xs, ws, out, kid, sk, iters=20, warmup=5):
