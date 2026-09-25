@@ -149,6 +149,20 @@ class DFlash2Speculator(DFlashSpeculator):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
+        # GOALOPT iter 10: adaptive lookup-assisted drafting. Greedy
+        # requests only - the rejection kernel verifies greedy proposals
+        # by exact target-argmax chain match, which is proposal-source
+        # agnostic, so lookup proposals are distribution-exact with zero
+        # rejection-path changes. Non-greedy rows keep the neural walk
+        # (their acceptance needs the draft distribution).
+        self._lookup_enabled = (
+            os.environ.get("VLLM_DF2_LOOKUP", "0") == "1"
+        )
+        self._lookup_ib = None
+        self._lookup_min_n = int(os.environ.get("VLLM_DF2_LOOKUP_MIN_N", "12"))
+        self._lookup_max_n = int(os.environ.get("VLLM_DF2_LOOKUP_MAX_N", "32"))
+        self._lookup_hits = 0
+        self._lookup_rounds = 0
         draft_config = self.draft_model_config.hf_config.dflash_config
         self.selector_top_k = int(draft_config["selector_top_k"])
         self._anchor_indices = (
@@ -165,6 +179,69 @@ class DFlash2Speculator(DFlashSpeculator):
         self._cached_candidate_ids = torch.zeros(
             self._selector_scores.shape, dtype=torch.int64, device=device
         )
+
+    def propose(self, *args, **kwargs):
+        # Stash the input batch (full token histories) for the lookup
+        # override; the base class signature keeps positional args.
+        if len(args) >= 1:
+            self._lookup_ib = args[0]
+        try:
+            return super().propose(*args, **kwargs)
+        finally:
+            self._lookup_ib = None
+
+    def _lookup_override(self, num_reqs: int) -> None:
+        if not self._lookup_enabled:
+            return
+        if torch.cuda.is_current_stream_capturing():
+            return
+        ib = self._lookup_ib
+        if ib is None or getattr(ib, "token_ids_cpu", None) is None:
+            return
+        import numpy as _np
+
+        from vllm.v1.spec_decode.ngram_proposer import (
+            _find_longest_matched_ngram_and_propose_tokens,
+        )
+
+        k = self.num_speculative_steps
+        temp_cpu = getattr(ib, "temperature_cpu", None)
+        token_cpu = ib.token_ids_cpu
+        nts = ib.num_tokens_no_spec
+        self._lookup_rounds += 1
+        for row in range(num_reqs):
+            req_state = int(self.sample_idx_mapping[row])
+            if temp_cpu is not None and temp_cpu[req_state] != 0.0:
+                continue  # exact rule is greedy-only
+            n = int(nts[req_state])
+            if n < self._lookup_max_n + k:
+                continue
+            ctx = token_cpu[req_state, :n]
+            try:
+                out = _find_longest_matched_ngram_and_propose_tokens(
+                    origin_tokens=ctx,
+                    min_ngram=self._lookup_min_n,
+                    max_ngram=self._lookup_max_n,
+                    max_model_len=self.max_model_len,
+                    k=k,
+                )
+            except Exception:
+                continue
+            if not out:
+                continue
+            proposal = list(out[:k])
+            if len(proposal) < k:
+                # Pad with the final proposed token; any padding that is
+                # not what the target wants is rejected by the argmax
+                # chain (same as any neural mismatch) - never OOB ids.
+                proposal = proposal + [proposal[-1]] * (k - len(proposal))
+            row_t = torch.tensor(
+                proposal,
+                dtype=self.draft_tokens.dtype,
+                device=self.draft_tokens.device,
+            )
+            self.draft_tokens[row] = row_t
+            self._lookup_hits += 1
 
     def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
         # fp32 so the walk and the rejection that checks it read the same
@@ -332,6 +409,10 @@ class DFlash2Speculator(DFlashSpeculator):
         # rtx3090 kvarn-v2 fix. Pure GPU op, cudagraph-capture-safe.
         scores = torch.nan_to_num(scores, nan=-1e30, posinf=1e30, neginf=-1e30)
         self._sample_path(candidate_ids, scores, num_reqs)
+        # GOALOPT iter 10: adaptive lookup override (greedy rows, exact
+        # target-argmax chain verification) ahead of the TP broadcast so
+        # every rank verifies the same proposals.
+        self._lookup_override(num_reqs)
         if os.environ.get("VLLM_TP_SAMPLE_SYNC") == "1":
             # The target verify must see the same draft path on every TP rank.
             # A rank-local selector decision otherwise changes the verify
