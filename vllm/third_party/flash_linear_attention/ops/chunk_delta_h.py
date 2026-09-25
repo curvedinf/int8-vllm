@@ -22,9 +22,10 @@ NUM_WARPS = [2, 4, 8, 16]
 # Triton's AMD backend fails to lower this kernel with num_stages=4.
 _CHUNK_DELTA_H_NUM_STAGES = [2, 3] if torch.version.hip else [2, 3, 4]
 # G1 fp32-prefill mode (VLLM_GDN_PREFILL_FP32=1): fp32 tiles double the
-# shared-memory footprint and stage-3 pipelining exceeds gfx908's 64KB.
+# shared-memory footprint; gfx908's 64KB needs single-stage pipelining
+# (measured: stages=2 with BV=32 still requests 72KB).
 if os.environ.get("VLLM_GDN_PREFILL_FP32", "0") == "1":
-    _CHUNK_DELTA_H_NUM_STAGES = [2]
+    _CHUNK_DELTA_H_NUM_STAGES = [1]
     _CHUNK_DELTA_H_BV = [32]
 else:
     _CHUNK_DELTA_H_BV = [32, 64]
