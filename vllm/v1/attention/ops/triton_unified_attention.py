@@ -1746,6 +1746,9 @@ def unified_attention(
             OUT_STRIDE1=out.stride(1),
             MMA_DT=_mma_dt,
             MMA_FP16=(_mma_mode == "fp16"),
+            WIDE_KV=(
+                os.environ.get("VLLM_G128_PREFILL_WIDEKV", "0") == "1"
+            ),
             num_warps=4,
         )
         return

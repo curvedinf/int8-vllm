@@ -43,6 +43,7 @@ def g128_prefill_core(
     OUT_STRIDE1: gl.constexpr,
     MMA_DT: gl.constexpr,
     MMA_FP16: gl.constexpr,
+    WIDE_KV: gl.constexpr,
 ):
     block_id = gl.program_id(0)
     qhead = gl.program_id(1)
@@ -106,6 +107,11 @@ def g128_prefill_core(
     qptr = Q + (q_start + qpos[:, None]) * Q_STRIDE0 + qhead * Q_STRIDE1 + qd[None, :]
     q0 = gl.load(qptr, mask=qvalid[:, None], other=0.0).to(MMA_DT)
     q1 = gl.load(qptr + 128, mask=qvalid[:, None], other=0.0).to(MMA_DT)
+    if WIDE_KV:
+        # GOALOPT wide-KV: K/V loads run through int32 lanes (128-bit
+        # loads) and the nested-join unpack restores the original
+        # interleaved column order, so Q loads normally.
+        pass
     q0 = gl.convert_layout(q0, gl.DotOperandLayout(0, mma, k_width=2))
     q1 = gl.convert_layout(q1, gl.DotOperandLayout(0, mma, k_width=2))
 
@@ -120,19 +126,55 @@ def g128_prefill_core(
 
     tn = gl.arange(0, 32, layout=gl.SliceLayout(1, q_layout))
     kd = gl.arange(0, 128, layout=gl.SliceLayout(0, q_layout))
+    # wide-KV helpers: 32 int32 lanes cover 128 int8 columns per half.
+    tw = gl.arange(0, 32, layout=gl.SliceLayout(1, q_layout))
+    kq = gl.arange(0, 32, layout=gl.SliceLayout(0, q_layout))
     for j in range(0, hi):
         slot = (j * 32) % BLOCK_SIZE
         physical = gl.load(BT + seq * BT_STRIDE + (j * 32) // BLOCK_SIZE)
         kv_valid = gl.minimum(32, max_prefix - j * 32)
         valid_t = tn < kv_valid
         kb = K + physical * K_STRIDE0 + kv_head * K_STRIDE2 + slot * K_STRIDE1
-        off_k = tn[:, None] * K_STRIDE1 + kd[None, :]
-        if kv_valid == 32:
-            k0 = gl.load(kb + off_k).to(MMA_DT)
-            k1 = gl.load(kb + 128 + off_k).to(MMA_DT)
+        if WIDE_KV:
+            kb32 = kb.to(gl.pointer_type(gl.int32))
+            off_w = tw[:, None] * (K_STRIDE1 // 4) + kq[None, :]
+            vw = tw < kv_valid
+            if kv_valid == 32:
+                w0 = gl.load(kb32 + off_w)
+                w1 = gl.load(kb32 + off_w + 32)
+            else:
+                w0 = gl.load(kb32 + off_w, mask=vw[:, None], other=0)
+                w1 = gl.load(kb32 + off_w + 32, mask=vw[:, None], other=0)
+            # Byte extraction per word; nested join produces [w, byte-in-pair,
+            # pair] whose flatten order is b0[w],b1[w],b2[w],b3[w],b0[w+1],...
+            # = the ORIGINAL interleaved column order - no Q permutation
+            # needed (the Q pointer permutation above is then inactive but
+            # harmless: with interleaved K, qperm must be identity; it is
+            # kept only when the plane order is in effect).
+            b00 = (w0 & 0xFF).to(gl.int8)
+            b01 = ((w0 >> 8) & 0xFF).to(gl.int8)
+            b02 = ((w0 >> 16) & 0xFF).to(gl.int8)
+            b03 = ((w0 >> 24) & 0xFF).to(gl.int8)
+            k0 = gl.reshape(
+                gl.join(gl.join(b00, b02), gl.join(b01, b03)),
+                (32, 128),
+            ).to(MMA_DT)
+            b10 = (w1 & 0xFF).to(gl.int8)
+            b11 = ((w1 >> 8) & 0xFF).to(gl.int8)
+            b12 = ((w1 >> 16) & 0xFF).to(gl.int8)
+            b13 = ((w1 >> 24) & 0xFF).to(gl.int8)
+            k1 = gl.reshape(
+                gl.join(gl.join(b10, b12), gl.join(b11, b13)),
+                (32, 128),
+            ).to(MMA_DT)
         else:
-            k0 = gl.load(kb + off_k, mask=valid_t[:, None], other=0).to(MMA_DT)
-            k1 = gl.load(kb + 128 + off_k, mask=valid_t[:, None], other=0).to(MMA_DT)
+            off_k = tn[:, None] * K_STRIDE1 + kd[None, :]
+            if kv_valid == 32:
+                k0 = gl.load(kb + off_k).to(MMA_DT)
+                k1 = gl.load(kb + 128 + off_k).to(MMA_DT)
+            else:
+                k0 = gl.load(kb + off_k, mask=valid_t[:, None], other=0).to(MMA_DT)
+                k1 = gl.load(kb + 128 + off_k, mask=valid_t[:, None], other=0).to(MMA_DT)
         k0 = gl.convert_layout(gl.permute(k0, (1, 0)), gl.DotOperandLayout(1, mma, k_width=2))
         k1 = gl.convert_layout(gl.permute(k1, (1, 0)), gl.DotOperandLayout(1, mma, k_width=2))
         sptr_k = SK + physical * S_STRIDE0 + kv_head * S_STRIDE2 + (slot + tn) * S_STRIDE1
