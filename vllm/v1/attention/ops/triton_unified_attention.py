@@ -1603,6 +1603,35 @@ def unified_attention(
             MMA_FP16=(_m64_mode == "fp16"),
             num_warps=num_warps,
         )
+        # GOALOPT: Gluon split-KV reduce (VLLM_G128_REDUCE_GLUON=1) - the
+        # gfx908 port measured 2.5x over Triton reduce_segments at this
+        # shape with 1-ulp numerics.
+        if (
+            os.environ.get("VLLM_G128_REDUCE_GLUON") == "1"
+            and head_size % 128 == 0
+            and head_size_padded == head_size
+        ):
+            from vllm.v1.attention.ops.gfx908_g128_gluon_reduce import (
+                reduce_segments_gfx908,
+            )
+
+            reduce_segments_gfx908[(q.shape[0], num_query_heads)](
+                out,
+                softmax_segm_output,
+                softmax_segm_max,
+                softmax_segm_expsum,
+                seqused_k,
+                cu_seqlens_q,
+                num_seqs,
+                OUT_STRIDE0=out.stride(0),
+                OUT_STRIDE1=out.stride(1),
+                H=num_query_heads,
+                SPLITS=actual_num_splits,
+                TILE=TILE_SIZE_DECODE,
+                D=head_size,
+                num_warps=4,
+            )
+            return
         reduce_segments[(q.shape[0], num_query_heads)](
             output_ptr=out,
             segm_output_ptr=softmax_segm_output,

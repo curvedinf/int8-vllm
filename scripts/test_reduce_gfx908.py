@@ -18,8 +18,12 @@ reduce_segments[(T, H)](
     block_table_stride=1, TILE_SIZE=TILE, HEAD_SIZE=D, HEAD_SIZE_PADDED=D,
     query_start_len_ptr=torch.zeros(T+1, device="cuda", dtype=torch.int32).cumsum(0).to(torch.int32),
     BLOCK_Q=1, NUM_SEGMENTS_PER_SEQ=S, USE_FP8=False)
+cuq = torch.arange(0, T + 1, T // 6, device="cuda", dtype=torch.int32)
+if cuq.numel() < T + 1:
+    cuq = torch.cat([cuq, torch.full((T + 1 - cuq.numel(),), T, device="cuda", dtype=torch.int32)])
+num_seqs = 6
 reduce_segments_gfx908[(T, H)](
-    out_glu, po, pm, pl, seqlens,
+    out_glu, po, pm, pl, seqlens, cuq, num_seqs,
     OUT_STRIDE0=out_glu.stride(0), OUT_STRIDE1=out_glu.stride(1),
     H=H, SPLITS=S, TILE=TILE, D=D, num_warps=4)
 d = (out_tri - out_glu).abs()
@@ -44,7 +48,7 @@ t_tri = bench(lambda: reduce_segments[(T, H)](
     query_start_len_ptr=torch.zeros(T+1, device="cuda", dtype=torch.int32).cumsum(0).to(torch.int32),
     BLOCK_Q=1, NUM_SEGMENTS_PER_SEQ=S, USE_FP8=False))
 t_glu = bench(lambda: reduce_segments_gfx908[(T, H)](
-    out_glu, po, pm, pl, seqlens,
+    out_glu, po, pm, pl, seqlens, cuq, num_seqs,
     OUT_STRIDE0=out_glu.stride(0), OUT_STRIDE1=out_glu.stride(1),
     H=H, SPLITS=S, TILE=TILE, D=D, num_warps=4))
 print(f"triton={t_tri:.2f}us gluon={t_glu:.2f}us ratio={t_tri/t_glu:.2f}x")
