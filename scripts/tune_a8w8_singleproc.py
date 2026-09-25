@@ -57,7 +57,19 @@ def main() -> None:
         w = torch.randint(-127, 127, (N, K), device=dev, dtype=torch.int8)
         ws = torch.rand(N, device=dev, dtype=torch.float32) * 0.02 + 0.005
         out = torch.empty(M, N, device=dev, dtype=torch.float16)
-        ref = (xq.float() * xs[:, None]) @ (w.float() * ws[:, None]).t()
+        if N * K > 64_000_000:
+            # Chunked fp32 reference: (M,K)x(K,N) accumulated over K slices so
+            # the float weights never materialize in full (fits beside the
+            # serving engine's VRAM).
+            ref = torch.zeros(M, N, device=dev, dtype=torch.float32)
+            CH = 512
+            for c0 in range(0, K, CH):
+                c1 = min(c0 + CH, K)
+                ref += (xq[:, c0:c1].float() * xs[:, None]) @ (
+                    w[:, c0:c1].float() * ws[:, None]
+                ).t()
+        else:
+            ref = (xq.float() * xs[:, None]) @ (w.float() * ws[:, None]).t()
         best = None
         t0 = time.time()
         for kid in sorted(kernels_list):
