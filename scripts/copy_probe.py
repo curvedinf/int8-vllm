@@ -27,7 +27,7 @@ def one(i, out_tokens, results):
         "prompt": PREFIX,
         "max_tokens": out_tokens,
         "ignore_eos": True,
-        "temperature": 0.0,
+        "temperature": float(os.environ.get("COPY_TEMP", "0.0")),
         "seed": 5,
     }
     req = urllib.request.Request(

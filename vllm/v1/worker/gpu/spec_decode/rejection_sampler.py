@@ -8,13 +8,35 @@ import torch
 
 from vllm.logger import init_logger
 
+logger = init_logger(__name__)
+
+# GOALOPT lookup-drafting flag handoff: the DFlash2 speculator marks
+# which request rows proposed from the context lookup; the rejection
+# sampler consumes (and clears) the marks in the same engine step.
+# q(proposal) is the one-hot by construction, so the Leviathan ratio
+# test and residual resample stay exact for those rows.
+_lookup_flag_tensor: torch.Tensor | None = None
+
+
+def set_lookup_flags(flags: torch.Tensor) -> None:
+    global _lookup_flag_tensor
+    _lookup_flag_tensor = flags
+
+
+def _pop_lookup_flags(num_reqs: int, device) -> torch.Tensor | None:
+    global _lookup_flag_tensor
+    t = _lookup_flag_tensor
+    _lookup_flag_tensor = None
+    if t is None or t.shape[0] < num_reqs or t.device != device:
+        return None
+    return t[:num_reqs]
+
 from vllm.config import SpeculativeConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
 
-logger = init_logger(__name__)
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     get_num_sampled_and_rejected,
@@ -293,6 +315,8 @@ class RejectionSampler:
             use_block_verification=self.use_block_verification,
             salt_resample=bool(os.environ.get("VLLM_RESAMPLE_SALT")),
             salt_u=bool(os.environ.get("VLLM_SALT_U")),
+            lookup_req=_pop_lookup_flags(num_reqs=idx_mapping.shape[0],
+                                         device=logits.device),
         )
         _p_ring = os.environ.get("VLLM_P_RING")
         if _p_ring and not torch.cuda.is_current_stream_capturing():

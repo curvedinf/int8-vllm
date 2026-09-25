@@ -198,8 +198,12 @@ class DFlash2Speculator(DFlashSpeculator):
         ib = self._lookup_ib
         if ib is None or getattr(ib, "token_ids_cpu", None) is None:
             return
-        import numpy as _np
-
+        # Mode 2 also drafts non-greedy rows from lookup matches; the
+        # rejection sampler consumes the flags (one-hot q semantics).
+        allow_sampled = os.environ.get("VLLM_DF2_LOOKUP") == "2"
+        flags = torch.zeros(
+            max(num_reqs, 1), dtype=torch.int8, device=self.draft_tokens.device
+        )
         from vllm.v1.spec_decode.ngram_proposer import (
             _find_longest_matched_ngram_and_propose_tokens,
         )
@@ -211,8 +215,10 @@ class DFlash2Speculator(DFlashSpeculator):
         self._lookup_rounds += 1
         for row in range(num_reqs):
             req_state = int(self.sample_idx_mapping[row])
-            if temp_cpu is not None and temp_cpu[req_state] != 0.0:
-                continue  # exact rule is greedy-only
+            if temp_cpu is not None and temp_cpu[req_state] != 0.0 and not (
+                allow_sampled
+            ):
+                continue  # mode 1 is greedy-only
             n = int(nts[req_state])
             if n < self._lookup_max_n + k:
                 continue
@@ -242,6 +248,14 @@ class DFlash2Speculator(DFlashSpeculator):
             )
             self.draft_tokens[row] = row_t
             self._lookup_hits += 1
+            flags[row] = 1
+        if allow_sampled:
+            # Avoid a .any() device sync; an all-zero mask is harmless.
+            from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
+                set_lookup_flags,
+            )
+
+            set_lookup_flags(flags)
 
     def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
         # fp32 so the walk and the rejection that checks it read the same

@@ -533,15 +533,22 @@ def _rejection_kernel(
     # [num_logits, num_blocks]
     local_residual_mass_ptr,
     local_residual_mass_stride,
+    # [num_reqs] nonzero when the request's proposals came from the
+    # lookup drafter (GOALOPT): their draft distribution is the one-hot
+    # at the proposed token, so log q(proposal) = 0 and the Leviathan
+    # ratio test / residual resample remain exact with zero plumbing.
+    lookup_req_ptr,
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    HAS_LOOKUP: tl.constexpr,
     SYNTHETIC_MODE: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
     SALT_U: tl.constexpr = False,
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
+    is_lookup = HAS_LOOKUP and (tl.load(lookup_req_ptr + req_idx) > 0)
     start_idx = tl.load(cu_num_logits_ptr + req_idx).to(tl.int64)
     end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
     num_draft_tokens = end_idx - start_idx - 1
@@ -671,6 +678,14 @@ def _rejection_kernel(
                 else:
                     # Probability ratio test: p(x) > u * q(x)
                     # Equivalent log form: log_p(x) > log(u) + log_q(x)
+                    if is_lookup:
+                        # Lookup proposal: q is the one-hot at the
+                        # proposal, so log_q(x) = 0 and q's lse = 0;
+                        # acceptance p(proposal) > u is the exact
+                        # Leviathan rule and the residual resample
+                        # renormalizes p off the proposal.
+                        draft_logprob = 0.0
+                        draft_lse = 0.0
                     accepted = target_logprob > tl.log(u) + draft_logprob
                 verifying = accepted
                 accepted_length += accepted
@@ -962,6 +977,7 @@ def rejection_sample(
     use_block_verification: bool = False,
     salt_resample: bool = False,
     salt_u: bool = False,
+    lookup_req: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
     assert draft_logits is None or (
@@ -1167,9 +1183,11 @@ def rejection_sample(
         cumulative_log_p,
         local_residual_mass,
         local_residual_mass.stride(0) if local_residual_mass is not None else 0,
+        lookup_req,
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
         HAS_DRAFT_LOGITS=has_draft_logits,
+        HAS_LOOKUP=lookup_req is not None,
         SYNTHETIC_MODE=synthetic_conditional_rates is not None,
         USE_BLOCK_VERIFICATION=use_block_verification,
         SALT_U=salt_u,
