@@ -194,7 +194,7 @@ __global__ __launch_bounds__(kThreads) void gdn_decode_post_conv_mtp_kernel(
   __shared__ float shared_q[kMaxMtpTokens][kDimK];
   __shared__ float shared_k[kMaxMtpTokens][kDimK];
   __shared__ bf16_t shared_v[kMaxMtpTokens][kDimV];
-  __shared__ bf16_t shared_out[kMaxMtpTokens][kDimV];
+  __shared__ float shared_out[kMaxMtpTokens][kDimV];
   __shared__ float shared_decay[kMaxMtpTokens];
   __shared__ float shared_beta[kMaxMtpTokens];
 
@@ -314,13 +314,13 @@ __global__ __launch_bounds__(kThreads) void gdn_decode_post_conv_mtp_kernel(
       const Sum2 dot_hq_23 = warp_reduce_sum_pair(dot_hq[2], dot_hq[3]);
       if (lane == 0) {
         shared_out[t][chunk * kChunkV + rows[0]] =
-            __float2bfloat16(dot_hq_01.x);
+            dot_hq_01.x;
         shared_out[t][chunk * kChunkV + rows[1]] =
-            __float2bfloat16(dot_hq_01.y);
+            dot_hq_01.y;
         shared_out[t][chunk * kChunkV + rows[2]] =
-            __float2bfloat16(dot_hq_23.x);
+            dot_hq_23.x;
         shared_out[t][chunk * kChunkV + rows[3]] =
-            __float2bfloat16(dot_hq_23.y);
+            dot_hq_23.y;
       }
 
       const int destination_slot =
@@ -348,7 +348,7 @@ __global__ __launch_bounds__(kThreads) void gdn_decode_post_conv_mtp_kernel(
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
       const int value = lane + i * 32;
-      output_values[i] = __bfloat162float(shared_out[t][value]);
+      output_values[i] = shared_out[t][value];
       sum_square += output_values[i] * output_values[i];
     }
     sum_square = warp_reduce_sum(sum_square);
