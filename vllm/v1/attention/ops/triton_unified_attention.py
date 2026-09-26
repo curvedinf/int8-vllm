@@ -1404,7 +1404,7 @@ def unified_attention(
         use_3d,
         use_g8,
         kv_quant_mode == KVQuantMode.INT8_BLOCK_G128,
-        g8_k_scale.shape[-1] == 1,
+        use_g8 and g8_k_scale.shape[-1] == 1,
         head_size == 128,
         num_queries_per_kv == 4,
         num_kv_heads == 2,
@@ -1434,8 +1434,8 @@ def unified_attention(
         v_descale is None,
         k.stride(3) == 1,
         v.stride(3) == 1,
-        g8_k_scale.stride(3) == 1,
-        g8_k_scale.stride() == g8_v_scale.stride(),
+        use_g8 and g8_k_scale.stride(3) == 1,
+        use_g8 and g8_k_scale.stride() == g8_v_scale.stride(),
         block_table.stride(1) == 1,
     )
     if os.environ.get("VLLM_DRAFT_GUARD_DEBUG"):
@@ -1572,6 +1572,12 @@ def unified_attention(
 
         _m64_mode = os.environ.get("VLLM_G128_GLUON_MMA", "fp16")
         _m64_dt = _gl.float16 if _m64_mode == "fp16" else _gl.bfloat16
+        # The legacy 32-row core has a fixed BF16 MFMA signature.
+        mma_kwargs = (
+            dict(MMA_DT=_m64_dt, MMA_FP16=(_m64_mode == "fp16"))
+            if g128_gluon_mode != "32"
+            else {}
+        )
 
         g128_core[(
             q.shape[0] // query_block + num_seqs,
@@ -1599,8 +1605,7 @@ def unified_attention(
             S_STRIDE0=g8_k_scale.stride(0),
             S_STRIDE1=g8_k_scale.stride(1),
             S_STRIDE2=g8_k_scale.stride(2),
-            MMA_DT=_m64_dt,
-            MMA_FP16=(_m64_mode == "fp16"),
+            **mma_kwargs,
             num_warps=num_warps,
         )
         # GOALOPT: Gluon split-KV reduce (VLLM_G128_REDUCE_GLUON=1) - the

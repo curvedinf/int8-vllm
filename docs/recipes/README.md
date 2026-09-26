@@ -358,6 +358,13 @@ clean. NS=5 is off the menu (garbled 4k leg despite clean screens). Ledger:
 
 ## History
 
+- **2026-09-26 — Deep-context G128 KV address overflow fixed.** The five
+  Gluon attention cores multiplied physical KV block IDs by page strides in
+  int32, wrapping valid target addresses above 2 GiB and group-scale addresses
+  above 4 GiB. They now widen IDs before multiplication. The production
+  INT8 recipe stays enabled. Minimal before/after proof, large-offset oracle
+  tests, and serving validation are recorded in the
+  [incident resolution](bug_gfx908_g128_kv_offset_overflow.md).
 - **2026-08-30 (morning) — OffloadingConnector FIXED (tier stays ON).** Root
   cause was two connector defects hitting the hybrid-mamba stack under
   concurrent load, plus unbounded GDN state lookups turning desyncs into

@@ -131,7 +131,11 @@ def g128_prefill_core(
     kq = gl.arange(0, 32, layout=gl.SliceLayout(0, q_layout))
     for j in range(0, hi):
         slot = (j * 32) % BLOCK_SIZE
-        physical = gl.load(BT + seq * BT_STRIDE + (j * 32) // BLOCK_SIZE)
+        # Widen before multiplying: the KV arena can exceed 2 GiB even
+        # though its block IDs fit in int32.
+        physical = gl.load(
+            BT + seq * BT_STRIDE + (j * 32) // BLOCK_SIZE
+        ).to(gl.int64)
         kv_valid = gl.minimum(32, max_prefix - j * 32)
         valid_t = tn < kv_valid
         kb = K + physical * K_STRIDE0 + kv_head * K_STRIDE2 + slot * K_STRIDE1

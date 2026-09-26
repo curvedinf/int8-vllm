@@ -110,7 +110,11 @@ def g128_core(
     kd = gl.arange(0, 128, layout=gl.SliceLayout(0, kv_layout))
     for j in range(lo, hi):
         slot = (j * 32) % BLOCK_SIZE
-        physical = gl.load(BT + seq * BT_STRIDE + (j * 32) // BLOCK_SIZE)
+        # Widen before multiplying: the KV arena can exceed 2 GiB even
+        # though its block IDs fit in int32.
+        physical = gl.load(
+            BT + seq * BT_STRIDE + (j * 32) // BLOCK_SIZE
+        ).to(gl.int64)
         kv_valid = gl.minimum(32, max_prefix - j * 32)
         valid_t = tn < kv_valid
         kb = K + physical * K_STRIDE0 + kv_head * K_STRIDE2 + slot * K_STRIDE1
@@ -185,4 +189,3 @@ def g128_core(
     moff = (q_start + score_qpos) * (NUM_QHEADS * SPLITS) + score_qhead * SPLITS + seg
     gl.store(PMAX + moff, m, mask=score_qvalid)
     gl.store(PSUM + moff, l, mask=score_qvalid)
-

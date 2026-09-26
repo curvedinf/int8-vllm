@@ -81,7 +81,9 @@ def g128_core(
     qd = gl.arange(0, 128, layout=gl.SliceLayout(0, q_layout))
     qpos = local_block * 5 + qm // NQ_PER_KV
     qhead = kv_head * NQ_PER_KV + qm % NQ_PER_KV
-    qvalid = (qpos < q_len) & (qhead < NUM_QHEADS)
+    # The two padding rows belong to the next query block. They must not
+    # overwrite its complete softmax result with this block's shorter prefix.
+    qvalid = (qpos < q_len) & (qhead < NUM_QHEADS) & (qm < 5 * NQ_PER_KV)
     qptr = Q + (q_start + qpos[:, None]) * Q_STRIDE0 + qhead[:, None] * Q_STRIDE1 + qd[None, :]
     q0 = gl.load(qptr, mask=qvalid[:, None], other=0.0)
     q1 = gl.load(qptr + 128, mask=qvalid[:, None], other=0.0)
@@ -92,7 +94,9 @@ def g128_core(
     score_cols = gl.arange(0, 32, layout=gl.SliceLayout(0, mma))
     score_qpos = local_block * 5 + score_rows // NQ_PER_KV
     score_qhead = kv_head * NQ_PER_KV + score_rows % NQ_PER_KV
-    score_qvalid = (score_qpos < q_len) & (score_qhead < NUM_QHEADS)
+    score_qvalid = (
+        (score_qpos < q_len) & (score_qhead < NUM_QHEADS) & (score_rows < 5 * NQ_PER_KV)
+    )
     m = gl.full((32,), float('-inf'), gl.float32, layout=gl.SliceLayout(1, mma))
     l = gl.full((32,), 1.0, gl.float32, layout=gl.SliceLayout(1, mma))
     acc0 = gl.full((32, 128), 0.0, gl.float32, layout=mma)
@@ -102,7 +106,11 @@ def g128_core(
     kd = gl.arange(0, 128, layout=gl.SliceLayout(0, kv_layout))
     for j in range(lo, hi):
         slot = (j * 32) % BLOCK_SIZE
-        physical = gl.load(BT + seq * BT_STRIDE + (j * 32) // BLOCK_SIZE)
+        # Widen before multiplying: the KV arena can exceed 2 GiB even
+        # though its block IDs fit in int32.
+        physical = gl.load(
+            BT + seq * BT_STRIDE + (j * 32) // BLOCK_SIZE
+        ).to(gl.int64)
         kv_valid = gl.minimum(32, max_prefix - j * 32)
         valid_t = tn < kv_valid
         kb = K + physical * K_STRIDE0 + kv_head * K_STRIDE2 + slot * K_STRIDE1
@@ -170,7 +178,7 @@ def g128_core(
     od = gl.arange(0, 128, layout=gl.SliceLayout(0, out_layout))
     opos = local_block * 5 + om // NQ_PER_KV
     ohead = kv_head * NQ_PER_KV + om % NQ_PER_KV
-    ovalid = (opos < q_len) & (ohead < NUM_QHEADS)
+    ovalid = (opos < q_len) & (ohead < NUM_QHEADS) & (om < 5 * NQ_PER_KV)
     base = (
         PARTIAL
         + (q_start + opos[:, None]) * (NUM_QHEADS * SPLITS * 256)

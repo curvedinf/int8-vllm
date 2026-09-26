@@ -104,7 +104,9 @@ def g128_prefill_core_packed(
     qd = gl.arange(0, 128, layout=gl.SliceLayout(0, q_layout))
     qpos = local_block * QTOKENS_PER_CTA + qm // NQ_PER_KV
     qhead = qm % NQ_PER_KV
-    qvalid = qpos < q_len
+    # Padding rows must not race the next CTA's complete output with a
+    # softmax computed over this CTA's shorter prefix.
+    qvalid = (qpos < q_len) & (qm < QTOKENS_PER_CTA * NQ_PER_KV)
     # Rows are (token-major, head-minor): consecutive 256B Q rows.
     qptr = (
         Q
@@ -120,7 +122,9 @@ def g128_prefill_core_packed(
     score_rows = gl.arange(0, 64, layout=gl.SliceLayout(1, mma))
     score_cols = gl.arange(0, 32, layout=gl.SliceLayout(0, mma))
     score_qpos = local_block * QTOKENS_PER_CTA + score_rows // NQ_PER_KV
-    score_qvalid = score_qpos < q_len
+    score_qvalid = (
+        (score_qpos < q_len) & (score_rows < QTOKENS_PER_CTA * NQ_PER_KV)
+    )
     m = gl.full((64,), float('-inf'), gl.float32, layout=gl.SliceLayout(1, mma))
     l = gl.full((64,), 1.0, gl.float32, layout=gl.SliceLayout(1, mma))
     acc0 = gl.full((64, 128), 0.0, gl.float32, layout=mma)
@@ -130,7 +134,11 @@ def g128_prefill_core_packed(
     kd = gl.arange(0, 128, layout=gl.SliceLayout(0, q_layout))
     for j in range(0, hi):
         slot = (j * 32) % BLOCK_SIZE
-        physical = gl.load(BT + seq * BT_STRIDE + (j * 32) // BLOCK_SIZE)
+        # Widen before multiplying: the KV arena can exceed 2 GiB even
+        # though its block IDs fit in int32.
+        physical = gl.load(
+            BT + seq * BT_STRIDE + (j * 32) // BLOCK_SIZE
+        ).to(gl.int64)
         kv_valid = gl.minimum(32, max_prefix - j * 32)
         valid_t = tn < kv_valid
         kb = K + physical * K_STRIDE0 + kv_head * K_STRIDE2 + slot * K_STRIDE1
@@ -199,7 +207,7 @@ def g128_prefill_core_packed(
     od = gl.arange(0, 128, layout=gl.SliceLayout(0, out_layout))
     opos = local_block * QTOKENS_PER_CTA + om // NQ_PER_KV
     ohead = om % NQ_PER_KV
-    ovalid = opos < q_len
+    ovalid = (opos < q_len) & (om < QTOKENS_PER_CTA * NQ_PER_KV)
     base = (
         OUT
         + (q_start + opos[:, None]) * OUT_STRIDE0
