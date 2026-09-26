@@ -288,6 +288,25 @@ Older numbers elsewhere (554 tok/s / 14.44 ms / 770 tok/s regimes) predate
 the corruption bisect and the accuracy program — superseded; the audit
 doc's history section explains why.
 
+## GOALOPT day-2 state (2026-09-25/26)
+
+**Canonical gate suite** (binding protocol, GOALOPT_CANONICAL_GATE_SUITE):
+short C6 32x(32->1000); steady 32k/800; long-run 32k/2048 + acceptance
+decay (GDNRING zero-overhead per-step capture); solo-32k TTFT; mixed gate
+3x32k/2048+3x32k/16; oracle 0/0/0 + greedy + temp-1 copy probe. Adoptions
+report every item.
+
+**Adopted day-2**: M=24 a8w8 tuned rows (7 shapes; module keep-list now
+58 ids). **Closed screens** (mechanisms in the ledger): fused GDN MTP
+decode kernel — bf16 variant fast (+5.3%) but acceptance-hostile (-11%);
+fp32 variant acceptance-neutral but not faster interleaved; both variants
+in-tree, launcher default `VLLM_GDN_DECODE_KERNEL=triton`. Gluon
+reduce_segments port — 2.5x standalone, 146x slower in-graph (codegen
+pathology; trace-evidenced), default off. int8-MMA QK — no-go, gfx908's
+only i8 MFMA (16x16x16) loses to fp16 16x16x16. Dynamic NS — closed,
+fixed per-step costs dominate. MNBT chunk sizes — 1024 rejected (TTFT
++2.6s), 4096 unproven in leg noise; 2048 stands.
+
 ## NS (speculative token budget) sweep — 2026-08-26, tuned-aiter build
 
 Canonical `bench_quick.sh` C8 leg (8x32-in/1000-out, greedy), one boot per

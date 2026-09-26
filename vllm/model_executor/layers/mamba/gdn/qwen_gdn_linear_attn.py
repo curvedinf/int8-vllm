@@ -1058,6 +1058,22 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
 
             self._fused_spec_last = False
+            _zview = (
+                os.environ.get("VLLM_GDN_ZVIEW", "0") == "1"
+                and not self.gqa_interleaved_layout
+            )
+            if _zview:
+                qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
+                z_size = self.value_dim // self.tp_size
+                z = projected_states_qkvz[:, qkv_size : qkv_size + z_size].reshape(
+                    num_tokens, -1, self.head_v_dim
+                )
+            else:
+                z = torch.empty(
+                    (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+                    dtype=projected_states_qkvz.dtype,
+                    device=projected_states_qkvz.device,
+                )
             torch.ops.vllm.qwen_gdn_attention_core(
                 projected_states_qkvz,
                 projected_states_ba,
@@ -1447,7 +1463,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         mixed_qkv, z, b, a = self.prepare_gdn_attention_core_inputs(
             qkvz, ba, num_tokens_all
         )
-        z_out[:] = z
+        # ZVIEW (GOALOPT): when the caller passed a view of the qkvz z-slice
+        # as z_out, z already holds the right values in the right storage and
+        # the per-layer output copy is a same-memory round-trip - skip it.
+        if z_out.data_ptr() != z.data_ptr():
+            z_out[:] = z
         # Spec-decode steps with the fused MTP post-conv kernel available:
         # replace the Triton rearrange + fused_sigmoid_gating + layernorm
         # chain (one kernel per GDN layer).
