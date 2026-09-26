@@ -186,6 +186,30 @@ def test_partial_lookup_returns_exact_boundary_and_group_load_keys():
     assert req_status.partial_tail_boundary is None
 
 
+@pytest.mark.parametrize("no_loads", [False, True])
+def test_no_loads_diagnostic_allows_recompute(monkeypatch, no_loads):
+    if no_loads:
+        monkeypatch.setenv("VLLM_OFFLOAD_NO_LOADS", "1")
+    else:
+        monkeypatch.delenv("VLLM_OFFLOAD_NO_LOADS", raising=False)
+    scheduler = _make_partial_tail_scheduler()
+    request = _make_partial_tail_request(scheduler)
+    request.skip_reading_prefix_cache = False
+    scheduler.manager.lookup.return_value = LookupResult.HIT
+
+    # A forced miss must let admission proceed on repeated scheduler steps.
+    # None would mark the lookup pending forever despite no outstanding work.
+    for _ in range(2):
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (
+            (0, False) if no_loads else (28, True)
+        )
+    assert scheduler._req_status[request.request_id].deferred_lookup_start_time is None
+    if no_loads:
+        scheduler.manager.lookup.assert_not_called()
+    else:
+        scheduler.manager.lookup.assert_called()
+
+
 def test_partial_lookup_requires_every_cache_group():
     scheduler = _make_partial_tail_scheduler()
     _make_partial_tail_request(scheduler)

@@ -149,3 +149,8 @@ are disabled.
 
 The kernels are JIT compiled. Restart the server to use the changed source;
 no C++ rebuild or sibling AITER source change is required.
+
+The [audit of the prior investigation's retained changes](garble200k_prior_agent_audit.md)
+removes its temporary tracing and unneeded block-pool assertion, retains
+the diagnostic NO_LOADS miss-semantics correction, and corrects the earlier
+Mamba-store conviction.

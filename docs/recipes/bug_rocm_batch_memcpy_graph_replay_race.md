@@ -225,3 +225,27 @@ The consistent model is **two coexisting defects**:
 corruption falls to or below the BD1=1 level, the OOB was a contributor and
 the residual cleanly convicts the race; if unchanged, the OOB was incidental
 on this stack and §5 stands unmodified.
+
+## 12. The 2026-09-26 deep-context incident: KV address overflow
+
+The persistent 200k-context incident was caused by int32 page-offset
+multiplication in the five G128 Gluon attention readers. The direct
+before/after proof and completed serving gates are in
+[the incident resolution](bug_gfx908_g128_kv_offset_overflow.md).
+
+The earlier draft of this section incorrectly stated that connector
+presence was necessary and that the Mamba store-to-CoW chain was the live
+vector. Later experiments corrupted with Mamba stores disabled, with all
+store copies suppressed, with loads bypassed, and in eager mode. Those
+results retire that conviction. A single clean classic-load leg was not a
+reliable isolation result.
+
+The classic H2D executor, Mamba lag-bound change, full-row block-table
+clearing, and Mamba-store suppression were falsified and already reverted.
+The deployed recipe does not need these bypasses to pass the deep-context
+gate. The retained NO_LOADS change corrects the diagnostic's miss-versus-
+pending return value; it has no effect when the diagnostic is disabled.
+
+The September 12–14 store-side observations earlier in this dossier are a
+separate historical investigation. This 200k incident does not establish a
+new driver-copy or CoW defect.

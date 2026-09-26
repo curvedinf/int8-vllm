@@ -990,10 +990,10 @@ class OffloadingConnectorScheduler:
 
     def _lookup(self, req_status: RequestOffloadState) -> int | None:
         # Diagnostic lever: force recompute instead of serving tier loads.
-        # Stores still run; only the load/serve path is bypassed. Used to
-        # isolate load-content corruption (garble hunt pass 29).
+        # Stores still run. Return a completed miss: None means a pending
+        # asynchronous lookup and would defer the request forever.
         if os.environ.get("VLLM_OFFLOAD_NO_LOADS"):
-            return None
+            return 0
         complete_hit = self._lookup_complete_chunks(req_status)
         req_status.partial_tail_boundary = None
         if complete_hit is None or not self.config.supports_partial_tail:
