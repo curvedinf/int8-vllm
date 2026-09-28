@@ -110,10 +110,9 @@ ARGS=(
   --max-model-len "${MAXLEN:-262144}"
   --max-num-seqs 6
   --gpu-memory-utilization 0.92
-  # KVMEM flag file / env: pin the KV arena size in bytes (gpu_worker reports
-  # ~1.4GiB/GPU unused headroom at 0.92 util; a pinned --kv-cache-memory
-  # both recovers it and makes the pool deterministic across boots).
-  # ${LOG_DIR}/KVMEM (e.g. "19000000000") overrides the env for systemd boots.
+  # KVMEM flag file / env: pin the KV arena size in bytes. A fixed
+  # --kv-cache-memory overrides --gpu-memory-utilization; leave headroom
+  # for transient runtime allocations. ${LOG_DIR}/KVMEM overrides the env.
   --compilation-config '{"mode":'"${CMODE:-3}"',"cudagraph_mode":"'"${CGMODE:-FULL_AND_PIECEWISE}"'","custom_ops":["+gemma_rms_norm","+silu_and_mul","+rms_norm_gated","+rotary_embedding","+apply_rotary_emb","none"],"pass_config":{"fuse_allreduce_rms":'"${ARFUSE:-false}"'}}'
   --language-model-only
   --skip-mm-profiling
@@ -246,14 +245,14 @@ fi
 MNBT="${MNBT:-2048}"
 ARGS+=(--max-num-batched-tokens "${MNBT}")
 # KVMEM: optional pinned KV cache size in bytes (flag file or env).
-# Default 20.2 GiB (2026-08-30): recovers the ~1.4 GiB/GPU the 0.92-util
-# profiler leaves unused -> 1,031,145-token arena (was 982,523; +4.9%
-# capacity, 3.93x max-len). Concurrent-round stable, 0 collapse windows.
+# Default 19.0 GB per GPU (2026-09-28): return 1.2 GB per GPU from the
+# previous 20.2 GB arena after recurrent ROCm OOMs at low KV occupancy.
+# Keep max-model-len 262144, C6, and the 12 GiB CPU KV offload tier.
 _kvmem_flag="${LOG_DIR}/KVMEM"
 if [[ -f "${_kvmem_flag}" ]]; then
   KVMEM="$(tr -d '[:space:]' < "${_kvmem_flag}")"
 fi
-KVMEM="${KVMEM:-20200000000}"
+KVMEM="${KVMEM:-19000000000}"
 ARGS+=(--kv-cache-memory "${KVMEM}")
 # EAGERALL flag file: --enforce-eager (diagnostic; target python-side
 # instrumentation like the GDN state ring needs non-replayed rounds).
