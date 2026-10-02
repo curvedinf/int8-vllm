@@ -44,6 +44,7 @@ from vllm.utils.gc_utils import (
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
+from vllm.utils.torch_utils import release_host_cache
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_scheduler_kv_cache_config,
@@ -94,6 +95,10 @@ from vllm.v1.utils import compute_iteration_details
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+
+# Interval between CUDA caching-host-allocator releases in the EngineCore
+# busy loop (see run_busy_loop).
+_HOST_CACHE_RELEASE_INTERVAL_S = 900.0
 
 
 HANDSHAKE_TIMEOUT_MINS = 5
@@ -1499,7 +1504,18 @@ class EngineCoreProc(EngineCore):
     @fault_tolerant_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
+        # Bound the CUDA caching *host* allocator: it never returns freed
+        # pinned blocks, and on gfx908 each pinned byte is mapped into every
+        # GPU's GTT aperture, so hours of varying-size pinned traffic
+        # (spec-decode masks, offload descriptors) exhausted the pool with
+        # hipErrorOutOfMemory (2026-10-02 crash loop). Releasing on a timer
+        # keeps the standing pinned set at ~one interval of working set.
+        next_host_cache_release = time.monotonic() + _HOST_CACHE_RELEASE_INTERVAL_S
         while self._handle_shutdown():
+            now = time.monotonic()
+            if now >= next_host_cache_release:
+                next_host_cache_release = now + _HOST_CACHE_RELEASE_INTERVAL_S
+                release_host_cache()
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
             # Publish request counts before and after GPU step to ensure freshness.

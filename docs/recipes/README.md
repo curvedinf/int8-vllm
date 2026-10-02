@@ -85,7 +85,8 @@ The script encodes the full intended feature set:
 | All-reduce | **vLLM CUSTOM all-reduce** (`VLLM_ROCM_USE_AITER_CUSTOM_AR=0`) | audited TP4/C8 rerun: vLLM CUSTOM 63.49 tok/s beats AITER CAR 58.34 and PYNCCL 53.04; AITER CAR gfx908 forces the naive kernel until tuned — CAR stays a tuning lever, not the default |
 | Fused epilogue | OFF (`fuse_allreduce_rms=false`) | the fused INT8 epilogue path is implemented but inactive; enable only after the gfx908 graph integration work lands |
 | GPU util | 0.92, with the deployed KV arena pinned separately | |
-| GPU KV reservation | **19,000,000,000 bytes per GPU** (since 2026-09-28; previously 20,200,000,000) | Leaves 1.2 GB more runtime headroom per GPU after recurrent OOMs. Startup reports 1,605,403 KV tokens, or 6.12 full 262,144-token contexts, with the 12 GiB CPU KV tier still enabled. |
+| GPU KV reservation | **19,000,000,000 bytes per GPU** (since 2026-09-28; previously 20,200,000,000) | Leaves 1.2 GB more runtime headroom per GPU after recurrent OOMs. Startup reports 1,605,403 KV tokens, or 6.12 full 262,144-token contexts, with the CPU KV tier still enabled. |
+| CPU KV offload tier | **8,589,934,592 bytes** cross-worker (since 2026-10-02; previously 12,884,901,888, i.e. 12 GiB) | Reliability: the tier is materialized (pinned/registered) at boot and 12 GiB on the 61 GiB host left no burst headroom — every run 2026-09-28..10-02 died after 4-9h with `hipErrorOutOfMemory` on a pinned allocation (offload descriptors / spec masks). Observed tier usage stays ≤1.5%. Tunable via `CPUTIER` env / `${LOG_DIR}/CPUTIER` flag file. |
 | TP / concurrency / graphs | **TP4, C6**, FULL_AND_PIECEWISE (forced FULL_DECODE_ONLY on gfx908) | `--tensor-parallel-size 4 --max-num-seqs 6` |
 
 `AiterW8A16LinearKernel` is a compatibility name in the registry. For GS128

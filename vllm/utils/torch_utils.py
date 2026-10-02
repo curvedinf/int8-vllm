@@ -73,6 +73,46 @@ T = TypeVar("T")
 
 PIN_MEMORY = is_pin_memory_available()
 
+# Frees cached-but-unreferenced pinned host blocks back to the OS. The CUDA
+# caching *host* allocator never returns them on its own, and on gfx908 every
+# pinned byte is also mapped into each GPU's GTT aperture, so varying-size
+# pinned traffic (spec-decode masks, offload descriptors) grows the pool
+# monotonically until hipHostMalloc fails with hipErrorOutOfMemory.
+_host_empty_cache = getattr(torch._C, "_host_emptyCache", None)
+
+
+def release_host_cache() -> None:
+    if _host_empty_cache is not None:
+        _host_empty_cache()
+
+
+def _is_oom(e: BaseException) -> bool:
+    return "out of memory" in str(e).lower()
+
+
+def pin_tensor_with_grace(t: torch.Tensor) -> torch.Tensor:
+    """Pin a CPU tensor, degrading gracefully when the pinned pool is full.
+
+    On an OOM from hipHostMalloc, release cached pinned blocks and retry;
+    if it still fails, return the unpinned tensor — pageable H2D copies are
+    synchronous but correct, which beats killing the engine."""
+    if not PIN_MEMORY:
+        return t
+    try:
+        return t.pin_memory()
+    except RuntimeError as e:
+        if not _is_oom(e):
+            raise
+    logger.warning("pinned host allocation failed; releasing host cache")
+    release_host_cache()
+    try:
+        return t.pin_memory()
+    except RuntimeError as e:
+        if not _is_oom(e):
+            raise
+        logger.warning("pinned host allocation still failing; using pageable memory")
+        return t
+
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
     return (
@@ -699,7 +739,7 @@ def async_tensor_h2d(
     if isinstance(data, np.ndarray):
         data = torch.from_numpy(data)
     if isinstance(data, torch.Tensor):
-        t = data.pin_memory() if PIN_MEMORY else data
+        t = pin_tensor_with_grace(data)
     else:
         t = torch.tensor(data, dtype=dtype, pin_memory=PIN_MEMORY, device="cpu")
     assert t.is_cpu
@@ -708,7 +748,7 @@ def async_tensor_h2d(
 
 def np_to_pinned_tensor(array: np.ndarray) -> torch.Tensor:
     t = torch.from_numpy(array)
-    return t.pin_memory() if PIN_MEMORY else t
+    return pin_tensor_with_grace(t)
 
 
 def make_ndarray_with_pad(

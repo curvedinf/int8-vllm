@@ -28,7 +28,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.utils.torch_utils import PIN_MEMORY, release_host_cache
 from vllm.v1.kv_offload.base import (
     BlockIDsLoadStoreSpec,
     CanonicalKVCacheRef,
@@ -303,11 +303,27 @@ def _new_descriptor_buffers(
     pin = PIN_MEMORY
     # CUDA cache_kernels.cu requires int64; XPU DMA engine requires uint64.
     ptr_dtype = torch.uint64 if current_platform.is_xpu() else torch.int64
-    return (
-        torch.empty(num_copy_ops, dtype=ptr_dtype, pin_memory=pin),
-        torch.empty(num_copy_ops, dtype=ptr_dtype, pin_memory=pin),
-        torch.empty(num_copy_ops, dtype=ptr_dtype, pin_memory=pin),
+
+    def _alloc() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return (
+            torch.empty(num_copy_ops, dtype=ptr_dtype, pin_memory=pin),
+            torch.empty(num_copy_ops, dtype=ptr_dtype, pin_memory=pin),
+            torch.empty(num_copy_ops, dtype=ptr_dtype, pin_memory=pin),
+        )
+
+    try:
+        return _alloc()
+    except RuntimeError as e:
+        if not pin or "out of memory" not in str(e).lower():
+            raise
+    # Descriptors are dereferenced on-device, so they must stay pinned —
+    # release cached pinned blocks and retry once before giving up.
+    logger.warning(
+        "pinned descriptor alloc failed (%d ops); releasing host cache, retrying",
+        num_copy_ops,
     )
+    release_host_cache()
+    return _alloc()
 
 
 class SingleDirectionOffloadingHandler:

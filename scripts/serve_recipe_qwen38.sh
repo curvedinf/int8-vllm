@@ -153,7 +153,7 @@ ARGS=(
   # measurements used a different checkpoint pair; see the recipe NS sweep.
   # SPECOFF=1 drops the draft entirely (diagnostic target-only legs).
   # The speculative-config is appended conditionally after ARGS below.
-  # CPU KV second tier: 12 GiB total (cross-worker) host DRAM via the native
+  # CPU KV second tier (cross-worker) host DRAM via the native
   # OffloadingConnector. Blocks are copied as raw bytes, so grouped INT8 KV
   # scales and fp32 mamba state pages transfer dtype-safely. L2 reuse
   # cache only — the live arena stays on-GPU.
@@ -161,9 +161,20 @@ ARGS=(
   # fixed (eagle catch-all flagged every group incl. mamba -> misaligned
   # resume boundaries -> concurrent garble/wedges; see offloading/scheduler.py
   # and logs/garble/NOTES.md). Tier ON per the recipe.
+  # 2026-10-02: CPUTIER env / flag file; default down from 12 GiB to 8 GiB.
+  # The region is materialized (pinned/registered) at boot and every run
+  # since 2026-09-28 died after 4-9h with hipErrorOutOfMemory on a pinned
+  # allocation (offload descriptors / spec masks) — 61 GiB host DRAM left
+  # no burst headroom. Observed tier usage stays <=1.5%.
 )
 if [[ "${OFFLOAD:-1}" == "1" ]]; then
-  ARGS+=(--kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":12884901888}}')
+  # Read before composing the JSON below; ${LOG_DIR}/CPUTIER overrides env.
+  _cputier_flag="${LOG_DIR}/CPUTIER"
+  if [[ -f "${_cputier_flag}" ]]; then
+    CPUTIER="$(tr -d '[:space:]' < "${_cputier_flag}")"
+  fi
+  CPUTIER="${CPUTIER:-8589934592}"
+  ARGS+=(--kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":'"${CPUTIER}"'}}')
 fi
 # OFFLOAD flag file (diagnostic lever for systemd-driven restarts).
 _offload_flag="${LOG_DIR}/OFFLOAD"
@@ -247,7 +258,7 @@ ARGS+=(--max-num-batched-tokens "${MNBT}")
 # KVMEM: optional pinned KV cache size in bytes (flag file or env).
 # Default 19.0 GB per GPU (2026-09-28): return 1.2 GB per GPU from the
 # previous 20.2 GB arena after recurrent ROCm OOMs at low KV occupancy.
-# Keep max-model-len 262144, C6, and the 12 GiB CPU KV offload tier.
+# Keep max-model-len 262144, C6, and the CPU KV offload tier (CPUTIER).
 _kvmem_flag="${LOG_DIR}/KVMEM"
 if [[ -f "${_kvmem_flag}" ]]; then
   KVMEM="$(tr -d '[:space:]' < "${_kvmem_flag}")"
@@ -563,7 +574,7 @@ start_server() {
 
   printf 'starting recipe Qwen3.8 server: url=http://%s:%s cpuset=%s log=%s/server.log\n' \
     "${HOST}" "${PORT}" "${CPUSET}" "${LOG_DIR}"
-  printf '%s\n' 'contract: PTQR-retrained target+DFlash2 GS128; AITER W8A8/UA/custom-AR; INT8-G128 KV/fp32 Mamba/quant-out; TP4/C6; 12GiB CPU KV tier'
+  printf '%s\n' 'contract: PTQR-retrained target+DFlash2 GS128; AITER W8A8/UA/custom-AR; INT8-G128 KV/fp32 Mamba/quant-out; TP4/C6; CPU KV tier '"${CPUTIER:-8589934592}"'B'
 
   local api_key
   api_key="$(read_api_key)"
