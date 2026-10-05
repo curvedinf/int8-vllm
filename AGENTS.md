@@ -76,6 +76,15 @@ do not derive an alternate production configuration from archival material.
   bare pip against this venv without a `--dry-run` first — it pins
   torch 2.11.0+rocm7.1 + triton 3.6.0 and PyPI resolution would replace them
   with CUDA builds.
+- The venv's ROCm *runtime* is deliberately patched ahead of its wheel:
+  `torch/lib/libamdhip64.so` and `libhsa-runtime64.so` are the 7.2.53211
+  builds (from the quant venv's torch 2.13 wheel; wheel originals kept as
+  `*.wheel-rocm7.1`). The bundled 7.1 runtime leaks ~80 KiB of host AQL
+  packet batches on every hipGraphLaunch replay
+  (`VirtualGPU::dispatchAqlPacketBatch`, ~29 MB/min/worker under load →
+  global host OOM kill every ~10 h; root-caused 2026-10-05, battery 4/4 and
+  E2E golden re-verified on 7.2). Any venv reinstall must restore this
+  override or re-validate the leak is fixed upstream.
 - Quantization uses a **separate quantization venv** outside the repo (torch 2.13.0+rocm7.2,
   gptqmodel 7.3.4, transformers 5.15) so the serving venv stays pinned.
 - ROCm env for any GPU work: `ROCM_PATH=/opt/rocm`,
