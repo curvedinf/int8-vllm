@@ -13,6 +13,13 @@ alternative production recipes.
 | `vllm-gfx908` (this repo) | `main` (`curvedinf/int8-vllm`) | serving engine, int8 kernels |
 | sibling `../aiter` checkout | `main` (`curvedinf/int8-aiter`) | int8 unified-attention + gfx908 tuning (PYTHONPATH) |
 
+The serving venv carries a deliberate ROCm **runtime** override:
+`torch/lib/libamdhip64.so` + `libhsa-runtime64.so` are the 7.2.53211
+builds (from the quant venv's torch 2.13 wheel). The bundled rocm7.1
+runtime leaks host memory on every graph replay — see History
+2026-10-05. A venv reinstall must restore the override or prove the
+leak is fixed in the newer wheel.
+
 ## The baseline configuration (all features ON)
 
 The published pair is designed to run together:
@@ -360,6 +367,38 @@ clean. NS=5 is off the menu (garbled 4k leg despite clean screens). Ledger:
 
 ## History
 
+- **2026-10-05 — Host-OOM crash loop root-caused: ROCm 7.1 runtime leaks
+  AQL packet batches on every graph replay; serving-venv runtime
+  overridden to 7.2.53211.** Since 2026-09-28 the service died every
+  4-10 h: first `hipErrorOutOfMemory` exit-code failures (mitigated
+  2026-10-02 by 8a438fd1ee, which bounds the pinned host pool in
+  EngineCore but left the workers unbounded), then global host OOM
+  kills of `VLLM::Worker_TP` every ~10 h (Oct 3 04:57, Oct 3 16:15,
+  Oct 4 01:48, Oct 4 12:26, Oct 5 03:24; kernel
+  `Out of memory: Killed process ... VLLM::Worker_TP`, peak ~57 G RSS +
+  28 G swap on the 61 G host). Root cause — bpftrace caller accounting
+  plus gdb backtraces on the live workers: the rocm7.1 runtime's
+  `hipGraphLaunch → hip::GraphExec::EnqueueGraphWithSingleList →
+  amd::roc::VirtualGPU::dispatchAqlPacketBatch` mallocs two host packet
+  batches (59,552 + 21,216 B ≈ 80 KiB) per replay and never frees them
+  (6,072 allocs vs 317 frees per 100 s measured; ~29 MB/min/worker at
+  ~4 graphed decode steps/s — proportional to engine load, TP workers
+  only, EngineCore/API flat). Not fork code: GC-tracked objects, numpy
+  buffers in tracked containers, the torch caching host allocator
+  pools, glibc free space (`malloc_trim`/`mallinfo2`), and JIT/module
+  mappings were all measured flat before the runtime path was named.
+  Rejected remedies: rocm 7.14 runtime swap (segfault, ABI) and
+  `AMD_DIRECT_DISPATCH=1` (no effect; slope 27.6 MB/min). Fix: replace
+  `libamdhip64.so` + `libhsa-runtime64.so` in the serving venv's
+  `torch/lib` with the 7.2.53211 builds (wheel originals kept as
+  `*.wheel-rocm7.1`). Validation: battery 4/4; TP1 vLLM golden
+  byte-identical; full-recipe boot with greedy golden identical
+  ("The capital of France is Paris…"); per-caller malloc/free
+  accounting shows the packet-batch site balanced (4,298 allocs /
+  4,295 frees per 230 s) and worker `RssAnon` slope ~0 under identical
+  load (0.04 MB/min vs 29 MB/min). If it ever returns, the signature is
+  worker RssAnon climbing 15-30 MB/min/worker under load, and
+  59552/21216-byte `__libc_malloc` calls from `libamdhip64` in bpftrace.
 - **2026-09-26 — Deep-context G128 KV address overflow fixed.** The five
   Gluon attention cores multiplied physical KV block IDs by page strides in
   int32, wrapping valid target addresses above 2 GiB and group-scale addresses
