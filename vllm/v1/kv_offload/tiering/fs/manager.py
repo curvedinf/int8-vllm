@@ -235,17 +235,32 @@ class FileSystemTierManager(SecondaryTierManager):
             )
 
     def _scan_existing_files(self) -> None:
+        # Block files live in {base_path}_r<rank>/... sibling directories of
+        # the mapper's base_path (which itself holds only the config json).
         config_name = os.path.basename(self.file_mapper.get_config_file_path())
-        for dirpath, _dirs, files in os.walk(self.file_mapper.base_path):
-            for name in files:
-                if name == config_name:
-                    continue
-                path = os.path.join(dirpath, name)
-                try:
-                    st = os.stat(path)
-                except OSError:
-                    continue
-                self._add_live_file(path, st.st_mtime, st.st_size)
+        base = self.file_mapper.base_path
+        parent = os.path.dirname(base)
+        prefix = os.path.basename(base)
+        scan_roots = [base]
+        try:
+            scan_roots += [
+                os.path.join(parent, d)
+                for d in os.listdir(parent)
+                if d.startswith(prefix + "_r")
+            ]
+        except OSError:
+            pass
+        for root in scan_roots:
+            for dirpath, _dirs, files in os.walk(root):
+                for name in files:
+                    if name == config_name:
+                        continue
+                    path = os.path.join(dirpath, name)
+                    try:
+                        st = os.stat(path)
+                    except OSError:
+                        continue
+                    self._add_live_file(path, st.st_mtime, st.st_size)
 
     def _add_live_file(self, path: str, mtime: float, size: int) -> None:
         self._live_files[path] = (mtime, size)
