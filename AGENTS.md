@@ -93,13 +93,14 @@ do not derive an alternate production configuration from archival material.
 - FS->GPU direct IO: `vllm/fs_gpu` wraps AMD Infinity Storage (hipFile
   0.3.0, ctypes — no new build deps). In-process it resolves to torch's
   bundled (patched 7.2) HIP runtime — one `libamdhip64.so.7`, verified by
-  `scripts/fs_gpu_probe.py`. Weight loading goes direct-to-VRAM (no host
-  staging) when `VLLM_FS_GPU=weights` / the serve-script `AISW` flag file
-  (production default since 2026-10-06). Per-rank reads via a plan-pass
-  recorder (`scripts/fs_gpu_plan_test.py` gates the geometry) + gap-tolerant
-  range merge; hipFile 0.3.0 runs ~one IO per process (threads/handles/async
-  make no difference — probed), so merge caps trade bytes for IOPS
-  (VLLM_AIS_MERGE_*). Byte gate: `scripts/fs_gpu_weightcheck.py`.
+  `scripts/fs_gpu_probe.py`. `VLLM_FS_GPU=auto` (default) uses AIS for
+  weight loading whenever it is available; the serve-script `AISW` flag
+  forces it for A/B boots. Loads go through the per-rank repack cache
+  (`~/.cache/vllm/ais_repack/`, written on first boot,
+  `scripts/fs_gpu_repack_check.py` is the byte gate); hipFile 0.3.0 runs
+  ~one IO per process (threads/handles/async make no difference — probed),
+  hence the cache's windowed sequential reads. Byte gate for the uncached
+  path: `scripts/fs_gpu_weightcheck.py`.
 
 ## Build
 

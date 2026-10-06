@@ -166,7 +166,7 @@ if TYPE_CHECKING:
     # FS->GPU direct IO via AMD Infinity Storage (hipFile). See the
     # getters below; these only affect weight loading (and future FS-backed
     # tiers), never compiled graphs.
-    VLLM_FS_GPU: str = "off"
+    VLLM_FS_GPU: str = "auto"
     VLLM_FS_GPU_ALLOW_COMPAT: bool = True
     VLLM_AIS_LIB: str = "libhipfile.so.0"
     VLLM_AIS_STAGING_MB: int = 128
@@ -180,6 +180,10 @@ if TYPE_CHECKING:
     # Gap-tolerant merge for per-rank range fills (see getters below).
     VLLM_AIS_MERGE_GAP_KB: int = 64
     VLLM_AIS_MERGE_MAX_KB: int = 192
+    # Rank-repacked checkpoint cache (see getters below).
+    VLLM_AIS_REPACK: bool = True
+    VLLM_AIS_REPACK_DIR: str = ""
+    VLLM_AIS_REPACK_WINDOW_MB: int = 32
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
@@ -1396,7 +1400,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # safetensors loading through vllm.fs_gpu (no host staging); "all"
     # additionally opts in future consumers (KV tier, page tier). "off"
     # keeps the stock host-staged paths.
-    "VLLM_FS_GPU": lambda: os.getenv("VLLM_FS_GPU", "off"),
+    "VLLM_FS_GPU": lambda: os.getenv("VLLM_FS_GPU", "auto"),
     # When AIS cannot initialize (no lib, unsupported fs, non-safetensors
     # checkpoint), fall back to the stock loader with a loud warning
     # instead of failing the boot. Mid-load failures are always loud.
@@ -1418,6 +1422,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # for fewer/larger IOs wins until the aggregate NVMe bandwidth cap.
     "VLLM_AIS_MERGE_GAP_KB": lambda: int(os.getenv("VLLM_AIS_MERGE_GAP_KB", "64")),
     "VLLM_AIS_MERGE_MAX_KB": lambda: int(os.getenv("VLLM_AIS_MERGE_MAX_KB", "192")),
+    # Rank-repacked checkpoint cache: first AIS boot writes each rank's
+    # planned byte runs compactly; later boots are pure sequential reads.
+    "VLLM_AIS_REPACK": lambda: (
+        os.getenv("VLLM_AIS_REPACK", "True").lower() in ("true", "1")
+    ),
+    "VLLM_AIS_REPACK_DIR": lambda: os.getenv("VLLM_AIS_REPACK_DIR", ""),
+    # Sequential-read window for cache-hit loads (see loader docstring).
+    "VLLM_AIS_REPACK_WINDOW_MB": lambda: int(
+        os.getenv("VLLM_AIS_REPACK_WINDOW_MB", "32")
+    ),
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING": lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
     # Pad the weights for the moe kernel
@@ -2336,6 +2350,9 @@ def compile_factors() -> dict[str, object]:
         "VLLM_AIS_IO_THREADS",
         "VLLM_AIS_MERGE_GAP_KB",
         "VLLM_AIS_MERGE_MAX_KB",
+        "VLLM_AIS_REPACK",
+        "VLLM_AIS_REPACK_DIR",
+        "VLLM_AIS_REPACK_WINDOW_MB",
         # Runtime memory-plan persistence; does not affect compiled graphs.
         "VLLM_ENABLE_STARTUP_PLAN",
         # Location-only derived paths: where a cache/config directory lives
