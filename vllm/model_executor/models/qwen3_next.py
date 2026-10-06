@@ -17,6 +17,15 @@ import torch
 _LAYERPROBE_RECS: list = []
 _lp_n: list = []
 
+# ATTNINF isfinite knife switch, evaluated once at import: a per-layer
+# os.path.exists() is a posix.stat() call that Dynamo cannot trace (fatal
+# graph break under VLLM_COMPILE) and a needless stat on every layer
+# forward otherwise. Flag file is boot-created, so import time is
+# equivalent to the old per-forward check.
+_ATTNINF_ON = bool(os.environ.get("VLLM_ATTNINF")) or os.path.exists(
+    os.path.expanduser("~/int8-vllm/logs/serve_recipe_qwen38/ATTNINF")
+)
+
 
 def _layerprobe_proj(model) -> torch.Tensor | None:
     out = os.environ.get("VLLM_LAYERPROBE")
@@ -757,8 +766,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         if self.layer_type == "linear_attention":
             hidden_states = self.linear_attn(hidden_states=hidden_states)
         elif self.layer_type == "full_attention":
-            _attninf_on = os.environ.get("VLLM_ATTNINF") or os.path.exists(
-                "/home/curved/vllm-gfx908/logs/serve_recipe_qwen38/ATTNINF")
+            _attninf_on = _ATTNINF_ON
             _ain = torch.isfinite(hidden_states).all().item() if (
                 _attninf_on and not torch.cuda.is_current_stream_capturing()
             ) else True
@@ -846,8 +854,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 already_sequence_parallel=True,
             )
         else:
-            _ai_on = os.environ.get("VLLM_ATTNINF") or os.path.exists(
-                "/home/curved/vllm-gfx908/logs/serve_recipe_qwen38/ATTNINF")
+            _ai_on = _ATTNINF_ON
             _min_f = torch.isfinite(hidden_states).all().item() if (
                 _ai_on and not torch.cuda.is_current_stream_capturing()
             ) else True
