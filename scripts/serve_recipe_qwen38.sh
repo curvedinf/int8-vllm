@@ -255,6 +255,14 @@ fi
 # Spec-decode token budget; MNBT and NS remain tuning controls only.
 MNBT="${MNBT:-2048}"
 ARGS+=(--max-num-batched-tokens "${MNBT}")
+# LPT: cap per-step scheduled prefill tokens (long_prefill_token_threshold).
+# Default 256 since 2026-10-06: at MNBT=2048 a long prompt's 2k-token prefill
+# chunk stalls every concurrent decode for its whole duration (~100 ms/step
+# TPOT; a 32k prefill = ~16 back-to-back prefill steps), which reads as a
+# multi-second decode freeze under mixed load. 256-token chunks let decode
+# interleave between prefill chunks. The scheduler keeps chunk ends
+# block-aligned for the GDN/mamba hybrid machinery. 0 disables (legacy).
+ARGS+=(--long-prefill-token-threshold "${LPT:-256}")
 # KVMEM: optional pinned KV cache size in bytes (flag file or env).
 # Default 19.0 GB per GPU (2026-09-28): return 1.2 GB per GPU from the
 # previous 20.2 GB arena after recurrent ROCm OOMs at low KV occupancy.
