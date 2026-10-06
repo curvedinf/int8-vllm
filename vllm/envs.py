@@ -170,6 +170,16 @@ if TYPE_CHECKING:
     VLLM_FS_GPU_ALLOW_COMPAT: bool = True
     VLLM_AIS_LIB: str = "libhipfile.so.0"
     VLLM_AIS_STAGING_MB: int = 128
+    # Per-rank file-range reads for AIS weight loading (plan pass records the
+    # weight_loader chain's consumed slices; each TP rank reads only its own
+    # byte ranges instead of every tensor in full).
+    VLLM_AIS_PER_RANK: bool = True
+    # Read-fanout threads for per-rank range fills (strided shards arrive
+    # as ~15 KiB ranges; queue depth is the bottleneck, not bandwidth).
+    VLLM_AIS_IO_THREADS: int = 8
+    # Gap-tolerant merge for per-rank range fills (see getters below).
+    VLLM_AIS_MERGE_GAP_KB: int = 64
+    VLLM_AIS_MERGE_MAX_KB: int = 192
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
@@ -1397,6 +1407,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_AIS_LIB": lambda: os.getenv("VLLM_AIS_LIB", "libhipfile.so.0"),
     # Registered GPU staging arena size for AIS transfers.
     "VLLM_AIS_STAGING_MB": lambda: int(os.getenv("VLLM_AIS_STAGING_MB", "128")),
+    # Per-rank file-range reads (plan-pass recorder); disables to full reads.
+    "VLLM_AIS_PER_RANK": lambda: (
+        os.getenv("VLLM_AIS_PER_RANK", "True").lower() in ("true", "1")
+    ),
+    # Read-fanout threads for per-rank range fills.
+    "VLLM_AIS_IO_THREADS": lambda: int(os.getenv("VLLM_AIS_IO_THREADS", "8")),
+    # Gap-tolerant range merge for per-rank fills: hipFile 0.3.0 runs ~one
+    # IO per process (IOPS-bound), so reading neighbors' gaps in exchange
+    # for fewer/larger IOs wins until the aggregate NVMe bandwidth cap.
+    "VLLM_AIS_MERGE_GAP_KB": lambda: int(os.getenv("VLLM_AIS_MERGE_GAP_KB", "64")),
+    "VLLM_AIS_MERGE_MAX_KB": lambda: int(os.getenv("VLLM_AIS_MERGE_MAX_KB", "192")),
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING": lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
     # Pad the weights for the moe kernel
@@ -2311,6 +2332,10 @@ def compile_factors() -> dict[str, object]:
         "VLLM_FS_GPU_ALLOW_COMPAT",
         "VLLM_AIS_LIB",
         "VLLM_AIS_STAGING_MB",
+        "VLLM_AIS_PER_RANK",
+        "VLLM_AIS_IO_THREADS",
+        "VLLM_AIS_MERGE_GAP_KB",
+        "VLLM_AIS_MERGE_MAX_KB",
         # Runtime memory-plan persistence; does not affect compiled graphs.
         "VLLM_ENABLE_STARTUP_PLAN",
         # Location-only derived paths: where a cache/config directory lives

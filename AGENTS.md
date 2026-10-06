@@ -94,9 +94,12 @@ do not derive an alternate production configuration from archival material.
   0.3.0, ctypes — no new build deps). In-process it resolves to torch's
   bundled (patched 7.2) HIP runtime — one `libamdhip64.so.7`, verified by
   `scripts/fs_gpu_probe.py`. Weight loading goes direct-to-VRAM (no host
-  staging) when `VLLM_FS_GPU=weights` / the serve-script `AISW` flag file;
-  default off. Byte gate: `scripts/fs_gpu_weightcheck.py` (31.77 GiB target
-  + draft verified byte-identical, ledger AIS_W1).
+  staging) when `VLLM_FS_GPU=weights` / the serve-script `AISW` flag file
+  (production default since 2026-10-06). Per-rank reads via a plan-pass
+  recorder (`scripts/fs_gpu_plan_test.py` gates the geometry) + gap-tolerant
+  range merge; hipFile 0.3.0 runs ~one IO per process (threads/handles/async
+  make no difference — probed), so merge caps trade bytes for IOPS
+  (VLLM_AIS_MERGE_*). Byte gate: `scripts/fs_gpu_weightcheck.py`.
 
 ## Build
 

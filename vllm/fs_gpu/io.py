@@ -11,6 +11,8 @@ future KV pages, whose layout we control).
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import torch
 
 from vllm.fs_gpu.ais import FsGpuError
@@ -60,6 +62,71 @@ def read_into_tensor(
         fs_gpu_stats.reads += 1
     fs_gpu_stats.bytes_read += total
     return total
+
+
+def merge_ranges(
+    ranges: list[tuple[int, int, int]],
+    max_gap: int,
+    max_run: int,
+) -> list[tuple[int, int, int]]:
+    """Merge file-adjacent (tensor_off, file_off, nbytes) ranges.
+
+    hipFile 0.3.0 executes ~one IO per process (~9k IOPS regardless of
+    threads/handles/async — probed), so strided shard reads are
+    latency-bound, not bandwidth-bound. Merging a rank's range with its
+    neighbors' gaps trades extra bytes (which the NVMe has headroom for)
+    for far fewer, larger IOs. ``max_gap`` caps the wasteful gap willing
+    to be read; ``max_run`` caps the merged IO size.
+    """
+    if not ranges:
+        return ranges
+    out = [ranges[0]]
+    for bo, fo, n in ranges[1:]:
+        cur_bo, cur_fo, cur_n = out[-1]
+        gap = fo - (cur_fo + cur_n)
+        if 0 <= gap <= max_gap and cur_n + gap + n <= max_run:
+            out[-1] = (cur_bo, cur_fo, cur_n + gap + n)
+        else:
+            out.append((bo, fo, n))
+    return out
+
+
+def fill_ranges(
+    f: RegisteredFile,
+    tensor: torch.Tensor,
+    ranges: list[tuple[int, int, int]],
+    executor: ThreadPoolExecutor | None = None,
+) -> None:
+    """Read checkpoint byte ranges directly into a device tensor.
+
+    ``ranges`` are ``(tensor_byte_offset, file_offset, nbytes)`` triples.
+    The tensor's base is registered for the duration, and each range is
+    issued as one raw AIS read with an explicit buffer offset — unaligned
+    file/buffer offsets and sizes are fine (probe-verified: hipFile bounces
+    internally). With an executor, reads are fanned out across its threads;
+    ctypes releases the GIL, so they genuinely overlap.
+    """
+    if not tensor.is_contiguous():
+        raise FsGpuError("fill_ranges: non-contiguous destination", 5000 + 22)
+    base = tensor.data_ptr()
+    nbytes = tensor.numel() * tensor.element_size()
+    f.ais.buf_register(base, nbytes)
+    try:
+
+        def _one(r: tuple[int, int, int]) -> None:
+            buf_off, file_off, n = r
+            f.ais.read(f.fh, base, n, file_off, buf_off)
+
+        if executor is not None and len(ranges) > 16:
+            list(executor.map(_one, ranges))
+        else:
+            for r in ranges:
+                _one(r)
+    finally:
+        f.ais.buf_deregister(base)
+    read = sum(n for _, _, n in ranges)
+    fs_gpu_stats.bytes_read += read
+    fs_gpu_stats.reads += len(ranges)
 
 
 def write_from_tensor(
