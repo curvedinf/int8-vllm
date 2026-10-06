@@ -101,6 +101,13 @@ do not derive an alternate production configuration from archival material.
   ~one IO per process (threads/handles/async make no difference — probed),
   hence the cache's windowed sequential reads. Byte gate for the uncached
   path: `scripts/fs_gpu_weightcheck.py`.
+- KV prefix-cache hierarchy: the recipe enables the stock
+  `TieringOffloadingSpec` (VRAM -> 12 GiB pinned RAM LRU -> NVMe fs tier)
+  via the serve-script `DISKTIER` lever (default 50 GiB, 0=off; root
+  `~/.cache/vllm/kv_tier`). All tiering policy is the existing manager's
+  (write-through cascade, staged promotion, CPU LRU); the only fork
+  addition is `FileSystemTierManager.max_bytes` — oldest-file disk-budget
+  reclamation, no scheduling.
 
 ## Build
 

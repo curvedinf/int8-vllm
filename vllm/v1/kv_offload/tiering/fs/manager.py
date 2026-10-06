@@ -16,6 +16,7 @@ File naming:  <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
 """
 
 import functools
+import heapq
 import json
 import os
 from collections.abc import Iterable
@@ -115,6 +116,7 @@ class FileSystemTierManager(SecondaryTierManager):
         root_dir: str,
         n_read_threads: int = 16,
         n_write_threads: int = 16,
+        max_bytes: int | None = None,
         enable_kv_events: bool = False,
         locality: str | None = None,
     ):
@@ -127,6 +129,12 @@ class FileSystemTierManager(SecondaryTierManager):
             root_dir: Root directory for block files.
             n_read_threads: Number of read-priority I/O threads.
             n_write_threads: Number of write-priority I/O threads.
+            max_bytes: Disk budget for this tier in bytes (None = unbounded).
+                No scheduling is introduced: the tiering manager's existing
+                cascade/promotion policy and the CPU tier's LRU decide what
+                is stored; this only bounds the directory by reclaiming the
+                oldest files (filesystem mtime as the recency record) once
+                the budget is exceeded.
             enable_kv_events: Emit BlockStored KV events for blocks
                 successfully stored to this tier. Effective only when KV
                 cache events are enabled globally (kv_events_config).
@@ -149,6 +157,9 @@ class FileSystemTierManager(SecondaryTierManager):
                 )
         # Keys of in-flight store jobs, tracked only when events are enabled.
         self._store_job_keys: dict[JobId, list[OffloadKey]] = {}
+        # Paths of in-flight store jobs, tracked for quota accounting
+        # regardless of events.
+        self._store_job_paths: dict[JobId, list[str]] = {}
         # Keys of in-flight load (promotion) jobs, so a failed load can mark
         # its own cached lookup verdicts False (see get_finished_jobs).
         self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
@@ -203,6 +214,96 @@ class FileSystemTierManager(SecondaryTierManager):
 
         self._lookup_manager = FsAsyncLookupManager(tier=self, tier_type=self.tier_type)
 
+        # Disk budget. Accounting is exact: a re-store of an existing
+        # content-hash file replaces it (atomic tmp+rename) and is not
+        # double-counted; files left by previous runs are scanned in.
+        self._max_bytes = max_bytes
+        self._live_files: dict[str, tuple[float, int]] = {}  # path -> (mtime, size)
+        self._evict_heap: list[tuple[float, int, str]] = []  # (mtime, seq, path)
+        self._evict_seq = 0
+        self._bytes_on_disk = 0
+        self._logged_eviction = False
+        if self._max_bytes is not None:
+            self._scan_existing_files()
+            logger.info(
+                "fs KV tier '%s': quota %.2f GiB, existing usage %.2f GiB "
+                "across %d file(s)",
+                tier_type,
+                self._max_bytes / (1 << 30),
+                self._bytes_on_disk / (1 << 30),
+                len(self._live_files),
+            )
+
+    def _scan_existing_files(self) -> None:
+        config_name = os.path.basename(self.file_mapper.get_config_file_path())
+        for dirpath, _dirs, files in os.walk(self.file_mapper.base_path):
+            for name in files:
+                if name == config_name:
+                    continue
+                path = os.path.join(dirpath, name)
+                try:
+                    st = os.stat(path)
+                except OSError:
+                    continue
+                self._add_live_file(path, st.st_mtime, st.st_size)
+
+    def _add_live_file(self, path: str, mtime: float, size: int) -> None:
+        self._live_files[path] = (mtime, size)
+        self._evict_seq += 1
+        heapq.heappush(self._evict_heap, (mtime, self._evict_seq, path))
+        self._bytes_on_disk += size
+
+    def _account_stored(self, paths: list[str]) -> None:
+        for path in paths:
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue  # store failed or file already reclaimed
+            cur = self._live_files.get(path)
+            if cur is not None:
+                if cur[0] == st.st_mtime:
+                    continue  # unchanged re-store
+                self._bytes_on_disk -= cur[1]
+            self._add_live_file(path, st.st_mtime, st.st_size)
+        self._enforce_quota()
+
+    def _enforce_quota(self) -> None:
+        if self._max_bytes is None:
+            return
+        evicted = 0
+        while self._bytes_on_disk > self._max_bytes and self._evict_heap:
+            mtime, _seq, path = heapq.heappop(self._evict_heap)
+            cur = self._live_files.get(path)
+            if cur is None or cur[0] != mtime:
+                continue  # stale heap entry (file re-stored or already gone)
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.debug("fs KV tier '%s': could not reclaim %s", self.tier_type, path)
+                continue
+            self._bytes_on_disk -= cur[1]
+            del self._live_files[path]
+            try:
+                os.rmdir(os.path.dirname(path))  # best-effort hash-dir cleanup
+            except OSError:
+                pass
+            evicted += 1
+            if evicted >= 4096:
+                break  # bound scheduler-thread work per tick
+        if evicted:
+            log = logger.info_once if not self._logged_eviction else logger.debug
+            self._logged_eviction = True
+            log(
+                "fs KV tier '%s': reclaimed %d file(s); usage %.2f GiB of "
+                "%.2f GiB quota",
+                self.tier_type,
+                evicted,
+                self._bytes_on_disk / (1 << 30),
+                self._max_bytes / (1 << 30),
+            )
+
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         return RequestOffloadingContext()
@@ -219,9 +320,11 @@ class FileSystemTierManager(SecondaryTierManager):
         keys = list(job_metadata.keys)
         if self.events is not None:
             self._store_job_keys[job_metadata.job_id] = keys
+        paths = [self.file_mapper.get_file_name(key) for key in keys]
+        self._store_job_paths[job_metadata.job_id] = paths
         task = functools.partial(
             batch_store_block,
-            [self.file_mapper.get_file_name(key) for key in keys],
+            paths,
             self._primary_kv_view,
             [int(bid) * self._block_size for bid in job_metadata.block_ids],
             self._block_size,
@@ -274,6 +377,9 @@ class FileSystemTierManager(SecondaryTierManager):
         as a miss here (scheduler thread)."""
         results = []
         for job_id, success, transfer_time in self._pool.get_finished():
+            store_paths = self._store_job_paths.pop(job_id, None)
+            if success and store_paths:
+                self._account_stored(store_paths)
             if self.events is not None:
                 keys = self._store_job_keys.pop(job_id, None)
                 if success and keys:

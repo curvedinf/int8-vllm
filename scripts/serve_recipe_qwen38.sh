@@ -174,7 +174,23 @@ if [[ "${OFFLOAD:-1}" == "1" ]]; then
     CPUTIER="$(tr -d '[:space:]' < "${_cputier_flag}")"
   fi
   CPUTIER="${CPUTIER:-8589934592}"
-  ARGS+=(--kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":'"${CPUTIER}"'}}')
+  # DISKTIER flag file / env: NVMe L3 prefix-cache tier behind the CPU tier
+  # (bytes; 0 disables). Uses the existing tiering machinery as-is —
+  # write-through cascade from the RAM tier, staged promotion, CPU-tier LRU;
+  # the fs tier only enforces a disk budget by reclaiming oldest files.
+  # Default 50 GiB since 2026-10-06 (~4x the RAM tier horizon at the
+  # current page geometry).
+  _disktier_flag="${LOG_DIR}/DISKTIER"
+  if [[ -f "${_disktier_flag}" ]]; then
+    DISKTIER="$(tr -d '[:space:]' < "${_disktier_flag}")"
+  fi
+  DISKTIER="${DISKTIER:-53687091200}"
+  DISKROOT="${DISKROOT:-${HOME}/.cache/vllm/kv_tier}"
+  if [[ "${DISKTIER}" != "0" ]]; then
+    ARGS+=(--kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":'"${CPUTIER}"',"spec_name":"TieringOffloadingSpec","secondary_tiers":[{"type":"fs","root_dir":"'"${DISKROOT}"'","max_bytes":'"${DISKTIER}"'}]}}')
+  else
+    ARGS+=(--kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":'"${CPUTIER}"'}}')
+  fi
 fi
 # OFFLOAD flag file (diagnostic lever for systemd-driven restarts).
 _offload_flag="${LOG_DIR}/OFFLOAD"
