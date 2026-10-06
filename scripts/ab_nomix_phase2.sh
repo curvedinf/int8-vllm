@@ -3,7 +3,7 @@
 set -u
 K="$(cat /tmp/.vk)"
 export VLLM_API_KEY="$K" VLLM_STEPPHASE=1 VLLM_SCHED_NO_MIX=1
-cd /home/curved/vllm-gfx908
+cd /home/curved/int8-vllm
 
 scripts/serve_recipe_qwen38.sh stop >/dev/null 2>&1
 sleep 8

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="${HOME}/vllm-gfx908"
+ROOT_DIR="${HOME}/int8-vllm"
 VENV="${ROOT_DIR}/.venv"
 MODEL_DIR="${MODEL_DIR:-${HOME}/models/Qwen3.8-27B-PTQR-R10S60}"  # PTQR-retrained (ledger PTQR_P1_R10S60_FINAL: KLD 0.0069 vs 0.0110 deployed, acceptance 3.88)
 SERVED_MODEL_NAME="qwen3.8-27b-gptq8"
@@ -358,29 +358,29 @@ fi
 
 # ROW0RING flag file: GDN init-state norm ring (build-spec A instrument).
 if [[ -f "${LOG_DIR}/ROW0RING" ]]; then
-  VLLM_ROW0_RING="/home/curved/vllm-gfx908/logs/garble/row0"
+  VLLM_ROW0_RING="${ROOT_DIR}/logs/garble/row0"
 fi
 
 # KVLINE flag file: target anchor-slot K/V checksums across the draft forward.
 if [[ -f "${LOG_DIR}/KVLINE" ]]; then
-  VLLM_KVLINE_RING="/home/curved/vllm-gfx908/logs/garble/kvline"
+  VLLM_KVLINE_RING="${ROOT_DIR}/logs/garble/kvline"
 fi
 
 # KVLINE3 flag file: mamba checkpoint-window lineage across the verify
 # forward (pre/post-forward hooks in mamba_hybrid align machinery).
 if [[ -f "${LOG_DIR}/KVLINE3" ]]; then
-  VLLM_KVLINE3="/home/curved/vllm-gfx908/logs/garble/kvline3"
+  VLLM_KVLINE3="${ROOT_DIR}/logs/garble/kvline3"
 fi
 
 # UAREAD flag file: attention READ audit — reference-attend row 0 from the
 # cache bytes and compare vs the unified-attention kernel output.
 if [[ -f "${LOG_DIR}/UAREAD" ]]; then
-  VLLM_UA_READAUDIT="/home/curved/vllm-gfx908/logs/garble/ua_read"
+  VLLM_UA_READAUDIT="${ROOT_DIR}/logs/garble/ua_read"
 fi
 
 # GDNROWAUDIT flag file: GDN spec-kernel row-0 reference audit.
 if [[ -f "${LOG_DIR}/GDNROWAUDIT" ]]; then
-  VLLM_GDN_ROWAUDIT="/home/curved/vllm-gfx908/logs/garble/gdn_rowaudit"
+  VLLM_GDN_ROWAUDIT="${ROOT_DIR}/logs/garble/gdn_rowaudit"
 fi
 
 # KVG8 flag file: g8+f16 KV diagnostic mode (target+draft int8 caches get
@@ -474,13 +474,13 @@ fi
 # ALIGNPROBE flag file: log every align-mode mamba boundary migration with
 # the block-table columns the precopy reads (the 1023-lock NaN onset hunt).
 if [[ -f "${LOG_DIR}/ALIGNPROBE" ]]; then
-  VLLM_ALIGN_PROBE="/home/curved/vllm-gfx908/logs/garble/align_probe.jsonl"
+  VLLM_ALIGN_PROBE="${ROOT_DIR}/logs/garble/align_probe.jsonl"
 fi
 
 # GDNPROBE flag file: per-step NaN scan of each live request's running mamba
 # state block per layer, eager (sees the replayed forward's real state).
 if [[ -f "${LOG_DIR}/GDNPROBE" ]]; then
-  VLLM_GDN_PROBE="/home/curved/vllm-gfx908/logs/garble/gdn_probe.jsonl"
+  VLLM_GDN_PROBE="${ROOT_DIR}/logs/garble/gdn_probe.jsonl"
 fi
 
 # CONVGUARD flag file: count conv-kernel old-guard-condition hits per step

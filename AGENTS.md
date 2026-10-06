@@ -1,6 +1,6 @@
 # Agent Instructions for int8-vllm (MI100 fork)
 
-Operational guide for AI agents working in this repository (the `vllm-gfx908`
+Operational guide for AI agents working in this repository (the `int8-vllm`
 checkout, remote `curvedinf/int8-vllm`, authoritative branch `main`).
 Read this before
 building, serving, testing, or syncing. This file is fork-specific; the
@@ -54,7 +54,7 @@ do not derive an alternate production configuration from archival material.
 
 ```
 <parent>/
-├── vllm-gfx908/   branch main   (this repo — curvedinf/int8-vllm; serving venv .venv/)
+├── int8-vllm/      branch main   (this repo — curvedinf/int8-vllm; serving venv .venv/)
 └── aiter/         branch main   (curvedinf/int8-aiter; PYTHONPATH consumer, not pip-installed)
 ```
 

@@ -2,7 +2,7 @@
 # E2: sweep vLLM CUSTOM AR geometries on 4 GPUs. One combo at a time,
 # 4 ranks launched concurrently, CSV on stdout.
 set -uo pipefail
-cd "${HOME}/vllm-gfx908"
+cd "${HOME}/int8-vllm"
 export ROCM_PATH=/opt/rocm
 export LD_LIBRARY_PATH=/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 export GPU_ARCHS=gfx908 PYTORCH_ROCM_ARCH=gfx908

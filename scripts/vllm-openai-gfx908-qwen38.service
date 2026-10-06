@@ -9,12 +9,12 @@ Type=simple
 User=curved
 Group=curved
 SupplementaryGroups=video render
-WorkingDirectory=/home/curved/vllm-gfx908
+WorkingDirectory=/home/curved/int8-vllm
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=/etc/llama/llama-api.env
-ExecStartPre=/home/curved/vllm-gfx908/scripts/serve_recipe_qwen38.sh stop
-ExecStart=/home/curved/vllm-gfx908/scripts/serve_recipe_qwen38.sh supervise
-ExecStop=/home/curved/vllm-gfx908/scripts/serve_recipe_qwen38.sh stop
+ExecStartPre=/home/curved/int8-vllm/scripts/serve_recipe_qwen38.sh stop
+ExecStart=/home/curved/int8-vllm/scripts/serve_recipe_qwen38.sh supervise
+ExecStop=/home/curved/int8-vllm/scripts/serve_recipe_qwen38.sh stop
 Restart=always
 RestartSec=10
 KillSignal=SIGTERM

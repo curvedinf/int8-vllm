@@ -7,7 +7,7 @@
 # Usage: ab_interleaved.sh <pairs> <tag> <result_csv>
 # Candidate env: AITER_CONFIG_GEMM_A8W8=.../a8w8_tuned_gemm_msmall.csv
 set -u
-ROOT=/home/curved/vllm-gfx908
+ROOT=/home/curved/int8-vllm
 PAIRS="${1:-3}"
 TAG="${2:-abgemm}"
 CSV="${3:-$ROOT/logs/goal_opt/${TAG}_pairs.csv}"

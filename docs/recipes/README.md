@@ -10,7 +10,7 @@ alternative production recipes.
 
 | Repo | Branch | Role |
 |---|---|---|
-| `vllm-gfx908` (this repo) | `main` (`curvedinf/int8-vllm`) | serving engine, int8 kernels |
+| `int8-vllm` (this repo) | `main` (`curvedinf/int8-vllm`) | serving engine, int8 kernels |
 | sibling `../aiter` checkout | `main` (`curvedinf/int8-aiter`) | int8 unified-attention + gfx908 tuning (PYTHONPATH) |
 
 The serving venv carries a deliberate ROCm **runtime** override:
