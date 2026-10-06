@@ -163,6 +163,13 @@ if TYPE_CHECKING:
     # median (0.0966 -> 0.0153) and lifted greedy agreement 24 -> 38/52 vs
     # the aiter trunc path. "aiter" retains the legacy trunc kernel.
     VLLM_GFX908_ACT_QUANT: str = "round"
+    # FS->GPU direct IO via AMD Infinity Storage (hipFile). See the
+    # getters below; these only affect weight loading (and future FS-backed
+    # tiers), never compiled graphs.
+    VLLM_FS_GPU: str = "off"
+    VLLM_FS_GPU_ALLOW_COMPAT: bool = True
+    VLLM_AIS_LIB: str = "libhipfile.so.0"
+    VLLM_AIS_STAGING_MB: int = 128
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
@@ -1375,6 +1382,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_GFX908_FUSED_NORM_QUANT", "False").lower() in ("true", "1")
     ),
     "VLLM_GFX908_ACT_QUANT": lambda: os.getenv("VLLM_GFX908_ACT_QUANT", "round"),
+    # FS->GPU direct IO (AMD Infinity Storage / hipFile). "weights" routes
+    # safetensors loading through vllm.fs_gpu (no host staging); "all"
+    # additionally opts in future consumers (KV tier, page tier). "off"
+    # keeps the stock host-staged paths.
+    "VLLM_FS_GPU": lambda: os.getenv("VLLM_FS_GPU", "off"),
+    # When AIS cannot initialize (no lib, unsupported fs, non-safetensors
+    # checkpoint), fall back to the stock loader with a loud warning
+    # instead of failing the boot. Mid-load failures are always loud.
+    "VLLM_FS_GPU_ALLOW_COMPAT": lambda: (
+        os.getenv("VLLM_FS_GPU_ALLOW_COMPAT", "True").lower() in ("true", "1")
+    ),
+    # AIS shared-library soname/path override (default: system soname).
+    "VLLM_AIS_LIB": lambda: os.getenv("VLLM_AIS_LIB", "libhipfile.so.0"),
+    # Registered GPU staging arena size for AIS transfers.
+    "VLLM_AIS_STAGING_MB": lambda: int(os.getenv("VLLM_AIS_STAGING_MB", "128")),
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING": lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
     # Pad the weights for the moe kernel
@@ -2283,6 +2305,12 @@ def compile_factors() -> dict[str, object]:
         "VLLM_DEBUG_DUMP_PATH",
         "VLLM_PORT",
         "VLLM_CACHE_ROOT",
+        # FS->GPU direct IO (weight-loading path / future tiers); cannot
+        # affect compiled graphs.
+        "VLLM_FS_GPU",
+        "VLLM_FS_GPU_ALLOW_COMPAT",
+        "VLLM_AIS_LIB",
+        "VLLM_AIS_STAGING_MB",
         # Runtime memory-plan persistence; does not affect compiled graphs.
         "VLLM_ENABLE_STARTUP_PLAN",
         # Location-only derived paths: where a cache/config directory lives

@@ -90,6 +90,13 @@ do not derive an alternate production configuration from archival material.
 - ROCm env for any GPU work: `ROCM_PATH=/opt/rocm`,
   `LD_LIBRARY_PATH=/opt/rocm/lib`, `PYTORCH_ROCM_ARCH=gfx908`,
   `GPU_ARCHS=gfx908`, `VLLM_TARGET_DEVICE=rocm`.
+- FS->GPU direct IO: `vllm/fs_gpu` wraps AMD Infinity Storage (hipFile
+  0.3.0, ctypes — no new build deps). In-process it resolves to torch's
+  bundled (patched 7.2) HIP runtime — one `libamdhip64.so.7`, verified by
+  `scripts/fs_gpu_probe.py`. Weight loading goes direct-to-VRAM (no host
+  staging) when `VLLM_FS_GPU=weights` / the serve-script `AISW` flag file;
+  default off. Byte gate: `scripts/fs_gpu_weightcheck.py` (31.77 GiB target
+  + draft verified byte-identical, ledger AIS_W1).
 
 ## Build
 

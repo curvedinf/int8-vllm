@@ -324,6 +324,13 @@ if [[ -f "${LOG_DIR}/GDN_TINY_BA" ]]; then
   VLLM_GFX908_TINY_BA="$(tr -d '[:space:]' < "${LOG_DIR}/GDN_TINY_BA")"
 fi
 
+# AISW flag file: direct-to-GPU (AMD Infinity Storage / hipFile) weight
+# loading via vllm.fs_gpu — safetensors reads land in VRAM without host
+# staging. Default off (stock loader); VLLM_FS_GPU env mirrors this lever.
+if [[ -f "${LOG_DIR}/AISW" ]]; then
+  VLLM_FS_GPU=weights
+fi
+
 # DFCACHEBYPASS flag file: dense draft-logits cache rewrite (diagnostic
 # A/B for the garble; requires DFLEAGER since python must run per round).
 if [[ -f "${LOG_DIR}/DFCACHEBYPASS" ]]; then
@@ -595,6 +602,7 @@ start_server() {
   VLLM_DF_CACHE_BYPASS="${VLLM_DF_CACHE_BYPASS:-}" \
   VLLM_OFFLOAD_LAYOUT_DUMP="${VLLM_OFFLOAD_LAYOUT_DUMP:-}" \
   VLLM_GFX908_ACT_QUANT="${VLLM_GFX908_ACT_QUANT:-round}" \
+  VLLM_FS_GPU="${VLLM_FS_GPU:-off}" \
   VLLM_GFX908_ATTN_WARPS="${VLLM_GFX908_ATTN_WARPS:-2}" \
   VLLM_OFFLOAD_FAKESTORES="${VLLM_OFFLOAD_FAKESTORES:-}" \
   VLLM_OFFLOAD_NOEVENTS="${VLLM_OFFLOAD_NOEVENTS:-}" \

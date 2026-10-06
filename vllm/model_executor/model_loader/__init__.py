@@ -30,6 +30,7 @@ logger = init_logger(__name__)
 # Reminder: Please update docstring in `LoadConfig`
 # if a new load format is added here
 LoadFormats = Literal[
+    "ais",
     "auto",
     "hf",
     "dummy",
@@ -116,9 +117,25 @@ def register_model_loader(load_format: str):
     return _wrapper
 
 
+def _get_ais_loader_cls() -> type[BaseModelLoader]:
+    from vllm.model_executor.model_loader.ais_loader import AisModelLoader
+
+    return AisModelLoader
+
+
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     """Get a model loader based on the load format."""
     load_format = load_config.load_format
+    if load_format == "ais":
+        return _get_ais_loader_cls()(load_config)
+    if load_format in ("auto", "hf"):
+        # Fork: opt-in direct-to-GPU (AIS) weight loading for safetensors
+        # checkpoints; selection is env-driven so systemd boots can A/B it
+        # without touching the serve contract.
+        from vllm.fs_gpu import fs_gpu_enabled
+
+        if fs_gpu_enabled("weights"):
+            return _get_ais_loader_cls()(load_config)
     if load_format not in _LOAD_FORMAT_TO_MODEL_LOADER:
         raise ValueError(f"Load format `{load_format}` is not supported")
     return _LOAD_FORMAT_TO_MODEL_LOADER[load_format](load_config)
