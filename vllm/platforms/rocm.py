@@ -1026,10 +1026,15 @@ class RocmPlatform(Platform):
             if not cache_config.user_specified_block_size:
                 cache_config.block_size = 32
 
-        # MI100 (gfx908): force FULL_DECODE_ONLY graphs (PIECEWISE hangs at
-        # TP>1), and disable torch.compile / Inductor (fusions unavailable
-        # on ROCm, produces garbage or slowdown). Both gated by
-        # VLLM_MI100_TORCH_COMPILE=1 as an escape hatch.
+        # MI100 (gfx908): default to FULL_DECODE_ONLY graphs and no
+        # torch.compile. The historical "PIECEWISE hangs at TP>1" was a
+        # crash loop, not a hang: a per-layer os.path.exists() in the
+        # model forward (ATTNINF knife) is a fatal Dynamo graph break,
+        # and the restart churn re-ran the compile from zero (fixed
+        # 2026-10-06, qwen3_next.py _ATTNINF_ON; ledger
+        # PIECEWISE_UNBAN_20261006). The serving recipe sets
+        # VLLM_MI100_TORCH_COMPILE=1 to keep piecewise graphs enabled;
+        # this override remains the off-switch for that.
         if _ON_GFX908:
             from vllm.config.compilation import CompilationMode
 
