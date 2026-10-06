@@ -399,6 +399,10 @@ clean. NS=5 is off the menu (garbled 4k leg despite clean screens). Ledger:
   load (0.04 MB/min vs 29 MB/min). If it ever returns, the signature is
   worker RssAnon climbing 15-30 MB/min/worker under load, and
   59552/21216-byte `__libc_malloc` calls from `libamdhip64` in bpftrace.
+  With the leak fixed, the CPU KV tier is restored to its full 12 GiB
+  (`CPUTIER` flag file = 12884901888, 2026-10-06) — the Oct-2 12→8 GiB
+  shrink was a pressure mitigation that is no longer needed; host
+  headroom after boot: ~29 G available.
 - **2026-09-26 — Deep-context G128 KV address overflow fixed.** The five
   Gluon attention cores multiplied physical KV block IDs by page strides in
   int32, wrapping valid target addresses above 2 GiB and group-scale addresses
