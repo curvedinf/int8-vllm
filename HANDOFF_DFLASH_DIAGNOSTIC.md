@@ -10,7 +10,7 @@ server must remain stopped. Any files created by the agent must be owned by
 ## Current state
 
 - Repo: `/home/curved/vllm-gfx908`
-- Service: `vllm-openai-gfx908-qwen38.service`
+- Service: `vllm.service`
 - Service is currently `inactive`; no vLLM engine/API process is running.
 - All created/modified files and diagnostic artifacts were checked as owned by
   `curved:curved`.

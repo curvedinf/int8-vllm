@@ -7,7 +7,7 @@ BF16=/home/curved/models/dflash2-bf16-with-tokenizer
 INT8=/home/curved/.cache/huggingface/dflash2-int8/Qwen3.8-27B-DFlash2-GPTQ-8bit
 KEY="$(tr -d '\r\n' </etc/llama/llama-api.key)"
 
-systemctl stop vllm-openai-gfx908-qwen38.service
+systemctl stop vllm.service
 install -d -o curved -g curved "$OUT"
 
 stop_server() {

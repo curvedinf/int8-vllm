@@ -101,7 +101,7 @@ The script encodes the full intended feature set:
 the implementation dispatches AITER A8W8 at every M. The launcher blocklists
 `TritonW8A16LinearKernel` to prevent silently reverting to the old path.
 
-systemd: `scripts/vllm-openai-gfx908-qwen38.service` (conflicts with the
+systemd: `scripts/vllm.service` (unit name `vllm`) (conflicts with the
 retired qwen36 unit).
 
 ## Models

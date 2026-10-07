@@ -181,8 +181,8 @@ attention tuning
 scripts/serve_recipe_qwen38.sh {start|stop|restart|status}
 
 # systemd
-sudo cp scripts/vllm-openai-gfx908-qwen38.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now vllm-openai-gfx908-qwen38
+sudo cp scripts/vllm.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now vllm
 ```
 
 The complete flag contract (env pins, dtypes, spec config, NS, levers) is
