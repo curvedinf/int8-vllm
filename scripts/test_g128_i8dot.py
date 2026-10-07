@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Correctness + speed gate for the gfx908_g128_i8dot decode core."""
+import os
 import sys
 import time
 
@@ -96,13 +97,15 @@ def run_kernel(packed, k, v, g8, g8v, q, CTX):
     seqused = torch.full((SEQS,), CTX, device=dev, dtype=torch.int32)
 
     total_q = SEQS * QTOK
-    segm_out = torch.zeros((512, NQ, SPLITS, D), dtype=torch.float32, device=dev)
-    segm_max = torch.full((512, NQ, SPLITS), -1e30, dtype=torch.float32, device=dev)
-    segm_sum = torch.zeros((512, NQ, SPLITS), dtype=torch.float32, device=dev)
+    segm_out = torch.full((512, NQ, SPLITS, D), float('nan'), dtype=torch.float32, device=dev)
+    segm_max = torch.full((512, NQ, SPLITS), 123.0, dtype=torch.float32, device=dev)
+    segm_sum = torch.full((512, NQ, SPLITS), 5.0, dtype=torch.float32, device=dev)
     out = torch.empty((total_q, NQ, D), dtype=torch.bfloat16, device=dev)
 
     nblocks = int(cu[-1].item()) // 10 + SEQS
     grid = (nblocks, SPLITS)
+    TILE = int(os.environ.get("I8_TILE", "64"))
+    STAGES = int(os.environ.get("I8_STAGES", "1"))
     _g128_i8dot_kernel[grid](
         q, k, v, g8, g8v, bt, seqused, cu,
         segm_out, segm_max, segm_sum,
@@ -114,8 +117,9 @@ def run_kernel(packed, k, v, g8, g8v, q, CTX):
         k_stride0=k.stride(0), k_stride1=k.stride(1), k_stride2=k.stride(2),
         v_stride0=v.stride(0), v_stride1=v.stride(1), v_stride2=v.stride(2),
         s_stride0=g8.stride(0), s_stride1=g8.stride(1), s_stride2=g8.stride(2),
-        ROWS=64, TILE=64, D=D, DG=DG,
+        ROWS=64, TILE=TILE, D=D, DG=DG,
         num_warps=4,
+        num_stages=STAGES,
     )
 
     reduce_segments[(total_q, NQ)](

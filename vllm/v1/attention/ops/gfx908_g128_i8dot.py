@@ -111,11 +111,17 @@ def _g128_i8dot_kernel(
     l_i = tl.zeros((ROWS,), dtype=tl.float32)
     acc = tl.zeros((ROWS, D), dtype=tl.float32)
 
-    tiles_per_seg = tl.cdiv(seq_len, splits * TILE)
-    lo = seg * tiles_per_seg
-    if lo * TILE >= seq_len:
+    # Segmentation MUST follow the reduce's 32-token-unit contract (the
+    # m64 layout): tiles_per_seg is defined in 32-token tiles regardless
+    # of this kernel's TILE, so the written segment count and boundaries
+    # match reduce_segments exactly.
+    tps32 = tl.cdiv(seq_len, splits * 32)
+    seg_lo_tok = seg * tps32 * 32
+    if seg_lo_tok >= seq_len:
         return
-    hi = tl.minimum((seg + 1) * tiles_per_seg, tl.cdiv(max_prefix, TILE))
+    seg_hi_tok = tl.minimum((seg + 1) * tps32 * 32, max_prefix)
+    lo = seg_lo_tok // TILE
+    hi = tl.cdiv(seg_hi_tok, TILE)
 
     offs_n = tl.arange(0, TILE)
     offs_dv = tl.arange(0, D)
@@ -124,7 +130,9 @@ def _g128_i8dot_kernel(
         physical = tl.load(
             BT + seq * bt_stride + (j * TILE) // block_size
         ).to(tl.int64)
-        kv_valid = tl.minimum(TILE, max_prefix - j * TILE)
+        kv_valid = tl.minimum(
+            tl.minimum(TILE, seg_hi_tok - j * TILE), max_prefix - j * TILE
+        )
         valid_n = offs_n < kv_valid
 
         kb = K + physical * k_stride0 + slot * k_stride1
@@ -151,8 +159,8 @@ def _g128_i8dot_kernel(
 
         kvpos = j * TILE + offs_n
         mask = qvalid[:, None] & (kvpos[None, :] < max_prefix) & (
-            kvpos[None, :] <= context + qpos[:, None]
-        )
+            kvpos[None, :] < seg_hi_tok
+        ) & (kvpos[None, :] <= context + qpos[:, None])
         scores = tl.where(mask, scores, float("-inf"))
 
         m_new = tl.maximum(m_i, tl.max(scores, axis=1))
