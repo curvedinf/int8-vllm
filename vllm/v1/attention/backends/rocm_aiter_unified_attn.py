@@ -576,6 +576,14 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                     )
                     os.environ.setdefault("VLLM_UA_3D_MAXQ", "8")
 
+                _g8t = getattr(self, "_g8_attntrace", None)
+                if _g8t is None and os.environ.get("VLLM_ATTNTRACE") is not None:
+                    _g8t = self._g8_attntrace = {"k": 0.0, "n": 0}
+                _g8ev0 = (
+                    torch.cuda.Event(enable_timing=True) if _g8t is not None else None
+                )
+                if _g8ev0 is not None:
+                    _g8ev0.record()
                 triton_unified_attention(
                     q=query[:num_actual_tokens],
                     k=key_cache,
@@ -603,6 +611,22 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                     g8_v_scale=self._g8_v,
                     **_segm_kw,
                 )
+                if _g8ev0 is not None:
+                    _g8ev1 = torch.cuda.Event(enable_timing=True)
+                    _g8ev1.record()
+                    if not torch.cuda.is_current_stream_capturing():
+                        torch.cuda.synchronize()
+                        _g8t["k"] += _g8ev0.elapsed_time(_g8ev1)
+                        _g8t["n"] += 1
+                        if _g8t["n"] % 100 == 0:
+                            print(
+                                f"[g8-attntrace] calls {_g8t['n']} | kernel "
+                                f"{_g8t['k']/_g8t['n']*1000:8.1f} us/call | "
+                                f"maxk {max_seqlen_k} maxq {max_seqlen_q} "
+                                f"qrows {num_actual_tokens}",
+                                flush=True,
+                            )
+                            _g8t.update(k=0.0, n=0)
                 _ra8 = os.environ.get("VLLM_UA_READAUDIT_G8") or (
                     os.path.exists(
                         "/home/curved/vllm-gfx908/logs/serve_recipe_qwen38/READAUDITG8"
@@ -674,7 +698,9 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                         if _at_box["n"] % 100 == 0:
                             n = _at_box["n"]
                             print(f"[attntrace] calls {n} | kernel "
-                                  f"{_at_box['k']/n*1000:8.1f} us/call", flush=True)
+                                  f"{_at_box['k']/n*1000:8.1f} us/call | "
+                                  f"maxk {max_seqlen_k} maxq {max_seqlen_q}",
+                                  flush=True)
                             _at_box.update(k=0.0, w=0.0, n=0)
             import os as _os
             _ra = _os.environ.get("VLLM_UA_READAUDIT")
@@ -1103,7 +1129,9 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         """Allocate (once per (device, num_heads)) the 3D split-K segment
         buffers shared by every layer's backend instance. Sized for
         verify-shaped decode batches: rows = max q tokens (seqs x q_len),
-        splits = 64 (adaptive picker stays under this)."""
+        splits = 64 (adaptive picker stays under this; 128 was probed
+        2026-10-07 at 60k context with no per-call change — the long-KV
+        wall is kernel efficiency, not split budget)."""
         key = (str(device), self.num_heads)
         cached = RocmAiterUnifiedAttentionImpl._SEGM_POOL.get(key)
         if cached is None:
