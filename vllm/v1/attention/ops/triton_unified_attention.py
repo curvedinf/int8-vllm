@@ -1522,6 +1522,96 @@ def unified_attention(
     # Gfx908 grouped-int8 decode: reuse each vectorized KV tile across the
     # verify query rows. Prefill and unsupported shapes use the general kernel.
     g128_gluon_mode = os.environ.get("VLLM_G128_GLUON")
+    g128_i8dot_mode = os.environ.get("VLLM_G128_I8DOT") == "1"
+    if (
+        g128_i8dot_mode
+        and use_3d
+        and use_g8
+        and kv_quant_mode == KVQuantMode.INT8_BLOCK_G128
+        and g8_k_scale.shape[-1] == 2
+        and head_size == 256
+        and num_queries_per_kv == 6
+        and num_kv_heads == 1
+        and BLOCK_Q == 2
+        and q.dtype == torch.bfloat16
+        and q.stride(2) == 1
+        and block_size % 64 == 0
+        and use_causal
+        and sliding_window_val == 0
+        and not use_per_seq_causal
+        and not use_mm_prefix
+        and not use_rswa
+        and not use_alibi_slopes
+        and not use_qq_bias
+        and sinks is None
+        and softcap == 0
+        and output_scale is None
+        and q_descale is None
+        and k_descale is None
+        and v_descale is None
+        and k.stride(3) == 1
+        and v.stride(3) == 1
+        and g8_k_scale.stride(3) == 1
+        and g8_k_scale.stride() == g8_v_scale.stride()
+        and block_table.stride(1) == 1
+    ):
+        # int8-MFMA core: Q RN-quantized per (row, 128-dim group), K stays
+        # int8 through the dot, group scales folded into the score sum.
+        # 6-7x over both existing G128 paths at 64k-200k contexts (ledger
+        # G128_I8DOT_CORE). Partials use the m64 layout; the shared
+        # reduce below finalizes.
+        from vllm.v1.attention.ops.gfx908_g128_i8dot import _g128_i8dot_kernel
+
+        _g128_i8dot_kernel[(
+            q.shape[0] // 10 + num_seqs,
+            actual_num_splits,
+        )](
+            q, k, v, g8_k_scale, g8_v_scale, block_table, seqused_k,
+            cu_seqlens_q, softmax_segm_output, softmax_segm_max,
+            softmax_segm_expsum,
+            scale=softmax_scale,
+            num_query_heads=num_query_heads,
+            nq_per_kv=num_queries_per_kv,
+            num_seqs=num_seqs,
+            block_size=block_size,
+            splits=actual_num_splits,
+            bt_stride=block_table.stride(0),
+            q_stride0=q.stride(0),
+            q_stride1=q.stride(1),
+            k_stride0=k.stride(0),
+            k_stride1=k.stride(1),
+            k_stride2=k.stride(2),
+            v_stride0=v.stride(0),
+            v_stride1=v.stride(1),
+            v_stride2=v.stride(2),
+            s_stride0=g8_k_scale.stride(0),
+            s_stride1=g8_k_scale.stride(1),
+            s_stride2=g8_k_scale.stride(2),
+            ROWS=64, TILE=64, D=head_size, DG=head_size // 2,
+            num_warps=4,
+        )
+        reduce_segments[(q.shape[0], num_query_heads)](
+            output_ptr=out,
+            segm_output_ptr=softmax_segm_output,
+            segm_max_ptr=softmax_segm_max,
+            segm_expsum_ptr=softmax_segm_expsum,
+            seq_lens_ptr=seqused_k,
+            num_seqs=num_seqs,
+            num_query_heads=num_query_heads,
+            out_scale_inv=1.0,
+            output_stride_0=out.stride(0),
+            output_stride_1=out.stride(1),
+            block_table_stride=block_table.stride(0),
+            TILE_SIZE=TILE_SIZE_DECODE,
+            HEAD_SIZE=head_size,
+            HEAD_SIZE_PADDED=head_size_padded,
+            query_start_len_ptr=cu_seqlens_q,
+            BLOCK_Q=max_seqlen_q,
+            NUM_SEGMENTS_PER_SEQ=actual_num_splits,
+            USE_FP8=(output_scale is not None),
+        )
+        return
+
     if (
         g128_gluon_mode in ("1", "32", "64")
         and use_3d
