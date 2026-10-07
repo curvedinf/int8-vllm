@@ -144,7 +144,7 @@ def main():
 
     nonce = f"{args.tag}-{int(time.time())}"
     text, dt, usage = request(args.in_tokens, args.out_tokens, nonce, args.seed)
-    path = f"/home/curved/vllm-gfx908/logs/garble/{args.tag}.txt"
+    import os as _os; _os.makedirs("/home/curved/int8-vllm/logs/garble", exist_ok=True); path = f"/home/curved/int8-vllm/logs/garble/{args.tag}.txt"
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         f.write(text)

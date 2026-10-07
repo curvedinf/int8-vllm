@@ -147,8 +147,8 @@ def leg_concurrent(args, tok):
 
 
 def save(tag, text):
-    os.makedirs("/home/curved/vllm-gfx908/logs/garble", exist_ok=True)
-    with open(f"/home/curved/vllm-gfx908/logs/garble/{tag}.txt", "w") as f:
+    os.makedirs("/home/curved/int8-vllm/logs/garble", exist_ok=True)
+    with open(f"/home/curved/int8-vllm/logs/garble/{tag}.txt", "w") as f:
         f.write(text)
 
 
