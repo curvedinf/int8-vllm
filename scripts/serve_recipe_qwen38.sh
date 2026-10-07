@@ -278,7 +278,12 @@ ARGS+=(--max-num-batched-tokens "${MNBT}")
 # multi-second decode freeze under mixed load. 256-token chunks let decode
 # interleave between prefill chunks. The scheduler keeps chunk ends
 # block-aligned for the GDN/mamba hybrid machinery. 0 disables (legacy).
-ARGS+=(--long-prefill-token-threshold "${LPT:-256}")
+# 2026-10-07: default dropped (unset) now that piecewise graphs let mixed
+# prefill+decode steps replay the non-attention pieces — the LPT crutch is
+# no longer worth its prefill-side cost. Set LPT to re-enable chunking.
+if [[ -n "${LPT:-}" ]]; then
+  ARGS+=(--long-prefill-token-threshold "${LPT}")
+fi
 # KVMEM: optional pinned KV cache size in bytes (flag file or env).
 # Default 19.0 GB per GPU (2026-09-28): return 1.2 GB per GPU from the
 # previous 20.2 GB arena after recurrent ROCm OOMs at low KV occupancy.
