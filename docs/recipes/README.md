@@ -20,6 +20,94 @@ runtime leaks host memory on every graph replay — see History
 2026-10-05. A venv reinstall must restore the override or prove the
 leak is fixed in the newer wheel.
 
+## Mixed-load and prefix-cache update (2026-10-10)
+
+The model pair, TP4/C6/NS6, W8A8 GEMMs, INT8-G128 target/draft KV,
+FP32 recurrent state, and custom all-reduce are unchanged. This update
+prioritizes established decoders when new prompts arrive; it does **not**
+increase throughput for every workload.
+
+Matched greedy HTTP-stream A/B: three established 32k/2048 decoders,
+then three fresh 32k/16 prefills. Both legs use the same prompt marker and
+documentation corpus; all injected prefills have zero cached tokens.
+Rates count exact output token IDs only during the common decode/prefill
+overlap, not the subsequent decode-only tail.
+
+| Metric | Before (`4d485fb53`) | Updated |
+|---|---:|---:|
+| Mixed aggregate decode | 12.63 tok/s | **75.45 tok/s (5.97x)** |
+| Mixed per-stream decode | 5.04 / 3.88 / 3.71 tok/s | 25.92 / 24.27 / 25.26 tok/s |
+| Injected-prefill TTFT | 18.75 / 35.12 / 51.78 s | 43.50 / 81.52 / 100.30 s |
+| Median decoder stream-event gap | 1.012 s | 0.086 s |
+| Repeated-prefix TTFT | 2.64 s | 1.51 s |
+
+**Tradeoff:** prefill TTFT roughly doubles in this saturated workload.
+Admission of additional decoders is also staggered while existing ones run.
+The short 32k/800 six-stream test therefore had no common all-six-stream
+decode window (132.04 tok/s whole-run rate). Do not interpret the mixed
+speedup as an improvement in total-work throughput or admission latency.
+
+Launcher controls (core scheduler defaults remain opt-in):
+
+| Control | Recipe default | Purpose |
+|---|---|---|
+| `VLLM_GFX908_MIXED_PREFILL_TOKENS` | `1664` | Shared prefill budget across requests while decoders are active; `0` disables this scheduling policy |
+| `VLLM_GFX908_MIXED_PREFILL_INTERVAL` | `16` | Admit prefill work every 16 scheduler rounds; bulk 2048-token prefill resumes without active decoders |
+| `VLLM_G128_MIXED_SPLIT` | `1` | Separate short-query and long-query attention runs using host metadata |
+| `VLLM_G128_PREFILL_SPLITK` | `1` | Bounded split-K for short prefix-replay tails; retain unquantized Q for new prefill shapes |
+| `CGSIZES` | Existing small shapes plus `128,256,512,1024,2048` | Extend graph coverage; measured graph memory about 1.26 GiB/rank |
+
+Empty diagnostic environment variables no longer enable synchronization-heavy
+attention/step tracing. GDN prefill no longer reads a diagnostic GPU scalar
+on every layer; fresh-state masking avoids dynamic boolean indexing.
+
+Prefix reuse now retains the common hybrid replay boundary needed after
+draft lookahead backs off a block. Mamba chunk splitting uses the resolved
+scheduler alignment (1664 tokens in this deployment). A 32,020-token prompt
+reuses 29,952 tokens locally; its cold/repeat first 16 greedy IDs match.
+The disk tier starts a new namespace at
+`~/.cache/vllm/kv_tier/mamba-align-v2`, avoiding legacy recurrent snapshots.
+The previous production cache is preserved, not deleted. The first request
+after a service restart reused 29,952 external tokens; the next two reused
+local blocks. Under resumed production traffic, cold/restart outputs matched
+15/16 IDs (last word `in` versus `the`); the appended-prompt outputs matched
+16/16. Thus restart reuse is verified, but cross-boot bitwise generation
+equivalence is **not** claimed.
+
+Validation on the updated stack:
+
+- INT8 KV micro: PASS; unloaded-GPU battery: **4/4**; CPU regression suite:
+  **335 passed**. GDN GPU fresh-state zeroing: 4/4.
+- Bounded G128 prefill checks: finite, repeatable outputs at query lengths
+  16–256 and contexts 64–32k; largest measured mean-relative error 0.00133
+  against the existing reference path.
+- Short C6, 32 requests of 32→1000 tokens: 218.08 output tok/s.
+- 32k/2048 C6: 162.62 tok/s in the common decode window; 129.23 whole-run.
+  Five-second acceptance snapshots averaged length 4.98 in the first half
+  and 2.77 in the second half of this gate.
+- Solo 32k TTFT: 19.31 / 19.41 s on the separate canonical probe corpus.
+  Six-stream copy probes completed 4800 tokens each: greedy 107.56 tok/s,
+  temperature 1 at 97.71 tok/s (whole-run rates).
+- Mixed sampled chat: all six requests completed without errors; the three
+  decoder traces scored **0 / 0 / 1** tokens outside the clean-prefill top 20.
+  The exception is token index 9, ` Stream`, rank 21, logprob -5.0458
+  (rank-20 logprob -4.8739). The other 6143 tokens pass. This is **not** an
+  all-zero oracle gate; retain this qualification when citing the result.
+- The three exact greedy cached-prefix traces from the performance A/B
+  separately score **0 / 0 / 0** misses over 6144 tokens (maximum rank 5),
+  using the production service's clean-prefill path after restart.
+- The 52-prompt greedy capture completed; 43/52 first-40-character outputs
+  matched the historical reference. Positionwise KLD between independently
+  generated continuations is not an aligned fidelity comparison.
+
+Reproduce with `scripts/mixed_load_probe.py --tag <output-tag>
+--prompt-tag <shared-prompt-tag>` against fresh isolated cache namespaces
+for each leg. Set `PORT` and provide `VLLM_API_KEY` through the environment.
+Use the same corpus snapshot for both legs; the probe records its hash.
+Complete measurements and artifact paths are in ledger entry
+`MIXED_LOAD_FINAL_20261010`. The unchanged sibling AITER revision is
+`83e07b940`.
+
 ## The baseline configuration (all features ON)
 
 The published pair is designed to run together:
@@ -246,7 +334,11 @@ and prefill-only by design, so production keeps the epilogue OFF
 Per-group int8 variant (fp16-scale format for the Triton blockscale path)
 remains available for the fallback path only.
 
-## Current production status (2026-09-25, post-GOALOPT iterations 1-13)
+## Historical production status (2026-09-25, post-GOALOPT iterations 1-13)
+
+This section records the earlier campaign. For the current mixed-load
+policy and its validation limitations, see the 2026-10-10 update above;
+the baseline configuration table defines the current model contract.
 
 THE canonical component/accuracy/perf state after the GOALOPT optimization
 program (8 adopted iterations, 2026-09-24/25). Deployed-stock verification:

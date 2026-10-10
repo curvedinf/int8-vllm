@@ -96,6 +96,7 @@ class GDNAttentionMetadata:
     prefill_query_start_loc: torch.Tensor | None = None
     prefill_state_indices: torch.Tensor | None = None
     prefill_has_initial_state: torch.Tensor | None = None
+    max_prefill_query_len: int = 0
 
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: dict | None = None
@@ -466,6 +467,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         prefill_query_start_loc: torch.Tensor | None = None
         prefill_state_indices: torch.Tensor | None = None
         prefill_has_initial_state: torch.Tensor | None = None
+        max_prefill_query_len = 0
         if num_prefills > 0:
             # In a mixed non-spec batch, decodes are peeled off to the recurrent
             # kernel (decode-first front slice), so build chunk metadata from the
@@ -487,6 +489,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 prefill_query_start_loc_cpu = non_spec_query_start_loc_cpu
                 prefill_state_indices = non_spec_state_indices_tensor
 
+            assert prefill_query_start_loc_cpu is not None
+            prefill_lengths = (
+                prefill_query_start_loc_cpu[1:] - prefill_query_start_loc_cpu[:-1]
+            )
+            if prefill_lengths.numel():
+                max_prefill_query_len = int(prefill_lengths.max())
             chunk_indices, chunk_offsets = self._build_chunk_metadata(
                 prefill_query_start_loc,
                 prefill_query_start_loc_cpu,
@@ -604,6 +612,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             prefill_query_start_loc=prefill_query_start_loc,
             prefill_state_indices=prefill_state_indices,
             prefill_has_initial_state=prefill_has_initial_state,
+            max_prefill_query_len=max_prefill_query_len,
             spec_query_start_loc=spec_query_start_loc,
             non_spec_query_start_loc=non_spec_query_start_loc,
             spec_state_indices_tensor=spec_state_indices_tensor,

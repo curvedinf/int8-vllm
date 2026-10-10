@@ -1530,7 +1530,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         grammar_output: GrammarOutput | None,
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
         sample_hidden_states = hidden_states[input_batch.logits_indices]
-        _sph = os.environ.get("VLLM_STEPPHASE") is not None
+        _sph = os.environ.get("VLLM_STEPPHASE") == "1"
         _st0 = time.perf_counter() if _sph else 0.0
         logits = self.model.compute_logits(sample_hidden_states)
         if _sph:
@@ -1632,7 +1632,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         context_len: int = 0,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         # VLLM_STEPPHASE: CPU wall split of the worker step (env-gated).
-        _pph = os.environ.get("VLLM_STEPPHASE") is not None
+        _pph = os.environ.get("VLLM_STEPPHASE") == "1"
         _t0 = time.perf_counter() if _pph else 0.0
         if not dummy_run:
             # Update the request states.
@@ -2098,7 +2098,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
 
         # Last rank: sample tokens
-        _pph = os.environ.get("VLLM_STEPPHASE") is not None
+        _pph = os.environ.get("VLLM_STEPPHASE") == "1"
         _t0 = time.perf_counter() if _pph else 0.0
         if _pph and getattr(self, "_pph_t0", 0.0):
             self._pphase["gap"] += _t0 - self._pph_t0

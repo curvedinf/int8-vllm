@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with PagedAttention and Triton prefix prefill."""
 
+from functools import partial
 from typing import ClassVar
 
 import os as _os
@@ -20,7 +21,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.utils.torch_utils import get_dtype_size, is_quantized_kv_cache
-from vllm.v1.attention.backend import AttentionLayer, AttentionType, MultipleOf
+from vllm.v1.attention.backend import (
+    AttentionLayer,
+    AttentionType,
+    CommonAttentionMetadata,
+    MultipleOf,
+)
 from vllm.v1.attention.backends.rocm_attn import (
     RocmAttentionBackend,
     RocmAttentionImpl,
@@ -38,6 +44,49 @@ from vllm.v1.kv_cache_interface import (
 )
 
 logger = init_logger(__name__)
+
+
+class RocmAiterUnifiedAttentionMetadataBuilder(RocmAttentionMetadataBuilder):
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> RocmAttentionMetadata:
+        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        spec = self.vllm_config.speculative_config
+        if (
+            os.environ.get("VLLM_G128_MIXED_SPLIT") != "1"
+            or (spec is not None and spec.enable_adaptive_verification)
+            or common_attn_metadata.causal is not True
+            or metadata.max_query_len <= 32
+            or self.headdim != 256
+        ):
+            return metadata
+        # Query offsets already exist on the host. Build contiguous runs once
+        # per step, outside the layer loop; never read GPU metadata back.
+        starts = common_attn_metadata.query_start_loc_cpu.tolist()
+        lengths = [b - a for a, b in zip(starts, starts[1:])]
+        if not any(0 < length <= 32 for length in lengths):
+            return metadata
+        partitions = []
+        first = 0
+        for end in range(1, len(lengths) + 1):
+            if (
+                end < len(lengths)
+                and (lengths[end] <= 32) == (lengths[first] <= 32)
+                and (lengths[first] > 32 or starts[end + 1] - starts[first] <= 256)
+            ):
+                continue
+            lo, hi = starts[first], starts[end]
+            if hi > lo:
+                offsets = metadata.query_start_loc[first:end + 1] - lo
+                partitions.append(
+                    (first, end, lo, hi, max(lengths[first:end]), offsets)
+                )
+            first = end
+        metadata.query_partitions = partitions
+        return metadata
 
 
 class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
@@ -183,7 +232,7 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
 
     @staticmethod
     def get_builder_cls() -> type["RocmAttentionMetadataBuilder"]:
-        return RocmAttentionMetadataBuilder
+        return RocmAiterUnifiedAttentionMetadataBuilder
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
@@ -577,27 +626,22 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                     os.environ.setdefault("VLLM_UA_3D_MAXQ", "8")
 
                 _g8t = getattr(self, "_g8_attntrace", None)
-                if _g8t is None and os.environ.get("VLLM_ATTNTRACE") is not None:
+                if _g8t is None and os.environ.get("VLLM_ATTNTRACE") == "1":
                     _g8t = self._g8_attntrace = {"k": 0.0, "n": 0}
                 _g8ev0 = (
                     torch.cuda.Event(enable_timing=True) if _g8t is not None else None
                 )
                 if _g8ev0 is not None:
                     _g8ev0.record()
-                triton_unified_attention(
-                    q=query[:num_actual_tokens],
+                attend = partial(
+                    triton_unified_attention,
                     k=key_cache,
                     v=value_cache,
-                    out=output[:num_actual_tokens],
-                    cu_seqlens_q=cu_seqlens_q,
-                    max_seqlen_q=max_seqlen_q,
-                    seqused_k=seqused_k,
                     max_seqlen_k=max_seqlen_k,
                     softmax_scale=softmax_scale,
                     causal=True,
                     alibi_slopes=self.alibi_slopes,
                     window_size=self.sliding_window,
-                    block_table=block_table,
                     softcap=self.logits_soft_cap,
                     kv_quant_mode=self._kv_quant_mode,
                     q_descale=None,
@@ -611,6 +655,21 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                     g8_v_scale=self._g8_v,
                     **_segm_kw,
                 )
+                partitions = attn_metadata.query_partitions
+                if partitions and self._kv_quant_mode == KVQuantMode.INT8_BLOCK_G128:
+                    for first, end, lo, hi, max_q, offsets in partitions:
+                        attend(
+                            q=query[lo:hi], out=output[lo:hi],
+                            cu_seqlens_q=offsets, max_seqlen_q=max_q,
+                            seqused_k=seqused_k[first:end],
+                            block_table=block_table[first:end],
+                        )
+                else:
+                    attend(
+                        q=query[:num_actual_tokens], out=output[:num_actual_tokens],
+                        cu_seqlens_q=cu_seqlens_q, max_seqlen_q=max_seqlen_q,
+                        seqused_k=seqused_k, block_table=block_table,
+                    )
                 if _g8ev0 is not None:
                     _g8ev1 = torch.cuda.Event(enable_timing=True)
                     _g8ev1.record()
@@ -649,7 +708,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 import os as _os, time as _time
                 _pace = _os.environ.get("VLLM_ATTN_PACE", "0")
                 _at = _pace == "1" or \
-                    _os.environ.get("VLLM_ATTNTRACE") is not None
+                    _os.environ.get("VLLM_ATTNTRACE") == "1"
                 # PACE=2: pace only target forwards (workspace lane 0) so the
                 # draft-verify async overlap is preserved (the spec-on
                 # regression of PACE=1); the CPU-race pathology lives in the
@@ -658,7 +717,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                     from vllm.v1.worker.workspace import _workspace_lane
                     _at = _workspace_lane.get() == 0
                 _at_box = getattr(self, "_attntrace", None) \
-                    if _at or _os.environ.get("VLLM_ATTNTRACE") is not None else None
+                    if _at else None
                 if _at and _at_box is None:
                     _at_box = self._attntrace = {"k": 0.0, "w": 0.0, "n": 0}
                 _ev0 = torch.cuda.Event(enable_timing=True) if _at_box else None

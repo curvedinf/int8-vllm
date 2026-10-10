@@ -18,7 +18,7 @@ dev = "cuda"
 torch.manual_seed(0)
 G, BLOCK = 128, 1664
 NQ, D = 6, 256
-SEQS, QTOK = 6, 7
+SEQS, QTOK = 6, int(os.environ.get("I8_QTOK", "7"))
 DG = D // 2
 PAD = D + 2 * (D // G)
 CONTENT = 2 * PAD
@@ -138,7 +138,7 @@ def run_kernel(packed, k, v, g8, g8v, q, CTX):
         HEAD_SIZE=D,
         HEAD_SIZE_PADDED=D,
         query_start_len_ptr=cu,
-        BLOCK_Q=7,
+        BLOCK_Q=QTOK,
         NUM_SEGMENTS_PER_SEQ=SPLITS,
         USE_FP8=False,
     )
@@ -146,7 +146,7 @@ def run_kernel(packed, k, v, g8, g8v, q, CTX):
 
 
 if __name__ == "__main__":
-    CTX = 20000
+    CTX = int(os.environ.get("I8_CTX", "20000"))
     NB, packed, k, v, g8, g8v, q = build(CTX)
     print("building fp32 reference (slow)...")
     ref = reference(packed, g8, g8v, q, CTX)
@@ -157,6 +157,13 @@ if __name__ == "__main__":
     top_ref = ref.argmax(-1)
     top_got = got.argmax(-1)
     print(f"top-1 match: {(top_ref == top_got).float().mean():.4f}")
+    assert torch.isfinite(got).all()
+    # INT8 Q quantization introduces bounded error against unquantized Q.
+    assert (got - ref).abs().mean() / ref.abs().mean() < 0.04
+    again = run_kernel(packed, k, v, g8, g8v, q, CTX).float()
+    assert torch.equal(got, again), "query-tile stores must not race"
+    if os.environ.get("I8_CHECK_ONLY") == "1":
+        sys.exit(0)
 
     # speed sweep
     print(f"\n{'ctx':>7} {'us/call':>9} {'GB/s':>7}")

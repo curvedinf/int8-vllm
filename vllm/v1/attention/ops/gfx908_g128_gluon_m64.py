@@ -59,8 +59,7 @@ def g128_core(
     lo = seg * tiles_per_seg
     if lo * 32 >= seq_len:
         return
-    # The causal mask below excludes the conservative extra key in this bound.
-    max_prefix = gl.minimum(context + local_block * 10 + 11, seq_len)
+    max_prefix = gl.minimum(context + local_block * 10 + 10, seq_len)
     hi = gl.minimum((seg + 1) * tiles_per_seg, (max_prefix + 31) // 32)
 
     q_layout: gl.constexpr = gl.BlockedLayout(
@@ -89,7 +88,7 @@ def g128_core(
     qd = gl.arange(0, 128, layout=gl.SliceLayout(0, q_layout))
     qpos = local_block * 10 + qm // NQ_PER_KV
     qhead = kv_head * NQ_PER_KV + qm % NQ_PER_KV
-    qvalid = (qpos < q_len) & (qhead < NUM_QHEADS)
+    qvalid = (qm < 10 * NQ_PER_KV) & (qpos < q_len)
     qptr = Q + (q_start + qpos[:, None]) * Q_STRIDE0 + qhead[:, None] * Q_STRIDE1 + qd[None, :]
     q0 = gl.load(qptr, mask=qvalid[:, None], other=0.0).to(MMA_DT)
     q1 = gl.load(qptr + 128, mask=qvalid[:, None], other=0.0).to(MMA_DT)
@@ -100,7 +99,7 @@ def g128_core(
     score_cols = gl.arange(0, 32, layout=gl.SliceLayout(0, mma))
     score_qpos = local_block * 10 + score_rows // NQ_PER_KV
     score_qhead = kv_head * NQ_PER_KV + score_rows % NQ_PER_KV
-    score_qvalid = (score_qpos < q_len) & (score_qhead < NUM_QHEADS)
+    score_qvalid = (score_rows < 10 * NQ_PER_KV) & (score_qpos < q_len)
     m = gl.full((64,), float('-inf'), gl.float32, layout=gl.SliceLayout(1, mma))
     l = gl.full((64,), 1.0, gl.float32, layout=gl.SliceLayout(1, mma))
     acc0 = gl.full((64, 128), 0.0, gl.float32, layout=mma)
@@ -182,7 +181,7 @@ def g128_core(
     od = gl.arange(0, 128, layout=gl.SliceLayout(0, out_layout))
     opos = local_block * 10 + om // NQ_PER_KV
     ohead = kv_head * NQ_PER_KV + om % NQ_PER_KV
-    ovalid = (opos < q_len) & (ohead < NUM_QHEADS)
+    ovalid = (om < 10 * NQ_PER_KV) & (opos < q_len)
     base = PARTIAL + (q_start + opos[:, None]) * (NUM_QHEADS * SPLITS * 256) + ohead[:, None] * (SPLITS * 256) + seg * 256 + od[None, :]
     gl.store(base, acc0, mask=ovalid[:, None])
     gl.store(base + 128, acc1, mask=ovalid[:, None])

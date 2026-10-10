@@ -108,6 +108,9 @@ class SingleTypeKVCacheManager(ABC):
         # aligned segment (SWA). Initialized lazily by the coordinator after
         # determining the attention groups.
         self.use_eagle = False
+        # Hybrid groups must retain a common replay point after a draft group
+        # drops its volatile lookahead block. Set by the coordinator.
+        self.prefix_replay_offset = 0
 
         # Partial-hit copy-on-write bookkeeping. Populated only by fine-grained
         # managers (full attention, mamba "align"); harmlessly empty elsewhere.
@@ -450,6 +453,10 @@ class SingleTypeKVCacheManager(ABC):
         # retention: the replay boundary (``num_prompt - 1``, capped by
         # ``get_computed_blocks``) and any detected shared-prefix junction.
         reachable_boundaries = [request.num_prompt_tokens - 1]
+        if self.prefix_replay_offset:
+            reachable_boundaries.append(
+                request.num_prompt_tokens - 1 - self.prefix_replay_offset
+            )
         if request.shared_prefix_boundary:
             reachable_boundaries.append(request.shared_prefix_boundary)
 

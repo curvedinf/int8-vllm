@@ -182,6 +182,11 @@ def test_gdn_build_classification(test_case: GDNBuildTestCase):
     assert meta.num_prefills == test_case.expected_num_prefills
     assert meta.num_prefill_tokens == test_case.expected_num_prefill_tokens
     assert meta.num_spec_decodes == test_case.expected_num_spec_decodes
+    if meta.num_prefills:
+        starts = meta.prefill_query_start_loc
+        assert meta.max_prefill_query_len == int((starts[1:] - starts[:-1]).max())
+    else:
+        assert meta.max_prefill_query_len == 0
 
 
 def test_has_initial_state_after_reclassification():

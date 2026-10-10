@@ -516,6 +516,76 @@ def test_throttle_defers_inflight_prefill_chunk():
     assert "chk0" in output.num_scheduled_tokens
 
 
+def test_mixed_prefill_budget_is_shared_and_preserves_solo_throughput(monkeypatch):
+    monkeypatch.setenv("VLLM_GFX908_MIXED_PREFILL_TOKENS", "16")
+    scheduler = create_scheduler(
+        max_num_seqs=8, max_num_batched_tokens=64, enable_chunked_prefill=True
+    )
+    (decode,) = create_requests(num_requests=1, num_tokens=32, req_ids=["decode"])
+    scheduler.add_request(decode)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"decode": 32}  # Solo is not capped.
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["decode"], req_id_to_index={"decode": 0},
+            sampled_token_ids=[[0]], logprobs=None,
+            prompt_logprobs_dict={}, pooler_output=[],
+        ),
+    )
+    for request in create_requests(
+        num_requests=3, num_tokens=12, req_ids=["p0", "p1", "p2"]
+    ):
+        scheduler.add_request(request)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"decode": 1, "p0": 12, "p1": 4}
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["decode", "p0", "p1"],
+            req_id_to_index={"decode": 0, "p0": 1, "p1": 2},
+            sampled_token_ids=[[0], [0], []], logprobs=None,
+            prompt_logprobs_dict={}, pooler_output=[],
+        ),
+    )
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {
+        "decode": 1, "p0": 1, "p1": 8, "p2": 8,
+    }
+
+
+def test_mixed_prefill_cadence_keeps_decode_running(monkeypatch):
+    monkeypatch.setenv("VLLM_GFX908_MIXED_PREFILL_TOKENS", "16")
+    monkeypatch.setenv("VLLM_GFX908_MIXED_PREFILL_INTERVAL", "4")
+    scheduler = create_scheduler(
+        max_num_seqs=8, max_num_batched_tokens=64, enable_chunked_prefill=True
+    )
+    (decode,) = create_requests(num_requests=1, num_tokens=4, req_ids=["decode"])
+    scheduler.add_request(decode)
+
+    def complete(output):
+        ids = list(output.num_scheduled_tokens)
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=ids, req_id_to_index={r: i for i, r in enumerate(ids)},
+                sampled_token_ids=[[0] if r == "decode" else [] for r in ids],
+                logprobs=None, prompt_logprobs_dict={}, pooler_output=[],
+            ),
+        )
+
+    complete(scheduler.schedule())
+    (prefill,) = create_requests(num_requests=1, num_tokens=100, req_ids=["prefill"])
+    scheduler.add_request(prefill)
+    counts = []
+    for _ in range(8):
+        output = scheduler.schedule()
+        assert output.num_scheduled_tokens["decode"] == 1
+        counts.append(output.num_scheduled_tokens.get("prefill", 0))
+        complete(output)
+    assert counts == [0, 0, 16, 0, 0, 0, 16, 0]
+
+
 def test_throttle_capacity_bound_guard_admits():
     """Saturation guard: if a cadence-aligned release step cannot drain the
     waiting prefill queue (it ran out of token budget), the throttle backs off on
@@ -5947,7 +6017,7 @@ def test_hybrid_per_group_hit_divergence_with_connector(
     ),
     [
         (True, 0, 5, 16),
-        (True, 16, 6, 80),
+        (True, 16, 6, 32),
         (False, 16, 6, 32),
     ],
 )
@@ -5957,9 +6027,11 @@ def test_hybrid_fa_deeper_hit_respects_connector_lookup_policy(
     replay_blocks: int,
     expected_num_computed: int,
 ):
-    """A capable connector may restore missing Mamba state at the deeper FA
-    boundary. An external miss or an incapable connector uses a locally
-    consistent boundary instead.
+    """External matches extend the common, coherent local boundary.
+
+    A capability advertisement alone cannot prove that a deeper FA hit has
+    its matching Mamba snapshot. The fork deliberately reconciles local
+    groups before asking the connector (the August 30 cache safety repair).
     """
     block_size = 16
     scheduler = _create_hybrid_mamba_connector_scheduler(

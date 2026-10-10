@@ -72,6 +72,10 @@ class RocmAttentionMetadata:
     # DFlash drafting sets this to False via CommonAttentionMetadata.
     causal: bool = True
 
+    # Optional contiguous query partitions for the grouped-INT8 backend.
+    # (first request, end request, first token, end token, max query, starts)
+    query_partitions: list[tuple[int, int, int, int, int, torch.Tensor]] | None = None
+
 
 class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS

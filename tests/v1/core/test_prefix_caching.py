@@ -1084,6 +1084,7 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
     # Create minimal mock with just the needed attributes
     mock = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=block_size),
+        block_size=block_size,
         max_num_scheduled_tokens=3 * block_size,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         use_eagle=False,
@@ -4189,6 +4190,57 @@ def test_mamba_shared_prefix_survives_zero_retention():
     # Pinning the shared prefix at token 96 (state block 5) retains it too, so a
     # later request sharing that prefix can hit the Mamba state.
     assert cached_mamba_blocks(96) == {5, 14}
+
+
+@pytest.mark.parametrize("retention", [None, 0])
+@pytest.mark.parametrize("spec_blocks", [0, 6])
+@pytest.mark.parametrize("production_order", [False, True])
+def test_hybrid_spec_replay_retains_common_mamba_boundary(
+    retention, spec_blocks, production_order
+):
+    """A draft's last-block drop must not invalidate every local Mamba hit.
+
+    Production has full attention, align-mode Mamba and draft SWA. Sparse
+    retention previously kept Mamba only at the last prompt block, while the
+    draft could reuse only the preceding boundary; the common hit became zero.
+    """
+    block_size = 16
+    spec_types = (
+        ["mamba_align"] * 10 + ["full"] * 4 + ["sliding_window"]
+        if production_order else ["full", "mamba_align", "sliding_window"]
+    )
+    config = _make_hybrid_kv_cache_config(
+        block_size, 1000, spec_types
+    )
+    for group in config.kv_cache_groups:
+        if isinstance(group.kv_cache_spec, MambaSpec):
+            group.kv_cache_spec = replace(
+                group.kv_cache_spec, num_speculative_blocks=spec_blocks
+            )
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=True,
+        retention_interval=retention,
+    )
+    tokens = list(range(10 * block_size + 5))
+    producer = make_request("producer", tokens, block_size, sha256)
+    # Materialize real Mamba snapshots at each chunk boundary.
+    for _ in range(10):
+        assert manager.allocate_slots(producer, block_size) is not None
+        producer.num_computed_tokens += block_size
+    assert manager.allocate_slots(producer, 5) is not None
+    producer.num_computed_tokens += 5
+    for _ in range(4):
+        producer.append_output_token_ids(1000)
+        assert manager.allocate_slots(producer, 1) is not None
+        producer.num_computed_tokens += 1
+    manager.free(producer)
+    consumer = make_request("consumer", tokens, block_size, sha256)
+    _, hit, _ = manager.get_computed_blocks(consumer)
+    assert hit == 9 * block_size
 
 
 def test_mamba_shared_prefix_reuse_under_zero_retention():

@@ -11,7 +11,9 @@ API_KEY_FILE="/etc/llama/llama-api.key"
 WORKDIR="/tmp"
 
 HOST="127.0.0.1"
-PORT=8020
+PORT="${PORT:-8020}"
+# Cover mixed/prefill shapes as well as the small decode-only graphs.
+CGSIZES="${CGSIZES:-[1,2,4,8,16,24,32,40,48,56,64,72,80,128,256,512,1024,2048]}"
 STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-2400}"
 STOP_TIMEOUT=20
 CPUSET="0-47"
@@ -70,6 +72,14 @@ COMMON_ENV=(
   VLLM_ROCM_USE_AITER_CUSTOM_AR="${CAR:-0}"
   VLLM_ROCM_USE_AITER_TRITON_GEMM="1"
   VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION="${UA:-1}"
+  # Decode-priority mixed-load policy (2026-10-10 A/B in the recipe ledger).
+  # One cache-aligned prefill chunk per 16 rounds while decoders are active;
+  # ordinary bulk prefill resumes immediately when there are no decoders.
+  # Set the token budget to 0 to disable this scheduling policy.
+  VLLM_GFX908_MIXED_PREFILL_TOKENS="${VLLM_GFX908_MIXED_PREFILL_TOKENS:-1664}"
+  VLLM_GFX908_MIXED_PREFILL_INTERVAL="${VLLM_GFX908_MIXED_PREFILL_INTERVAL:-16}"
+  VLLM_G128_MIXED_SPLIT="${VLLM_G128_MIXED_SPLIT:-1}"
+  VLLM_G128_PREFILL_SPLITK="${VLLM_G128_PREFILL_SPLITK:-1}"
   # Full W8A8 doctrine, gated pieces: int8 lm_head (A1 gate-passed, neutral
   # acceptance, halves head memory) and DFlash2 conv/selector projections
   # (A2 gate-passed, acceptance +10.7pt). Fused norm+quant stays OFF
@@ -113,7 +123,7 @@ ARGS=(
   # KVMEM flag file / env: pin the KV arena size in bytes. A fixed
   # --kv-cache-memory overrides --gpu-memory-utilization; leave headroom
   # for transient runtime allocations. ${LOG_DIR}/KVMEM overrides the env.
-  --compilation-config '{"mode":'"${CMODE:-3}"',"cudagraph_mode":"'"${CGMODE:-FULL_AND_PIECEWISE}"'","custom_ops":["+gemma_rms_norm","+silu_and_mul","+rms_norm_gated","+rotary_embedding","+apply_rotary_emb","none"],"pass_config":{"fuse_allreduce_rms":'"${ARFUSE:-false}"'}}'
+  --compilation-config '{"mode":'"${CMODE:-3}"',"cudagraph_mode":"'"${CGMODE:-FULL_AND_PIECEWISE}"'","cudagraph_capture_sizes":'"${CGSIZES:-null}"',"custom_ops":["+gemma_rms_norm","+silu_and_mul","+rms_norm_gated","+rotary_embedding","+apply_rotary_emb","none"],"pass_config":{"fuse_allreduce_rms":'"${ARFUSE:-false}"'}}'
   --language-model-only
   --skip-mm-profiling
   --disable-uvicorn-access-log
@@ -185,7 +195,9 @@ if [[ "${OFFLOAD:-1}" == "1" ]]; then
     DISKTIER="$(tr -d '[:space:]' < "${_disktier_flag}")"
   fi
   DISKTIER="${DISKTIER:-53687091200}"
-  DISKROOT="${DISKROOT:-${HOME}/.cache/vllm/kv_tier}"
+  # Recurrent snapshots written before the resolved-alignment repair are not
+  # safe to reuse. Leave the legacy cache recoverable, but start a new schema.
+  DISKROOT="${DISKROOT:-${HOME}/.cache/vllm/kv_tier/mamba-align-v2}"
   if [[ "${DISKTIER}" != "0" ]]; then
     ARGS+=(--kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":'"${CPUTIER}"',"spec_name":"TieringOffloadingSpec","secondary_tiers":[{"type":"fs","root_dir":"'"${DISKROOT}"'","max_bytes":'"${DISKTIER}"'}]}}')
   else
@@ -256,6 +268,8 @@ fi
 if [[ "${_prefix_value}" == "0" ]]; then
   ARGS+=(--no-enable-prefix-caching)
 fi
+# Expose the actual reused-token count to clients and cache regression probes.
+ARGS+=(--enable-prompt-tokens-details)
 
 # MAMBA_BLOCK_SIZE (diagnostic lever): with prefix caching on, enlarge the
 # mamba page so decode never crosses a block boundary — neutralizes the

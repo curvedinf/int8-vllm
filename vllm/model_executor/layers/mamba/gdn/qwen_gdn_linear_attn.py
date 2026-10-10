@@ -1894,10 +1894,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             # Stash the prefill's state-cache line id (the conv/SSM final
             # states land at non_spec_state_indices' line): the first spec
             # round's SPECSTAT compares si[0] against this line.
-            try:
-                self._pf_line = int(non_spec_state_indices_tensor[0].item())
-            except Exception:
-                pass
+            if os.environ.get("VLLM_GDN_SPECSTAT"):
+                try:
+                    self._pf_line = int(non_spec_state_indices_tensor[0].item())
+                except Exception:
+                    pass
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
             # - "cache_indices" updates the conv_state cache in positions
             #   pointed to by "state_indices_tensor"
@@ -2243,7 +2244,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert prefill_state_indices is not None
             assert prefill_has_initial_state is not None
             initial_state = ssm_state[prefill_state_indices]
-            initial_state[~prefill_has_initial_state, ...] = 0
+            initial_state.masked_fill_(
+                ~prefill_has_initial_state.view(
+                    -1, *([1] * (initial_state.ndim - 1))
+                ),
+                0,
+            )
             _gch = os.environ.get("VLLM_GDN_COREHASH")
             _gch_pre = None
             if _gch and not torch.cuda.is_current_stream_capturing():
@@ -2296,9 +2302,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 # state lands in the pool directly.
                 cu_p = attn_metadata.prefill_query_start_loc
                 n_seq = cu_p.numel() - 1
-                t_max = int(
-                    (cu_p[1:] - cu_p[:-1]).max().item()
-                ) if n_seq > 0 else 0
+                # Already available on the host when metadata is built. A
+                # GPU scalar read here serializes every recurrent layer.
+                t_max = attn_metadata.max_prefill_query_len
                 # Real-prefill gate (T >= 64): spec-verify-sized multi-token
                 # batches (T = NS+1 <= 14) also arrive on this branch and the
                 # serial exact kernel on them cost ~20% of C6 steady TPOT
@@ -2316,9 +2322,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                         .expand(n_seq, t_max)
                         .contiguous()
                     )
-                    ssm_state[prefill_state_indices[
-                        ~prefill_has_initial_state[:n_seq]
-                    ]] = 0
+                    zero_prefill_states(
+                        ssm_state, prefill_state_indices,
+                        prefill_has_initial_state[:n_seq],
+                    )
                     (
                         q_ex, k_ex, v_ex,
                     ) = self.rearrange_mixed_qkv(conv_output_prefill)
@@ -2890,6 +2897,40 @@ direct_register_custom_op(
     mutates_args=["core_attn_out"],
     fake_impl=gdn_attention_core_fused_norm_packed_fake,
 )
+
+
+@triton.jit
+def _zero_prefill_states_kernel(
+    state, indices, has_initial, STRIDE: tl.constexpr,
+    INDEX_STRIDE: tl.constexpr, MASK_STRIDE: tl.constexpr,
+    ROW_SIZE: tl.constexpr, NUM_STATES: tl.constexpr, BLOCK: tl.constexpr,
+):
+    seq = tl.program_id(0)
+    if tl.load(has_initial + seq * MASK_STRIDE):
+        return
+    row = tl.load(indices + seq * INDEX_STRIDE).to(tl.int64)
+    row = tl.where(row < 0, row + NUM_STATES, row)
+    offsets = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    tl.store(state + row * STRIDE + offsets, 0,
+             mask=(offsets < ROW_SIZE) & (row >= 0) & (row < NUM_STATES))
+
+
+def zero_prefill_states(state, indices, has_initial):
+    """Zero only fresh requests, without a GPU nonzero()/scalar readback.
+
+    Mamba pages can have padding between states; their trailing state axes
+    are contiguous. Duplicate indices are safe: all writers store zero.
+    """
+    assert state.stride(-1) == 1
+    assert all(state.stride(i) == state.shape[i + 1] * state.stride(i + 1)
+               for i in range(1, state.ndim - 1))
+    row_size = state.numel() // state.shape[0]
+    if indices.numel():
+        _zero_prefill_states_kernel[(indices.numel(), triton.cdiv(row_size, 1024))](
+            state, indices, has_initial, state.stride(0),
+            indices.stride(0), has_initial.stride(0), row_size,
+            state.shape[0], 1024,
+        )
 
 
 @triton.jit

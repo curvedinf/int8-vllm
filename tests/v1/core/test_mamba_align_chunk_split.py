@@ -78,18 +78,38 @@ def _split(
     num_new_tokens: int,
     use_eagle: bool = True,
     partial_hit: bool = False,
+    mixed_limit: int = 0,
+    configured_block_size: int | None = None,
 ) -> int:
     """Call the real `Scheduler._mamba_block_aligned_split` on a stub self."""
     stub = SimpleNamespace(
-        cache_config=SimpleNamespace(block_size=MAMBA_BLOCK_SIZE),
+        cache_config=SimpleNamespace(
+            block_size=configured_block_size or MAMBA_BLOCK_SIZE
+        ),
+        block_size=MAMBA_BLOCK_SIZE,
         use_eagle=use_eagle,
         max_num_scheduled_tokens=16384,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         # `prefix_match_unit` finer than the block size (#46384).
         mamba_partial_cache_hit=partial_hit,
         hash_block_size=ATTN_BLOCK_SIZE,
+        _step_prefill_limit=mixed_limit,
     )
     return Scheduler._mamba_block_aligned_split(stub, request, num_new_tokens)
+
+
+def test_mixed_prefill_subblock_chunks_stop_at_mamba_boundary():
+    (request,) = create_requests(num_requests=1, num_tokens=4000)
+    assert _split(request, 256, mixed_limit=256) == 256
+    request.num_computed_tokens = 1536
+    assert _split(request, 256, mixed_limit=256) == 64
+    request.num_computed_tokens = 1600
+    assert _split(request, 256, mixed_limit=256) == 256
+
+
+def test_prefill_uses_resolved_group_alignment_not_attention_tile():
+    (request,) = create_requests(num_requests=1, num_tokens=4000)
+    assert _split(request, 2048, configured_block_size=64) == MAMBA_BLOCK_SIZE
 
 
 def _run_chunked_prefill(

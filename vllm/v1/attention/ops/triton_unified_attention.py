@@ -1311,6 +1311,19 @@ def unified_attention(
     # KV with a tiny grid (~num_seqs CTAs), which is catastrophically
     # slow at long context on MI100.
     _ua_3d_maxq = int(os.environ.get("VLLM_UA_3D_MAXQ", "1"))
+    # Short prefix-cache tails need split-K too, but retain the prefill
+    # kernel's unquantized Q / FP16-MFMA arithmetic over INT8 KV storage.
+    split_prefill = (
+        os.environ.get("VLLM_G128_PREFILL_SPLITK") == "1"
+        and os.environ.get("VLLM_G128_GLUON") in ("1", "64")
+        and kv_quant_mode == KVQuantMode.INT8_BLOCK_G128
+        and head_size == 256
+        and num_queries_per_kv == 6
+        and softmax_segm_output is not None
+        and q.shape[0] <= softmax_segm_output.shape[0]
+    )
+    if split_prefill:
+        _ua_3d_maxq = max(_ua_3d_maxq, 256)
     use_3d = not (
         seq_threshold_3D is None
         or num_par_softmax_segments is None
@@ -1525,6 +1538,7 @@ def unified_attention(
     g128_i8dot_mode = os.environ.get("VLLM_G128_I8DOT") == "1"
     if (
         g128_i8dot_mode
+        and (not split_prefill or max_seqlen_q <= 8)
         and use_3d
         and use_g8
         and kv_quant_mode == KVQuantMode.INT8_BLOCK_G128
@@ -1757,7 +1771,7 @@ def unified_attention(
     if (
         os.environ.get("VLLM_G128_PREFILL_GLUON") == "1"
         and not use_3d
-        and max_seqlen_q >= 256
+        and max_seqlen_q >= 64
         and use_g8
         and kv_quant_mode == KVQuantMode.INT8_BLOCK_G128
         and g8_k_scale.shape[-1] == 2

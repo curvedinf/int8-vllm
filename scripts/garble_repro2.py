@@ -11,7 +11,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 MODEL = "qwen3.8-27b-gptq8"
-API = "http://127.0.0.1:8020/v1/chat/completions"
+API = "http://127.0.0.1:" + os.environ.get("PORT", "8020") + "/v1/chat/completions"
 TOKENIZER_PATH = "/home/curved/models/Qwen3.8-27B-GPTQ-8bit-gs128"
 
 from garble_repro import WORDS, TOPICS, scan, seed_for_nonce  # reuse corpus + scanner

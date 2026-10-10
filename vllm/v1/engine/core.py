@@ -598,7 +598,7 @@ class EngineCore:
             return {}, False
         # VLLM_STEPTRACE: wall-time split of the step phases (env-gated).
         import os as _os, time as _time
-        _st = _os.environ.get("VLLM_STEPTRACE") is not None
+        _st = _os.environ.get("VLLM_STEPTRACE") == "1"
         if _st:
             _t = {"sched": 0.0, "exec": 0.0, "out": 0.0, "n": 0}
             _st_box = getattr(self, "_steptrace", None)
@@ -705,7 +705,7 @@ class EngineCore:
         deferred_scheduler_output = None
         # VLLM_STEPTRACE: phase timing for the batch-queue loop (env-gated)
         import os as _os, time as _time
-        _st = _os.environ.get("VLLM_STEPTRACE") is not None
+        _st = _os.environ.get("VLLM_STEPTRACE") == "1"
         _st_box = getattr(self, "_steptrace", None)
         if _st and _st_box is None:
             _st_box = self._steptrace = {"sched": 0.0, "exec": 0.0,

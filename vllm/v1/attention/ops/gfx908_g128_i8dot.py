@@ -73,13 +73,15 @@ def _g128_i8dot_kernel(
 
     seq_len = tl.load(SEQLENS + seq)
     context = seq_len - q_len
-    max_prefix = tl.minimum(context + local_block * 10 + 11, seq_len)
+    max_prefix = tl.minimum(context + local_block * 10 + 10, seq_len)
 
     # ---- Q: ROWS rows = token(10) x head(6); RN-quantize per group ----
     offs_m = tl.arange(0, ROWS)
     qpos = local_block * 10 + offs_m // nq_per_kv
     qhead = offs_m % nq_per_kv
-    qvalid = (qpos < q_len) & (qhead < num_query_heads)
+    # The final four MFMA rows are padding, not a partial eleventh token.
+    # Otherwise adjacent query tiles race to store token 10's first heads.
+    qvalid = (offs_m < 10 * nq_per_kv) & (qpos < q_len)
     offs_d = tl.arange(0, DG)
 
     q8_lo = tl.zeros((ROWS, DG), dtype=tl.int8)
@@ -160,7 +162,9 @@ def _g128_i8dot_kernel(
         kvpos = j * TILE + offs_n
         mask = qvalid[:, None] & (kvpos[None, :] < max_prefix) & (
             kvpos[None, :] < seg_hi_tok
-        ) & (kvpos[None, :] <= context + qpos[:, None])
+        ) & (kvpos[None, :] >= seg_lo_tok) & (
+            kvpos[None, :] <= context + qpos[:, None]
+        )
         scores = tl.where(mask, scores, float("-inf"))
 
         m_new = tl.maximum(m_i, tl.max(scores, axis=1))

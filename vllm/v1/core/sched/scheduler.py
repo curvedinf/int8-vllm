@@ -348,6 +348,17 @@ class Scheduler(SchedulerInterface):
             and self.hash_block_size < self.block_size
             and self.kv_cache_manager.coordinator.enable_partial_hash_hits
         )
+        if self.cache_config.enable_prefix_caching:
+            logger.info(
+                "Prefix cache geometry: scheduler block=%d, configured block=%d, "
+                "hash unit=%d, Mamba mode=%s, partial Mamba hits=%s, group blocks=%s",
+                self.block_size,
+                self.cache_config.block_size,
+                self.hash_block_size,
+                self.cache_config.mamba_cache_mode,
+                self.mamba_partial_cache_hit,
+                [g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups],
+            )
 
         # Counts of non-empty steps scheduled / processed. update_from_output
         # is called once per scheduled step in FIFO order, so these stay in sync.
@@ -386,6 +397,25 @@ class Scheduler(SchedulerInterface):
         # In-flight requests still prefilling (prefill chunks + in-progress
         # async KV loads). Their remaining-block reservation gates async loads.
         self._inflight_prefills: set[Request] = set()
+        # A shared (not per-request) prefill budget protects decode latency.
+        # Solo prefill retains the ordinary throughput-oriented token budget.
+        self.mixed_prefill_tokens = int(
+            os.environ.get("VLLM_GFX908_MIXED_PREFILL_TOKENS", "0")
+        )
+        self.mixed_prefill_interval = int(
+            os.environ.get("VLLM_GFX908_MIXED_PREFILL_INTERVAL", "1")
+        )
+        if self.mixed_prefill_tokens < 0 or self.mixed_prefill_interval < 1:
+            raise ValueError("Mixed prefill budget must be >= 0 and interval >= 1")
+        if self.mixed_prefill_tokens:
+            logger.info(
+                "Mixed-load prefill policy: shared budget=%d, interval=%d; "
+                "bulk budget=%d when no decoders are active",
+                self.mixed_prefill_tokens,
+                self.mixed_prefill_interval,
+                self.max_num_scheduled_tokens,
+            )
+        self._step_prefill_limit = 0
 
     def _mamba_block_aligned_split(
         self,
@@ -413,7 +443,9 @@ class Scheduler(SchedulerInterface):
         if start >= prefill_end:
             return num_new_tokens
 
-        block_size = self.cache_config.block_size
+        # Use the resolved scheduler/group alignment, not the backend's
+        # nominal attention tile size (which can differ after page padding).
+        block_size = self.block_size
         # The last block-aligned position whose state can be cached. With
         # Eagle, FullAttn prunes the last matching block, so back off one
         # block to avoid a Mamba cache miss.
@@ -432,6 +464,8 @@ class Scheduler(SchedulerInterface):
             long_prefill_threshold = self.scheduler_config.long_prefill_token_threshold
             if long_prefill_threshold > 0:
                 max_prefill_tokens = min(max_prefill_tokens, long_prefill_threshold)
+            if getattr(self, "_step_prefill_limit", 0) > 0:
+                max_prefill_tokens = min(max_prefill_tokens, self._step_prefill_limit)
             aligned_end = end // block_size * block_size
             if aligned_end > start or block_size <= max_prefill_tokens:
                 end = aligned_end
@@ -518,6 +552,20 @@ class Scheduler(SchedulerInterface):
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
+        self._step_prefill_limit = (
+            self.mixed_prefill_tokens
+            if any(r.num_computed_tokens >= r.num_prompt_tokens for r in self.running)
+            else 0
+        )
+        prefill_budget = self._step_prefill_limit or token_budget
+        if (
+            self._step_prefill_limit
+            and self.current_step % self.mixed_prefill_interval != 0
+        ):
+            # Give decoders graph-replay-only rounds between bounded mixed
+            # rounds. Prefills advance at least once per interval; once no
+            # decoders remain, ordinary bulk prefill resumes immediately.
+            prefill_budget = 0
         spec = self.vllm_config.speculative_config
         draft_slots = spec.max_num_new_slots_for_drafting if spec is not None else 0
         input_budget = self.scheduler_config.max_num_batched_tokens
@@ -612,6 +660,9 @@ class Scheduler(SchedulerInterface):
             num_new_tokens = min(
                 num_new_tokens, token_budget, input_budget - draft_slots
             )
+            is_prefill = request.num_computed_tokens < request.num_prompt_tokens
+            if is_prefill:
+                num_new_tokens = min(num_new_tokens, prefill_budget)
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
@@ -744,6 +795,8 @@ class Scheduler(SchedulerInterface):
             request_id = request.request_id
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
+            if is_prefill:
+                prefill_budget -= num_new_tokens
             token_budget -= num_new_tokens
             input_budget -= num_new_tokens + draft_slots
             req_index += 1
@@ -1023,6 +1076,10 @@ class Scheduler(SchedulerInterface):
                         break
 
                     num_new_tokens = min(num_new_tokens, request_token_budget)
+                    if num_computed_tokens < request.num_prompt_tokens:
+                        num_new_tokens = min(num_new_tokens, prefill_budget)
+                        if num_new_tokens == 0:
+                            break
                     assert num_new_tokens > 0
 
                     # Apply Mamba alignment before encoder caps.
@@ -1189,6 +1246,8 @@ class Scheduler(SchedulerInterface):
                     request_id
                 )
                 num_scheduled_tokens[request_id] = num_new_tokens
+                if num_computed_tokens < request.num_prompt_tokens:
+                    prefill_budget -= num_new_tokens
                 token_budget -= num_new_tokens
                 input_budget -= num_new_tokens + draft_slots
                 request.status = RequestStatus.RUNNING

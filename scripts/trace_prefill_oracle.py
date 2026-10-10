@@ -33,7 +33,7 @@ def main() -> None:
         "prompt_logprobs": 0,
     }
     request = urllib.request.Request(
-        "http://127.0.0.1:8020/v1/completions",
+        "http://127.0.0.1:" + os.environ.get("PORT", "8020") + "/v1/completions",
         data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json",
                  "Authorization": f"Bearer {key}"},

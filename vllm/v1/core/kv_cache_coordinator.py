@@ -153,6 +153,16 @@ class KVCacheCoordinator(ABC):
         # (``scheduler_block_size``) to land on real cache-hit boundaries.
         # 0 = keep only the latest replay boundary; None = dense;
         self.retention_interval = kv_cache_config.prefix_cache_retention_interval
+        # Hybrid speculative lookup may back off a block to validate the
+        # draft window. Keep that common boundary's Mamba snapshot and window
+        # as well as the normal prompt tail; neither is reconstructible from
+        # a later recurrent state.
+        if self.eagle_group_ids and any(
+            isinstance(group.kv_cache_spec, MambaSpec)
+            for group in self.kv_cache_config.kv_cache_groups
+        ):
+            for manager in self.single_type_managers:
+                manager.prefix_replay_offset = self.scheduler_block_size
         _validate_prefix_cache_retention_interval(
             self.retention_interval, self.scheduler_block_size, kv_cache_config
         )
