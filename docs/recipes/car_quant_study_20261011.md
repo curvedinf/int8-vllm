@@ -1,5 +1,9 @@
 # Model-free CAR quantization study — 4× MI100
 
+The initial study below is model-free. A separate **MLP-only full-model
+follow-up** is recorded at the end of this page; its results must not be
+confused with the synthetic format comparison.
+
 **Verdict: keep production CAR unchanged.** None of the tested BF16-input
 compressed implementations beat the native automatic CAR path. The most
 promising *format* for another implementation is linear INT8 with FP32 group
@@ -237,3 +241,459 @@ Retained under `logs/agent_mixed/` (gitignored):
 The production INT8 KV micro-test passed and the unloaded-GPU battery was
 **4/4 PASS** after testing. Production model, precision, topology, speculation,
 collective selection and scheduler configuration were not changed.
+
+---
+
+## MLP-only full-model follow-up — 2026-10-11
+
+**Outcome: keep this implementation experimental and off by default.** The
+selected token-oracle checks passed, but it did not produce a useful
+mixed-load decode improvement. It is not a 3× speedup or a lossless transport.
+Production and Nginx were restored after a successful completion smoke check;
+the GS32 flag and profiling/developer flags are absent from production workers.
+
+### Implementation and controls
+
+`VLLM_MLP_CAR_INT8_GS32=1` selects the experimental transport only for
+`RowParallelLinear` prefixes ending in `.mlp.down_proj`: target and DFlash2
+draft. It defaults off and participates in the compile-cache hash. The
+model/activation dtype, checkpoints, attention, KV format, scheduler, TP4,
+C6 and NS6 are unchanged. The baseline revision is `e5092f0f2`; sibling
+AITER is `83e07b940`. Both arms use the same added code with the flag off/on.
+
+| Callsite | Partial input | Wire input | Scale | Accumulator | Output / immediate consumer |
+|---|---|---|---|---|---|
+| Target MLP down projection | BF16 | Signed INT8, GS32 | FP32 | FP32 | BF16 → residual/normalization |
+| Target GDN output projection | BF16 | Native BF16 | None | Native FP32 | Unchanged BF16 residual stream |
+| Target full-attention output projection | BF16 | Native BF16 | None | Native FP32 | Unchanged BF16 residual stream |
+| Target token embedding | BF16 | Native BF16 | None | Native FP32 | Unchanged BF16 model input |
+| Draft MLP down projection | BF16 | Signed INT8, GS32 | FP32 | FP32 | BF16 → residual/normalization |
+| Draft attention output projection | BF16 | Native BF16 | None | Native FP32 | Unchanged BF16 residual stream |
+| Draft token embedding | BF16 | Native BF16 | None | Native FP32 | Unchanged BF16 draft input |
+
+The transport also supports FP16 inputs/outputs, tested synthetically, but
+the serving experiment does not change these BF16 model streams. Each rank
+packs its own partial with symmetric round-to-nearest quantization and an
+independent `amax/127` scale per 32 values. Decoded values are accumulated in
+fixed rank order in FP32 and rounded once to the output dtype. INT8 codes
+with different scales are **not** directly added.
+Native two-stage CAR uses a rotating summation order, so the A/B includes
+both quantization and summation-order changes; it does not isolate their
+individual numerical contributions.
+
+Private uncached IPC buffers and barrier epochs isolate this transport from
+interleaved native CAR. The native automatic 512 KiB cutoff is retained:
+one-stage below it, two-stage at/above it. Two-stage all-gather remains BF16;
+there is no second quantization of the reduced sum. Packed input is 1.125
+bytes/value, saving 43.75% of one-stage remote payload but only 21.875% of
+the complete two-stage remote payload. Separate packing adds a launch.
+
+### Test protocol
+
+Nginx is stopped and runtime-masked throughout isolated testing. Every
+server/client runs as `curved`; no persistent traffic generator is installed.
+The harness uses private disk-cache roots, bounded service memory/lifetime,
+and restores the original production service and Nginx in its finalizer.
+Stopped test KV directories are removed after their logs are retained;
+these contain regenerable cache entries, not model weights or requests.
+
+The frozen workload is **eight chats, two turns each, 16 requests**. The
+stored manifest is not the older three-turn/24-request workload. Initial
+contexts are approximately 40k tokens; arrivals are at 0, 7, 19, 29, 43,
+61, 83 and 109 seconds. Output caps are 1536 then 768 tokens, with natural
+EOS, sampled decoding, fixed seeds and 2/5/8-second follow-up waits. HTTP
+outstanding-request cap is eight; engine concurrency remains six. Normalized
+manifest SHA256: `7f5934b1334bd26e6f864a55b6e77dbd0e0435d375d1798e0bfade3e486370a1`.
+
+The suite includes:
+
+- Production INT8 KV micro-test and the four-part gfx908 battery.
+- CPU scheduler, prefix-admission, disk-tier, environment/hash and client
+  regression tests, plus the new MLP selector/fake-op tests.
+- Four-rank exact quantized-sum checks, BF16/FP16 range/cancellation cases,
+  mixed native/quantized graph replay and unprofiled collective timings.
+- A 52-prompt, 10,610-token baseline reference. Candidate teacher forcing
+  uses **identical reference token contexts**, not independently generated
+  continuations. Reported KL is a coarsened lower bound: common returned
+  top-20 tokens plus an OTHER bucket, not full-vocabulary KL.
+- Cold/warm C6 greedy gates: one shared 40k prompt, 512 output tokens per
+  stream, 3072 fixed output tokens per leg, NS6 acceptance counts.
+- Cold/warm mixed runs, followed by separate cold/warm kernel captures on
+  fresh baseline/candidate boots. Profiling replays the exact saved baseline
+  request bodies, including follow-up contexts, rather than rebuilding them
+  from different candidate responses.
+- Clean-baseline prefill-oracle scoring of six candidate long-context
+  traces and six corresponding baseline controls: all 1536 tokens of the
+  first two long responses (or until their earlier stop), and up to 512
+  tokens of each other trace. Late tails from token 1024 are reported
+  separately to expose failures hidden by prefix-only checks.
+
+Request-lifecycle captures cover rank 0; model loading/compilation is
+excluded. The separate bounded micro capture
+covers all four ranks. Timings use GPU events/Kineto plus calibrated host
+lifecycle spans, not hardware performance counters. Unprofiled client
+timings remain authoritative for performance. These legs have GPU capture
+off but the same lightweight host lifecycle tracing on in both arms.
+Whole-run output rate includes
+prefill, arrivals and queueing; it is not per-stream decode throughput.
+Profile legs are **open-loop replays of saved send offsets**, not new
+closed-loop conversations. Profiler delays can make a follow-up coexist
+with its still-running predecessor and change cache availability or batch
+composition. Their phase/call counts describe that diagnostic replay;
+the unprofiled closed-loop legs are the realistic performance comparison.
+All four captures completed 16/16 requests with zero accounting errors.
+Their submitted bodies match the saved native request hashes, and their
+cache-hit/created-token details match between arms for every request.
+Recorded runtime source hashes also match. Maximum start/end clock-offset
+drift was 0.760 µs; maximum calibration uncertainty was 2.210 µs.
+
+### Serving-transport micro results
+
+The INT8 KV micro-test passed; the battery passed **4/4**; **308 CPU tests
+passed**. All 15 numeric cases per rank matched the independent CPU-decoded
+quantized-sum oracle, and all **270 changing-input graph replays per rank**
+passed with native CAR interleaved. This is implementation correctness, not
+a claim that quantization preserves the uncompressed model's outputs.
+
+BF16 relative L2 errors versus uncompressed FP32 summation followed by BF16
+rounding: normal 0.581%, outliers 1.053%, log-range 0.635%, near-cancellation
+116.934%. The full finite BF16 sweep had no nonfinite results; mixed extreme
+groups still lost small values. FP32 scales preserve range, not arbitrary
+within-group resolution.
+
+Unprofiled BF16 collective latency in microseconds, including packing and
+communication; median of five maximum-rank trials, 10 repetitions of a
+16-operation graph burst:
+
+| Rows | Native automatic | INT8 GS32 |
+|---:|---:|---:|
+| 1 | 9.41 | 14.93 |
+| 7 | 12.96 | 17.10 |
+| 42 | 33.91 | 39.76 |
+| 48 | 37.32 | 41.01 |
+| 52 | 30.16 | 50.64 |
+| 56 | 30.96 | 49.19 |
+| 128 | 50.55 | 73.10 |
+| 1664 | 552.19 | 726.36 |
+| 2048 | 672.03 | 890.73 |
+
+In the separate 1664-row all-rank capture, native staging-copy medians were
+41.44–42.88 µs and native two-stage medians 513.84–518.08 µs. INT8 packing
+took 165.76–170.48 µs, with compressed reduction/gather at 520.40–522.24 µs.
+These are per-kernel medians from profiled runs, not additive substitutes
+for the complete unprofiled timings above. Packing is expensive, and this
+implementation's compressed reduction does not yet turn byte savings into
+a faster reduction.
+
+Compiler resource diagnostics report 11 VGPRs and zero scratch for packing;
+one-/two-stage reductions use 38/41 VGPRs and 72 bytes/lane private scratch,
+with no compiler-reported register spills. Private scratch is not itself
+proof of register spilling or a bandwidth-bound roofline classification.
+
+### Aligned short-context quality gate
+
+| Metric | GS32 candidate against native baseline |
+|---|---:|
+| Prompts / identical-context reference tokens | 52 / 10,610 |
+| Token-level top-1 agreement | 96.852% |
+| Mean coarsened KL lower bound | 0.0136051 |
+| Mean absolute reference-token logprob change | 0.0430498 |
+| Reference tokens outside candidate top 20 | 0 |
+| Worst reference-token rank | 5 |
+| Nonfinite returned logprobs | 0 |
+
+This is not a 96.852% task-accuracy score and not lossless communication:
+334 reference positions change top-1 prediction. The baseline itself is
+the already quantized serving model, not a full-precision teacher. Long
+contexts and speculative acceptance require their separate gates below.
+
+### Unprofiled end-to-end results
+
+All eight measured legs completed: six requests per greedy leg, 16 per
+mixed leg, with **zero token-accounting errors** throughout. These are
+single paired runs, not repeated/interleaved confidence intervals.
+
+| Workload | Native wall, s | GS32 wall, s | Native output tokens | GS32 output tokens | Native whole-run tok/s | GS32 whole-run tok/s |
+|---|---:|---:|---:|---:|---:|---:|
+| C6 greedy, cold | 58.261 | 55.223 | 3072 | 3072 | 52.73 | 55.63 |
+| C6 greedy, warm | 34.232 | 32.498 | 3072 | 3072 | 89.74 | 94.53 |
+| Mixed, cold | 462.930 | 480.727 | 16,675 | 18,432 | 36.02 | 38.34 |
+| Mixed, warm | 206.600 | 204.429 | 18,432 | 18,432 | 89.22 | 90.16 |
+
+The cold mixed baseline stopped `c1-t0` and `c1-t1` early with tool calls
+(444 and 103 output tokens). The candidate used the full budgets there.
+Consequently the cold wall times and rates do not measure identical work.
+All initial cold contexts missed local prefix cache in both arms; one
+baseline follow-up matched 38,272 instead of 39,936 tokens. Warm mixed
+cache counts matched for **every request**: 38,272 initial, 39,936 follow-up.
+
+| Mixed-run client metric | Native cold | GS32 cold | Native warm | GS32 warm |
+|---|---:|---:|---:|---:|
+| Median per-stream decode, tok/s | 24.17 | 24.71 | 24.32 | 24.37 |
+| Per-stream tok/s while another request awaits first token | 23.89 | 23.67 | 19.28 | 18.05 |
+| Mean first-turn TTFT, s | 155.54 | 167.30 | 5.59 | 5.08 |
+| Mean follow-up TTFT, s | 56.21 | 38.50 | 11.08 | 7.41 |
+
+The contention metric is weighted over per-stream token-seconds. It
+includes another request's queue wait, not just actual overlapping prefill.
+Speculative burst gaps are stream-event gaps, not single-token ITL.
+The mixed results do **not** establish a useful decode speedup: warm median
+stream rate is unchanged, warm whole-run rate is only 1.06% higher, and the
+contention metric is lower. TTFT movements in one sampled pair are not a
+separate cache implementation improvement; cache policy was not changed.
+
+| NS6 acceptance, accepted / drafted | Native | GS32 | Change, percentage points |
+|---|---:|---:|---:|
+| Greedy cold | 2085 / 5946 = 35.07% | 2124 / 5730 = 37.07% | +2.00 |
+| Greedy warm | 2101 / 5856 = 35.88% | 2130 / 5682 = 37.49% | +1.61 |
+| Mixed cold | 11270 / 32514 = 34.66% | 12412 / 36156 = 34.33% | −0.33 |
+| Mixed warm | 12438 / 36048 = 34.50% | 12539 / 35502 = 35.32% | +0.82 |
+
+Acceptance is aggregated from raw counts, not averaged request percentages.
+Mixed acceptance stays within the ±1-point parity band. The greedy changes
+are increases, but lie outside strict ±1-point parity; they accompany
+different generated continuations. Greedy wall improvement must not be
+attributed to a faster CAR kernel: acceptance and scheduled work also changed.
+
+### Long-context clean-prefill oracle
+
+Six retained traces per arm were teacher-forced through a **native-CAR
+baseline** server. This tests the exact emitted token IDs under their exact
+contexts, including the late portions of the two 1536-token candidate
+responses; it does not compare independently generated positions as KL.
+
+| Check | Native-generated controls | GS32-generated traces |
+|---|---:|---:|
+| Scored tokens | 4028 | 5120 |
+| Tokens outside clean-prefill top 20 | 0 | 0 |
+| Worst rank | 20 | 16 |
+| Nonfinite logprobs | 0 | 0 |
+| Tokens checked from position 1024 onward | 512 | 1024 |
+| Late-tail tokens outside top 20 | 0 | 0 |
+
+The differing counts reflect the native `c1-t0` tool-call stop at 444
+tokens, not omitted failing tokens. These checks found no numerical
+catastrophe in the selected long outputs. They do not establish unchanged
+general task accuracy, exact output equivalence, or multi-day stability.
+Mean logprobs of different generated texts must not be treated as an
+accuracy improvement.
+
+### Native reference profile
+
+The native cold/warm captures contain **8,446,995 / 3,405,436 GPU kernels**
+on rank 0, in **56 / 23 chunks**. All retained kernels were launch-correlated
+by the converter/analyzer. Kernel-interval coverage within chunks was
+98.79% / 98.85%; do not call that compute utilization, because a running
+collective can be waiting for peers. Export pauses lie between chunks.
+
+In the cold replay, median GPU step windows were **59.71 ms decode-only**
+and **985.70 ms mixed**, with mixed p95 **1237.86 ms**. These phase groups
+contain different batch sizes; they are not fixed-shape microbenchmarks.
+
+| Kernel family in native cold mixed batches | Summed GPU seconds | Share |
+|---|---:|---:|
+| GEMMs, across all projections | 75.943 | 37.40% |
+| Full-attention KV kernels | 57.425 | 28.28% |
+| All collectives | 37.045 | 18.24% |
+| GDN recurrence | 14.561 | 7.17% |
+| Normalization | 5.749 | 2.83% |
+| Other kernels | 5.019 | 2.47% |
+| Copy/store kernels | 3.765 | 1.85% |
+| Activation quantization | 2.525 | 1.24% |
+| GDN convolution | 0.850 | 0.42% |
+| Sampling | 0.195 | 0.10% |
+
+These are implementation families, not disjoint model-layer labels: GEMMs
+include MLP, attention projections and other linear work. GDN is an
+attention mechanism; its recurrence/convolution kernels are listed separately
+from the full-attention KV kernels. MLP down-projection CAR is only a subset
+of the collective row. The latter includes synchronization wait time, not
+just arithmetic or transferred bytes.
+
+Native BF16 reduction kernels alone totaled **39.014 s** over 29,866
+two-stage calls and **23.273 s** over 466,709 one-stage calls in the cold
+capture. Corresponding warm totals were **7.110 s / 6,170 calls** and
+**14.338 s / 198,162 calls**. Their means include a mixture of sizes and
+peer-arrival delays. Generic staging copies are not uniquely attributable
+to CAR in the full trace; the fixed-shape micro table includes native
+staging and remains the clean complete-collective comparison.
+
+### GS32 candidate profile
+
+The candidate cold capture contains **8,339,795 rank-0 kernels** in 55
+chunks. Kernel-interval coverage inside chunks is 97.14%. Its median
+decode-only step was **59.46 ms** and median mixed step **996.53 ms**
+(mixed p95 **1248.12 ms**), versus 59.71/985.70/1237.86 ms in the native
+capture. These are diagnostic phase distributions, not matched-shape
+speed ratios: batch composition, continuation tokens and speculative work
+can differ even when replayed request bodies match.
+
+Cold candidate kernel components, across all phases:
+
+| Kernel | Calls | Summed GPU seconds | Mean, µs |
+|---|---:|---:|---:|
+| MLP GS32 packing | 241,438 | 4.690 | 19.42 |
+| MLP GS32 one-stage reduction | 226,609 | 7.619 | 33.62 |
+| MLP GS32 two-stage reduction/gather | 14,829 | 16.965 | 1144.06 |
+| Remaining native BF16 one-stage | 233,390 | 14.350 | 61.48 |
+| Remaining native BF16 two-stage | 15,061 | 23.299 | 1546.98 |
+
+In mixed steps alone, packing costs **2.886 s / 14,766 calls**, or
+195.42 µs on average. GS32 two-stage costs **14.905 s / 12,864 calls**,
+or 1158.65 µs. The much larger remaining-native means demonstrate why
+individual kernel means cannot be treated as matched collective latency:
+callsite/shape mix and peer arrival differ, and reductions include waits.
+The fixed-shape all-rank microbenchmark above is the controlled comparison.
+Native staging copies are in the copy category whereas GS32 packing is
+classified as a collective; blindly subtracting category totals would
+also mix accounting boundaries.
+
+The warm candidate capture contains **3,381,318 kernels** in 23 chunks,
+all launch-correlated, with 98.90% within-chunk kernel-interval coverage.
+Median decode-only/mixed step windows were **108.49 / 1205.37 ms**, versus
+native **95.08 / 1188.87 ms**; mixed p95 was **1297.58 versus 1278.47 ms**.
+The same cautions about phase composition and profiler perturbation apply.
+Warm candidate component totals:
+
+| Kernel | Calls | Summed GPU seconds | Mean, µs |
+|---|---:|---:|---:|
+| MLP GS32 packing | 99,991 | 1.258 | 12.58 |
+| MLP GS32 one-stage reduction | 96,919 | 4.740 | 48.90 |
+| MLP GS32 two-stage reduction/gather | 3,072 | 3.071 | 999.62 |
+| Remaining native BF16 one-stage | 99,776 | 10.154 | 101.76 |
+| Remaining native BF16 two-stage | 3,120 | 4.446 | 1425.15 |
+
+The measured implementation has not converted reduced input traffic into
+end-to-end speed. A further transport experiment should remove the separate
+packing pass (for example, a down-projection producer epilogue), and optimize
+the two-stage reduction/gather itself. Merely changing the wire dtype with
+this pack/reduce path does not address the dominant mixed-step stalls.
+The reproducible A/B record is ledger entry
+`MLP_DOWN_PROJ_CAR_INT8_GS32_20261011` in
+`docs/recipes/surface_experiments_ledger.jsonl`.
+
+### Unprofiled host lifecycle
+
+Warm closed-loop run, median host-span milliseconds. Worker entries use
+rank 0; frontend/scheduler/cache entries use their owning process. These
+are asynchronous, sometimes nested spans, **not additive wall-time parts**.
+
+| Host span | Native | GS32 |
+|---|---:|---:|
+| Chat rendering/tokenization | 80.332 | 78.219 |
+| Scheduler call | 0.903 | 0.885 |
+| Prefix lookup | 0.069 | 0.088 |
+| Prepare inputs | 0.375 | 0.431 |
+| Prepare attention metadata | 0.147 | 0.171 |
+| Target model call/enqueue | 6.313 | 6.906 |
+| Draft propose call/enqueue | 1.293 | 1.565 |
+| Sampling call/enqueue | 1.133 | 1.416 |
+| Filesystem load task (7 / 8 samples) | 176.708 | 176.589 |
+| Filesystem store task (23 / 24 samples) | 160.868 | 117.144 |
+
+Lookup call time is not the entire asynchronous cache-promotion delay, and
+filesystem tasks can overlap other work. This transport experiment changes
+no cache policy. The recorded request-level cache-hit counts, TTFT and
+GPU phase timings must be considered together; small host-span differences
+in one pair do not establish a causal optimization.
+
+### Reproducing the full-model follow-up
+
+Sources: `csrc/custom_all_reduce_int8_gs32.hip`,
+`benchmarks/kernels/benchmark_mlp_car_gs32.py`, the opt-in communicator and
+MLP dispatch, and `scripts/{run_mlp_car_experiment,mlp_car_campaign,
+mlp_car_suite,eval_mlp_car,summarize_mlp_car}.py`.
+
+Build from the repository root using the required ROCm environment:
+
+```bash
+export ROCM_PATH=/opt/rocm LD_LIBRARY_PATH=/opt/rocm/lib
+export PYTORCH_ROCM_ARCH=gfx908 GPU_ARCHS=gfx908 VLLM_TARGET_DEVICE=rocm
+export PYTHONPATH="$PWD:$PWD/../aiter"
+mkdir -p build
+/opt/rocm/bin/hipcc -O3 -ffp-contract=off -std=c++17 \
+  --offload-arch=gfx908 -shared -fPIC csrc/custom_all_reduce_int8_gs32.hip \
+  -o build/mlp_car_int8_gs32.so
+```
+
+Tested library SHA256:
+`5467c190c9bc689d9f2af0e2801d14a66a462389d92585633e0808cc3236576c`.
+The flag requires a process restart and never builds a library inside graph
+capture. It does not change the default serving recipe.
+
+The following root-only campaign stops external ingress for its entire
+duration. Choose a **new** output directory; existing evidence is never
+overwritten. The two manifest variables below select the exact retained
+workload rather than regenerating a potentially different corpus:
+
+```bash
+export MLP_CAR_CAMPAIGN_DIR="$PWD/logs/agent_mixed/mlp_car_repeat"
+export MLP_CAR_MANIFEST="$PWD/logs/agent_mixed/mlp_car_gs32_20261011/manifest.json"
+export MLP_CAR_GREEDY_GATE="$PWD/logs/agent_mixed/mlp_car_gs32_20261011/greedy_gate.json"
+systemctl stop nginx.service
+systemctl mask --runtime nginx.service
+systemctl stop vllm.service
+.venv/bin/python scripts/mlp_car_campaign.py
+```
+
+The controller boots baseline/candidate, runs accuracy and closed-loop
+timings, then boots both again for cold/warm captures and native-oracle
+checks. It restores the original `vllm` service, verifies a completion, and
+only then unmasks/starts Nginx. `--baseline-already-running` is available
+for an explicitly prebooted isolated baseline. The original measured run
+used that preboot workflow before it was moved under the restoration guard.
+
+If the retained manifests are unavailable, prepare new ones with
+`scripts/bench_agent_mixed.py --prepare` and `--greedy-gate-from`, then point
+the variables at them. That is a new workload, not a reproduction of the
+two-turn numbers here. The controller freezes both manifests into the
+campaign directory. Its test clients and transient servers run as `curved`.
+
+The separate GPU micro/battery checks were run before the serving campaign,
+with all four GPUs idle and Nginx stopped. They are not invoked by the
+controller. After building the library, use the required environment above
+and run as the service owner:
+
+```bash
+runuser -u curved -- env PYTHONPATH="$PWD:$PWD/../aiter" \
+  ROCM_PATH=/opt/rocm LD_LIBRARY_PATH=/opt/rocm/lib \
+  PYTORCH_ROCM_ARCH=gfx908 GPU_ARCHS=gfx908 VLLM_TARGET_DEVICE=rocm \
+  .venv/bin/python scripts/test_int8_kv_micro.py
+runuser -u curved -- env PYTHONPATH="$PWD:$PWD/../aiter" \
+  ROCM_PATH=/opt/rocm LD_LIBRARY_PATH=/opt/rocm/lib \
+  PYTORCH_ROCM_ARCH=gfx908 GPU_ARCHS=gfx908 VLLM_TARGET_DEVICE=rocm \
+  HIP_VISIBLE_DEVICES=0 .venv/bin/python scripts/battery_gfx908.py
+runuser -u curved -- env PYTHONPATH="$PWD:$PWD/../aiter" \
+  ROCM_PATH=/opt/rocm LD_LIBRARY_PATH=/opt/rocm/lib \
+  PYTORCH_ROCM_ARCH=gfx908 GPU_ARCHS=gfx908 VLLM_TARGET_DEVICE=rocm \
+  VLLM_MLP_CAR_INT8_LIBRARY="$PWD/build/mlp_car_int8_gs32.so" \
+  .venv/bin/python -m torch.distributed.run --nproc_per_node=4 \
+  benchmarks/kernels/benchmark_mlp_car_gs32.py \
+  --output "$MLP_CAR_CAMPAIGN_DIR/micro.json" \
+  --trace-dir "$MLP_CAR_CAMPAIGN_DIR/micro_trace"
+```
+
+Create that artifact directory with `curved` ownership first. The 308-test
+CPU run covered `tests/test_envs.py`, `tests/distributed/test_mlp_car_gs32.py`,
+`tests/v1/core/{test_scheduler,test_mamba_align_chunk_split,
+test_prefix_fair_admission}.py`,
+`tests/v1/attention/test_rocm_g128_mixed_partitions.py`,
+`tests/v1/kv_offload/tiering/test_fs_tier.py`, and
+`scripts/test_bench_agent_mixed.py`.
+
+Summarize completed runs without issuing any requests:
+
+```bash
+.venv/bin/python scripts/summarize_mlp_car.py "$MLP_CAR_CAMPAIGN_DIR" \
+  --output "$MLP_CAR_CAMPAIGN_DIR/results.json"
+```
+
+The experiment's retained artifacts are under
+`logs/agent_mixed/mlp_car_gs32_20261011/` (gitignored): `micro.json`,
+`micro_trace/`, `reference52.json`, `candidate52.json`, the four unprofiled
+mixed/greedy legs per arm, `oracle_*.json`, `*_capture.json`, per-boot
+`host/gpu/*.json.gz` plus clock calibration, `*_kernel_analysis.json`,
+`unprofiled_host_timings.json`, `profile_validation.json`, and `results.json`.
+Use `scripts/kineto_to_agent_csv.py` followed by `scripts/analyze_agent_profile.py`
+to regenerate kernel summaries; pass the matching profile run to `--run`
+and its boot's `host` directory to `--host`.

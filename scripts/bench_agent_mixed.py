@@ -96,6 +96,9 @@ def configuration_snapshot():
     # Include candidate sources even before they are tracked by git.
     sources += [root / path for path in (
         "vllm/envs.py",
+        "vllm/model_executor/layers/linear.py",
+        "vllm/distributed/device_communicators/int8_gs32_all_reduce.py",
+        "csrc/custom_all_reduce_int8_gs32.hip",
         "vllm/model_executor/layers/mamba/gdn/gfx908_tiny_ba.py",
         "vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py",
         "vllm/v1/attention/ops/gfx908_g128_gluon_prefill.py",

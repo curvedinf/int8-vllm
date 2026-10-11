@@ -164,6 +164,7 @@ if TYPE_CHECKING:
     # the aiter trunc path. "aiter" retains the legacy trunc kernel.
     VLLM_GFX908_ACT_QUANT: str = "round"
     VLLM_GFX908_TINY_BA: bool = False
+    VLLM_MLP_CAR_INT8_GS32: bool = False
     # FS->GPU direct IO via AMD Infinity Storage (hipFile). See the
     # getters below; these only affect weight loading (and future FS-backed
     # tiers), never compiled graphs.
@@ -1400,6 +1401,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # This switch changes the traced GDN graph. Include it in compile/AOT
     # cache factors so a rollback cannot silently reuse the optimized graph.
     "VLLM_GFX908_TINY_BA": lambda: os.getenv("VLLM_GFX908_TINY_BA") == "1",
+    # MLP-only experimental transport changes the graph; hash it for AOT safety.
+    "VLLM_MLP_CAR_INT8_GS32": lambda: os.getenv("VLLM_MLP_CAR_INT8_GS32") == "1",
     # FS->GPU direct IO (AMD Infinity Storage / hipFile). "weights" routes
     # safetensors loading through vllm.fs_gpu (no host staging); "all"
     # additionally opts in future consumers (KV tier, page tier). "off"

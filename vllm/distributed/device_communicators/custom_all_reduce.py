@@ -99,6 +99,7 @@ class CustomAllreduce:
             )
         self._IS_CAPTURING = False
         self._ptr = 0
+        self.int8_gs32 = None
         self.disabled = True
         self.mnnvl_buffer = None
         self.mnnvl_handle = None
@@ -271,6 +272,11 @@ class CustomAllreduce:
             self.meta_ptrs, self.rank_data, rank, self.fully_connected
         )
         ops.register_buffer(self._ptr, self.buffer_ptrs)
+        if envs.VLLM_MLP_CAR_INT8_GS32:
+            from .int8_gs32_all_reduce import Int8Gs32Allreduce
+
+            self.int8_gs32 = Int8Gs32Allreduce(self)
+            logger.info("Experimental MLP-only INT8 GS32 CAR enabled (FP32 scales)")
         self._init_mnnvl_buffer(
             max(
                 max_mnnvl_all_gather_size * world_size,
@@ -550,6 +556,9 @@ class CustomAllreduce:
         return out
 
     def close(self):
+        if self.int8_gs32 is not None:
+            self.int8_gs32.close()
+            self.int8_gs32 = None
         if not self.disabled and self._ptr:
             if ops is not None:
                 ops.dispose(self._ptr)
