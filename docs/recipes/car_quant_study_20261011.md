@@ -697,3 +697,256 @@ mixed/greedy legs per arm, `oracle_*.json`, `*_capture.json`, per-boot
 Use `scripts/kineto_to_agent_csv.py` followed by `scripts/analyze_agent_profile.py`
 to regenerate kernel summaries; pass the matching profile run to `--run`
 and its boot's `host` directory to `--host`.
+
+## Decode INT8 intermediates — GS128 producer and transport
+
+Experimental, **off by default**: `VLLM_DECODE_INT8_INTERMEDIATES=1`.
+This is a separate experiment from the GS32 boundary packer above. It applies
+to target and draft `mlp.down_proj`, for 1–64 input rows, including the
+decode-sized speculative verification batches. Other projections, larger
+prefill batches, KV precision, and recurrent-state precision are unchanged.
+
+The small-M path uses the checkpoint's original signed INT8 GS128 weights
+with their scales promoted to FP32, rather than CK's per-channel requantized
+copy. Activations are quantized per row and 128 K elements. The GEMM uses
+INT8 MFMA with INT32 dot products for each K group, then FP32 scaled
+accumulation. Its epilogue writes signed INT8 output groups of 128 channels
+and one FP32 scale per group, without writing BF16 GEMM-output values.
+
+The custom all-reduce transports those **INT8 GS128 codes plus FP32 scales**
+from each rank. It does not transport BF16 or requantize the reduced sum.
+Peer dequantization, rank summation, residual addition, and RMSNorm use FP32
+inside one HIP kernel; the existing BF16 rounding of the reduced activation
+is preserved in registers. RMSNorm output and the residual stream are BF16.
+The draft's two-tap convolution is folded into this consumer, preserving its
+BF16 arithmetic boundaries. Five target auxiliary snapshots needed by DFlash
+are explicit dense consumers and require five additional reductions.
+
+There are still two staging copies per collective (codes and scales).
+The shape-stable compiled ABI also allocates an unused BF16 placeholder for
+small-M calls; it is neither written with GEMM values nor consumed there.
+Runtime dispatch lives inside opaque custom ops because vLLM drops Dynamo
+shape guards. A Python size branch would risk freezing the warmup choice.
+Large-M calls dispatch to the existing CK GEMM, BF16 native all-reduce, and
+the corresponding native/HIP norm arithmetic.
+
+The experiment retains the original down-projection weights alongside CK's
+prefill copy. The first full-model boot at the production 19 GB KV allocation
+ran out of memory during graph capture. The paired experiment therefore uses
+**17 GB KV in both arms**, with the original weights and private transport
+buffers retained in both (`VLLM_DECODE_INT8_RETAIN_GS128=1`). This capacity
+adjustment is confined to the test harness; it is not a production recipe
+change. The 40k-context workload is unchanged. These results must not be
+presented as a capacity-neutral change.
+
+Build with the repository's ROCm environment:
+
+```bash
+/opt/rocm/bin/hipcc -O3 -ffp-contract=off -std=c++17 \
+  --offload-arch=gfx908 -shared -fPIC csrc/decode_int8_intermediates.hip \
+  -o build/decode_int8_intermediates.so
+export MLP_CAR_EXPERIMENT=decode_int8
+export MLP_CAR_CAMPAIGN_DIR="$PWD/logs/agent_mixed/decode_int8_intermediates_20261011"
+export MLP_CAR_MANIFEST="$PWD/logs/agent_mixed/mlp_car_gs32_20261011/manifest.json"
+export MLP_CAR_GREEDY_GATE="$PWD/logs/agent_mixed/mlp_car_gs32_20261011/greedy_gate.json"
+export VLLM_DECODE_INT8_LIBRARY="$PWD/build/decode_int8_intermediates.so"
+.venv/bin/python scripts/mlp_car_campaign.py \
+  --isolate --with-micro --with-battery --candidate-preflight
+```
+
+Use a fresh campaign directory when reproducing. The guard stops/masks Nginx,
+runs GPU checks before booting, and restores production before reopening
+ingress. `MLP_CAR_KVMEM` can explicitly override the paired test's 17 GB arena.
+The new `scripts/eval_decode_int8.py` complements the existing teacher-forced
+prefill control: it forces one reference token, then compares the next
+decode step's **raw, pre-mask** top-20 logprobs at identical histories. Its
+common-top20-plus-OTHER KL is a coarsened lower bound, not full-vocabulary KL.
+A raw-logprob canary checks that mask-contaminated scores are not compared.
+The force uses `allowed_token_ids`, not `logit_bias` (the latter is rejected
+by the speculative-decoding API).
+
+Validation: 314 CPU tests, 4/4 GPU battery, KV micro, and 112 four-rank
+numeric cases passed. The micro also exercised 84 changing-input graph
+replays per rank. The candidate booted with full and piecewise graphs, and
+six concurrent smoke requests returned coherent answers and finite scores.
+
+### Unprofiled full-model results
+
+**Do not deploy this implementation.** It does not improve the target
+workload, and it fails the strict fixed-token draft-acceptance parity gate.
+The exact frozen manifests are the same as the GS32 experiment above, but
+these are fresh paired runs, both with the 17 GB KV arena and retained
+original weights. Numbers below are not a comparison against the old run.
+
+| Measurement | Native baseline | Decode INT8 GS128 |
+|---|---:|---:|
+| Fixed C6, cold: 3,072 tokens, wall time | 55.68 s | 67.57 s |
+| Fixed C6, warm: 3,072 tokens, wall time | 32.11 s | 38.48 s |
+| Fixed C6, warm: median per-stream decode | 28.84 tok/s | 22.83 tok/s |
+| Fixed C6, warm: per-stream contention rate | 21.75 tok/s | 17.44 tok/s |
+| Fixed C6, warm: accepted / drafted | 41.23% | 33.25% |
+| Mixed cold: 18,432 tokens, wall time | 488.72 s | 488.10 s |
+| Mixed cold: median per-stream decode | 26.35 tok/s | 25.27 tok/s |
+| Mixed cold: per-stream contention rate | 24.05 tok/s | 24.92 tok/s |
+| Mixed warm: median per-stream decode | 25.63 tok/s | 23.71 tok/s |
+| Mixed warm: per-stream contention rate | 19.56 tok/s | 19.71 tok/s |
+| Mixed warm: output tokens | 16,647 | 18,432 |
+| Mixed warm: wall time | 201.19 s | 210.09 s |
+
+Contention means another client is awaiting its first token, not proof of
+simultaneous execution on the GPU. Warm mixed whole-run throughput is not a
+fixed-work comparison: the baseline ended some responses early. Every leg
+completed all planned requests with zero token-accounting errors. There is
+only one paired run, not a statistical significance claim. The baseline cold
+leg includes a 15.22-second stream gap and a mid-run cleanup of old derived
+CSV exports; do not treat its tiny aggregate difference as an improvement.
+Pre-existing XGMI WAFL/FCInitTimeoutErr reports were present in kernel logs
+before this experiment and continued in the native baseline; no hardware
+causality is established by these measurements.
+
+The fixed-token warm run needed 323 candidate `runner.sample`/`draft.propose`
+calls versus 285 baseline calls. Median CPU `worker.execute_model` spans
+were nearly unchanged (6.47 vs 6.46 ms); these asynchronous CPU launch spans
+are **not** GPU step latency. The extra rounds and the 7.97-point acceptance
+loss are important confounders when attributing the end-to-end slowdown to
+the kernels alone.
+
+### Accuracy results
+
+| Aligned comparison | Cases | Mean coarsened KL | Top-1 agreement |
+|---|---:|---:|---:|
+| Teacher-forced control, 52 prompts | 10,803 tokens | 0.01219 | 97.07% |
+| Aligned next-token decode (2-token requests) | 415 positions | 0.01495 | 95.90% |
+
+The short masked requests assess next-token fidelity, not normal draft
+acceptance; the latter is measured separately by the unforced C6 runs.
+The teacher-forced reference token remained in the candidate top 20 at every
+position (worst rank 7). Maximum coarsened decode KL was 0.27753. These are
+fidelity comparisons against the native baseline, not task accuracy or
+full-vocabulary KL. The fixed-token draft-acceptance gate fails: cold acceptance
+fell from 42.55% to 32.39%, and warm from 41.23% to 33.25%.
+
+The native-baseline long-response oracle scored 5,120 retained continuation
+tokens per arm across six requests, including two 1,536-token continuations
+and their tails beyond token 1,024. All scores were finite, with zero tokens
+outside the native top 20; worst rank was 11 for baseline continuations and
+14 for candidate continuations. This checks plausibility of these sampled
+continuations, not task correctness or equivalence of their free-running
+outputs. Artifacts: `oracle_{baseline,candidate}_*.json` in the campaign.
+
+This is not an isolated communication-format A/B: it changes activation
+grouping, uses the original checkpoint's grouped weights instead of CK's
+per-channel requantization, quantizes projection outputs, and changes both
+target and draft paths together. The fidelity and acceptance changes cannot
+be attributed specifically to the INT8 wire format from this experiment.
+
+### Microbenchmarks
+
+Complete quantization + GEMM + transport + residual/Gemma RMSNorm chain,
+unprofiled median GPU latency using the slowest TP rank:
+
+| M | K | Native chain | INT8 GS128 chain |
+|---:|---:|---:|---:|
+| 1 | 256 | 51.30 us | 53.99 us |
+| 7 | 256 | 56.32 us | 56.23 us |
+| 1 | 4352 | 551.30 us | 140.78 us |
+| 7 | 4352 | 126.79 us | 141.98 us |
+| 42 | 4352 | 185.00 us | 210.79 us |
+| 48 | 4352 | 605.52 us | 216.96 us |
+| 64 | 4352 | 596.01 us | 270.60 us |
+
+These strongly shape-dependent micro wins do not translate to the fixed-C6
+model run. All four rank traces were retained. At M=42, profiled medians
+across ranks were 5.76–5.92 us for activation quantization, 74.40–75.36 us
+for GEMM plus quant-out, and 49.92–51.68 us for fused CAR/residual/RMSNorm.
+Interleaved native CAR was 31.04–32.16 us. These constituent profiled timings
+must not be added or substituted for the unprofiled complete-chain timings.
+The native collective figure excludes its separate RMSNorm, whereas the
+candidate kernel includes it. The compiled GEMM uses
+`v_mfma_i32_16x16x16i8`, verified in generated assembly.
+
+Tested HIP source SHA256:
+`da364d04654dab06d2dd2fbcc40def2b8391e5dff429b48b1df8a1c87c12ee93`.
+Library SHA256:
+`48108efa0b249d976a2d0edae9a50afdb6cf33c0d0567ff61ecfb773ed724121`.
+
+### Full-model lifecycle profiles
+
+All four rank-0 lifecycle captures completed: cold and warm for both arms,
+16 requests per capture, zero token-accounting errors. Request-body hashes
+and reported cache-token counts match across arms for all 32 paired requests.
+This is exact-body, open-loop replay of the native baseline's retained
+requests; it is not a replay of identical generated tokens or scheduler steps.
+Cold captures each produced 18,432 tokens. Warm captures produced 16,704
+baseline versus 17,799 candidate tokens, so their aggregate times are not
+equal-work speed comparisons.
+
+There are 79 baseline and 78 candidate GPU trace chunks. Maximum measured
+clock-offset drift is 720 ns. Chunk flushing introduces multi-second pauses;
+the analysis includes phase totals excluding each chunk's first worker step.
+Kernel durations still include synchronization waits. Full-model profiles
+cover rank 0; the separate micro captures cover all four ranks. These are
+timeline profiles, not hardware-counter roofline measurements.
+
+Artifacts are under
+`logs/agent_mixed/decode_int8_intermediates_20261011/`: `results.json`,
+`{baseline,candidate}_{cold,warm}_kernel_analysis.json`, and raw
+`{baseline,candidate}_profile_boot/host/gpu/*.json.gz` with clock sidecars.
+
+Warm capture, decode-phase kernel-duration sums, excluding chunk-boundary
+worker steps (seconds; **not** per-request or end-to-end latency):
+
+| Kernel family | Native baseline | Decode INT8 GS128 |
+|---|---:|---:|
+| Projection/other GEMMs | 45.16 | 38.06 |
+| New GS128 GEMM + quantized output | — | 8.59 |
+| Native all-reduce | 14.05 | 11.62 |
+| New fused GS128 CAR + residual/RMSNorm | — | 9.24 |
+| Separate normalization | 5.93 | 3.57 |
+| Paged/full-attention kernels | 37.85 | 40.42 |
+| GDN recurrence (linear attention) | 4.17 | 4.42 |
+
+These are operation-family labels: attention kernels can internally perform
+matrix multiplication, and GDN is linear attention. The GEMM rows are not a
+count of every matrix instruction in the model. The new fused collective
+includes reduction, optional draft convolution, residual addition, RMSNorm,
+and synchronization waits; it must not be labeled as all-reduce alone.
+
+The candidate's collective-plus-normalization sum is 24.43 s versus 19.98 s
+for baseline. Combined GEMM rows are 46.65 s versus 45.16 s. This identifies
+the new consumer as a substantial cost, but does not isolate its causal
+slowdown: warm outputs and batch trajectories differ. Across the complete
+warm capture, the new GEMM/quant-out kernel averages 91.18 us and fused CAR
+averages 91.93 us, versus 6.18 us for the new activation quantizer. These
+averages mix shapes and include boundary effects; the separate micro is the
+controlled shape comparison.
+
+The design still stages codes and scales separately, and performs five extra
+collectives for auxiliary snapshots. Compressing the peer payload to 51.56%
+of BF16 bytes does not remove those costs. Together with the measured
+fixed-token acceptance loss and extra draft rounds, this explains why the
+implementation cannot be treated as a communication-only speedup. The
+experiment does not establish that an optimized INT8-GS128 transport would
+be slower than native CAR.
+
+The equal-output cold capture reinforces that distinction. Its decode-phase
+GEMM sums decrease from 79.67 s to 76.47 s (including the new quant-out GEMM),
+while collective-plus-normalization sums increase from 35.52 s to 41.04 s.
+The candidate has 3,241 attributed decode steps versus 3,332 baseline steps,
+so this is not explained by a larger decode-step count in that trace. Batch
+shapes still differ; this is evidence to target the fused consumer, not an
+isolated attribution of every extra millisecond to communication.
+
+| Profile step GPU window, median | Native baseline | Decode INT8 GS128 |
+|---|---:|---:|
+| Cold: decode | 59.42 ms | 60.12 ms |
+| Cold: mixed | 982.00 ms | 977.13 ms |
+| Warm: decode | 94.65 ms | 109.80 ms |
+| Warm: mixed | 1,198.00 ms | 1,196.29 ms |
+
+These windows are descriptive, not matched-shape kernel benchmarks. Every
+kernel in the four full-model traces was launch-correlated: 8,523,686 and
+3,344,777 baseline kernels, versus 8,232,074 and 3,350,027 candidate kernels
+(cold and warm respectively). The native production service and Nginx were
+restored after a successful completion smoke test. The experimental flags
+are unset in production; the production KV allocation was not changed.

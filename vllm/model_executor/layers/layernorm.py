@@ -19,6 +19,15 @@ from vllm.triton_utils import tl, triton
 logger = init_logger(__name__)
 
 
+def _decode_int8_norm(x, residual, weight, epsilon, gemma=False, hip=False):
+    if envs.VLLM_DECODE_INT8_INTERMEDIATES:
+        from vllm.model_executor.layers.decode_int8 import DecodeInt8Tensor, norm
+
+        if isinstance(x, DecodeInt8Tensor):
+            return norm(x, residual, weight, epsilon, gemma, hip)
+    return None
+
+
 @triton.jit
 def _gemma_fused_add_rmsnorm_kernel(
     X,
@@ -164,6 +173,9 @@ class RMSNorm(CustomOp):
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
+        decoded = _decode_int8_norm(x, residual, self.weight, self.variance_epsilon)
+        if decoded is not None:
+            return decoded
         if (
             envs.VLLM_GFX908_FUSED_NORM_QUANT
             and not torch.compiler.is_compiling()
@@ -275,6 +287,11 @@ class RMSNorm(CustomOp):
         the same launch and stashes (q, scale) on the returned tensor for
         CK W8A8 linear consumers.
         """
+        decoded = _decode_int8_norm(
+            x, residual, self.weight, self.variance_epsilon, hip=True
+        )
+        if decoded is not None:
+            return decoded
         from aiter.ops.triton.normalization.rmsnorm import (
             rms_norm as aiter_rms_norm,
             rmsnorm2d_fwd_with_add as aiter_rmsnorm_add,
@@ -372,6 +389,11 @@ class GemmaRMSNorm(CustomOp):
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
+        decoded = _decode_int8_norm(
+            x, residual, self.weight, self.variance_epsilon, gemma=True
+        )
+        if decoded is not None:
+            return decoded
         weight = self.weight.float() + 1.0
         if residual is None:
             return ir.ops.rms_norm(x, weight, self.variance_epsilon)
@@ -405,6 +427,11 @@ class GemmaRMSNorm(CustomOp):
         call (~182 chains per C6 decode step in the rank-0 trace).
         VLLM_GFX908_SMALLM_NORM selects: fused (default) | native.
         """
+        decoded = _decode_int8_norm(
+            x, residual, self.weight, self.variance_epsilon, gemma=True, hip=True
+        )
+        if decoded is not None:
+            return decoded
         orig_shape = x.shape
         x_2d = x.reshape(-1, orig_shape[-1]).contiguous()
         m = x_2d.shape[0]

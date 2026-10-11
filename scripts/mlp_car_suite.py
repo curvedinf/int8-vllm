@@ -78,6 +78,11 @@ def main():
     else:
         run("candidate52", "scripts/eval_mlp_car.py", "--reference", reference,
             "--output", BASE / "candidate52.json")
+    if os.environ.get("MLP_CAR_EXPERIMENT") == "decode_int8":
+        run(f"{arm}_decode_accuracy", "scripts/eval_decode_int8.py",
+            "--generations", reference, "--reference", BASE / "decode_reference.json",
+            "--output", BASE / f"{arm}_decode_accuracy.json",
+            *(["--capture"] if arm == "baseline" else []))
     for state in ("cold", "warm"):
         run(f"{arm}_greedy_{state}", "scripts/bench_agent_mixed.py", "--manifest",
             gate_path, "--output",

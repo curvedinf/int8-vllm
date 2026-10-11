@@ -1673,6 +1673,12 @@ class RowParallelLinear(LinearBase):
         # Only fuse bias add into GEMM for rank 0 (this ensures that
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        if (envs.VLLM_DECODE_INT8_INTERMEDIATES and selected_mlp(self.prefix)
+                and input_parallel.ndim == 2):
+            from vllm.model_executor.layers.decode_int8 import down_projection
+
+            result = down_projection(self, input_parallel)
+            return (result, None) if self.return_bias else result
         output_parallel = self.quant_method.apply(self, input_parallel, bias_)
 
         if self.reduce_results and self.tp_size > 1 and not self.skip_reduce:

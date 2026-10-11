@@ -1515,6 +1515,18 @@ class EagleModelMixin:
         residual: torch.Tensor | None,
     ) -> list[torch.Tensor]:
         if layer_idx in self.aux_hidden_state_layers:
+            from vllm import envs
+
+            if envs.VLLM_DECODE_INT8_INTERMEDIATES:
+                from vllm.model_executor.layers.decode_int8 import (
+                    DecodeInt8Tensor,
+                    auxiliary_hidden,
+                )
+
+                if isinstance(hidden_states, DecodeInt8Tensor):
+                    value = auxiliary_hidden(hidden_states, residual)
+                    aux_hidden_states.append(value)
+                    return aux_hidden_states
             value = hidden_states + residual if residual is not None else hidden_states
             aux_hidden_states.append(value)
         return aux_hidden_states

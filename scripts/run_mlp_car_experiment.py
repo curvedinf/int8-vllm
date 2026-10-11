@@ -20,6 +20,9 @@ CAMPAIGN = Path(os.environ.get(
     "MLP_CAR_CAMPAIGN_DIR", ROOT / "logs/agent_mixed/mlp_car_gs32_20261011"
 )).resolve()
 UNIT = "vllm-mlp-car-experiment"
+EXPERIMENT = os.environ.get("MLP_CAR_EXPERIMENT", "gs32")
+if EXPERIMENT not in ("gs32", "decode_int8"):
+    raise ValueError(f"Unknown MLP_CAR_EXPERIMENT: {EXPERIMENT}")
 
 
 def client_env():
@@ -34,10 +37,12 @@ def client_env():
         env.get("VLLM_API_KEY") or env.get("LLAMA_API_KEY")
         or Path("/etc/llama/llama-api.key").read_text().strip()
     )
-    env.update(HOME="/home/curved", PYTHONPATH=f"{ROOT}:{ROOT.parent / 'aiter'}",
+    env.update(HOME="/home/curved", USER="curved", LOGNAME="curved",
+               PYTHONPATH=f"{ROOT}:{ROOT.parent / 'aiter'}",
                ROCM_PATH="/opt/rocm", LD_LIBRARY_PATH="/opt/rocm/lib",
                PYTORCH_ROCM_ARCH="gfx908", GPU_ARCHS="gfx908",
-               VLLM_TARGET_DEVICE="rocm", PYTHONUNBUFFERED="1")
+               VLLM_TARGET_DEVICE="rocm", PYTHONUNBUFFERED="1",
+               TORCHINDUCTOR_CACHE_DIR=str(CAMPAIGN / "inductor_cache"))
     return env
 
 
@@ -64,7 +69,7 @@ def main():
         subprocess.run(["systemctl", "stop", UNIT], check=True)
         if directory is not None:
             allowed = {"baseline_boot", "candidate_boot", "baseline_profile_boot",
-                       "candidate_profile_boot"}
+                       "candidate_profile_boot", "candidate_smoke_boot"}
             if (directory.resolve().parent != CAMPAIGN
                     or directory.name not in allowed):
                 raise RuntimeError("Refusing to clean a cache outside this campaign")
@@ -95,7 +100,8 @@ def main():
         raise RuntimeError("Stop production before booting an experiment")
     if args.tag is None:
         args.tag = f"{args.arm}_boot"
-    if args.tag not in (f"{args.arm}_boot", f"{args.arm}_profile_boot"):
+    if args.tag not in (f"{args.arm}_boot", f"{args.arm}_profile_boot",
+                        f"{args.arm}_smoke_boot"):
         ap.error("Use the arm's boot/profile_boot tag and a fresh campaign directory")
     account = pwd.getpwnam("curved")
     if not CAMPAIGN.exists():
@@ -123,10 +129,20 @@ def main():
                f"--setenv=VLLM_LIFECYCLE_DIR={directory / 'host'}",
                f"--setenv=VLLM_LIFECYCLE_GATE={directory / 'active'}",
                f"--setenv=DISKROOT={directory / 'kv'}",
-               f"--setenv=VLLM_MLP_CAR_INT8_GS32={int(args.arm == 'candidate')}",
+               f"--setenv=VLLM_MLP_CAR_INT8_GS32={int(EXPERIMENT == 'gs32' and args.arm == 'candidate')}",
                "--setenv=VLLM_MLP_CAR_INT8_LIBRARY="
                f"{ROOT / 'build/mlp_car_int8_gs32.so'}",
+               f"--setenv=VLLM_DECODE_INT8_INTERMEDIATES={int(EXPERIMENT == 'decode_int8' and args.arm == 'candidate')}",
+               f"--setenv=VLLM_DECODE_INT8_RETAIN_GS128={int(EXPERIMENT == 'decode_int8')}",
+               f"--setenv=VLLM_DECODE_INT8_LIBRARY={ROOT / 'build/decode_int8_intermediates.so'}",
                str(ROOT / "scripts/serve_recipe_qwen38.sh"), "supervise"]
+    if EXPERIMENT == "decode_int8":
+        # Original G128 weights coexist with the CK prefill copy. Reserve
+        # 2 GB of headroom in BOTH arms; otherwise graph capture OOMs at
+        # the production 19 GB KV allocation. This is test-only, not a
+        # change to the production recipe or the KV representation.
+        command.insert(-2, "--setenv=KVMEM=" + os.environ.get(
+            "MLP_CAR_KVMEM", "17000000000"))
     subprocess.run(command, check=True)
     for _ in range(900):
         try:

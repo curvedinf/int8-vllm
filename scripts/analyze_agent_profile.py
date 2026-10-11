@@ -21,6 +21,15 @@ from pathlib import Path
 @functools.cache
 def category(name):
     name = name.lower()
+    # G128 is also the decode-intermediate quantization group size; it
+    # does not by itself identify an attention kernel. Label fused work
+    # explicitly rather than charging all of it to one constituent op.
+    if "decode_int8_g128_car_rmsnorm" in name:
+        return "collective_RMSNorm"
+    if "_gemm_g128_quant_out" in name:
+        return "GEMM_quantization"
+    if "_quantize_g128" in name:
+        return "quantization"
     if any(s in name for s in ("allreduce", "all_reduce", "cross_device", "car_",
                                "nccl", "rccl")):
         return "collective"

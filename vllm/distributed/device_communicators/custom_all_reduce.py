@@ -100,6 +100,7 @@ class CustomAllreduce:
         self._IS_CAPTURING = False
         self._ptr = 0
         self.int8_gs32 = None
+        self.decode_int8 = None
         self.disabled = True
         self.mnnvl_buffer = None
         self.mnnvl_handle = None
@@ -272,6 +273,16 @@ class CustomAllreduce:
             self.meta_ptrs, self.rank_data, rank, self.fully_connected
         )
         ops.register_buffer(self._ptr, self.buffer_ptrs)
+        if (envs.VLLM_DECODE_INT8_INTERMEDIATES
+                or envs.VLLM_DECODE_INT8_RETAIN_GS128):
+            from .decode_int8_all_reduce import DecodeInt8Allreduce
+
+            self.decode_int8 = DecodeInt8Allreduce(self)
+            logger.info(
+                "Decode INT8 GS128 transport ready: enabled=%s, FP32 scales, "
+                "fused residual/RMSNorm; no BF16 peer payload",
+                envs.VLLM_DECODE_INT8_INTERMEDIATES,
+            )
         if envs.VLLM_MLP_CAR_INT8_GS32:
             from .int8_gs32_all_reduce import Int8Gs32Allreduce
 
@@ -556,6 +567,9 @@ class CustomAllreduce:
         return out
 
     def close(self):
+        if self.decode_int8 is not None:
+            self.decode_int8.close()
+            self.decode_int8 = None
         if self.int8_gs32 is not None:
             self.int8_gs32.close()
             self.int8_gs32 = None

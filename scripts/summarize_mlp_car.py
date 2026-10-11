@@ -88,6 +88,11 @@ def main():
     quality = args.campaign / "candidate52.json"
     if quality.exists():
         result["aligned_quality"] = json.loads(quality.read_text()).get("summary")
+    decode_quality = args.campaign / "candidate_decode_accuracy.json"
+    if decode_quality.exists():
+        result["decode_aligned_quality"] = json.loads(
+            decode_quality.read_text()
+        ).get("summary")
     args.output.write_text(json.dumps(result, indent=2))
     print(json.dumps({
         name: {k: v for k, v in row.items() if not isinstance(v, dict)}

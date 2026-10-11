@@ -6,13 +6,15 @@ by the restoration guard. All inference clients run as the service owner.
 """
 import argparse
 import json
+import os
+import pwd
 import shutil
 import subprocess
 import sys
 import time
 import urllib.request
 
-from run_mlp_car_experiment import CAMPAIGN, ROOT, client_env
+from run_mlp_car_experiment import CAMPAIGN, EXPERIMENT, ROOT, client_env
 
 
 def run(*args):
@@ -39,14 +41,49 @@ def stop(tag):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline-already-running", action="store_true")
+    parser.add_argument("--micro-only", action="store_true")
+    parser.add_argument("--with-micro", action="store_true")
+    parser.add_argument("--with-battery", action="store_true")
+    parser.add_argument("--candidate-preflight", action="store_true")
+    parser.add_argument("--isolate", action="store_true",
+                        help="Stop/mask ingress and stop production inside the restoration guard")
     args = parser.parse_args()
+    CAMPAIGN.mkdir(parents=True, exist_ok=True)
+    account = pwd.getpwnam("curved")
+    os.chown(CAMPAIGN, account.pw_uid, account.pw_gid)
     result = {"status": "running"}
     try:
+        if args.isolate:
+            subprocess.run(["systemctl", "mask", "--runtime", "--now", "nginx"], check=True)
+            subprocess.run(["systemctl", "stop", "vllm"], check=True)
+        if args.micro_only or args.with_micro:
+            run("scripts/run_mlp_car_experiment.py", "client", "--",
+                "-m", "torch.distributed.run", "--nproc_per_node=4",
+                "benchmarks/kernels/benchmark_decode_int8_intermediates.py",
+                "--output", CAMPAIGN / "micro.json",
+                "--trace-dir", CAMPAIGN / "micro_traces")
+        if args.micro_only:
+            result["status"] = "micro_completed"
+            return
+        if args.with_battery:
+            run("scripts/run_mlp_car_experiment.py", "client", "--",
+                "scripts/test_int8_kv_micro.py")
+            run("scripts/run_mlp_car_experiment.py", "client", "--",
+                "scripts/battery_gfx908.py")
+        if args.candidate_preflight:
+            run("scripts/run_mlp_car_experiment.py", "boot", "--arm", "candidate",
+                "--tag", "candidate_smoke_boot")
+            run("scripts/run_mlp_car_experiment.py", "client", "--",
+                "scripts/eval_decode_int8.py", "--smoke")
+            stop("candidate_smoke")
         if args.baseline_already_running:
             ready()
         else:
             run("scripts/run_mlp_car_experiment.py", "boot", "--arm", "baseline",
                 "--tag", "baseline_boot")
+        if EXPERIMENT == "decode_int8":
+            run("scripts/run_mlp_car_experiment.py", "client", "--",
+                "scripts/eval_decode_int8.py", "--canary")
         run("scripts/mlp_car_suite.py", "baseline")
         stop("baseline")
         run("scripts/run_mlp_car_experiment.py", "boot", "--arm", "candidate",

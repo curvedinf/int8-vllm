@@ -165,6 +165,8 @@ if TYPE_CHECKING:
     VLLM_GFX908_ACT_QUANT: str = "round"
     VLLM_GFX908_TINY_BA: bool = False
     VLLM_MLP_CAR_INT8_GS32: bool = False
+    VLLM_DECODE_INT8_INTERMEDIATES: bool = False
+    VLLM_DECODE_INT8_RETAIN_GS128: bool = False
     # FS->GPU direct IO via AMD Infinity Storage (hipFile). See the
     # getters below; these only affect weight loading (and future FS-backed
     # tiers), never compiled graphs.
@@ -1403,6 +1405,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_GFX908_TINY_BA": lambda: os.getenv("VLLM_GFX908_TINY_BA") == "1",
     # MLP-only experimental transport changes the graph; hash it for AOT safety.
     "VLLM_MLP_CAR_INT8_GS32": lambda: os.getenv("VLLM_MLP_CAR_INT8_GS32") == "1",
+    "VLLM_DECODE_INT8_INTERMEDIATES": lambda: (
+        os.getenv("VLLM_DECODE_INT8_INTERMEDIATES") == "1"
+    ),
+    "VLLM_DECODE_INT8_RETAIN_GS128": lambda: (
+        os.getenv("VLLM_DECODE_INT8_RETAIN_GS128") == "1"
+    ),
     # FS->GPU direct IO (AMD Infinity Storage / hipFile). "weights" routes
     # safetensors loading through vllm.fs_gpu (no host staging); "all"
     # additionally opts in future consumers (KV tier, page tier). "off"

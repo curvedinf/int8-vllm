@@ -60,6 +60,10 @@ class Helpers(unittest.TestCase):
         self.assertEqual(merged([(0, 10), (5, 15), (20, 22)]), [[0, 15], [20, 22]])
         self.assertEqual(category("custom_all_reduce_kernel"), "collective")
         self.assertEqual(category("_tiny_ba_kernel"), "GEMM")
+        self.assertEqual(category("_gemm_g128_quant_out"), "GEMM_quantization")
+        self.assertEqual(category("_quantize_g128"), "quantization")
+        self.assertEqual(category("decode_int8_g128_car_rmsnorm"),
+                         "collective_RMSNorm")
         self.assertEqual(phase({"requests": {"a": {"output": 1},
                                             "b": {"output": 0}}}), "mixed")
         self.assertEqual(stats([1, 2])["p50_s"], 1.5)

@@ -162,6 +162,18 @@ class DFlashGroupedConv(nn.Module):
                 self._bk_q[side].to(torch.float32)
                 * self._bk_s[side].unsqueeze(-1)
             ).to(delta.dtype)
+        if os.environ.get("VLLM_DECODE_INT8_INTERMEDIATES") == "1":
+            from vllm.model_executor.layers.decode_int8 import DecodeInt8Tensor
+
+            if isinstance(hidden_states, DecodeInt8Tensor):
+                if self.taps != 2:
+                    raise ValueError("Decode INT8 supports the deployed two-tap conv")
+                return hidden_states._replace(
+                    # prepare() selects one side of [M,2,taps,groups],
+                    # so the coefficient view has a strided row dimension.
+                    conv_delta=delta.contiguous(), conv_base=base.contiguous(),
+                    conv_block_size=self.block_size, conv_group_size=self.group_size,
+                )
         return _grouped_conv(
             hidden_states,
             delta,

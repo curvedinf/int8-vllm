@@ -274,6 +274,15 @@ class AiterW8A16LinearKernel(MPLinearKernel):
         # fallback). Free the rest; the memory returns to KV cache.
         # QKVParallelLinear carries head_size; q_size lives on the parent
         # attention module, not the linear itself.
+        if (layer.prefix.endswith(".mlp.down_proj")
+                and (os.environ.get("VLLM_DECODE_INT8_INTERMEDIATES") == "1"
+                     or os.environ.get("VLLM_DECODE_INT8_RETAIN_GS128") == "1")):
+            wq, ws, _, _ = self._get_weight_params(layer)
+            if self.config.group_size != 128:
+                raise ValueError("Decode INT8 requires original GS128 weights")
+            # Retain the original bytes, not the per-channel requantized copy.
+            layer._decode_i8_wq = wq.data
+            layer._decode_i8_ws = ws.data.float().contiguous()
         if (
             hasattr(layer, "_ck_q")
             and not hasattr(layer, "head_size")
