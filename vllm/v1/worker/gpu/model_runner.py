@@ -101,6 +101,7 @@ from vllm.multimodal.encoder_budget import (
     MultiModalBudget,
     get_dummy_encoder_profile_inputs,
 )
+from vllm.profiler.lifecycle import lifecycle
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
@@ -1277,6 +1278,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_reqs, num_toks, max_query_len, batch_state.has_prefill
         )
 
+    @lifecycle("runner.prepare_inputs")
     def prepare_inputs(
         self,
         scheduler_output: SchedulerOutput,
@@ -1493,6 +1495,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 _asm_ring_flush(os.getpid())
         return pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)
 
+    @lifecycle("runner.prepare_attn")
     def prepare_attn(
         self, input_batch: InputBatch
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
@@ -1523,6 +1526,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         return block_tables, slot_mappings
 
+    @lifecycle("runner.sample")
     def sample(
         self,
         hidden_states: torch.Tensor,
@@ -1576,6 +1580,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
 
+    @lifecycle("runner.postprocess_sampled")
     def postprocess_sampled(
         self,
         idx_mapping: torch.Tensor,  # May include -1 for masked entries

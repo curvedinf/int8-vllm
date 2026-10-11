@@ -108,6 +108,11 @@ Complete measurements and artifact paths are in ledger entry
 `MIXED_LOAD_FINAL_20261010`. The unchanged sibling AITER revision is
 `83e07b940`.
 
+For 40k conversations with tool round-trips, use the
+[bounded agent workload](agent_mixed_profile.md). Its
+[lifecycle profile](agent_mixed_profile_results_20261011.md) separates queueing,
+prefix reuse, mixed-prefill stalls, and kernel costs; it is not a speedup claim.
+
 ## The baseline configuration (all features ON)
 
 The published pair is designed to run together:

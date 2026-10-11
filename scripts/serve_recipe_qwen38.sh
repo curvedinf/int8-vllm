@@ -252,6 +252,10 @@ fi
 
 # LOGSTATS=1 enables periodic engine/spec-decode stat logging
 # (default off: --disable-log-stats).
+if [[ "${LIFECYCLE_METRICS:-0}" == "1" ]]; then
+  LOGSTATS=1
+  ARGS+=(--enable-per-request-metrics --per-request-spec-decode-metrics detailed)
+fi
 if [[ "${LOGSTATS:-0}" != "1" ]]; then
   ARGS+=(--disable-log-stats)
 fi

@@ -55,6 +55,7 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
 from vllm.platforms import current_platform
+from vllm.profiler.lifecycle import lifecycle
 from vllm.profiler.wrapper import (
     CudaProfilerWrapper,
     ProtonProfilerWrapper,
@@ -1043,6 +1044,7 @@ class Worker(WorkerBase):
 
     @torch.inference_mode()
     @with_gpu_sync_check
+    @lifecycle("worker.sample_tokens")
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
@@ -1050,6 +1052,7 @@ class Worker(WorkerBase):
 
     @torch.inference_mode()
     @with_gpu_sync_check
+    @lifecycle("worker.execute_model")
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
@@ -1142,6 +1145,16 @@ class Worker(WorkerBase):
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
+
+    def start_lifecycle_gpu_profile(self, tag: str, ranks: str = "0"):
+        from vllm.profiler.lifecycle import start_gpu_profile
+
+        return start_gpu_profile(tag, ranks)
+
+    def stop_lifecycle_gpu_profile(self):
+        from vllm.profiler.lifecycle import stop_gpu_profile
+
+        return stop_gpu_profile()
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         # Check if profiling is enabled

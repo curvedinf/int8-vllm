@@ -44,6 +44,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
+from vllm.profiler.lifecycle import lifecycle
 
 
 class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
@@ -102,6 +103,7 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         assert isinstance(kv_connector_metadata, OffloadingConnectorMetadata)
         self.connector_worker.handle_preemptions(kv_connector_metadata)
 
+    @lifecycle("cache.start_load_kv")
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
@@ -119,11 +121,13 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> None:
         pass
 
+    @lifecycle("cache.wait_for_save")
     def wait_for_save(self):
         # Store deferral is handled in get_finished(), which always runs even
         # when wait_for_save() is skipped (e.g. kv_connector_no_forward).
         pass
 
+    @lifecycle("cache.get_finished")
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
@@ -144,6 +148,7 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.on_new_request(request)
 
+    @lifecycle("cache.lookup")
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int | None, bool]:

@@ -8,6 +8,8 @@ import os
 import random
 import threading
 
+from vllm.profiler.lifecycle import lifecycle
+
 try:
     from vllm.fs_io_C import (  # pyright: ignore[reportMissingImports]
         batch_load_block as batch_load_block_C,
@@ -165,6 +167,7 @@ def _load_block(
             os.close(fd)
 
 
+@lifecycle("cache.fs_store")
 def batch_store_block(
     paths: list[str],
     view: memoryview,
@@ -190,6 +193,7 @@ def batch_store_block(
             _store_block(path, view, offset, block_size, use_o_direct)
 
 
+@lifecycle("cache.fs_load")
 def batch_load_block(
     paths: list[str],
     view: memoryview,

@@ -32,6 +32,7 @@ except ImportError:
 from typing_extensions import override
 
 from vllm.logger import init_logger
+from vllm.profiler.lifecycle import lifecycle
 from vllm.v1.kv_offload.base import (
     Locality,
     LookupResult,
@@ -74,6 +75,7 @@ class FsAsyncLookupManager(AsyncLookupManager):
         super().__init__(tier_type=tier_type)
         self._tier = tier
 
+    @lifecycle("cache.fs_lookup")
     def batch_lookup(
         self, keys: list[OffloadKey], req_context: ReqContext
     ) -> Iterable[bool]:

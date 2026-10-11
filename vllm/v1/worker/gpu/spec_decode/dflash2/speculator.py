@@ -9,6 +9,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_tp_group
+from vllm.profiler.lifecycle import lifecycle
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
@@ -180,6 +181,7 @@ class DFlash2Speculator(DFlashSpeculator):
             self._selector_scores.shape, dtype=torch.int64, device=device
         )
 
+    @lifecycle("draft.propose")
     def propose(self, *args, **kwargs):
         # Stash the input batch (full token histories) for the lookup
         # override; the base class signature keeps positional args.

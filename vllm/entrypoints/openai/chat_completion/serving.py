@@ -58,6 +58,7 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.parser import ParserManager
+from vllm.profiler.lifecycle import lifecycle
 from vllm.parser.abstract_parser import Parser
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
@@ -214,6 +215,7 @@ class OpenAIServingChat(GenerateBaseServing):
         """
         return chat_template_kwargs
 
+    @lifecycle("frontend.render_chat_request")
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
