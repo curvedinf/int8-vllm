@@ -417,6 +417,59 @@ class Scheduler(SchedulerInterface):
                 self.max_num_scheduled_tokens,
             )
         self._step_prefill_limit = 0
+        self.prefix_fair_admission = (
+            os.environ.get("VLLM_GFX908_PREFIX_FAIR_ADMISSION", "0") == "1"
+        )
+        self._prefix_bypassed_heads: set[str] = set()
+
+    def _prioritize_cached_waiter(self, queue: RequestQueue, budget: int) -> None:
+        """Allow one short cached follow-up ahead of each long FCFS head.
+
+        A warm tool turn should not wait behind every queued 40k cold prompt.
+        The bypass is bounded to one per original head, preserving cold-request
+        progress. Running requests, priorities, cache allocation, and the shared
+        prefill budget are unchanged. No remote lookup or GPU work is started.
+        """
+        from vllm.v1.core.sched.request_queue import FCFSRequestQueue
+
+        if (not self.prefix_fair_admission or budget <= 0
+                or not isinstance(queue, FCFSRequestQueue) or not queue):
+            return
+        head = queue.peek_request()
+        if (head.request_id in self._prefix_bypassed_heads
+                or head.status != RequestStatus.WAITING
+                or head.num_computed_tokens or head.num_preemptions):
+            return
+        limit = 3 * self.block_size
+        if head.num_tokens <= limit:
+            return
+        manager = self.kv_cache_manager
+        if head.num_tokens - manager.peek_cached_tokens(head) <= limit:
+            return
+        # Deferred cold lookups otherwise outrank every regular waiter. Search
+        # both queues with one shared scan bound, not just the selected queue.
+        other = (
+            self.waiting if queue is self.skipped_waiting else self.skipped_waiting
+        )
+        candidates = (
+            (source, candidate)
+            for source in (queue, other)
+            for candidate in source
+            if candidate is not head
+        )
+        for source, candidate in itertools.islice(candidates, 16):
+            if (candidate.status != RequestStatus.WAITING
+                    or candidate.num_computed_tokens or candidate.num_preemptions
+                    or candidate.num_stale_output_tokens or candidate.mm_features
+                    or candidate.lora_request):
+                continue
+            cached = manager.peek_cached_tokens(candidate)
+            if (cached >= self.block_size and cached * 5 >= candidate.num_tokens * 4
+                    and candidate.num_tokens - cached <= limit):
+                source.remove_request(candidate)
+                queue.prepend_request(candidate)
+                self._prefix_bypassed_heads.add(head.request_id)
+                break
 
     def _mamba_block_aligned_split(
         self,
@@ -890,6 +943,13 @@ class Scheduler(SchedulerInterface):
                     step_skipped_waiting.prepend_request(request)
                     continue
 
+                # A deferred head may have just become runnable. Only now can
+                # its ordinary WAITING state participate in the bounded bypass.
+                if self.prefix_fair_admission:
+                    self._prioritize_cached_waiter(request_queue, prefill_budget)
+                    request = request_queue.peek_request()
+                    request_id = request.request_id
+
                 if (
                     request.num_stale_output_tokens > 0
                     and not request.drop_stale_output
@@ -1253,6 +1313,7 @@ class Scheduler(SchedulerInterface):
                 token_budget -= num_new_tokens
                 input_budget -= num_new_tokens + draft_slots
                 request.status = RequestStatus.RUNNING
+                self._prefix_bypassed_heads.discard(request_id)
                 request.num_computed_tokens = num_computed_tokens
                 if pad_spec_decode:
                     scheduled_spec_decode_tokens[request_id] = [
@@ -2570,6 +2631,8 @@ class Scheduler(SchedulerInterface):
         self, request: Request, delay_free_blocks: bool = False
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         assert request.is_finished()
+
+        self._prefix_bypassed_heads.discard(request.request_id)
 
         self._inflight_prefills.discard(request)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)

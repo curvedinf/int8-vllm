@@ -5,6 +5,8 @@ import torch
 import triton
 import triton.language as tl
 
+from vllm.utils.torch_utils import direct_register_custom_op
+
 
 @triton.jit
 def _tiny_ba_kernel(
@@ -42,3 +44,32 @@ def tiny_ba_projection(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         x, weight, out, N=cols, K=inner, BN=4, BK=128, num_warps=4
     )
     return out
+
+
+def _tiny_ba_dispatch(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    # This decision must execute at runtime, inside an opaque op. A Python
+    # M<=64 branch in the compiled model is specialized at the tracing shape
+    # (usually a large prefill) and silently loses the decode fast path.
+    if 0 < x.shape[0] <= 64:
+        return tiny_ba_projection(x, weight)
+    return torch.nn.functional.linear(x, weight)
+
+
+def _tiny_ba_fake(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    return x.new_empty((x.shape[0], weight.shape[0]))
+
+
+direct_register_custom_op(
+    op_name="gfx908_tiny_ba",
+    op_func=_tiny_ba_dispatch,
+    fake_impl=_tiny_ba_fake,
+)
+
+
+def tiny_ba_dispatch(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """Compile-safe dispatch for the validated BF16 gate projection shapes.
+
+    The caller checks static weight/dtype/layout eligibility. Large prefills
+    retain F.linear; decode uses the existing FP32-accumulating tiny kernel.
+    """
+    return torch.ops.vllm.gfx908_tiny_ba(x, weight)

@@ -23,7 +23,13 @@ def main() -> None:
 
     trace = json.loads(args.trace.read_text(encoding="utf-8"))
     prompt_ids = trace["prompt_token_ids"]
-    output_ids = trace["output_token_ids"][:args.max_tokens]
+    output_ids = trace.get("output_token_ids")
+    if output_ids is None and "tokens" in trace:
+        # bench_agent_mixed retains exact IDs grouped by stream-event timestamp.
+        output_ids = [token for _, tokens in trace["tokens"] for token in tokens]
+    if not prompt_ids or not output_ids:
+        ap.error("trace requires nonempty prompt and output token IDs")
+    output_ids = output_ids[:args.max_tokens]
     ids = prompt_ids + output_ids
     body = {
         "model": "qwen3.8-27b-gptq8",

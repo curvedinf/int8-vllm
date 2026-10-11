@@ -79,6 +79,10 @@ interval. Cancellation closes all streaming connections and retains unfinished
 and unstarted requests in the summary. HTTP 429/503 get at most two retries.
 The first SSE event's large prompt-ID array requires a larger client read buffer;
 this is covered by the 40k-event regression test.
+The client opens a fresh loopback TCP connection per HTTP request. Agent waits
+include five seconds, which can race the server's keep-alive timeout when
+reusing pooled sockets. Transport failures are retained, not silently replayed.
+The connection policy is recorded in each run's metadata.
 
 ## Kernel and CPU tracing
 

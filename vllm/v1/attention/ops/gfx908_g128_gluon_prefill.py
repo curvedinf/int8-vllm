@@ -44,6 +44,10 @@ def g128_prefill_core(
     MMA_DT: gl.constexpr,
     MMA_FP16: gl.constexpr,
     WIDE_KV: gl.constexpr,
+    PARTIAL=None,
+    PMAX=None,
+    PSUM=None,
+    SPLITS: gl.constexpr = 1,
 ):
     block_id = gl.program_id(0)
     qhead = gl.program_id(1)
@@ -79,6 +83,13 @@ def g128_prefill_core(
     context = seq_len - q_len
     max_prefix = gl.minimum(context + local_block * 64 + 64, seq_len)
     hi = (max_prefix + 31) // 32
+    if SPLITS > 1:
+        segment = gl.program_id(2)
+        tiles_per_segment = gl.cdiv(seq_len, SPLITS * 32)
+        lo = segment * tiles_per_segment
+        hi = gl.minimum(hi, lo + tiles_per_segment)
+    else:
+        lo = 0
 
     q_layout: gl.constexpr = gl.BlockedLayout(
         size_per_thread=[1, 8], threads_per_warp=[4, 16],
@@ -129,7 +140,7 @@ def g128_prefill_core(
     # wide-KV helpers: 32 int32 lanes cover 128 int8 columns per half.
     tw = gl.arange(0, 32, layout=gl.SliceLayout(1, q_layout))
     kq = gl.arange(0, 32, layout=gl.SliceLayout(0, q_layout))
-    for j in range(0, hi):
+    for j in range(lo, hi):
         slot = (j * 32) % BLOCK_SIZE
         # Widen before multiplying: the KV arena can exceed 2 GiB even
         # though its block IDs fit in int32.
@@ -237,7 +248,21 @@ def g128_prefill_core(
     od = gl.arange(0, 128, layout=gl.SliceLayout(0, out_layout))
     opos = local_block * 64 + om
     ovalid = opos < q_len
-    base = OUT + (q_start + opos[:, None]) * OUT_STRIDE0 + qhead * OUT_STRIDE1 + od[None, :]
-    inv_l = 1.0 / l_out
-    gl.store(base, acc0 * inv_l[:, None], mask=ovalid[:, None])
-    gl.store(base + 128, acc1 * inv_l[:, None], mask=ovalid[:, None])
+    if SPLITS > 1:
+        # Same token/head/segment layout and 32-token split boundaries as
+        # reduce_segments. Empty causal segments have m=-inf and zero output;
+        # their initial l=1 is harmless because exp(-inf-global_max)=0.
+        base = (PARTIAL + (q_start + opos[:, None]) * (NUM_QHEADS * SPLITS * 256)
+                + qhead * SPLITS * 256 + segment * 256 + od[None, :])
+        gl.store(base, acc0, mask=ovalid[:, None])
+        gl.store(base + 128, acc1, mask=ovalid[:, None])
+        m_out = gl.convert_layout(m, gl.SliceLayout(1, out_layout))
+        offset = (q_start + opos) * NUM_QHEADS * SPLITS + qhead * SPLITS + segment
+        gl.store(PMAX + offset, m_out, mask=ovalid)
+        gl.store(PSUM + offset, l_out, mask=ovalid)
+    else:
+        base = (OUT + (q_start + opos[:, None]) * OUT_STRIDE0
+                + qhead * OUT_STRIDE1 + od[None, :])
+        inv_l = 1.0 / l_out
+        gl.store(base, acc0 * inv_l[:, None], mask=ovalid[:, None])
+        gl.store(base + 128, acc1 * inv_l[:, None], mask=ovalid[:, None])

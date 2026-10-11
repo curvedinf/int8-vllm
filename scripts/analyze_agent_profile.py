@@ -33,7 +33,7 @@ def category(name):
         return "GDN_recurrence"
     if "conv1d" in name:
         return "GDN_convolution"
-    if any(s in name for s in ("gemm", "matmul", "cijk_")):
+    if any(s in name for s in ("gemm", "matmul", "cijk_", "tiny_ba")):
         return "GEMM"
     if any(s in name for s in ("norm", "rms")):
         return "normalization"

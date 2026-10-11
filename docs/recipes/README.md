@@ -157,6 +157,16 @@ deliberately `int8_block_g128`.
 
 The script encodes the full intended feature set:
 
+The 2026-10-11 [40k mixed-load pass](agent_mixed_optimizations_20261011.md)
+makes the tiny b/a dispatch survive large-shape compilation, selects the
+spill-free decode tile (`VLLM_G128_I8DOT_MFMA=16`), and enables bounded cached
+follow-up admission across both waiting queues
+(`VLLM_GFX908_PREFIX_FAIR_ADMISSION=1`). Serial prefill remains mandatory by
+default (`VLLM_G128_PREFILL_SEGMENTS=1`); segmented prefill failed the acceptance
+gate. Same-manifest whole-run throughput is 40.19 cold / 92.24 warm tok/s versus
+35.44 / 80.05 baseline, with mean cached tool-turn TTFT 69.56 versus 145.78 s.
+These are sampled aggregate workload results, not per-user rates or a 3x gain.
+
 | Feature | Value | Why it's critical |
 |---|---|---|
 | Checkpoint | PTQR-retrained export deployed at `<models>/Qwen3.8-27B-PTQR-R10S60` (since 2026-09-06) | PTQR-retrained G128 int8: serving-gate KLD 0.0069 vs 0.0110 for the original gptqmodel checkpoint, 42/52 vs 38/52 greedy agreement, acceptance 3.88/13 ≥ bf16 baseline 3.67 (ledger PTQR_P1_R10S60_FINAL); original stays at `Qwen3.8-27B-GPTQ-8bit-gs128` as wrapper source + rollback |

@@ -59,6 +59,7 @@ class Helpers(unittest.TestCase):
         self.assertEqual(union_ns([(0, 10), (5, 15), (20, 22)]), 17)
         self.assertEqual(merged([(0, 10), (5, 15), (20, 22)]), [[0, 15], [20, 22]])
         self.assertEqual(category("custom_all_reduce_kernel"), "collective")
+        self.assertEqual(category("_tiny_ba_kernel"), "GEMM")
         self.assertEqual(phase({"requests": {"a": {"output": 1},
                                             "b": {"output": 0}}}), "mixed")
         self.assertEqual(stats([1, 2])["p50_s"], 1.5)
@@ -201,6 +202,7 @@ class Client(unittest.IsolatedAsyncioTestCase):
                         rejected = await run.request(session, {"reject": True}, "rejected")
                     self.assertEqual(good["status"], "complete")
                     self.assertEqual(good["output_tokens_observed"], 1)
+                    self.assertEqual(good["prompt_token_ids"], [12345] * 40000)
                     self.assertEqual(bad["status"], "failed")
                     self.assertEqual(rejected["http_status"], 400)
                 finally:
@@ -210,6 +212,7 @@ class Client(unittest.IsolatedAsyncioTestCase):
 
     async def test_deadline_keeps_failures_and_removes_gate(self):
         async def stalled(self, session, spec):
+            assert session.connector.force_close
             await asyncio.sleep(10)
         async def monitor(self, session):
             await asyncio.sleep(10)

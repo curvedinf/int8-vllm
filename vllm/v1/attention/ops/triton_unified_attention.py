@@ -1603,6 +1603,7 @@ def unified_attention(
             s_stride2=g8_k_scale.stride(2),
             ROWS=64, TILE=64, D=head_size, DG=head_size // 2,
             num_warps=4,
+            matrix_instr_nonkdim=int(os.environ.get("VLLM_G128_I8DOT_MFMA", "0")),
         )
         reduce_segments[(q.shape[0], num_query_heads)](
             output_ptr=out,
@@ -1857,9 +1858,23 @@ def unified_attention(
             )
             return
 
+        # Reuse the shared flat workspace: 256 decode rows x 64 splits also
+        # holds 2048 prefill rows x 8 splits. No extra per-layer allocation.
+        prefill_segments = int(os.environ.get("VLLM_G128_PREFILL_SEGMENTS", "1"))
+        if (prefill_segments not in (2, 4, 8) or max_seqlen_k < 8192
+                or softmax_segm_output is None
+                or softmax_segm_max is None or softmax_segm_expsum is None):
+            prefill_segments = 1
+        elif (q.shape[0] * num_query_heads * prefill_segments * head_size
+              > softmax_segm_output.numel()
+              or q.shape[0] * num_query_heads * prefill_segments
+              > min(softmax_segm_max.numel(), softmax_segm_expsum.numel())):
+            prefill_segments = 1
+
         g128_prefill_core[(
             q.shape[0] // 64 + num_seqs,
             num_query_heads,
+            prefill_segments,
         )](
             q, k, v, g8_k_scale, g8_v_scale, block_table, seqused_k,
             cu_seqlens_q, out,
@@ -1887,8 +1902,25 @@ def unified_attention(
             WIDE_KV=(
                 os.environ.get("VLLM_G128_PREFILL_WIDEKV", "0") == "1"
             ),
+            PARTIAL=softmax_segm_output,
+            PMAX=softmax_segm_max,
+            PSUM=softmax_segm_expsum,
+            SPLITS=prefill_segments,
             num_warps=4,
         )
+        if prefill_segments > 1:
+            reduce_segments[(q.shape[0], num_query_heads)](
+                output_ptr=out, segm_output_ptr=softmax_segm_output,
+                segm_max_ptr=softmax_segm_max,
+                segm_expsum_ptr=softmax_segm_expsum,
+                seq_lens_ptr=seqused_k, num_seqs=num_seqs,
+                num_query_heads=num_query_heads, out_scale_inv=1.0,
+                output_stride_0=out.stride(0), output_stride_1=out.stride(1),
+                block_table_stride=block_table.stride(0), TILE_SIZE=32,
+                HEAD_SIZE=head_size, HEAD_SIZE_PADDED=head_size_padded,
+                query_start_len_ptr=cu_seqlens_q, BLOCK_Q=max_seqlen_q,
+                NUM_SEGMENTS_PER_SEQ=prefill_segments, USE_FP8=False,
+            )
         return
 
     kernel_unified_attention[grid](

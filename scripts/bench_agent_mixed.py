@@ -70,6 +70,10 @@ def configuration_snapshot():
     root = Path(__file__).resolve().parents[1]
     result = {"diff_sha256": hashlib.sha256(subprocess.check_output(
         ["git", "diff", "HEAD"], cwd=root)).hexdigest()}
+    result["source_snapshot_scope"] = (
+        "Checkout at client launch, not an attestation of already-imported "
+        "server code; match the recorded server PID to its boot/experiment row."
+    )
     result["aiter_git"] = subprocess.check_output(
         ["git", "-C", str(root.parent / "aiter"), "rev-parse", "HEAD"],
         text=True).strip()
@@ -80,13 +84,25 @@ def configuration_snapshot():
         for item in env:
             key, _, value = item.decode(errors="replace").partition("=")
             if key.startswith(("VLLM_", "ROCM_", "HIP_", "PYTORCH_", "GPU_")):
-                if not any(word in key for word in ("KEY", "TOKEN", "PASSWORD")):
+                if (key == "VLLM_GFX908_MIXED_PREFILL_TOKENS"
+                        or not any(word in key for word in
+                                   ("KEY", "TOKEN", "PASSWORD", "SECRET"))):
                     result["server_environment"][key] = value
         result["server_pid"] = pid
     except OSError as exc:
         result["server_snapshot_error"] = str(exc)
     sources = list((root / "scripts").glob("*agent*py")) + [
         root / "vllm/profiler/lifecycle.py", root / "scripts/serve_recipe_qwen38.sh"]
+    # Include candidate sources even before they are tracked by git.
+    sources += [root / path for path in (
+        "vllm/envs.py",
+        "vllm/model_executor/layers/mamba/gdn/gfx908_tiny_ba.py",
+        "vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py",
+        "vllm/v1/attention/ops/gfx908_g128_gluon_prefill.py",
+        "vllm/v1/attention/ops/triton_unified_attention.py",
+        "vllm/v1/core/kv_cache_manager.py",
+        "vllm/v1/core/sched/scheduler.py",
+    )]
     result["test_sources"] = {str(p.relative_to(root)):
         hashlib.sha256(p.read_bytes()).hexdigest() for p in sources}
     return result
@@ -202,10 +218,14 @@ class Run:
                             chunk = json.loads(payload)
                             if chunk.get("error"):
                                 raise RuntimeError(str(chunk["error"]))
+                            if chunk.get("prompt_token_ids") is not None:
+                                result["prompt_token_ids"] = chunk["prompt_token_ids"]
                             for key in ("usage", "metrics"):
                                 if chunk.get(key) is not None:
                                     result[key] = chunk[key]
                             for choice in chunk.get("choices", []):
+                                if choice.get("prompt_token_ids") is not None:
+                                    result["prompt_token_ids"] = choice["prompt_token_ids"]
                                 ids = choice.get("token_ids") or []
                                 if ids:
                                     result["tokens"].append([now, ids])
@@ -300,6 +320,7 @@ class Run:
         gate = Path(self.args.trace_gate) if self.args.trace_gate else None
         meta = {"manifest_sha256": digest(self.manifest), "origin_ns": self.origin,
                 "wall_time_ns": time.time_ns(), "args": vars(self.args),
+                "http_connection_policy": "fresh TCP connection per request",
                 "configuration": configuration_snapshot(),
                 "git": subprocess.check_output(["git", "rev-parse", "HEAD"],
                                                text=True).strip()}
@@ -310,7 +331,12 @@ class Run:
         try:
             # return_token_ids includes the entire 40k prompt in the first SSE
             # event. aiohttp's default 128 KiB line cap is too small for it.
-            async with aiohttp.ClientSession(headers=headers, read_bufsize=4*1024*1024,
+            # Agent think-times include the server's five-second keep-alive
+            # boundary. Reusing an idle socket there can fail before headers;
+            # fresh loopback connections avoid the race without replaying work.
+            async with aiohttp.ClientSession(headers=headers,
+                    connector=aiohttp.TCPConnector(force_close=True),
+                    read_bufsize=4*1024*1024,
                     timeout=
                     aiohttp.ClientTimeout(total=self.args.request_timeout)) as session:
                 async with asyncio.timeout(self.args.duration):
@@ -344,7 +370,8 @@ class Run:
             seen = {r["name"] for r in self.results}
             self.results.extend({"name": name, "status": "not_started_dependency_or_deadline"}
                                 for name in planned if name not in seen)
-            compact = [{k: v for k, v in r.items() if k not in ("tokens", "message")}
+            compact = [{k: v for k, v in r.items()
+                        if k not in ("tokens", "message", "prompt_token_ids")}
                        for r in self.results]
             (self.root / "summary.json").write_text(json.dumps(compact, indent=2))
             self.events.close()
@@ -355,6 +382,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--prepare", action="store_true")
+    parser.add_argument("--greedy-gate-from", help="Freeze a C6 shared-prefix greedy "
+                        "acceptance gate from an existing corpus manifest")
     parser.add_argument("--context", type=int, default=40000)
     parser.add_argument("--prompt-namespace", default="frozen-mixed-v1")
     parser.add_argument("--output")
@@ -368,6 +397,24 @@ def main():
     parser.add_argument("--replay-from", help="Exact saved bodies and send offsets; "
                         "open-loop replay, not response-dependent agent mode")
     args = parser.parse_args()
+    if args.greedy_gate_from:
+        manifest = json.loads(Path(args.greedy_gate_from).read_text())
+        manifest["sampling"] = {"temperature": 0, "ignore_eos": True,
+                                "min_tokens": 512,
+                                "chat_template_kwargs": {"enable_thinking": False}}
+        manifest["output_budgets"] = [512]
+        manifest["question"] = (
+            "Write exhaustive technical release notes from these documents. "
+            "Discuss architecture, deployment and performance in detail. "
+            "Use only the provided documents; no tool call is needed.")
+        manifest["conversations"] = [
+            {"id": i, "arrival_s": 0, "delay_s": 0,
+             "prefix": "Frozen greedy acceptance gate 20261011.\n"}
+            for i in range(6)]
+        with open(args.manifest, "x") as file:
+            json.dump(manifest, file)
+        print(digest(manifest))
+        return
     if args.prepare:
         from garble_docs_probe import build_corpus
         from garble_repro2 import get_tok

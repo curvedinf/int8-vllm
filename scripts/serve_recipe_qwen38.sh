@@ -78,8 +78,14 @@ COMMON_ENV=(
   # Set the token budget to 0 to disable this scheduling policy.
   VLLM_GFX908_MIXED_PREFILL_TOKENS="${VLLM_GFX908_MIXED_PREFILL_TOKENS:-1664}"
   VLLM_GFX908_MIXED_PREFILL_INTERVAL="${VLLM_GFX908_MIXED_PREFILL_INTERVAL:-16}"
+  # One short locally cached turn may bypass each long FCFS head, across
+  # regular and deferred queues. Does not preempt an in-flight prefill.
+  VLLM_GFX908_PREFIX_FAIR_ADMISSION="${VLLM_GFX908_PREFIX_FAIR_ADMISSION:-1}"
   VLLM_G128_MIXED_SPLIT="${VLLM_G128_MIXED_SPLIT:-1}"
   VLLM_G128_PREFILL_SPLITK="${VLLM_G128_PREFILL_SPLITK:-1}"
+  # Preserve serial prefill numerics: segmented-prefill candidate held back
+  # after the 2026-10-11 acceptance gate (see the experiment ledger).
+  VLLM_G128_PREFILL_SEGMENTS="${VLLM_G128_PREFILL_SEGMENTS:-1}"
   # Full W8A8 doctrine, gated pieces: int8 lm_head (A1 gate-passed, neutral
   # acceptance, halves head memory) and DFlash2 conv/selector projections
   # (A2 gate-passed, acceptance +10.7pt). Fused norm+quant stays OFF
@@ -366,7 +372,8 @@ fi
 if [[ -f "${LOG_DIR}/G128PF" ]]; then
   VLLM_G128_PREFILL_GLUON="$(tr -d '[:space:]' < "${LOG_DIR}/G128PF")"
 fi
-# Keep the GDN b/a projection in BF16, using a direct small-batch kernel.
+# Compile-safe direct BF16 b/a kernel, gated with serial G128 prefill.
+# Large queries retain the general projection; small queries accumulate in FP32.
 if [[ -f "${LOG_DIR}/GDN_TINY_BA" ]]; then
   VLLM_GFX908_TINY_BA="$(tr -d '[:space:]' < "${LOG_DIR}/GDN_TINY_BA")"
 fi
@@ -660,6 +667,7 @@ start_server() {
   VLLM_G128_ATTN3D="${VLLM_G128_ATTN3D:-1}" \
   VLLM_G128_GLUON="${VLLM_G128_GLUON:-1}" \
   VLLM_G128_I8DOT="${VLLM_G128_I8DOT:-1}" \
+  VLLM_G128_I8DOT_MFMA="${VLLM_G128_I8DOT_MFMA:-16}" \
   VLLM_G128_DRAFT_GLUON="${VLLM_G128_DRAFT_GLUON:-1}" \
   VLLM_G128_PREFILL_GLUON="${VLLM_G128_PREFILL_GLUON:-1}" \
   VLLM_GFX908_TINY_BA="${VLLM_GFX908_TINY_BA:-1}" \

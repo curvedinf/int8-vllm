@@ -229,6 +229,19 @@ class KVCacheManager:
             preempted=request.num_preemptions > 0,
         )
 
+    def peek_cached_tokens(self, request: Request) -> int:
+        """Read-only local-cache estimate for bounded admission prioritization.
+
+        Do not allocate/touch blocks, emit reuse events, or start tier I/O.
+        Admission must repeat the normal lookup and allocation checks later.
+        """
+        if request.num_tokens < 1 or not self.prefix_cache_lookup_enabled(request):
+            return 0
+        _, tokens, _ = self.coordinator.find_longest_cache_hit(
+            request.block_hashes, request.num_tokens - 1
+        )
+        return tokens
+
     def get_computed_blocks(self, request: Request) -> tuple[KVCacheBlocks, int, int]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.

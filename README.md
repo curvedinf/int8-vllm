@@ -41,6 +41,11 @@ short-prompt throughput is not a prediction of long-context mixed-load speed.
 | 2026-10-10 | Long contexts, six concurrent streams | 162.6 tok/s | 32k → 2,048 tokens; sampled; common decode window |
 | 2026-10-10 | Mixed load, before this update | 12.6 tok/s | Three decoding streams while three fresh 32k-token prompts are prefilling |
 | 2026-10-10 | Mixed load, decode-priority update | **75.4 tok/s** | Matched prompts, models, and hardware; **6.0×** decode rate during the common overlap window |
+| 2026-10-11 | 40k agent-style mixed load, profiled baseline | 35.4 cold / 80.1 warm tok/s | Eight staggered chats × three turns, engine C6; whole-run rate including prefills and tool waits |
+| 2026-10-11 | Same 40k workload, kernel and cached-admission fixes | **40.2 cold / 92.2 warm tok/s** | Single sampled runs; aggregate, not per-user speed; cached tool-turn mean TTFT 146 → 70 s |
+
+The [40k optimization report](docs/recipes/agent_mixed_optimizations_20261011.md)
+records the accepted changes, quality gates, and remaining mixed-step stalls.
 
 The mixed-load test uses greedy decoding over documentation-based 32k-token
 contexts, 2,048 output tokens per decoder, and 16 output tokens per injected
@@ -56,6 +61,9 @@ A repeated 32k prefix reached its first token in **1.51 seconds** versus
 See the [recipe](docs/recipes/README.md) for validation and tuning details,
 and the [A/B ledger](docs/recipes/surface_experiments_ledger.jsonl) for
 measurements, controls, and reproduction commands.
+The [40k lifecycle profile](docs/recipes/agent_mixed_profile_results_20261011.md)
+uses a more realistic tool-round-trip workload and reports per-stream latency,
+cache reuse, queueing, and kernel costs. Its aggregate rate is not per-user speed.
 
 ## Models
 

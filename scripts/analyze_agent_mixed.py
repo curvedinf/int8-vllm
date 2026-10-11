@@ -53,7 +53,8 @@ def analyze(directory):
     return {"completed": completed, "planned": len(summary), "wall_s": elapsed,
             "wall_output_tok_s": sum(r.get("output_tokens_observed", 0)
                                       for r in results)/elapsed if elapsed else None,
-            "requests": [{k: v for k, v in r.items() if k not in ("tokens", "message")}
+            "requests": [{k: v for k, v in r.items()
+                          if k not in ("tokens", "message", "prompt_token_ids")}
                          for r in sorted(results, key=lambda x: x["name"])],
             "notes": __doc__}
 
