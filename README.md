@@ -100,9 +100,9 @@ Highlights of the current stack:
 
 #### Stock power (290W)
 
-| Date | Stack | Config | Wall Clock Output tok/s | TG tok/s | PP tok/s | Notes |
-|---|---|---|---:|---:|---:|---|
-| 2026-08-26 | Qwen3.8-27B INT8 GS128 + DFlash2 | same recipe as the 2026-08-26 reduced-power row (tuned aiter a8w8, NS=13, TP4/C8); cards at 290W + auto DVFS | 492 | 972 | 5,676 | TPOT 8.23 ms; PP from the 8×2048 prefill leg (mean TTFT 2886 ms); peak package ~252W, junction peak 82°C |
+| Date | Stack | Config | Wall Clock Output tok/s | TG tok/s | PP tok/s |
+|---|---|---|---:|---:|---:|
+| 2026-08-26 | Qwen3.8-27B INT8 GS128 + DFlash2 | same recipe as the 2026-08-26 reduced-power row (tuned aiter a8w8, NS=13, TP4/C8); cards at 290W + auto DVFS | 492 | 972 | 5,676 |
 
 #### Reduced power (105W)
 
@@ -116,13 +116,13 @@ conversion and ran fp16 KV. `—` = not measured under that definition.
 > performance on power-unconstrained cards; do not compare these figures
 > against stock-power MI100 benchmarks.
 
-| Date | Stack | Config | Wall Clock Output tok/s | TG tok/s | PP tok/s | Notes |
-|---|---|---|---:|---:|---:|---|
-| 2026-06 early | Qwen3.6-27B GPTQ-8, TRITON_ATTN, no spec | TP4, fp16 KV | 129 (c=8 mixed) | 151 | 1,490 | TPOT 20.1 ms at c=1 |
-| 2026-06-11 | Qwen3.6-27B + AITER UA + MTP n=3 | TP4, fp16 KV | 212 (c=8) | — | — | +29% at 16K ctx; +15% on 4k-in/6k-out batch; UA ≈ TRITON without MTP |
-| 2026-08-25 | Qwen3.8-27B INT8 GS128 + DFlash2 | W8A8 everywhere, int8-PTH KV both models, UA, fp32 GDN state, round act quant, TP4/C8 | 348 | — | 2,175 | INT8 conversion + accuracy program; NS=15 selected (NS=17 acceptance collapses to ~30%); TPOT 12.52 ms; ~71% draft acceptance; KLD median 0.0153 vs BF16; PP from the 8×8192 prefill leg |
-| 2026-08-26 | Qwen3.8-27B + tuned aiter gfx908 GEMMs | same recipe + 299-row gfx908 tuned a8w8 CSV, rebuilt `module_gemm_a8w8` (45 tuned kernels), NS=13, TP4/C8 | 288 | 648 | 2,776 | aiter tuning program merged (int8-aiter); kernel-level decode GEMM 1.37× geo (max 2.64×); NS=13 per same-session sweep (full NS table in recipes README) |
-| 2026-09-15 | Qwen3.8-27B PTQR numerics-closure stack | PTQR R10S60 target + PTQR r1 draft, int8_block_g128 KV, NS=6, TP4/**C6/20k steady** | — | ~101 (median-of-4; 123 fresh-boot) | ~1,048 (cold single-stream 20k) | different bench definition than the rows above (6×20k-in steady vs 8×32-in): long-context steady, not comparable cell-to-cell. **17 distinct numerics/correctness defects root-caused and fixed** in this campaign; 20k-in/4k-out garbles eliminated (all seeds full-read clean), draft acceptance 3.88/13 ≥ bf16 3.67 |
+| Date | Stack | Config | Wall Clock Output tok/s | TG tok/s | PP tok/s |
+|---|---|---|---:|---:|---:|
+| 2026-06 early | Qwen3.6-27B GPTQ-8, TRITON_ATTN, no spec | TP4, fp16 KV | 129 (c=8 mixed) | 151 | 1,490 |
+| 2026-06-11 | Qwen3.6-27B + AITER UA + MTP n=3 | TP4, fp16 KV | 212 (c=8) | — | — |
+| 2026-08-25 | Qwen3.8-27B INT8 GS128 + DFlash2 | W8A8 everywhere, int8-PTH KV both models, UA, fp32 GDN state, round act quant, TP4/C8 | 348 | — | 2,175 |
+| 2026-08-26 | Qwen3.8-27B + tuned aiter gfx908 GEMMs | same recipe + 299-row gfx908 tuned a8w8 CSV, rebuilt `module_gemm_a8w8` (45 tuned kernels), NS=13, TP4/C8 | 288 | 648 | 2,776 |
+| 2026-09-15 | Qwen3.8-27B PTQR numerics-closure stack | PTQR R10S60 target + PTQR r1 draft, int8_block_g128 KV, NS=6, TP4/**C6/20k steady** | — | ~101 (median-of-4; 123 fresh-boot) | ~1,048 (cold single-stream 20k) |
 
 #### Mixed-load campaign (2026-10)
 
