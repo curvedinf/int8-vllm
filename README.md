@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="int8-vllm-banner.png" alt="int8-vllm banner" width="880">
+</p>
+
 # int8-vllm
 
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
@@ -123,6 +127,18 @@ conversion and ran fp16 KV. `—` = not measured under that definition.
 | 2026-08-25 | Qwen3.8-27B INT8 GS128 + DFlash2 | W8A8 everywhere, int8-PTH KV both models, UA, fp32 GDN state, round act quant, TP4/C8 | 348 | — | 2,175 |
 | 2026-08-26 | Qwen3.8-27B + tuned aiter gfx908 GEMMs | same recipe + 299-row gfx908 tuned a8w8 CSV, rebuilt `module_gemm_a8w8` (45 tuned kernels), NS=13, TP4/C8 | 288 | 648 | 2,776 |
 | 2026-09-15 | Qwen3.8-27B PTQR numerics-closure stack | PTQR R10S60 target + PTQR r1 draft, int8_block_g128 KV, NS=6, TP4/**C6/20k steady** | — | ~101 (median-of-4; 123 fresh-boot) | ~1,048 (cold single-stream 20k) |
+
+> [!NOTE]
+> The 2026-09-15 row uses the C6/20k-context steady benchmark (6 streams,
+> 20k-token shared-prefix prompts) — the quality-gated workload of the
+> numerics campaign. The older rows are C8 short-input serving benches; do
+> not compare across definitions.
+
+> [!NOTE]
+> Higher numbers than the ones above may appear in historical logs. Those
+> were captured from configurations later shown to degrade output quality
+> (pre-corruption-bisect, pre-accuracy-program) and are superseded — see the
+> audit doc's history section for why they don't count.
 
 #### Mixed-load campaign (2026-10)
 
