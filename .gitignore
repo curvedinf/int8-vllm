@@ -272,3 +272,6 @@ logs/
 vllm/_C.abi3.so.*
 # Stale local build dirs
 build.stale*
+
+# Agent skills disposable scratch (dev-skills)
+/agents/tmp/
