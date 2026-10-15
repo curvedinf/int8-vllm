@@ -2,8 +2,9 @@
 
 This peer recipe runs the official NVIDIA Nemotron 3.5 Bolt 74B-A9B 24GB
 checkpoint and its LiLiCorr draft on four MI100 GPUs. It keeps the checkpoint's
-packed weights in GPU memory and converts weight tiles to INT8 GS128 inside
-the matrix kernels. It does not produce a replacement quantized checkpoint.
+packed weights in GPU memory. Dense projections reuse a bounded INT8 GS128
+weight cache; uncached projections convert tiles inside the matrix kernels.
+It does not produce a replacement quantized checkpoint.
 
 **Serving validated; production activation pending:** eager and graph TP4/C8
 serving, LiLiCorr acceptance, 28k context/prefix replay, RAM-prefix restoration,
@@ -36,7 +37,7 @@ checkpoint. The Qwen DFlash2 draft cannot be reused.
 | Q8_0 linears and LM head | Original packed bytes; same GS128 INT8 compute path |
 | Q8_0 embedding | Decode only the requested rows |
 | NVFP4 linears | Original nibbles, FP8 block scales and individual fused-projection global scales; tile conversion to GS128 INT8 |
-| MoE/shared-expert ReLU2 intermediate | Fused activation and GS128 INT8 output, consumed directly by the down projection |
+| MoE/shared-expert ReLU2 intermediate | ReLU2 and GS128 INT8 output, consumed directly by the down projection |
 | Other packed GEMM inputs | GS128 INT8 activation quantization |
 | Residual streams and excluded draft weights | BF16; storage dtype never determines activation dtype |
 | Target and draft KV | `int8_block_g128` |
@@ -44,8 +45,12 @@ checkpoint. The Qwen DFlash2 draft cannot be reused.
 | Tensor parallel communication | vLLM custom all-reduce; Ring/Simple for other collectives |
 
 AITER's sibling checkout owns the packed kernels. INT32 group partials are
-scaled and accumulated in FP32. Weight tiles are never persisted as expanded
-INT8/BF16 matrices. Unaligned tensor-parallel slices retain the necessary
+scaled and accumulated in FP32. The dense cache adds at most 2 GiB of INT8
+weights per GPU (`VLLM_BOLT_DENSE_CACHE_GIB`, 0 disables it), using AITER
+blockscale GEMMs with FP32 scaling and unfused accumulation. Routed experts
+remain packed. The launcher defaults to 70% GPU memory utilization; the CPU
+KV tier is 24 GiB (effective on the next restart). Unaligned tensor-parallel
+slices retain the necessary
 original packed boundary blocks. Some floating intermediates remain between
 operations; the recipe does not claim an entirely INT8 residual stream.
 

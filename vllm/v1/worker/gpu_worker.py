@@ -1152,6 +1152,20 @@ class Worker(WorkerBase):
         return start_gpu_profile(tag, ranks)
 
     @torch.inference_mode()
+    def get_bolt_kernel_memory(self):
+        """Report dense-cache and allocator bytes for diagnostic tuning."""
+        if os.environ.get("VLLM_BOLT_KERNEL_TUNING") != "1":
+            raise RuntimeError("Bolt kernel tuning is disabled")
+        from aiter.ops.triton.gemm.basic.packed_dense_cache import _BYTES, _CACHE
+
+        return {
+            "dense_cache_bytes": sum(_BYTES.values()),
+            "dense_cache_entries": len(_CACHE),
+            "allocated_bytes": torch.cuda.memory_allocated(),
+            "reserved_bytes": torch.cuda.memory_reserved(),
+        }
+
+    @torch.inference_mode()
     def reload_bolt_packed_kernels(self):
         """Idle diagnostic tuning: reload kernels and recapture both models."""
         import hashlib
@@ -1166,6 +1180,7 @@ class Worker(WorkerBase):
         torch.cuda.synchronize()
         modules = [
             "aiter.ops.triton._triton_kernels.gemm.basic.gemm_packed_g128",
+            "aiter.ops.triton.gemm.basic.packed_dense_cache",
             "aiter.ops.triton.gemm.basic.gemm_packed_g128",
             "vllm.model_executor.layers.quantization.utils.packed_g128_int8",
         ]

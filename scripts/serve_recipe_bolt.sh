@@ -36,6 +36,7 @@ serve() {
   export VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1
   export VLLM_ROCM_USE_AITER_CUSTOM_AR=0 VLLM_GFX908_ACT_QUANT=round
   export VLLM_TP_SAMPLE_SYNC=1
+  export VLLM_BOLT_DENSE_CACHE_GIB="${VLLM_BOLT_DENSE_CACHE_GIB:-2}"
   # Reuse the Qwen mixed-load policy with Bolt's resolved hybrid page size.
   export VLLM_GFX908_MIXED_PREFILL_TOKENS="${VLLM_GFX908_MIXED_PREFILL_TOKENS:-4256}"
   export VLLM_GFX908_MIXED_PREFILL_INTERVAL="${VLLM_GFX908_MIXED_PREFILL_INTERVAL:-16}"
@@ -66,10 +67,10 @@ serve() {
     --tensor-parallel-size 4 --max-num-seqs 8 --dtype bfloat16
     --max-model-len "${MAX_MODEL_LEN:-32768}"
     --max-num-batched-tokens "${MAX_BATCHED_TOKENS:-8512}"
-    --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.90}"
+    --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.70}"
     --kv-cache-dtype int8_block_g128 --mamba-ssm-cache-dtype float32
     --speculative-config "$spec"
-    --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":8589934592}}'
+    --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":25769803776}}'
   )
   if [[ "${EAGER:-0}" == 1 ]]; then
     args+=(--enforce-eager)
