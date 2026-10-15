@@ -165,6 +165,9 @@ class DFlashSpeculator(DraftModelSpeculator):
             draft_group_ids=self.draft_kv_cache_group_ids,
         )
 
+    def prepare_context_anchor(self, input_batch, num_rejected) -> None:
+        """Hook for drafters that condition on the last accepted context."""
+
     def load_draft_model(
         self,
         target_model: nn.Module,
@@ -414,6 +417,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         else:
             hidden_states = last_hidden_states
         self.hidden_states[:num_target_tokens].copy_(hidden_states[:num_target_tokens])
+        self.prepare_context_anchor(input_batch, num_rejected)
         if os.environ.get("VLLM_DFLASH_AUDIT"):
             from vllm import quant_audit_recorder as _qa
 

@@ -30,6 +30,7 @@ from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsHybrid,
     MultiModalEmbeddings,
+    SupportsEagle3,
     SupportsMultiModal,
     SupportsMultiModalPruning,
 )
@@ -901,7 +902,7 @@ class NanoNemotronVLDummyInputsBuilder(
     dummy_inputs=NanoNemotronVLDummyInputsBuilder,
 )
 class NemotronH_Nano_VL_V2(
-    nn.Module, HasInnerState, IsHybrid, SupportsMultiModal, SupportsMultiModalPruning
+    nn.Module, HasInnerState, IsHybrid, SupportsEagle3, SupportsMultiModal, SupportsMultiModalPruning
 ):
     requires_sequential_video_encoding = True
     """Temporarily needed for dynamic res video w/ conv3d, doesn't support bs>1 yet"""

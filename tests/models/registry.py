@@ -1501,6 +1501,13 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
         max_num_seqs=32,
     ),
+    "LiLiCorrDraftModel": _HfExamplesInfo(
+        "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB",
+        speculative_model="nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr",
+        use_original_num_layers=True,
+        max_model_len=8192,
+        max_num_seqs=8,
+    ),
     "DFlash2DraftModel": _HfExamplesInfo(
         "Qwen/Qwen3.8-27B",
         speculative_model="z-lab/Qwen3.8-27B-DFlash2",

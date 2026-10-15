@@ -703,7 +703,7 @@ class VllmConfig:
         return True
 
     def _is_dflash2_draft(self) -> bool:
-        """Whether the DFlash draft is a DFlash2 one, by the architecture the
+        """Whether the DFlash draft is DFlash2 or LiLiCorr, by the architecture the
         speculator selects on (v1/worker/gpu/spec_decode/__init__.py)."""
         spec = self.speculative_config
         if spec is None or spec.method != "dflash":
@@ -711,7 +711,9 @@ class VllmConfig:
         draft_config = getattr(spec, "draft_model_config", None)
         if draft_config is None:
             return False
-        return "DFlash2DraftModel" in (draft_config.architectures or [])
+        return bool({"DFlash2DraftModel", "LiLiCorrDraftModel"}.intersection(
+            draft_config.architectures or []
+        ))
 
     def _dflash_needs_multi_kv_group(self) -> bool:
         """Whether a DFlash draft mixes sliding-window and full attention."""
