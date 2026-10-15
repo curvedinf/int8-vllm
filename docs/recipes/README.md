@@ -11,6 +11,9 @@ packed weights and converts tiles to INT8 GS128 in AITER kernels. Its model
 geometry, speculative block and serving settings are documented separately;
 the Qwen baseline below remains available unchanged.
 
+Separate Qwen3.8 and Bolt systemd units are available; see
+[service installation and selection](services.md).
+
 ## The stack
 
 | Repo | Branch | Role |

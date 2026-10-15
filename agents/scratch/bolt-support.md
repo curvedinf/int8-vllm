@@ -1,7 +1,10 @@
-# Bolt production activation — active
+# Bolt production activation — deferred by user
 
 User authorized the official packed-weight implementation, peer recipe,
-commits/pushes and making Bolt active. Continue through production hosting.
+commits/pushes and making Bolt active, then explicitly deferred the OS
+installation/activation step. Do not activate services until the user resumes
+that work. Separate distributable Qwen3.8 and Bolt units are saved in scripts/;
+installation and selection are documented in docs/recipes/services.md.
 Implementation, checkpoint revisions, validation and scheduler tradeoffs are
 in docs/recipes/nemotron_bolt.md. Do not ask for deployment permission again.
 
@@ -25,7 +28,8 @@ is healthy on8021 under the diagnostic key; the production OS step remains.
 The final serving ledger row is in the canonical JSONL; both remote main
 refs were verified. Root installation was attempted and sudo returned
 "interactive authentication is required". The user has been asked to run
-the concrete commands below. Unit is currently not installed. Keep the
+the concrete commands below and chose to do this later. Unit is currently
+not installed. Keep the
 healthy diagnostic process until the unit stops it through ExecStartPre.
 Once activated, authenticate on8020 and verify persistent service ownership.
 
@@ -64,8 +68,8 @@ Prepared scripts/vllm-bolt@.service uses existing /etc/llama/llama-api.env.
 That directory is root0700; credentials are inaccessible here. No production
 API key is in the current environment. sudo -n true fails; sudo -n -l permits
 only an obsolete Qwen unit that is not installed, not the required operations.
-After all independent validation/publication, request this concrete OS step
-from the serving account (the unit template is already reviewed):
+The user deferred this concrete OS step; do not request it again during
+the service-file preparation task. For later activation from the serving account:
 
     sudo install -m0644 scripts/vllm-bolt@.service /etc/systemd/system/
     sudo systemctl daemon-reload

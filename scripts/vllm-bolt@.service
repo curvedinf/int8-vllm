@@ -1,8 +1,8 @@
 [Unit]
 Description=Nemotron Bolt + LiLiCorr packed INT8 GS128 API (TP4 C8)
 Wants=network-online.target
-After=network-online.target
-Conflicts=vllm.service llama-api-4x64k.service vllm-openai-gfx908.service
+After=network-online.target vllm.service
+Conflicts=vllm.service vllm-qwen38@%i.service llama-api-4x64k.service vllm-openai-gfx908.service
 
 [Service]
 Type=simple

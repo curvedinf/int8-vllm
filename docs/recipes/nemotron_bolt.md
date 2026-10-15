@@ -181,7 +181,8 @@ On a diagnostic server started with `VLLM_SERVER_DEV_MODE=1`, adding
 the CPU tier, then repeats retrieval and records transfer metrics. Keep this
 development mode off in production.
 
-For systemd, `scripts/vllm-bolt@.service` uses the existing credential envfile
-and runs as the named instance user. It conflicts with the Qwen service to
-prevent simultaneous GPU ownership. Install/activate only after the intended
-configuration passes the serving gates.
+For systemd, the separate `scripts/vllm-bolt@.service` and
+`scripts/vllm-qwen38@.service` templates use the existing credential envfile
+and run as the named instance user. See [installation and recipe
+selection](services.md). Install/activate only after the intended configuration
+passes the serving gates.
