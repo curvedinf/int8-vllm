@@ -28,7 +28,10 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
-from vllm.distributed.communication_op import tensor_model_parallel_all_gather
+from vllm.distributed.communication_op import (
+    tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import Attention
@@ -118,8 +121,46 @@ class NemotronHMLP(nn.Module):
             prefix=f"{prefix}.down_proj",
         )
         self.act_fn = get_act_fn(hidden_act)
+        from vllm.model_executor.layers.quantization.modelopt_gfx908 import (
+            PackedG128LinearMethod,
+        )
+
+        self.packed_relu2 = (
+            hidden_act == "relu2"
+            and not bias
+            and isinstance(self.up_proj.quant_method, PackedG128LinearMethod)
+            and isinstance(self.down_proj.quant_method, PackedG128LinearMethod)
+        )
 
     def forward(self, x: torch.Tensor):
+        if self.packed_relu2:
+            from vllm.model_executor.layers.quantization.utils.packed_g128_int8 import (
+                packed_gemm,
+                quantize,
+            )
+
+            up, down = self.up_proj, self.down_proj
+            q, scales = quantize(x.contiguous())
+            mid, mid_scales = packed_gemm(
+                q,
+                scales,
+                up.weight,
+                up.packed_grid,
+                relu2=True,
+                quant_out=True,
+                codec=up.quant_method.codec,
+            )
+            out = packed_gemm(
+                mid,
+                mid_scales,
+                down.weight,
+                down.packed_grid,
+                start=down.quant_method.start,
+                codec=down.quant_method.codec,
+            ).to(x.dtype)
+            if down.reduce_results and down.tp_size > 1:
+                out = tensor_model_parallel_all_reduce(out)
+            return out
         x, _ = self.up_proj(x)
         x = self.act_fn(x)
         x, _ = self.down_proj(x)

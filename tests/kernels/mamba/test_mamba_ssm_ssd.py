@@ -577,3 +577,59 @@ def test_mamba_chunk_scan_cont_batch_prefill_chunking(chunk_size, seqlens):
             rtol=rtol,
             msg=lambda x, i=i: f"seq{i} state " + x,
         )
+
+
+@pytest.mark.parametrize("with_initial_state", [False, True])
+@pytest.mark.parametrize("state_dim", [128, 256])
+def test_bolt_bf16_scan_fp32_state(with_initial_state, state_dim):
+    """Bolt TP4 geometry plus the larger-state loop, including chunk transitions."""
+    set_random_seed(42)
+    lengths = (137, 19)
+    tokens, heads, groups, head_dim = sum(lengths), 32, 2, 64
+    x = torch.randn(tokens, heads, head_dim, device=DEVICE, dtype=torch.bfloat16)
+    dt = (torch.rand(tokens, heads, device=DEVICE) * 0.1).to(torch.bfloat16)
+    a = -torch.rand(heads, device=DEVICE) - 0.5
+    b = torch.randn(tokens, groups, state_dim, device=DEVICE, dtype=torch.bfloat16)
+    c = torch.randn_like(b)
+    initial = torch.randn(len(lengths), heads, head_dim, state_dim, device=DEVICE)
+    if not with_initial_state:
+        initial.zero_()
+    cu = torch.tensor([0, lengths[0], tokens], device=DEVICE, dtype=torch.int32)
+    chunks, last, seq = compute_varlen_chunk_metadata(cu, 128)
+    out = torch.empty_like(x)
+    states = mamba_chunk_scan_combined_varlen(
+        x,
+        dt,
+        a,
+        b,
+        c,
+        128,
+        cu,
+        chunks,
+        last,
+        seq,
+        out,
+        initial_states=initial if with_initial_state else None,
+        state_dtype=torch.float32,
+    )
+    ref = torch.empty_like(x, dtype=torch.float32)
+    expected_states = []
+    offset = 0
+    for i, length in enumerate(lengths):
+        state = initial[i].clone()
+        for t in range(offset, offset + length):
+            bt = b[t].float().repeat_interleave(heads // groups, 0)
+            ct = c[t].float().repeat_interleave(heads // groups, 0)
+            delta = dt[t].float()
+            state = (
+                state * torch.exp(delta * a)[:, None, None]
+                + delta[:, None, None] * x[t].float()[:, :, None] * bt[:, None, :]
+            )
+            ref[t] = (state * ct[:, None, :]).sum(-1)
+        expected_states.append(state)
+        offset += length
+    expected = torch.stack(expected_states)
+    assert states.dtype == torch.float32
+    assert (out.float() - ref).norm() / ref.norm() < 0.01
+    assert (states - expected).norm() / expected.norm() < 0.01
+    torch.testing.assert_close(out.float(), ref, atol=0.12, rtol=0.05)

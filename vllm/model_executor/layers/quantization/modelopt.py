@@ -81,7 +81,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     requantize_with_max_scale,
 )
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
     ChannelQuantScaleParameter,
@@ -90,6 +93,7 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -1269,7 +1273,14 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
         # 1. `use_a16=True` forces  `Marlin`: https://github.com/vllm-project/vllm/commit/e68988a#diff-7135ab92aa94dfacb1ad3c77fc13f9c4ffe0b977f8eac5d86c2afe243e5f92a6R842-R889
         # for `--linear-backend=auto`, avoiding a W4A4 kernel that requires input_scale.
         # 2. Specifying e.g. `--linear-backend=humming` will override.
-        self.kernel = init_nvfp4_linear_kernel(use_a16=True)
+        self.packed_g128 = False
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx908
+
+            self.packed_g128 = on_gfx908()
+        self.kernel = (
+            None if self.packed_g128 else init_nvfp4_linear_kernel(use_a16=True)
+        )
 
     def create_weights(
         self,
@@ -1348,6 +1359,25 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
         layer.register_parameter("input_scale", input_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if self.packed_g128:
+            from .utils.packed_g128_int8 import make_grid
+
+            layer.register_buffer(
+                "packed_grid", make_grid(layer.weight.device), persistent=False
+            )
+            layer.register_buffer(
+                "packed_global_scales",
+                torch.cat(
+                    [
+                        layer.weight_scale_2[i : i + 1].expand(width)
+                        for i, width in enumerate(layer.logical_widths)
+                    ]
+                ).contiguous(),
+                persistent=False,
+            )
+            if hasattr(layer, "input_scale"):
+                del layer.input_scale
+            return
         if not hasattr(layer, "has_bias"):
             layer.has_bias = getattr(layer, "bias", None) is not None
 
@@ -1382,6 +1412,23 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self.packed_g128:
+            from .utils.packed_g128_int8 import packed_gemm, quantize
+
+            shape = x.shape
+            q, scales = quantize(x.reshape(-1, shape[-1]).contiguous())
+            y = packed_gemm(
+                q,
+                scales,
+                layer.weight,
+                layer.packed_grid,
+                codec="nvfp4",
+                weight_scales=layer.weight_scale,
+                global_scale=layer.packed_global_scales,
+            )
+            if bias is not None:
+                y += bias
+            return y.to(x.dtype).view(*shape[:-1], layer.weight.shape[0])
         return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
 
 
@@ -2405,6 +2452,23 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             return None
 
         quant_algo = self._resolve_quant_algo(prefix)
+
+        if quant_algo in ("IQ2_XXS", "Q8_0"):
+            if not current_platform.is_rocm():
+                raise ValueError("Packed GS128 ModelOpt execution requires gfx908")
+            from vllm.platforms.rocm import on_gfx908
+
+            if not on_gfx908():
+                raise ValueError("Packed GS128 ModelOpt execution requires gfx908")
+            from vllm.model_executor.layers.quantization.modelopt_gfx908 import (
+                PackedG128LinearMethod,
+                PackedG128MoEMethod,
+            )
+
+            if isinstance(layer, (LinearBase, VocabParallelEmbedding)):
+                return PackedG128LinearMethod(quant_algo)
+            if isinstance(layer, RoutedExperts) and quant_algo == "IQ2_XXS":
+                return PackedG128MoEMethod(layer.moe_config)
 
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             if quant_algo == "FP8":

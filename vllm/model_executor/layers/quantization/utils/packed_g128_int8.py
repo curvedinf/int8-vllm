@@ -2,7 +2,7 @@
 """Experimental packed IQ2-XXS/Q8_0/NVFP4 -> G128 INT8 MFMA for gfx908.
 
 Weights remain in their official packed format in device memory. Only a tile is expanded
-inside the GEMM. This module is not selected by production dispatch yet.
+inside the GEMM. ModelOpt selects this path for gfx908 packed checkpoints.
 """
 
 import torch
@@ -48,7 +48,9 @@ def _decode_q8(W, rows, ks, N: tl.constexpr, K: tl.constexpr):
 
 
 @triton.jit
-def _decode_nvfp4(W, WS, WG, rows, ks, N: tl.constexpr, K: tl.constexpr):
+def _decode_nvfp4(
+    W, WS, WG, rows, ks, N: tl.constexpr, K: tl.constexpr, WG_PER_ROW: tl.constexpr
+):
     valid = (rows[:, None] < N) & (ks[None, :] < K)
     byte = tl.load(
         W + rows[:, None].to(tl.int64) * (K // 2) + ks[None, :] // 2, valid, 0
@@ -73,7 +75,11 @@ def _decode_nvfp4(W, WS, WG, rows, ks, N: tl.constexpr, K: tl.constexpr):
         tldevice.ldexp((8 + mantissa).to(tl.float32), exp - 10),
     )
     scale = tl.where((bits & 128) != 0, -scale, scale)
-    return value * scale * tl.load(WG).to(tl.float32)
+    if WG_PER_ROW:
+        global_scale = tl.load(WG + rows[:, None], rows[:, None] < N, 0)
+    else:
+        global_scale = tl.load(WG)
+    return value * scale * global_scale.to(tl.float32)
 
 
 @triton.jit
@@ -106,8 +112,31 @@ def _gemm(
     QUANT_OUT: tl.constexpr,
     BM: tl.constexpr,
     CODEC: tl.constexpr,
+    IDS=None,
+    TOPK: tl.constexpr = 1,
+    ROUTED: tl.constexpr = False,
+    DOWN: tl.constexpr = False,
+    WSTRIDE: tl.constexpr = 0,
+    SORTED=None,
+    COUNT=None,
+    GROUPED: tl.constexpr = False,
+    WG_PER_ROW: tl.constexpr = False,
 ):
     rm = tl.program_id(0) * BM + tl.arange(0, BM)
+    if ROUTED:
+        route = tl.program_id(0)
+        if GROUPED:
+            if route * BM >= tl.load(COUNT):
+                return
+            expert = tl.load(IDS + route).to(tl.int64)
+            rm = tl.load(SORTED + route * BM + tl.arange(0, BM))
+        else:
+            expert = tl.load(IDS + route).to(tl.int64)
+            rm = tl.where(tl.arange(0, BM) == 0, route, M)
+        W += expert * WSTRIDE
+    xm = rm
+    if ROUTED and not DOWN:
+        xm = rm // TOPK
     rn = tl.program_id(1) * 128 + tl.arange(0, 128)
     rk = tl.arange(0, 128)
     acc = tl.zeros((BM, 128), tl.float32)
@@ -118,16 +147,16 @@ def _gemm(
         elif CODEC == "q8_0":
             w = _decode_q8(W, rn, START + local_k, N, K)
         else:
-            w = _decode_nvfp4(W, WS, WG, rn, START + local_k, N, K)
+            w = _decode_nvfp4(W, WS, WG, rn, START + local_k, N, K, WG_PER_ROW)
         w = tl.where(local_k[None, :] < LENGTH, w, 0.0)
         sw = tl.maximum(tl.div_rn(tl.max(tl.abs(w), 1), 127.0), 1.0e-30)
         wq = tldevice.nearbyint(tl.div_rn(w, sw[:, None])).to(tl.int8)
         x = tl.load(
-            X + rm[:, None] * LENGTH + local_k[None, :],
+            X + xm[:, None] * LENGTH + local_k[None, :],
             (rm[:, None] < M) & (local_k[None, :] < LENGTH),
             0,
         )
-        sx = tl.load(XS + rm * tl.cdiv(LENGTH, 128) + group, rm < M, 0)
+        sx = tl.load(XS + xm * tl.cdiv(LENGTH, 128) + group, rm < M, 0)
         dot = tl.dot(x, tl.trans(wq), out_dtype=tl.int32)
         acc += dot.to(tl.float32) * sx[:, None] * sw[None, :]
     if RELU2:
@@ -199,7 +228,7 @@ def packed_gemm(
             full_k % 16
             or weight_scales.shape != (n, full_k // 16)
             or weight_scales.dtype != torch.float8_e4m3fn
-            or global_scale.numel() != 1
+            or global_scale.numel() not in (1, n)
             or global_scale.dtype != torch.float32
         ):
             raise ValueError("Invalid NVFP4 scale geometry")
@@ -251,9 +280,76 @@ def packed_gemm(
         quant_out,
         16,
         codec,
+        WG_PER_ROW=codec == "nvfp4" and wg.numel() != 1,
         num_warps=4,
         num_stages=1,
         matrix_instr_nonkdim=16,
         enable_fp_fusion=False,
     )
     return (y, ys) if quant_out else y
+
+
+@triton.jit
+def _embedding(
+    W, IDS, OUT, M: tl.constexpr, K: tl.constexpr, N: tl.constexpr, B: tl.constexpr
+):
+    row = tl.program_id(0)
+    ks = tl.program_id(1) * B + tl.arange(0, B)
+    idx = tl.load(IDS + row)
+    value = _decode_q8(W, tl.full((1,), 0, tl.int32) + idx, ks, N, K)
+    tl.store(OUT + row * K + ks, tl.reshape(value, (B,)), ks < K)
+
+
+def packed_embedding(weight, ids, width, dtype=torch.bfloat16):
+    out = torch.empty((*ids.shape, width), device=weight.device, dtype=dtype)
+    _embedding[(ids.numel(), triton.cdiv(width, 256))](
+        weight, ids.contiguous(), out, ids.numel(), width, weight.shape[0], 256
+    )
+    return out
+
+
+def packed_experts(q, scales, packed, grid, ids, *, start=0, down=False, plan=None):
+    m, topk = ids.shape
+    routes = m * topk
+    n, blocks = packed.shape[1:3]
+    length = q.shape[-1]
+    y = torch.empty(
+        (routes, n), device=q.device, dtype=torch.float32 if down else torch.int8
+    )
+    ys = torch.empty(
+        (routes, triton.cdiv(n, 128)), device=q.device, dtype=torch.float32
+    )
+    sorted_ids, experts, count = (None, ids, None) if plan is None else plan
+    tiles = routes if plan is None else experts.numel()
+    _gemm[(tiles, triton.cdiv(n, 128))](
+        q,
+        scales,
+        packed,
+        grid,
+        scales,
+        scales,
+        y,
+        ys,
+        routes,
+        n,
+        blocks * 256,
+        start,
+        length,
+        not down,
+        not down,
+        16,
+        "iq2_xxs",
+        experts,
+        topk,
+        True,
+        down,
+        packed.stride(0),
+        sorted_ids,
+        count,
+        plan is not None,
+        num_warps=4,
+        num_stages=1,
+        matrix_instr_nonkdim=16,
+        enable_fp_fusion=False,
+    )
+    return y if down else (y, ys)

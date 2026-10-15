@@ -17,6 +17,7 @@ import torch
 from vllm.model_executor.layers.quantization.utils.iq2_xxs_grid import IQ2_XXS_GRID
 from vllm.model_executor.layers.quantization.utils.packed_g128_int8 import (
     make_grid,
+    packed_experts,
     packed_gemm,
     quantize,
 )
@@ -121,6 +122,63 @@ def check(name, packed, m, start, length, grid, *, dense_weight=None, **codec_ar
     )
 
 
+def check_routed(grid):
+    from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
+        moe_align_block_size,
+    )
+
+    torch.manual_seed(7)
+    weights = []
+    for shape in ((3, 576, 4, 66), (3, 1024, 3, 66)):
+        w = torch.randint(0, 256, shape, dtype=torch.uint8, device="cuda")
+        w[..., 0] = 0
+        w[..., 1] = 20  # Finite fp16 block scales.
+        weights.append(w)
+    up, down = weights
+    x = torch.randn(2, 1024, device="cuda", dtype=torch.bfloat16)
+    q, scales = quantize(x)
+    ids = torch.tensor([[2, 0], [1, 2]], device="cuda")
+    mid, ms = packed_experts(q, scales, up, grid, ids)
+    out = packed_experts(mid, ms, down, grid, ids, start=64, down=True)
+    for route, expert in enumerate(ids.flatten().tolist()):
+        token = route // 2
+        rq, rs = packed_gemm(
+            q[token : token + 1],
+            scales[token : token + 1],
+            up[expert],
+            grid,
+            relu2=True,
+            quant_out=True,
+        )
+        expected = packed_gemm(rq, rs, down[expert], grid, start=64)
+        torch.testing.assert_close(mid[route : route + 1], rq, rtol=0, atol=0)
+        torch.testing.assert_close(ms[route : route + 1], rs, rtol=0, atol=0)
+        torch.testing.assert_close(out[route : route + 1], expected, rtol=0, atol=0)
+    plan = moe_align_block_size(ids, 16, 3, pad_sorted_ids=True)
+    grouped, grouped_s = packed_experts(q, scales, up, grid, ids, plan=plan)
+    grouped_out = packed_experts(
+        grouped, grouped_s, down, grid, ids, start=64, down=True, plan=plan
+    )
+    torch.testing.assert_close(grouped, mid, rtol=0, atol=0)
+    torch.testing.assert_close(grouped_s, ms, rtol=0, atol=0)
+    torch.testing.assert_close(grouped_out, out, rtol=0, atol=0)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured_plan = moe_align_block_size(ids, 16, 3, pad_sorted_ids=True)
+        cq, cs = packed_experts(q, scales, up, grid, ids, plan=captured_plan)
+        cy = packed_experts(
+            cq, cs, down, grid, ids, start=64, down=True, plan=captured_plan
+        )
+    graph.replay()
+    torch.testing.assert_close(cy, out, rtol=0, atol=0)
+    print(
+        json.dumps(
+            dict(name="routed_iq2", exact=True, grouped_exact=True, graph_exact=True)
+        ),
+        flush=True,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=Path)
@@ -188,6 +246,23 @@ def main():
             weight_scales=scales.cuda(),
             global_scale=global_scale.cuda(),
         )
+        row_scales = global_scale.reshape(1).expand(129).clone()
+        row_scales[64:] *= 2
+        merged_dense = dense.clone()
+        merged_dense[64:] *= 2
+        check(
+            "nvfp4_fused_scales",
+            packed,
+            3,
+            0,
+            dense.shape[1],
+            grid,
+            dense_weight=merged_dense,
+            codec="nvfp4",
+            weight_scales=scales.cuda(),
+            global_scale=row_scales.cuda(),
+        )
+    check_routed(grid)
     print("PASS: packed G128 component gate", flush=True)
 
 
