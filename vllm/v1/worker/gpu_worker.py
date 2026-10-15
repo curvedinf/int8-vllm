@@ -1151,6 +1151,43 @@ class Worker(WorkerBase):
 
         return start_gpu_profile(tag, ranks)
 
+    @torch.inference_mode()
+    def reload_bolt_packed_kernels(self):
+        """Idle diagnostic tuning: reload kernels and recapture both models."""
+        import hashlib
+        import importlib
+        from pathlib import Path
+
+        if os.environ.get("VLLM_BOLT_KERNEL_TUNING") != "1":
+            raise RuntimeError("Bolt kernel tuning is disabled")
+        runner = self.model_runner
+        if runner.req_states.req_id_to_index:
+            raise RuntimeError("Kernel reload requires an idle worker")
+        torch.cuda.synchronize()
+        modules = [
+            "aiter.ops.triton._triton_kernels.gemm.basic.gemm_packed_g128",
+            "aiter.ops.triton.gemm.basic.gemm_packed_g128",
+            "vllm.model_executor.layers.quantization.utils.packed_g128_int8",
+        ]
+        digests = {}
+        for name in modules:
+            module = importlib.reload(importlib.import_module(name))
+            digests[name] = hashlib.sha256(
+                Path(module.__file__).read_bytes()
+            ).hexdigest()
+        managers = [runner.cudagraph_manager]
+        if runner.speculator is not None:
+            managers.append(runner.speculator.query_cudagraph_manager)
+        for manager in managers:
+            # A released HIP pool cannot be reused for a new graph capture.
+            manager.pool = current_platform.graph_pool_handle()
+            manager.graphs.clear()
+            manager._graphs_captured = False
+        with set_current_vllm_config(self.vllm_config):
+            runner.capture_model()
+        torch.cuda.synchronize()
+        return {"sources": digests, "graphs": [len(m.graphs) for m in managers]}
+
     def stop_lifecycle_gpu_profile(self):
         from vllm.profiler.lifecycle import stop_gpu_profile
 
