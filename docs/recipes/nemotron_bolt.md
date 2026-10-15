@@ -41,6 +41,13 @@ INT8/BF16 matrices. Unaligned tensor-parallel slices retain the necessary
 original packed boundary blocks. Some floating intermediates remain between
 operations; the recipe does not claim an entirely INT8 residual stream.
 
+AIS reads weights directly into GPU memory. On a repack-cache miss, the
+launcher enables `VLLM_AIS_REPACK_CPU_WRITE=1`: packed cache payloads are copied
+back through a temporary host buffer for buffered file writes. This avoids
+filesystem-journal stalls from thousands of small hipFile expert writes.
+It does not expand or requantize the weights, and cache-hit reads still use
+AIS directly. The Qwen launcher's cache-writing path is unchanged.
+
 ## Changes needed in the fork
 
 Relevant support from upstream `77154ca6116ae34cbfe314beef1016bde9b63989`
@@ -111,6 +118,22 @@ speculative counter deltas. It is not a general quality benchmark.
 `--prefix-file` prepends an identical document to every question for a retained
 long-context workload; `--max-tokens` controls each response budget.
 The A/B record belongs in [the experiment ledger](surface_experiments_ledger.jsonl).
+
+To reproduce the 28k-token retrieval and repeated-prefix workload:
+
+```bash
+.venv/bin/python scripts/probe_bolt_prefix.py \
+  --api-key-file "$API_KEY_FILE" --tokenizer "$MODEL_DIR/tokenizer.json" \
+  --output-dir logs/bolt-prefix
+.venv/bin/python scripts/bench_bolt_recipe.py \
+  --api-key-file "$API_KEY_FILE" --prefix-file logs/bolt-prefix/bench-prefix.txt \
+  --max-tokens 128 --output logs/bolt-long-c8.json
+```
+
+On a diagnostic server started with `VLLM_SERVER_DEV_MODE=1`, adding
+`--reset-gpu` to the prefix probe resets the GPU prefix cache while preserving
+the CPU tier, then repeats retrieval and records transfer metrics. Keep this
+development mode off in production.
 
 For systemd, `scripts/vllm-bolt@.service` uses the existing credential envfile
 and runs as the named instance user. It conflicts with the Qwen service to

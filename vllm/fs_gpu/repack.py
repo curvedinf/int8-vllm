@@ -117,9 +117,14 @@ class RepackWriter:
         self.tmp_bin = f"{cache.bin_path}.tmp-{os.getpid()}"
         self.entries: list[dict[str, Any]] = []
         self.off = 0
-        self.ais = get_ais()
-        self.fd = os.open(self.tmp_bin, os.O_DIRECT | os.O_CREAT | os.O_RDWR, 0o644)
-        self.fh = self.ais.handle_register(self.fd)
+        # Thousands of small expert writes can serialize on filesystem journal
+        # commits with hipFile. This opt-in changes cache construction only;
+        # source reads and subsequent cache reads still use direct GPU IO.
+        cpu_write = os.environ.get("VLLM_AIS_REPACK_CPU_WRITE") == "1"
+        self.ais = None if cpu_write else get_ais()
+        flags = os.O_CREAT | os.O_RDWR | (0 if cpu_write else os.O_DIRECT)
+        self.fd = os.open(self.tmp_bin, flags, 0o644)
+        self.fh = self.ais.handle_register(self.fd) if self.ais else None
         self.sources = cache.fingerprint(files)
 
     def append(
@@ -132,7 +137,18 @@ class RepackWriter:
     ) -> None:
         """Write one tensor's compact block (a contiguous uint8 GPU buffer)."""
         n = compact.numel()
-        self.ais.write(self.fh, compact.data_ptr(), n, self.off, 0)
+        if self.ais is not None:
+            self.ais.write(self.fh, compact.data_ptr(), n, self.off, 0)
+        else:
+            # Blocking D2H preserves stream ordering and keeps the host view
+            # alive until all bytes have been accepted by the filesystem.
+            data = memoryview(compact.cpu().numpy()).cast("B")
+            done = 0
+            while done < n:
+                written = os.pwrite(self.fd, data[done:], self.off + done)
+                if written == 0:
+                    raise OSError("Repack cache write made no progress")
+                done += written
         self.entries.append(
             {
                 "name": name,
@@ -147,7 +163,10 @@ class RepackWriter:
 
     def commit(self) -> bool:
         try:
-            self.ais.handle_deregister(self.fh)
+            if self.ais is not None:
+                self.ais.handle_deregister(self.fh)
+            else:
+                os.fsync(self.fd)
             os.close(self.fd)
             meta = {
                 "version": REPACK_VERSION,

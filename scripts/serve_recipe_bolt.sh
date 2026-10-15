@@ -44,6 +44,9 @@ serve() {
   # HD128/GQA8 layout. Use the already validated generic unified path.
   export NCCL_ALGO=Ring NCCL_PROTO=Simple NCCL_P2P_DISABLE=0 NCCL_DMABUF_ENABLE=0
   export HSA_ENABLE_IPC_MODE_LEGACY=0
+  # First-cache construction has thousands of small expert writes. Buffer
+  # those through the host; AIS weight reads and packed storage are unchanged.
+  export VLLM_AIS_REPACK_CPU_WRITE=1
   # Preserve the official excluded draft surfaces; the Qwen conv calibration
   # is not a calibration of this draft.
   export VLLM_GFX908_DF2_W8A8=0
@@ -103,7 +106,13 @@ case "${1:-status}" in
   stop)
     if alive; then
       pid="$(cat "$PID_FILE")"
-      kill -TERM "$pid"
+      # `start` creates a private session. Include booting workers, before
+      # the API server has installed its normal graceful-shutdown handlers.
+      if [[ "$(ps -o pgid= -p "$pid" | tr -d ' ')" == "$pid" ]]; then
+        kill -TERM -- "-$pid"
+      else
+        kill -TERM "$pid"
+      fi
       for _ in $(seq 1 60); do alive || break; sleep 1; done
       if alive; then echo 'Supervisor has not exited' >&2; exit 1; fi
     fi

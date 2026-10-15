@@ -49,7 +49,11 @@ Do not use old boot.py PID files to stop the current supervisor.
 
 Bolt is booting with VLLM_FS_GPU=weights, HF_HUB_OFFLINE=1 and
 VLLM_SERVER_DEV_MODE=1 (diagnostic reset endpoint only). First AIS load builds
-per-rank repack caches; allow time for 90 shards. Validate cache bytes against
+per-rank repack caches; allow time for 90 shards. Small hipFile cache writes
+stalled on filesystem journal commits (ais-small-write-stall.log); preallocation
+did not help. Stopped that boot and removed only its temporary files. Launcher
+now opts into buffered CPU cache writes; source/cache reads remain AIS. New
+short-write/alignment CPU test passed; latest micro PASS and battery4/4. Validate cache bytes against
 checkpoint using scripts/fs_gpu_repack_check.py; it accepts rank0 only, so use
 ignored temporary symlink directories to inspect other ranks.
 
@@ -81,3 +85,17 @@ the same account, use its API-key environment privately for endpoint checks,
 without printing credentials. Required outcome: authenticated Bolt hosting
 on8020 with existing production credentials and systemd restart ownership.
 A diagnostic8021 process is not completed deployment.
+
+Final-candidate coordinator is running in an exec session, waiting for8021
+health and then short C8 twice, prefix pair, identical-prefix long C8, and
+GPU-reset/CPU-restore. Output: final-candidate.log. It exits on any failure.
+New public probe_bolt_prefix.py reproduces the original prefix exactly.
+New loader branch needs final byte gates and Qwen regression before publishing.
+
+Buffered cache writer now loaded target and draft successfully (~7.14GiB/rank).
+All 8 cache manifests published. Rank0 and rank1 byte gates passed28,885 tensors
+each; other gates running via cache_gate.py (cache-byte-gates.log). Candidate
+coordinator now waits for all byte gates before timing tests. API is ready.
+Direct first-cache write failure was a filesystem journal stall; buffered
+writer is opt-in only for Bolt, with short-write/alignment test. Standalone
+launcher stop now signals its own setsid process group during boot too.
