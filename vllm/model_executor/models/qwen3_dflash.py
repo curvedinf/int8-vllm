@@ -1098,14 +1098,10 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
                 "means the draft model's target_layer_ids reference layers that "
                 "do not exist in the target model (incompatible draft/target pair)."
             )
-        # The target emits its own dtype (fp16 target + bf16 draft is a
-        # supported mix); cast to the drafter's dtype at the boundary. The
-        # upcast is lossless. When fc carries GPTQ params (E1 fcq8) there is
-        # no .weight; the quantized path takes any float dtype and the
-        # boundary cast is unnecessary.
-        fc_weight = getattr(self.model.fc, "weight", None)
-        if fc_weight is not None:
-            hidden_states = hidden_states.to(fc_weight.dtype)
+        # Packed checkpoints store fc.weight as uint8. Its storage dtype is
+        # unrelated to the floating activation dtype; casting to it destroys
+        # the target context (including negative and fractional features).
+        hidden_states = hidden_states.to(self.draft_model_config.dtype)
         result = self.model.fc(hidden_states)
         if needs_squeeze:
             result = result.squeeze(0)

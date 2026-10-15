@@ -20,9 +20,37 @@ from vllm.distributed import parallel_state
 from vllm.model_executor.layers import logits_processor
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.models.lilicorr import LiLiCorrHead
+from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import CandidateSampler
 from vllm.v1.worker.gpu.spec_decode.lilicorr.speculator import LiLiCorrSpeculator
+
+
+@pytest.mark.parametrize("storage_dtype", [torch.uint8, torch.bfloat16])
+def test_context_projection_uses_compute_dtype_with_packed_weights(storage_dtype):
+    class Projection(nn.Module):
+        input_size = 4
+
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(
+                torch.zeros(2, 4, dtype=storage_dtype), requires_grad=False
+            )
+
+        def forward(self, x):
+            assert x.dtype == torch.bfloat16
+            return x[:, :2] - x[:, 2:]
+
+    draft = SimpleNamespace(
+        draft_model_config=SimpleNamespace(dtype=torch.bfloat16),
+        model=SimpleNamespace(use_aux_hidden_state=True, fc=Projection()),
+    )
+    context = torch.tensor([[-2.5, 0.25, 1.5, -0.5]], dtype=torch.float16)
+    expected = torch.tensor([[-4.0, 0.75]], dtype=torch.bfloat16)
+    actual = DFlashQwen3ForCausalLM.combine_hidden_states(draft, context)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    actual = DFlashQwen3ForCausalLM.combine_hidden_states(draft, context[0])
+    torch.testing.assert_close(actual, expected[0], rtol=0, atol=0)
 
 
 @pytest.fixture(autouse=True)

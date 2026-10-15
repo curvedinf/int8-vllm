@@ -110,18 +110,30 @@ Latest post-relocation INT8 micro and battery4/4 pass. Loader suite5 passed.
 
 Bolt eager diagnostic boot succeeds: TP4/C8/NS7, INT8G128 target/draft KV,
 BF16 residuals, FP32 Mamba, custom AR. Target plus draft use7.14GiB/rank;
-cache page resolves4256 tokens. First response Paris and all eight C8 answers
-are coherent. C8 smoke took180s including shape JIT, 644 generated tokens.
-Draft acceptance is poor (~1.03--1.07 accepted length); do not treat this as
-validated speculative performance. Full C8 output in ignored c8-smoke.json.
+cache page resolves4256 tokens. Poor initial acceptance was caused by
+DFlash combine_hidden_states casting target features to fc.weight.dtype,
+which is uint8 for official NVFP4. Corrected to draft compute dtype. The
+32-test LiLiCorr suite passes, including new signed/fractional context cases.
+AITER quantize now rejects integer activation input (a6aacf7d5).
 
-Current diagnostic boot uses ignored agents/tmp/bolt-eval/boot.py with
-VLLM_SPEC_DEBUG_DUMP=1 to investigate draft candidate quality. It stores PID
-in boot.pid and log in boot.log. Private regression key must not be printed.
-Localhost8021, eager, maxlen8192/batched4256, standard loader, HF offline.
-Ring/Simple matches Qwen for all-gathers; all-reduce remains CUSTOM. Warm
-checkpoint loading ~18s. Earlier AIS load failed before expert-loader repair;
-AIS/repack still needs validation. No active production switch yet.
+After the fix: C8 smoke627 output tokens/14.425s,137 draft rounds,
+959 proposed/494 accepted tokens, acceptance length4.606. All outputs sane.
+This is an eager short-prompt smoke, not a broad fidelity/performance claim.
+Raw results: ignored eager-context-fix-c8.json; failure diagnostics retained
+in uint8-context-failure.log. Independent attention probe covers HD128,
+noncausal SW1024/sinks and4256-token pages at lengths31/1091/4271;
+relative errors ~0.002 against decoded-cache reference.
+Post-fix INT8 micro and battery4/4 pass.
+
+Current boot uses the peer launcher on localhost8021, with private existing
+regression key file, VLLM_FS_GPU=off and HF offline. Supervisor PID/log are
+under logs/serve_recipe_bolt. It enables FULL_DECODE_ONLY graphs without
+Torch compilation, capture sizes8..64 by8, default32768 context/8512 batch,
+RAM prefix tier, reasoning/tool parsers. Check server.log for boot progress.
+Earlier diagnostic boot.py is now stopped. Never print private keys.
+Need exercise scripts/bench_bolt_recipe.py (cold/warm), functional.py
+(reasoning/tools/image), long-context/prefix and streaming. The last two
+helper probes live in ignored agents/tmp/bolt-eval.
 
 Peer scripts/serve_recipe_bolt.sh needs full exercise: default32768 context,
 TP4/C8, NS7, RAM tier8GiB/diskoff, reasoning/tool parsers. Qwen-only conv
