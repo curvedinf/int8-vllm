@@ -95,53 +95,39 @@ Raw logs and failed merge evidence are in ignored `agents/tmp/bolt-eval/`.
 ## Runtime wiring in progress (after initial commit)
 
 Initial component/port milestone is committed as `088bfd9558` (not pushed).
-New uncommitted work wires `modelopt_gfx908.py` into ModelOpt mixed dispatch:
-Q8 embedding/linears, IQ2 linears/shared/routed experts and NVFP4 linears retain
-original byte storage. Row-parallel IQ2 keeps overlapping boundary blocks;
-shared/routed ReLU2 outputs feed down GEMMs as INT8 GS128. NVFP4 preserves fused
-projection scales individually. Routed kernel supports grouped routes via the
-existing `moe_align_block_size`; grouped and per-route outputs match exactly.
-Probe now includes routing and graph replay; rerun its full committed version.
+Packed runtime is wired into ModelOpt mixed dispatch: Q8 embedding/linears,
+IQ2 linears/shared/routed experts and NVFP4 linears retain original bytes.
+RoutedExperts recognizes individual 3D packed tensors by checkpoint names.
+NVFP4 preserves each fused projection's global scale as per-row metadata.
+Kernels now live in sibling AITER (55e06e3fe); vLLM utility modules reexport
+that implementation. GEMM M is dynamic to avoid recompilation by active count.
+Official/synthetic component probe, grouped routes and graph replay pass.
 
-The upstream `_index_expert_mapping` and name-based per-expert identification
-were ported into RoutedExperts: packed 3D per-expert weights must not be treated
-as fused experts. New `tests/quantization/test_bolt_packed_loading.py`: 5 passed,
-including real loader entrypoint for TP4 widths 1536/2048/2304/2560.
+Mamba SSD uses separate masked loads for initial and previous-chunk states,
+fixing AMD CanonicalizePointers with FP32 initial states. Eight recurrence /
+chunked-prefill checks pass, including production BF16/FP32 state geometry.
+Latest post-relocation INT8 micro and battery4/4 pass. Loader suite5 passed.
 
-Diagnostic Bolt TP4/C8/NS7 eager boot successfully loaded target + LiLiCorr at
-7.13 GiB/rank. INT8-G128 target/draft KV, BF16 compute, FP32 Mamba, custom AR.
-The target cache page resolves to 4256 tokens. First boot exposed a Triton 3.6
-AMD CanonicalizePointers failure in Mamba2 SSD when choosing between initial
-state and prior-chunk pointers. Replaced pointer selection with masked loads
-from separate allocations. New Bolt production-shape recurrence tests (with
-and without FP32 initial states) both pass against independent recurrence.
-Mamba state storage remains FP32. Need broader existing SSD checks and E2E.
+Bolt eager diagnostic boot succeeds: TP4/C8/NS7, INT8G128 target/draft KV,
+BF16 residuals, FP32 Mamba, custom AR. Target plus draft use7.14GiB/rank;
+cache page resolves4256 tokens. First response Paris and all eight C8 answers
+are coherent. C8 smoke took180s including shape JIT, 644 generated tokens.
+Draft acceptance is poor (~1.03--1.07 accepted length); do not treat this as
+validated speculative performance. Full C8 output in ignored c8-smoke.json.
 
-The failed diagnostic boot was stopped; GPU workers have exited. Reboot using
-ignored `agents/tmp/bolt-eval/boot.py` once the micro/battery ladder completes.
-It uses private existing regression key, localhost port 8021, standard loader
-(`VLLM_FS_GPU=off`), HF offline, eager, maxlen8192/batched4256. Script stores PID
-in `boot.pid`, output in `boot.log`. Never print the key. Previous full target
-load took 265s, draft 11s. Original AIS boot hit the now-fixed expert-layout bug,
-then stalled on cache writes; stopped it. AIS/repack needs rechecking later.
+Current diagnostic boot uses ignored agents/tmp/bolt-eval/boot.py with
+VLLM_SPEC_DEBUG_DUMP=1 to investigate draft candidate quality. It stores PID
+in boot.pid and log in boot.log. Private regression key must not be printed.
+Localhost8021, eager, maxlen8192/batched4256, standard loader, HF offline.
+Ring/Simple matches Qwen for all-gathers; all-reduce remains CUSTOM. Warm
+checkpoint loading ~18s. Earlier AIS load failed before expert-loader repair;
+AIS/repack still needs validation. No active production switch yet.
 
-Peer `scripts/serve_recipe_bolt.sh` exists but has not been exercised. TP4/C8,
-NS7, CPU tier8GiB/disk off, default maxlen32768 and batched8512. It disables the
-Qwen-only draft convolution post-load quantizer to preserve official excluded
-float weights. Needs graph configuration, readiness/stop checks, API validation,
-long-context acceptance, performance ledger and service activation. Current
-system `vllm` unit is inactive. No Bolt endpoint is serving successfully yet.
-
-Latest gates: the extended packed probe passes including grouped graph replay
-and distinct NVFP4 fused-projection global scales. NVFP4 now uses a per-row
-scale lookup so all fused segments execute in one GEMM (only scalar metadata
-is expanded, never weights). Mamba suite: 8 passed (existing chunked-prefill
-cases and BF16/FP32-state tests for state sizes128/256, fresh and initial-state).
-Post-Mamba micro and battery4/4 passed.
-
-Next eager boot got through target/draft forward into LiLiCorr candidate
-all-gather. It failed because the diagnostic script inherited ROCm's
-NCCL_ALGO=Tree/NCCL_PROTO=LL, which does not support AllGather. Matched Qwen's
-Ring/Simple gather configuration; TP all-reduce remains CUSTOM. Restart in
-progress via ignored boot.py (see boot.pid/log). Check the new boot, not old
-stopped processes. Warm page-cache loading is now ~18s for both checkpoints.
+Peer scripts/serve_recipe_bolt.sh needs full exercise: default32768 context,
+TP4/C8, NS7, RAM tier8GiB/diskoff, reasoning/tool parsers. Qwen-only conv
+post-load calibration is disabled to retain official excluded draft weights.
+Need acceptance diagnosis, graphs, long-context/prefix, multimodal/tools,
+performance ledger and Qwen regression. A systemd instance template is ready
+for review, preserving the existing credential envfile. System unit currently
+inactive; installing/starting it needs privileged access not available in this
+session. Finish independent validation before requesting the concrete OS step.
