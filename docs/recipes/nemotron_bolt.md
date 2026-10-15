@@ -5,9 +5,13 @@ checkpoint and its LiLiCorr draft on four MI100 GPUs. It keeps the checkpoint's
 packed weights in GPU memory and converts weight tiles to INT8 GS128 inside
 the matrix kernels. It does not produce a replacement quantized checkpoint.
 
-**Validation in progress:** eager and graph TP4/C8 serving, LiLiCorr acceptance,
-28k context/prefix replay, reasoning, tools, image/video and streaming pass.
-Final loader/scheduler checks and production service activation remain pending.
+**Serving validated; production activation pending:** eager and graph TP4/C8
+serving, LiLiCorr acceptance, 28k context/prefix replay, RAM-prefix restoration,
+reasoning, tools, image/video and streaming pass. All eight AIS rank caches
+match the official checkpoint bytes. The final post-loader Qwen regression
+passed. A subsequent eight-cache-hit restart also passed C8, reasoning, tools,
+image, streaming, API authentication and disabled-development-endpoint checks.
+Production service activation remains pending.
 The Qwen recipe remains independently available.
 
 ## Checkpoints and execution
@@ -47,6 +51,48 @@ back through a temporary host buffer for buffered file writes. This avoids
 filesystem-journal stalls from thousands of small hipFile expert writes.
 It does not expand or requantize the weights, and cache-hit reads still use
 AIS directly. The Qwen launcher's cache-writing path is unchanged.
+
+## Validation and scheduler tradeoff (2026-10-15)
+
+The packed component oracle, boundary slices, routed experts and graph replay
+pass. The loader suite passes five checks, Mamba recurrence/chunked prefill
+eight, and the post-context-fix LiLiCorr suite 32. INT8 KV micro passes and the
+gfx908 battery is 4/4. The CPU cache writer passes short-write, alignment,
+publication and source-invalidation checks. All four target rank caches
+(28,885 tensors each) and four draft rank caches (179 each) match source bytes.
+Loaded target plus draft use 7.14 GiB of model memory per GPU.
+
+In the final short C8 smoke, the cold/warm runs produced 644/657 output tokens
+in 16.45/14.78 seconds, with acceptance lengths 4.59/4.67. These variable-length
+short runs do not establish a throughput improvement over the earlier graph
+baseline (638/649 tokens in 13.13/13.53 seconds).
+
+The matched-input long C8 workload uses a shared 28k-token synthetic archive
+and eight questions, after the same retrieval/replay warmup:
+
+| Metric | No mixed-load policy | Adapted policy |
+| --- | ---: | ---: |
+| First completed response | 221.33 s | 46.33 s |
+| Median completed response | 225.25 s | 158.92 s |
+| Whole-run elapsed time | 228.63 s | 251.59 s |
+| Output tokens | 569 | 538 |
+| Acceptance length | 4.445 | 4.402 |
+
+The recipe adopts the policy to protect decoder progress. It staggers new
+prefills and increases total elapsed time in this workload. This is one paired
+run with freely generated responses of different lengths, not an equal-work
+throughput or statistical-significance claim.
+For the no-policy comparison, restart the same launcher with
+`VLLM_GFX908_MIXED_PREFILL_TOKENS=0 VLLM_GFX908_PREFIX_FAIR_ADMISSION=0`;
+restore the defaults for the adapted policy. Use a fresh server for each leg
+and the same prefix-probe/benchmark sequence below.
+
+The 28,067-token retrieval returns the same phrase cold and on replay:
+100.68/27.02 seconds. After a GPU-only prefix reset, the server restores
+339,735,040 bytes from RAM, reuses 17,024 tokens, and returns the same phrase in
+46.57 seconds. No disk prefix tier is configured. Reasoning, automatic tool
+calls, image/video input and non-thinking streaming also passed functional
+checks. These checks do not replace a broad model-quality evaluation.
 
 ## Changes needed in the fork
 

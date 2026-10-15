@@ -1,101 +1,78 @@
-# Bolt deployment — active
+# Bolt production activation — active
 
-User authorized official-checkpoint download, packed in-memory weights with
-in-kernel INT8 GS128 execution, a peer recipe, commits/pushes and switching the
-active service to Bolt. Continue through production hosting; no new deployment
-permission is needed. Preserve unrelated user edits in AGENTS.md,
-scripts/serve_recipe_qwen38.sh, deleted logs/README.md, and untracked
- docs/recipes/qwen38_flash_next_support.md.
+User authorized the official packed-weight implementation, peer recipe,
+commits/pushes and making Bolt active. Continue through production hosting.
+Implementation, checkpoint revisions, validation and scheduler tradeoffs are
+in docs/recipes/nemotron_bolt.md. Do not ask for deployment permission again.
 
-Implementation and checkpoint revisions are in docs/recipes/nemotron_bolt.md.
-Both forks have local commits not yet pushed. vLLM remote is origin; AITER
-remote is curved (not origin). Work directly on authoritative main.
+Preserve unrelated user edits in AGENTS.md, scripts/serve_recipe_qwen38.sh,
+deleted logs/README.md, and untracked docs/recipes/qwen38_flash_next_support.md.
+Both forks use main. vLLM remote is origin; AITER remote is curved (not origin).
+Local implementation commits are not pushed yet; latest code is848a1b5d3a and
+AITER a6aacf7d5. The remaining launcher edit makes fair admission overridable
+for reproducible A/B; its default is unchanged.
 
-## Costly evidence and resumption
+## Current process and remaining work
 
-All raw artifacts below are under ignored agents/tmp/bolt-eval/. The private
-regression.key is mode0600; never print or commit its contents. Diagnostic API
-is localhost8021. The peer launcher's PID/log live in logs/serve_recipe_bolt.
-Do not use old boot.py PID files to stop the current supervisor.
+Qwen post-loader regression PASSED and its supervisor/workers are stopped.
+Bolt is restarting from the verified AIS caches on localhost8021 with the
+private existing regression key, HF offline, and VLLM_SERVER_DEV_MODE=0.
+Use logs/serve_recipe_bolt/supervisor.pid and server.log; do not use stale
+boot.py PIDs. The updated stop command signals its private setsid group.
 
-- Official target/draft verified with hf cache verify: 118/6 files.
-- Packed component oracle, routed experts, boundary slices, distinct fused
-  NVFP4 scales, graph replay pass; generated ISA uses INT8 MFMA. Requantization
-  introduces ~0.8–1.7% random-activation relative error, not a model quality gate.
-- Loader suite5, Mamba recurrence/chunk suite8, post-context-fix LiLiCorr suite32
-  pass. Full tests/test_config.py cannot collect due to pre-existing missing
-  huggingface_hub.ResolvedRevision. Do not upgrade the serving venv for it.
-- INT8 micro PASS/battery4/4 after shared-code changes. Independent HD128
-  noncausal SW1024+sinks attention probe passes at lengths31/1091/4271.
-- DFlash NVFP4 context projection initially cast features to uint8 weight dtype,
-  collapsing acceptance. Fixed to draft compute dtype, with signed/fractional
-  regression. Integer activation input now rejected by AITER quantizer.
-- Eager post-fix C8:627 tokens/14.425s, acceptance length4.606.
-- Graph baseline (no mixed scheduler policy): cold638/13.125s, warm649/13.533s,
-  acceptance4.483/4.353. graph-cold-c8.json and graph-warm-c8.json.
-- Reasoning, tool calls, image/video and streaming pass (functional*, video*,
-  stream*). 28,067-token retrieval cold98.84s/repeat27.54s, same phrase.
-  long-prefix-results.json and long-prefix-request.json retain baseline data.
-- Long C8 baseline569 tokens/228.630s, acceptance4.445. graph-long-c8.json.
-  long-bench-prefix.txt retains common prefix. Reproduce via benchmark script
-  --prefix-file that file --max-tokens128 (separate flag/value). Warm the original
-  long_prefix.py cold/repeat pair first for comparable cache state.
-- Final Qwen regression passed unchanged TP4/C6/NS6, PTQR target/draft,
-  INT8G128, FP32 state, graphs, AIS, custom AR, existing12GiB RAM tier.
-  Six concurrent queries sane: qwen-final-greedy.json/qwen-final-server.log.
-  Qwen is stopped; redo only if new shared-code edits require it.
+The cache-hit serving gate PASSED: all8 AIS cache hits, C8 acceptance4.559,
+reasoning/tools/image/stream, authentication and disabled dev endpoint. Bolt
+is healthy on8021 under the diagnostic key; the production OS step remains.
+The final serving ledger row is appended to the canonical JSONL. AITER main
+is pushed and remote verified at a6aacf7d5. Finish the security-gated vLLM
+commit/push and root service activation, then authenticate on8020.
 
-## Current boot and next actions
+## Costly evidence
 
-Bolt is booting with VLLM_FS_GPU=weights, HF_HUB_OFFLINE=1 and
-VLLM_SERVER_DEV_MODE=1 (diagnostic reset endpoint only). First AIS load builds
-per-rank repack caches; allow time for 90 shards. Small hipFile cache writes
-stalled on filesystem journal commits (ais-small-write-stall.log); preallocation
-did not help. Stopped that boot and removed only its temporary files. Launcher
-now opts into buffered CPU cache writes; source/cache reads remain AIS. New
-short-write/alignment CPU test passed; latest micro PASS and battery4/4. Validate cache bytes against
-checkpoint using scripts/fs_gpu_repack_check.py; it accepts rank0 only, so use
-ignored temporary symlink directories to inspect other ranks.
+All raw files are under ignored agents/tmp/bolt-eval/. regression.key is0600;
+never print or commit it. Public scripts/probe_bolt_prefix.py reproduces the
+original long prefix exactly, and scripts/bench_bolt_recipe.py retains inputs
+and output counters. Use canonical docs/ledger for numerical results.
 
-Current boot adds mixed prefill4256/interval16 plus fair admission. Qwen's
-HD256/GQA6-specific attention switches do not cover Bolt HD128/GQA8; removed
-no-op exports from launcher, with no shared attention changes. Candidate tests:
-short C8 cold/warm, original long-prefix pair (save baseline results first),
-long C8, GPU-prefix reset preserving CPU followed by retrieval and restore
-metric inspection. Do not claim CPU restore until demonstrated.
+- candidate-{cold,warm,long}-c8.json, candidate-prefix/, candidate-cpu-restore.json
+  and candidate-before-reset.metrics/candidate-after-restore.metrics: all gates
+  pass. CPU restoration has positive load bytes and external-prefix hits.
+- graph-{cold,warm,long}-c8.json: no-policy graph baseline. Single paired runs,
+  variable response lengths; no equal-work throughput claim.
+- cache-byte-gates.log: all8 rank caches pass source byte checks.
+- candidate-server-complete.log: complete successful first-cache build/serve.
+- ais-small-write-stall.log: initial hipFile cache writes stalled in journal
+  waits. Preallocation did not fix it. Buffered CPU writes solve construction;
+  AIS source/cache reads and packed GPU storage remain unchanged.
+- final-loader-micro.log / final-loader-battery.log: PASS /4of4.
+- cpu-repack-test.log: short writes, alignment, publication, invalidation pass.
+- qwen-post-loader-{test.log,server.log,greedy.json}: final unchanged Qwen
+  TP4/C6/NS6, AIS, graphs, custom AR, INT8G128, FP32 state,12GiB RAM tier pass.
+- functional*, video*, stream*: earlier functional gates; cache-hit versions
+  are being retained separately by the current coordinator.
 
-Then finish ledger/docs, security-gated commit, push both main refs and verify.
-Do not claim performance gain from unpaired or variable-output smoke runs.
+Full tests/test_config.py cannot collect due to pre-existing missing
+huggingface_hub.ResolvedRevision. Do not upgrade the serving venv. Ruff on the
+existing repack module reports5 pre-existing findings; new test/probe files
+pass. No new numerical kernel changes have occurred since the prior gates.
 
-## Production OS step
+## Required OS access
 
-The reviewed scripts/vllm-bolt@.service uses existing /etc/llama/llama-api.env.
-Directory is root0700 and credentials are inaccessible here. No API-key env
-is present. sudo -n true fails. sudo -n -l only allows an obsolete Qwen unit
-which is not installed, so does not authorize the needed systemd operations.
-After all independent validation, ask for the concrete OS installation step:
+Prepared scripts/vllm-bolt@.service uses existing /etc/llama/llama-api.env.
+That directory is root0700; credentials are inaccessible here. No production
+API key is in the current environment. sudo -n true fails; sudo -n -l permits
+only an obsolete Qwen unit that is not installed, not the required operations.
+After all independent validation/publication, request this concrete OS step
+from the serving account (the unit template is already reviewed):
 
     sudo install -m0644 scripts/vllm-bolt@.service /etc/systemd/system/
     sudo systemctl daemon-reload
     sudo systemctl disable --now vllm.service
     sudo systemctl enable --now "vllm-bolt@$USER.service"
 
-Stop the diagnostic launcher first to release GPUs. Once production runs as
-the same account, use its API-key environment privately for endpoint checks,
-without printing credentials. Required outcome: authenticated Bolt hosting
-on8020 with existing production credentials and systemd restart ownership.
-A diagnostic8021 process is not completed deployment.
-
-Final-candidate coordinator is running in an exec session, waiting for8021
-health and then short C8 twice, prefix pair, identical-prefix long C8, and
-GPU-reset/CPU-restore. Output: final-candidate.log. It exits on any failure.
-New public probe_bolt_prefix.py reproduces the original prefix exactly.
-New loader branch needs final byte gates and Qwen regression before publishing.
-
-Buffered cache writer now loaded target and draft successfully (~7.14GiB/rank).
-All 8 cache manifests published. Rank0 and rank1 byte gates passed28,885 tensors
-each; other gates running via cache_gate.py (cache-byte-gates.log). Candidate
-coordinator now waits for all byte gates before timing tests. API is ready.
-Direct first-cache write failure was a filesystem journal stall; buffered
-writer is opt-in only for Bolt, with short-write/alignment test. Standalone
-launcher stop now signals its own setsid process group during boot too.
+The unit's ExecStartPre stops the diagnostic Bolt supervisor automatically.
+Once production runs as the same account, privately use its API-key environment
+for authenticated checks without printing credentials. Verify active+enabled,
+port8020, nemotron-bolt, no dev mode, actual generation and startup contract.
+Then update active-service selection in recipe README, commit/push final state,
+and remove this obsolete active note. Diagnostic8021 is not final deployment.

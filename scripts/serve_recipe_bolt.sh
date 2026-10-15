@@ -39,7 +39,7 @@ serve() {
   # Reuse the Qwen mixed-load policy with Bolt's resolved hybrid page size.
   export VLLM_GFX908_MIXED_PREFILL_TOKENS="${VLLM_GFX908_MIXED_PREFILL_TOKENS:-4256}"
   export VLLM_GFX908_MIXED_PREFILL_INTERVAL="${VLLM_GFX908_MIXED_PREFILL_INTERVAL:-16}"
-  export VLLM_GFX908_PREFIX_FAIR_ADMISSION=1
+  export VLLM_GFX908_PREFIX_FAIR_ADMISSION="${VLLM_GFX908_PREFIX_FAIR_ADMISSION:-1}"
   # Qwen's specialized HD256/GQA6 attention switches do not cover Bolt's
   # HD128/GQA8 layout. Use the already validated generic unified path.
   export NCCL_ALGO=Ring NCCL_PROTO=Simple NCCL_P2P_DISABLE=0 NCCL_DMABUF_ENABLE=0
