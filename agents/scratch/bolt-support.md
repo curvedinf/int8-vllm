@@ -8,14 +8,13 @@ in docs/recipes/nemotron_bolt.md. Do not ask for deployment permission again.
 Preserve unrelated user edits in AGENTS.md, scripts/serve_recipe_qwen38.sh,
 deleted logs/README.md, and untracked docs/recipes/qwen38_flash_next_support.md.
 Both forks use main. vLLM remote is origin; AITER remote is curved (not origin).
-Local implementation commits are not pushed yet; latest code is848a1b5d3a and
-AITER a6aacf7d5. The remaining launcher edit makes fair admission overridable
-for reproducible A/B; its default is unchanged.
+Implementation and validation are published on both main branches.
+Only production service activation and its final endpoint check remain.
 
 ## Current process and remaining work
 
 Qwen post-loader regression PASSED and its supervisor/workers are stopped.
-Bolt is restarting from the verified AIS caches on localhost8021 with the
+Bolt is running from the verified AIS caches on localhost8021 with the
 private existing regression key, HF offline, and VLLM_SERVER_DEV_MODE=0.
 Use logs/serve_recipe_bolt/supervisor.pid and server.log; do not use stale
 boot.py PIDs. The updated stop command signals its private setsid group.
@@ -23,9 +22,12 @@ boot.py PIDs. The updated stop command signals its private setsid group.
 The cache-hit serving gate PASSED: all8 AIS cache hits, C8 acceptance4.559,
 reasoning/tools/image/stream, authentication and disabled dev endpoint. Bolt
 is healthy on8021 under the diagnostic key; the production OS step remains.
-The final serving ledger row is appended to the canonical JSONL. AITER main
-is pushed and remote verified at a6aacf7d5. Finish the security-gated vLLM
-commit/push and root service activation, then authenticate on8020.
+The final serving ledger row is in the canonical JSONL; both remote main
+refs were verified. Root installation was attempted and sudo returned
+"interactive authentication is required". The user has been asked to run
+the concrete commands below. Unit is currently not installed. Keep the
+healthy diagnostic process until the unit stops it through ExecStartPre.
+Once activated, authenticate on8020 and verify persistent service ownership.
 
 ## Costly evidence
 
