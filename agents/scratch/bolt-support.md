@@ -35,6 +35,11 @@ Once activated, authenticate on8020 and verify persistent service ownership.
 
 ## Costly evidence
 
+The profiling investigation is documented in docs/recipes/bolt_profile_20261015.md.
+Raw request/response timings, rank-0 Kineto traces, all-rank host spans and
+analysis are retained under ignored agents/tmp/bolt-profile/. The normal
+diagnostic boot must keep VLLM_SERVER_DEV_MODE=0 and lifecycle tracing disabled.
+
 All raw files are under ignored agents/tmp/bolt-eval/. regression.key is0600;
 never print or commit it. Public scripts/probe_bolt_prefix.py reproduces the
 original long prefix exactly, and scripts/bench_bolt_recipe.py retains inputs

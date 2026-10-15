@@ -14,6 +14,10 @@ image, streaming, API authentication and disabled-development-endpoint checks.
 Production service activation remains pending.
 The Qwen recipe remains independently available.
 
+The [2026-10-15 performance profile](bolt_profile_20261015.md) identifies the
+packed matrix kernels as the dominant bottleneck and documents the remaining
+fidelity-validation gap.
+
 ## Checkpoints and execution
 
 | Component | Pinned official revision |
