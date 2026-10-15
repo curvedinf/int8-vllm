@@ -35,6 +35,13 @@ serve() {
   export HIP_VISIBLE_DEVICES=0,1,2,3 CUDA_VISIBLE_DEVICES=0,1,2,3
   export VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1
   export VLLM_ROCM_USE_AITER_CUSTOM_AR=0 VLLM_GFX908_ACT_QUANT=round
+  export VLLM_TP_SAMPLE_SYNC=1
+  # Reuse the Qwen mixed-load policy with Bolt's resolved hybrid page size.
+  export VLLM_GFX908_MIXED_PREFILL_TOKENS="${VLLM_GFX908_MIXED_PREFILL_TOKENS:-4256}"
+  export VLLM_GFX908_MIXED_PREFILL_INTERVAL="${VLLM_GFX908_MIXED_PREFILL_INTERVAL:-16}"
+  export VLLM_GFX908_PREFIX_FAIR_ADMISSION=1
+  # Qwen's specialized HD256/GQA6 attention switches do not cover Bolt's
+  # HD128/GQA8 layout. Use the already validated generic unified path.
   export NCCL_ALGO=Ring NCCL_PROTO=Simple NCCL_P2P_DISABLE=0 NCCL_DMABUF_ENABLE=0
   export HSA_ENABLE_IPC_MODE_LEGACY=0
   # Preserve the official excluded draft surfaces; the Qwen conv calibration
@@ -61,7 +68,11 @@ serve() {
     --speculative-config "$spec"
     --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":8589934592}}'
   )
-  if [[ "${EAGER:-0}" == 1 ]]; then args+=(--enforce-eager); fi
+  if [[ "${EAGER:-0}" == 1 ]]; then
+    args+=(--enforce-eager)
+  else
+    args+=(--compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[8,16,24,32,40,48,56,64]}')
+  fi
   "${ROOT_DIR}/.venv/bin/python" "${args[@]}" &
   child=$!
   wait "$child"
@@ -79,14 +90,22 @@ case "${1:-status}" in
   start)
     if alive; then echo 'Bolt supervisor is already running'; exit 0; fi
     nohup setsid bash "$0" supervise >> "${LOG_DIR}/server.log" 2>&1 < /dev/null &
-    echo "Bolt starting; log: ${LOG_DIR}/server.log"
+    for _ in $(seq 1 100); do
+      if alive; then
+        echo "Bolt starting; log: ${LOG_DIR}/server.log"
+        exit 0
+      fi
+      sleep 0.1
+    done
+    echo "Bolt supervisor failed to start; see ${LOG_DIR}/server.log" >&2
+    exit 1
     ;;
   stop)
     if alive; then
       pid="$(cat "$PID_FILE")"
       kill -TERM "$pid"
-      for _ in $(seq 1 60); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
-      if kill -0 "$pid" 2>/dev/null; then echo 'Supervisor has not exited' >&2; exit 1; fi
+      for _ in $(seq 1 60); do alive || break; sleep 1; done
+      if alive; then echo 'Supervisor has not exited' >&2; exit 1; fi
     fi
     ;;
   restart) bash "$0" stop; bash "$0" start ;;

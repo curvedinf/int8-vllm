@@ -1,145 +1,83 @@
-# Bolt packed-weight support — active
+# Bolt deployment — active
 
-User authorized downloading and implementing Bolt as a peer recipe to Qwen3.8,
-then making Bolt the active service after validation. No further deployment
-permission is needed within that scope. Do not claim completion before the
-production acceptance gates pass.
-
-## Contract
-
-Keep official IQ2-XXS, Q8_0, and NVFP4 weights packed in GPU memory. Decode and
-requantize tiles inside GEMM to INT8 GS128; carry eligible activations as INT8
-GS128. No persistent expanded INT8/BF16 weight copy. Preserve floating-point
-residual/routing/norm operations, FP32 Mamba state, and sensitive draft surfaces
-until independently gated. TP4, INT8-G128 target/draft KV, custom all-reduce,
-CPU prefix tier, disk tier explicitly off. LiLiCorr uses NS7 (trained block8).
-
-Artifacts downloaded to the existing models directory, under their repository
-basenames, and verified with `hf cache verify --fail-on-missing-files`:
-
-- `nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB` at
-  `a326822af111290f2af5ac59ef4b5040347dabc4`: 118 checked files.
-- `nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr` at
-  `4c6a5613b6d887194a3a5493e3a18a5b3930bb86`: 6 checked files.
-
-## Integration and evidence
-
-Starting source is `33505c684`. Existing user edits in AGENTS.md,
+User authorized official-checkpoint download, packed in-memory weights with
+in-kernel INT8 GS128 execution, a peer recipe, commits/pushes and switching the
+active service to Bolt. Continue through production hosting; no new deployment
+permission is needed. Preserve unrelated user edits in AGENTS.md,
 scripts/serve_recipe_qwen38.sh, deleted logs/README.md, and untracked
-docs/recipes/qwen38_flash_next_support.md must remain untouched.
+ docs/recipes/qwen38_flash_next_support.md.
 
-Referenced upstream snapshot `77154ca6116ae34cbfe314beef1016bde9b63989`
-has 2727 commits absent from this fork. Relevant feature commits:
+Implementation and checkpoint revisions are in docs/recipes/nemotron_bolt.md.
+Both forks have local commits not yet pushed. vLLM remote is origin; AITER
+remote is curved (not origin). Work directly on authoritative main.
 
-- `73a78e6f1f38e280986b81e0f2a9aa5e1ee6fe47`, LiLiCorr PR #57934:
-  ported against existing ModelOpt classes and DFlash interfaces, retaining
-  NaN handling, TP sampling synchronization, lookup override, and diagnostic
-  cache bypass. Adaptive verification is not ported.
-- `6849ca696a`, ModelOpt IQ2/Q8 PR #59604: inspected, not integrated. Its
-  backend requires B12X/SM12x and must be replaced for gfx908.
+## Costly evidence and resumption
 
-New packed GEMM component supports all three codecs, arbitrary logical K
-slices, masked output tails, fused ReLU-squared and GS128 quantized output.
-It is not wired into model dispatch. GPU weights remain packed; only the
-reference probe expands full matrices. GGML IQ2 codebook retains MIT notice.
+All raw artifacts below are under ignored agents/tmp/bolt-eval/. The private
+regression.key is mode0600; never print or commit its contents. Diagnostic API
+is localhost8021. The peer launcher's PID/log live in logs/serve_recipe_bolt.
+Do not use old boot.py PID files to stop the current supervisor.
 
-Component gate (`scripts/probe_bolt_packed_int8.py --checkpoint <target>`):
-synthetic M1/M8/M17 and misaligned K576/K640 slices; actual first-expert up/down,
-129 LM-head rows (Q8), and 129 Mamba in-projection rows (NVFP4). All matched
-explicit group-scaled reference (relative error zero in this run), including
-graph replay. Random-activation relative L2 vs decoded official weights:
-IQ2 up 0.0086234, IQ2 down 0.0088799, Q8 LM head 0.0173478, NVFP4 0.0096044.
-These are component numerics, not model fidelity or throughput evidence.
-INT8 MFMA instructions were observed in generated `_gemm.amdgcn`.
+- Official target/draft verified with hf cache verify: 118/6 files.
+- Packed component oracle, routed experts, boundary slices, distinct fused
+  NVFP4 scales, graph replay pass; generated ISA uses INT8 MFMA. Requantization
+  introduces ~0.8–1.7% random-activation relative error, not a model quality gate.
+- Loader suite5, Mamba recurrence/chunk suite8, post-context-fix LiLiCorr suite32
+  pass. Full tests/test_config.py cannot collect due to pre-existing missing
+  huggingface_hub.ResolvedRevision. Do not upgrade the serving venv for it.
+- INT8 micro PASS/battery4/4 after shared-code changes. Independent HD128
+  noncausal SW1024+sinks attention probe passes at lengths31/1091/4271.
+- DFlash NVFP4 context projection initially cast features to uint8 weight dtype,
+  collapsing acceptance. Fixed to draft compute dtype, with signed/fractional
+  regression. Integer activation input now rejected by AITER quantizer.
+- Eager post-fix C8:627 tokens/14.425s, acceptance length4.606.
+- Graph baseline (no mixed scheduler policy): cold638/13.125s, warm649/13.533s,
+  acceptance4.483/4.353. graph-cold-c8.json and graph-warm-c8.json.
+- Reasoning, tool calls, image/video and streaming pass (functional*, video*,
+  stream*). 28,067-token retrieval cold98.84s/repeat27.54s, same phrase.
+  long-prefix-results.json and long-prefix-request.json retain baseline data.
+- Long C8 baseline569 tokens/228.630s, acceptance4.445. graph-long-c8.json.
+  long-bench-prefix.txt retains common prefix. Reproduce via benchmark script
+  --prefix-file that file --max-tokens128 (separate flag/value). Warm the original
+  long_prefix.py cold/repeat pair first for comparable cache state.
+- Final Qwen regression passed unchanged TP4/C6/NS6, PTQR target/draft,
+  INT8G128, FP32 state, graphs, AIS, custom AR, existing12GiB RAM tier.
+  Six concurrent queries sane: qwen-final-greedy.json/qwen-final-server.log.
+  Qwen is stopped; redo only if new shared-code edits require it.
 
-Quantizer reference originally differed by one code at a half-integer tie:
-Torch scalar division used reciprocal multiplication, changing scale by one
-ULP. Kernel now specifies IEEE division and nearest-even rounding; independent
-NumPy reference uses the same contract. Do not weaken exact code checks.
+## Current boot and next actions
 
-LiLiCorr/DFlash tests: 35 passed on MI100, including GPU head/sampler and graph
-tests. Full tests/test_config.py cannot collect: installed huggingface_hub
-lacks ResolvedRevision, already imported by that file before this work.
-Candidate runner selection was separately exercised without that dependency.
-Serving venv torch/triton/runtime unchanged; only standalone ruff 0.17.1 was
-installed after a dry-run showing no dependency changes.
+Bolt is booting with VLLM_FS_GPU=weights, HF_HUB_OFFLINE=1 and
+VLLM_SERVER_DEV_MODE=1 (diagnostic reset endpoint only). First AIS load builds
+per-rank repack caches; allow time for 90 shards. Validate cache bytes against
+checkpoint using scripts/fs_gpu_repack_check.py; it accepts rank0 only, so use
+ignored temporary symlink directories to inspect other ranks.
 
-Pre-change and final-candidate INT8 KV micro PASS and battery 4/4. Post-port Qwen recipe booted TP4/C6/NS6 (current canonical launcher) with
-INT8-G128 target/draft KV, FP32 Mamba and captured graphs. Six concurrent short
-queries produced sane factual/code answers; test server was stopped afterward.
-This is a smoke regression, not a long-context acceptance or performance gate.
-The full Bolt recipe is not running and production activation is pending.
+Current boot adds mixed prefill4256/interval16 plus fair admission. Qwen's
+HD256/GQA6-specific attention switches do not cover Bolt HD128/GQA8; removed
+no-op exports from launcher, with no shared attention changes. Candidate tests:
+short C8 cold/warm, original long-prefix pair (save baseline results first),
+long C8, GPU-prefix reset preserving CPU followed by retrieval and restore
+metric inspection. Do not claim CPU restore until demonstrated.
 
-Raw logs and failed merge evidence are in ignored `agents/tmp/bolt-eval/`.
+Then finish ledger/docs, security-gated commit, push both main refs and verify.
+Do not claim performance gain from unpaired or variable-output smoke runs.
 
-## Remaining work
+## Production OS step
 
-1. Packed ModelOpt loader/linear methods; preserve original byte blocks and
-   implement TP slices plus scalar-scale handling for merged projections.
-2. Routed/shared-expert dispatch with latent projections, top9 routing,
-   ReLU-squared, INT8 intermediate chaining, and weighted FP32 combination.
-   Existing AITER MoE does not advertise non-gated ReLU-squared.
-3. Optimize the proven component kernels in sibling AITER; benchmark actual
-   expert token-count distributions. No performance claim exists yet.
-4. LiLiCorr packed NVFP4 loading and exclusions; integration with shared head,
-   INT8 KV, and target hidden-state taps; Mamba2 speculative rollback/prefix
-   caching. Qwen GDN kernels do not implement Mamba2.
-5. Peer launcher and model/cache namespace; text, image/video, reasoning, and
-   tool-parser gates; aligned fidelity/acceptance and performance ledger.
-6. Full ladder, Qwen regression, commit/security gate, push main, then activate
-   Bolt. Production credential directory is inaccessible to this user and
-   passwordless sudo is unavailable; temporary localhost regression can use
-   VLLM_API_KEY from a private ignored file. Reconcile service privileges at
-   deployment time without disclosing credentials.
+The reviewed scripts/vllm-bolt@.service uses existing /etc/llama/llama-api.env.
+Directory is root0700 and credentials are inaccessible here. No API-key env
+is present. sudo -n true fails. sudo -n -l only allows an obsolete Qwen unit
+which is not installed, so does not authorize the needed systemd operations.
+After all independent validation, ask for the concrete OS installation step:
 
-## Runtime wiring in progress (after initial commit)
+    sudo install -m0644 scripts/vllm-bolt@.service /etc/systemd/system/
+    sudo systemctl daemon-reload
+    sudo systemctl disable --now vllm.service
+    sudo systemctl enable --now "vllm-bolt@$USER.service"
 
-Initial component/port milestone is committed as `088bfd9558` (not pushed).
-Packed runtime is wired into ModelOpt mixed dispatch: Q8 embedding/linears,
-IQ2 linears/shared/routed experts and NVFP4 linears retain original bytes.
-RoutedExperts recognizes individual 3D packed tensors by checkpoint names.
-NVFP4 preserves each fused projection's global scale as per-row metadata.
-Kernels now live in sibling AITER (55e06e3fe); vLLM utility modules reexport
-that implementation. GEMM M is dynamic to avoid recompilation by active count.
-Official/synthetic component probe, grouped routes and graph replay pass.
-
-Mamba SSD uses separate masked loads for initial and previous-chunk states,
-fixing AMD CanonicalizePointers with FP32 initial states. Eight recurrence /
-chunked-prefill checks pass, including production BF16/FP32 state geometry.
-Latest post-relocation INT8 micro and battery4/4 pass. Loader suite5 passed.
-
-Bolt eager diagnostic boot succeeds: TP4/C8/NS7, INT8G128 target/draft KV,
-BF16 residuals, FP32 Mamba, custom AR. Target plus draft use7.14GiB/rank;
-cache page resolves4256 tokens. Poor initial acceptance was caused by
-DFlash combine_hidden_states casting target features to fc.weight.dtype,
-which is uint8 for official NVFP4. Corrected to draft compute dtype. The
-32-test LiLiCorr suite passes, including new signed/fractional context cases.
-AITER quantize now rejects integer activation input (a6aacf7d5).
-
-After the fix: C8 smoke627 output tokens/14.425s,137 draft rounds,
-959 proposed/494 accepted tokens, acceptance length4.606. All outputs sane.
-This is an eager short-prompt smoke, not a broad fidelity/performance claim.
-Raw results: ignored eager-context-fix-c8.json; failure diagnostics retained
-in uint8-context-failure.log. Independent attention probe covers HD128,
-noncausal SW1024/sinks and4256-token pages at lengths31/1091/4271;
-relative errors ~0.002 against decoded-cache reference.
-Post-fix INT8 micro and battery4/4 pass.
-
-Current boot uses the peer launcher on localhost8021, with private existing
-regression key file, VLLM_FS_GPU=off and HF offline. Supervisor PID/log are
-under logs/serve_recipe_bolt. It enables FULL_DECODE_ONLY graphs without
-Torch compilation, capture sizes8..64 by8, default32768 context/8512 batch,
-RAM prefix tier, reasoning/tool parsers. Check server.log for boot progress.
-Earlier diagnostic boot.py is now stopped. Never print private keys.
-Need exercise scripts/bench_bolt_recipe.py (cold/warm), functional.py
-(reasoning/tools/image), long-context/prefix and streaming. The last two
-helper probes live in ignored agents/tmp/bolt-eval.
-
-Peer scripts/serve_recipe_bolt.sh needs full exercise: default32768 context,
-TP4/C8, NS7, RAM tier8GiB/diskoff, reasoning/tool parsers. Qwen-only conv
-post-load calibration is disabled to retain official excluded draft weights.
-Need acceptance diagnosis, graphs, long-context/prefix, multimodal/tools,
-performance ledger and Qwen regression. A systemd instance template is ready
-for review, preserving the existing credential envfile. System unit currently
-inactive; installing/starting it needs privileged access not available in this
-session. Finish independent validation before requesting the concrete OS step.
+Stop the diagnostic launcher first to release GPUs. Once production runs as
+the same account, use its API-key environment privately for endpoint checks,
+without printing credentials. Required outcome: authenticated Bolt hosting
+on8020 with existing production credentials and systemd restart ownership.
+A diagnostic8021 process is not completed deployment.
