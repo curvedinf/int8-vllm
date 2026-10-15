@@ -10,17 +10,23 @@ Live diagnostic: localhost8021, TP4/C8/NS7, official packed weights,
 INT8 GS128 compute/KV, fp32 Mamba. Tuning/dev mode enabled. Key stays in
 ignored agents/tmp/bolt-eval/regression.key. Preserve unrelated user changes.
 
-Accepted AITER incumbent: 8584635aa. Quick gate: 1014 prefill / 151.31 decode
+Accepted AITER incumbent: a1dfa926d. Quick gate: 1179 prefill / 217.82 decode
 tok/s. Ledger contains A/B details. Original 32-request benchmark differs
 from current prior 8-request quick gate; do not mix their decode rates.
 Artifacts, harnesses, and rollback kernels: agents/tmp/bolt-opt/.
 
-Current experiment: split-static (split-K8 NVFP4 at small M). Earlier combined
-split-dense regressed decode; it also made every non-split K loop dynamic.
-The new candidate preserves static K bounds for SPLIT_K=1 and incumbent tiles.
-Idle reload in progress; then warm prefill, read coherence, run quick gate.
-Next: short GPU profile via enable-profile.py if needed; packed shared-memory
-layouts/kpack and IQ2 wide loads gave little benefit or regressed in micros.
+Current experiment: native-routed. Native HIP now handles routed IQ2 expert
+matrices on small-M requests using the existing sorted route plan. Loaded
+successfully on all four ranks; run-quick.py native-routed is running.
+Native dense Q8/IQ2 and NVFP4 are accepted. Native module is reloaded by the
+wrapper, clearing the library cache automatically. Native M8192/SK8 hit
+process-local OOM; keep native paths limited to small M.
+
+Latest short profile (opt3-* under profile/gpu): packed GEMMs still 82% of
+chat GPU time, 70% prefill. Profiling has been enabled in live workers via
+ignored enable-profile.py; host lifecycle wrappers remain off. No active
+GPU profiler. Cached scale metadata passed codec/routed smoke and E2E.
+Next structural target: routed IQ2 native path and remaining GEMM overhead.
 
 Reload helper requires idle workers, creates fresh HIP pools, and recaptures
 both graph managers (~3s cached). Failed collective RPCs desynchronize worker
