@@ -56,9 +56,13 @@ def test_context_projection_uses_compute_dtype_with_packed_weights(storage_dtype
 @pytest.fixture(autouse=True)
 def head_tp_metadata(monkeypatch):
     # Single-rank unit tests only need TP metadata.
-    monkeypatch.setattr(
-        parallel_state, "_TP", SimpleNamespace(rank_in_group=0, world_size=1)
-    )
+    # Restore the stub before global distributed cleanup, even when another
+    # autouse fixture created the outer monkeypatch fixture first.
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            parallel_state, "_TP", SimpleNamespace(rank_in_group=0, world_size=1)
+        )
+        yield
 
 
 def _config(**overrides):
