@@ -47,6 +47,14 @@ pooled aggregate decode fell 2.39%; it failed the no-degradation gate. The
 five-run samples remain noisy and do not prove a causal decode slowdown.
 The requested dense/expert memory configuration remains accepted.
 
+To reproduce the aggregate calculation from streamed trial JSON containing
+shared-clock token events, run
+`PYTHONPATH="$PWD" .venv/bin/python scripts/report_bolt_phases.py`
+with the raw trial paths. It reports median and pooled phase rates separately
+from whole-run output throughput. Input throughput includes admission delays
+and interleaved decode before the latest first token; the decode rate covers
+only the remaining tail. Per-request clocks are rejected.
+
 ## Checkpoints and execution
 
 | Component | Pinned official revision |
