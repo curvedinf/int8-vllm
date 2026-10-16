@@ -24,7 +24,17 @@ Production vllm-bolt is stopped (exit143 reportedfailed); do not start both.
 
 Batch01: profile complete, five-run incumbent complete: median43.297s, pooled47.329outputtok/s,
 median928.430prefilltok/s and14.005decode tok/s/request; acceptance3.367–3.559.
-Experiment1 native routed prefill implemented; idle GPU checks pending.
+Experiment1 native-only prefill INCONCLUSIVE: five runs pooled48.120outputtok/s
+(+1.67% vs47.329), median42.418s/957.035prefill/14.427decode; below3% minimum.
+Restored original dispatch; no adoption. Experiment2 cache-aware prefill
+implemented in AITER (get existing projection; no allocations/admission changes);
+KV microPASS/battery4/4 and31GPUtests passed (10large-prefill plus21expert cache).
+E2 RETAINED, AITER0d8d783ab committed/push in progress: candidate51.294outputtok/s
+vs matched fresh control47.540 (+7.90%); pooled prefill+9.15%, decode+6.17%.
+All5 corresponding trials improve each metric; arithmetic exact. Five fresh
+control results retained alongside original post-profile baseline. Source/test
+backups in loop/batch01/exp2-saved. Incumbent nowroot8a0e598d0e/AITER0d8d783ab.
+E3 epilogue fusion next; diagnostic server stopped for implementation/checks.
 Rank0 trace648950kernels, all launch-correlated; packed routed prefill10.327s /
 23.162s in prefill-containing steps (44.58%). Dense GEMMs and collectives follow.
 Artifacts loop/batch01/{profile-analysis.json,csv/,host/gpu/}. Frozen eight
@@ -46,9 +56,14 @@ Batch01 hypotheses (execute sequentially, no simultaneous candidate edits):
    and the same5GiB cap. Avoid decoding cached experts repeatedly; bounded route
    refresh remains unchanged. Build on1 only if accepted; otherwise preserve
    the incumbent path for misses and test a separate cache-aware prefill path.
-3. Fuse output router weighting +nine-expert reduction +BF16 conversion,
-   eliminating a large FP32 temporary and extra memory passes. Require matched
-   accumulation/rounding or model acceptance gate; no approximate shortcut.
+3. Fuse dense GEMM epilogues: store final BF16 directly when no FP32 bias is
+   pending, and fuse shared-UP ReLU2/GS128 INT8 output for full128-column groups.
+   Profile shows~80k BF16 copy launches in decode and separate quant/reduce work;
+   this has broader scope than the originally proposed nine-expert combine.
+   Preserve FP32/unfused ordered group accumulation and BF16/INT8 rounding.
+   Keep bias addition in FP32 before cast. Component tests compare direct BF16
+   to FP32-plus-cast and fused quant outputs/scales to the current split reducer.
+   Do not implement untilE2 completes; keep numerical and five-run phase gates.
 4. Specialize all-groups-selected routing (checkpoint n_group=topk_group=1),
    removing group top2/mask work; consider the existing fused sigmoid/bias topK.
    Preserve selected experts, renormalization and routing weights.
@@ -57,8 +72,8 @@ Batch01 hypotheses (execute sequentially, no simultaneous candidate edits):
 No GPU micro/profile/benchmark overlap. User's prior no-new-baseline instruction
 applied to the completed memory task; new workload requires its own incumbent.
 
-Sources: AITER3b85a2150 committed/pushedcurvedmain (verify remote ref); root
-accepted memory integration and earlier prerequisites prepared for publication. Preserve unrelated work/staging. Before-snapshots
+Sources: root8a0e598d0e and AITER0d8d783ab; memory integration and E2 are published
+(verify latest remote ref after push). Preserve unrelated work/staging. Before-snapshots
 in agents/tmp/bolt-opt/static-drop/before; memory tests/results recorded in
 ledger BOLT_STATIC_DENSE_EXPERT5_20261016, not a stable speedup claim.
 The root security finding was resolved by explicit user direction: the offload
@@ -98,3 +113,15 @@ prefills; decode8requests/C8/32input/1000output/temp0/seed0/2warmups. Older
 32request benchmarks are not comparable. No further production benchmarks
 while interactive traffic is active. Saved launcher must be edited atomically;
 a running shell can otherwise misread its remaining shutdown commands.
+
+Next-batch structural lead: native packed_routed already templates MT; MT2 can
+reuse decoded weights across32rows instead of16. Requires32-row route alignment,
+MT-aware COUNT guard, explicit tile-size metadata/API, and large/partial tests.
+Do not silently assume16-row plans work for MT2. Defer beyond current five scopes.
+
+Further source-backed lead for next batch: packed_routed hoists IQ2 FP16 base
+scales only for DOWN&&ALIGNED. UP and unaligned DOWN still call decode4 with
+per-subtile scale loads. Investigate hoisting one/two base scales per GS128
+window and selecting the correct half across original256-element boundaries.
+Require varying per-block FP16 scales (current synthetic helper uses constant
+0x3000) plus actual-weight and all-partial-offset exact checks before timing.

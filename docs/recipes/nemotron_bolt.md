@@ -32,6 +32,14 @@ C8 workload and five repetitions per experiment. Full fidelity and
 256k-context validation remain pending; see the experiment ledger for the
 individual outcomes and comparison limits.
 
+The first retained optimization on the new workload reuses resident expert
+INT8 copies during prefill (AITER `0d8d783ab`). Five 4,096-input/256-output C8
+trials measured 51.29 aggregate output tok/s versus 47.54 in five fresh
+incumbent controls. Pooled prefill improved 9.15% and per-request decode
+6.17%; end-to-end throughput improved 7.90%. Inputs, warmup, cache limits and
+105 W caps were held fixed. These are bounded workload results, with full
+fidelity and full-context validation still pending.
+
 ## Checkpoints and execution
 
 | Component | Pinned official revision |
@@ -78,9 +86,12 @@ learns from decode/verification routes and refreshes every 128 calls, keeping
 surviving slots and expanding only newly admitted experts. Misses use the
 ordinary IQ2 kernel. `VLLM_BOLT_EXPERT_CACHE_GIB=0` disables this cache;
 an explicit numeric `VLLM_BOLT_EXPERT_CACHE_SLOTS` retains fixed capacity.
-`VLLM_BOLT_EXPERT_CACHE_REFRESH` controls refresh cadence. Expert cached values
-serve at most 64 input tokens; larger prefills retain packed execution. All
-original packed expert weights remain resident, including boundary blocks for
+`VLLM_BOLT_EXPERT_CACHE_REFRESH` controls refresh cadence. Decode/verification
+calls with at most 64 input tokens own admission and refresh. Larger prefills
+reuse the existing copies without changing ranking or allocation; misses use
+native packed conversion. Before caches exist, loading/profiling prefills use
+the original Triton packed path. All original packed expert weights remain
+resident, including boundary blocks for
 unaligned TP slices. The static dense payload is 2,387,607,552 INT8 values
 (2.224 GiB) in 277 fused projections per GPU. FP32 group scales are retained
 for all experts, including those without expanded INT8 copies. Some floating
