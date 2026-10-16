@@ -29,12 +29,45 @@ Experiment1 native-only prefill INCONCLUSIVE: five runs pooled48.120outputtok/s
 Restored original dispatch; no adoption. Experiment2 cache-aware prefill
 implemented in AITER (get existing projection; no allocations/admission changes);
 KV microPASS/battery4/4 and31GPUtests passed (10large-prefill plus21expert cache).
-E2 RETAINED, AITER0d8d783ab committed/push in progress: candidate51.294outputtok/s
+E2 RETAINED, AITER0d8d783ab committed/pushed; remote ref verified: candidate51.294outputtok/s
 vs matched fresh control47.540 (+7.90%); pooled prefill+9.15%, decode+6.17%.
 All5 corresponding trials improve each metric; arithmetic exact. Five fresh
 control results retained alongside original post-profile baseline. Source/test
-backups in loop/batch01/exp2-saved. Incumbent nowroot8a0e598d0e/AITER0d8d783ab.
-E3 epilogue fusion next; diagnostic server stopped for implementation/checks.
+backups in loop/batch01/exp2-saved. Incumbent rooteaa11b900b/AITER0d8d783ab.
+E3 INCONCLUSIVE/reverted: pooled52.456 vs E2 51.294 (+2.27%), prefill+2.87%,
+decode+6.57%; median end-to-end+0.94%. Below3% minimum and interval spanszero.
+Exact patches/sources/tests archived in exp3-saved. Independent TP fixture fix
+eaa11b900b is published and retained (nested TP-mock context restores real
+distributed state before global cleanup; the same64 checks pass cleanly).
+E4 INCONCLUSIVE/reverted: skip redundant group top2/mask work forM>64 when every valid group
+is selected. Preserve small-shape execution.13 routing cases pass against the
+existing reference, with exact expert sets and per-expert weight tolerance
+rtol1e-6/atol1e-8 (compiled unsorted topK can reorder experts, even in the old
+implementation; strict eager-vs-compiled comparisons are not a valid gate).
+Initial exact comparator failures are retained in exp4-routing-tests*.log;
+literal old/new compiled comparisons are in exp4-compiled-reference.log.
+Final KV microPASS/battery4/4. Five timings pooled51.799 vs51.294 (+0.985%);
+prefill+1.074%, decode+1.461%. Below3% threshold and interval spanszero;
+source archived in exp4-saved then restored to HEAD. Source hashes/patch and
+all failures retained. Incumbent remains E2. Diagnostic service stopped.
+E5 NOT ADOPTED/reverted. Sweep selected128x128/8warps/stage2; stage1 forM<=64. Discovery
+weighted kernel time518.397->496.685ms; held-out543.578->519.021ms (4.52%
+latency reduction). All six variants valid/exact on six discovery shapes;
+selected variant exact on six held-out shapes.21existing dense/integration
+checks pass, KV microPASS/battery4/4. Five E2E trials pooled51.330 vs51.294
+(+0.071%); pooled prefill-0.155%, decode-0.016%, median decode-0.433%. No
+material gain and phase gates fail; differences remain within observed noise.
+Exact candidate archived in exp5-saved; AITER restored clean at0d8d783ab.
+Source hashes/patch and all timings/hardware retained in exp5-* artifacts.
+Plan and harness in exp5-tile-plan.json and loop/bench-dense-tiles.py. Discovery
+weights40/40/48/48/40/40 derive from target projection counts (40Mamba/MoE,
+8attention). Correctness failures/unsupported variants remain recorded and
+cannot be selected. Batch01 complete: E2 retained, E1/E3/E4 inconclusive and
+E5 not adopted. Next: publish E3-E5 ledger and this checkpoint after security
+gate, then profile the retained incumbent for batch02 and design five new
+scopes. Diagnostic service stopped; change lifecycle gate/output to batch02
+before its next boot, and make disposable runner/monitor/comparison accept a
+batch argument. Keep the same frozen manifest and request/token-count gates.
 Rank0 trace648950kernels, all launch-correlated; packed routed prefill10.327s /
 23.162s in prefill-containing steps (44.58%). Dense GEMMs and collectives follow.
 Artifacts loop/batch01/{profile-analysis.json,csv/,host/gpu/}. Frozen eight
@@ -69,10 +102,17 @@ Batch01 hypotheses (execute sequentially, no simultaneous candidate edits):
    Preserve selected experts, renormalization and routing weights.
 5. One bounded dense-prefill GEMM tile/pipeline sweep using measured shapes;
    leave decode dispatch intact. Count related variants as ONE experiment.
+   Before collecting results: incumbent128x128/8warps/stage1 vs five candidates
+   64x128/4/stage1,64x128/4/stage2,128x64/4/stage1,128x128/4/stage1,
+   128x128/8/stage2. Keep GS128, splitK1, unfused FP32 accumulation. Discovery
+   M4096 on N/K4640/4096,4096/2048,1024/4096,4096/1024,1344/4096,4096/1344;
+   held-out M4160 plus boundary shapes/independent random data. Choose one
+   configuration by weighted aggregate discovery time; verify held-out shapes
+   before five full workloads. Reject microscopic wins below the same E2E gate.
 No GPU micro/profile/benchmark overlap. User's prior no-new-baseline instruction
 applied to the completed memory task; new workload requires its own incumbent.
 
-Sources: root8a0e598d0e and AITER0d8d783ab; memory integration and E2 are published
+Sources: rooteaa11b900b and AITER0d8d783ab; memory integration and E2 are published
 (verify latest remote ref after push). Preserve unrelated work/staging. Before-snapshots
 in agents/tmp/bolt-opt/static-drop/before; memory tests/results recorded in
 ledger BOLT_STATIC_DENSE_EXPERT5_20261016, not a stable speedup claim.
@@ -125,3 +165,14 @@ per-subtile scale loads. Investigate hoisting one/two base scales per GS128
 window and selecting the correct half across original256-element boundaries.
 Require varying per-block FP16 scales (current synthetic helper uses constant
 0x3000) plus actual-weight and all-partial-offset exact checks before timing.
+
+Additional structural lead to assess against the next profile: separate the
+cached-only prefill GEMM from packed misses. Current native CACHED kernel keeps
+decoder branches in each group/subtile; inspect generated code before assuming
+the compiler has not unswitched them. A cached-only INT8 Triton tile can reuse
+weights across rows/columns without any packed conversion, while the packed
+kernel skips cache hits. Keep both original expert tensors and the same cache
+budget. If that path wins, fuse its UP ReLU2/GS128 INT8 output, and run the
+existing split reducer only for misses. Uniform map/route guards must prevent
+reads of unwritten partials; preserve FP32 group order and exact quant scales.
+This is a research lead, not yet an adopted batch02 plan.
