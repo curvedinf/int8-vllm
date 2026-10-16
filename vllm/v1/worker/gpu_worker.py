@@ -732,6 +732,39 @@ class Worker(WorkerBase):
         if not self.model_config.enforce_eager:
             cuda_graph_memory_bytes = self.model_runner.capture_model()
 
+        if float(os.environ.get("VLLM_BOLT_DENSE_CACHE_GIB", "0")) > 0:
+            from aiter.ops.triton.gemm.basic.packed_dense_cache import (
+                _BYTES,
+                _CACHE,
+                _RELEASED_BYTES,
+            )
+
+            logger.info(
+                "Bolt resident INT8 GS128 dense cache: %.3f GiB in %d projections "
+                "(limit %s GiB per GPU)",
+                sum(_BYTES.values()) / GiB_bytes,
+                len(_CACHE),
+                os.environ["VLLM_BOLT_DENSE_CACHE_GIB"],
+            )
+            logger.info(
+                "Bolt dense original weights/metadata released: %.3f GiB",
+                sum(_RELEASED_BYTES.values()) / GiB_bytes,
+            )
+        if float(os.environ.get("VLLM_BOLT_EXPERT_CACHE_GIB", "0")) > 0:
+            from aiter.ops.triton.gemm.basic.packed_expert_cache import _BYTES, _CACHE
+
+            slots = [entry.slots for entry in _CACHE.values()]
+            logger.info(
+                "Bolt resident INT8 GS128 expert cache: %.3f GiB in %d layers "
+                "(%d-%d slots/layer, %d expert pairs, limit %s GiB per GPU)",
+                sum(_BYTES.values()) / GiB_bytes,
+                len(_CACHE),
+                min(slots, default=0),
+                max(slots, default=0),
+                sum(slots),
+                os.environ["VLLM_BOLT_EXPERT_CACHE_GIB"],
+            )
+
         # Compare actual vs estimated CUDA graph memory (if we did profiling)
         if (
             hasattr(self, "cudagraph_memory_estimate")
@@ -1157,10 +1190,18 @@ class Worker(WorkerBase):
         if os.environ.get("VLLM_BOLT_KERNEL_TUNING") != "1":
             raise RuntimeError("Bolt kernel tuning is disabled")
         from aiter.ops.triton.gemm.basic.packed_dense_cache import _BYTES, _CACHE
+        from aiter.ops.triton.gemm.basic.packed_expert_cache import (
+            _BYTES as expert_bytes,
+        )
+        from aiter.ops.triton.gemm.basic.packed_expert_cache import (
+            _CACHE as expert_caches,
+        )
 
         return {
             "dense_cache_bytes": sum(_BYTES.values()),
             "dense_cache_entries": len(_CACHE),
+            "expert_cache_bytes": sum(expert_bytes.values()),
+            "expert_cache_layers": len(expert_caches),
             "allocated_bytes": torch.cuda.memory_allocated(),
             "reserved_bytes": torch.cuda.memory_reserved(),
         }
@@ -1181,6 +1222,7 @@ class Worker(WorkerBase):
         modules = [
             "aiter.ops.triton._triton_kernels.gemm.basic.gemm_packed_g128",
             "aiter.ops.triton.gemm.basic.packed_dense_cache",
+            "aiter.ops.triton.gemm.basic.packed_expert_cache",
             "aiter.ops.triton.gemm.basic.gemm_packed_g128",
             "vllm.model_executor.layers.quantization.utils.packed_g128_int8",
         ]

@@ -36,7 +36,12 @@ serve() {
   export VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1
   export VLLM_ROCM_USE_AITER_CUSTOM_AR=0 VLLM_GFX908_ACT_QUANT=round
   export VLLM_TP_SAMPLE_SYNC=1
-  export VLLM_BOLT_DENSE_CACHE_GIB="${VLLM_BOLT_DENSE_CACHE_GIB:-2}"
+  export VLLM_BOLT_DENSE_CACHE_GIB="${VLLM_BOLT_DENSE_CACHE_GIB:-3}"
+  export VLLM_BOLT_DENSE_CACHE_DROP_PACKED="${VLLM_BOLT_DENSE_CACHE_DROP_PACKED:-1}"
+  export VLLM_BOLT_EXPERT_CACHE_GIB="${VLLM_BOLT_EXPERT_CACHE_GIB:-5}"
+  export VLLM_BOLT_EXPERT_CACHE_SLOTS="${VLLM_BOLT_EXPERT_CACHE_SLOTS:-auto}"
+  export VLLM_BOLT_EXPERT_CACHE_REFRESH="${VLLM_BOLT_EXPERT_CACHE_REFRESH:-128}"
+  export VLLM_ROCM_PIN_LOCAL_OFFLOAD=1
   # Reuse the Qwen mixed-load policy with Bolt's resolved hybrid page size.
   export VLLM_GFX908_MIXED_PREFILL_TOKENS="${VLLM_GFX908_MIXED_PREFILL_TOKENS:-4256}"
   export VLLM_GFX908_MIXED_PREFILL_INTERVAL="${VLLM_GFX908_MIXED_PREFILL_INTERVAL:-16}"
@@ -57,6 +62,7 @@ serve() {
   local args=(
     -m vllm.entrypoints.openai.api_server
     --model "$MODEL_DIR" --served-model-name nemotron-bolt
+    --override-generation-config '{"temperature":1.0,"top_p":0.95,"max_new_tokens":32768}'
     --host "$HOST" --port "$PORT" --trust-remote-code
     --enable-auto-tool-choice --tool-call-parser qwen3_coder
     --reasoning-parser-plugin "${MODEL_DIR}/ultra_v3_reasoning_parser.py"
@@ -67,7 +73,9 @@ serve() {
     --tensor-parallel-size 4 --max-num-seqs 8 --dtype bfloat16
     --max-model-len "${MAX_MODEL_LEN:-262144}"
     --max-num-batched-tokens "${MAX_BATCHED_TOKENS:-8512}"
-    --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.70}"
+    --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.90}"
+    # Fixed arena follows the Qwen recipe; leave space for resident INT8 copies.
+    --kv-cache-memory "${KVMEM:-14000000000}"
     --kv-cache-dtype int8_block_g128 --mamba-ssm-cache-dtype float32
     --speculative-config "$spec"
     --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":25769803776}}'

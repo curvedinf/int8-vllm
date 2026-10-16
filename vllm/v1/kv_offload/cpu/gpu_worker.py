@@ -6,6 +6,7 @@ import time
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import NamedTuple
 
 
@@ -16,9 +17,9 @@ def _offload_knife(name: str) -> bool:
     unreliable for shell-exported vars)."""
     if os.environ.get(f"VLLM_OFFLOAD_{name}") == "1":
         return True
-    return os.path.exists(
-        "/home/curved/vllm-gfx908/logs/serve_recipe_qwen38/" + name
-    )
+    return (
+        Path(__file__).resolve().parents[4] / "logs" / "serve_recipe_qwen38" / name
+    ).exists()
 
 import numpy as np
 import torch
@@ -269,6 +270,12 @@ def _canonical_block_sizes(
 
 def pin_mmap_region(region: SharedOffloadRegion) -> None:
     """Register the entire mmap as CUDA pinned memory via cudaHostRegister."""
+    if (
+        current_platform.is_rocm()
+        and os.environ.get("VLLM_ROCM_PIN_LOCAL_OFFLOAD") == "1"
+    ):
+        region.pin_worker_pages()
+        return
     if not current_platform.is_cuda_alike():
         logger.info(
             "Skipping mmap host registration on %s; cudaHostRegister is only "

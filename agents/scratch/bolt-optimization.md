@@ -1,60 +1,100 @@
 # Bolt continuous optimization
 
-Keep optimizing until the user stops. Target: approximately 900 aggregate
-C8 decode tok/s. Preserve current fidelity baseline; only read outputs for
-basic coherence now. Full fidelity checks deferred until the user stops.
-Report prefill and decode numbers after every successful iteration and in
-progress updates; keep prose minimal. Production activation remains deferred.
+Active user contract (2026-10-16): run indefinitely until manually stopped.
+Each batch profiles 4096 input /256 output at C8, identifies prefill compute
+opportunities, designs five experiments spanning structural/fusion/kernel
+scopes, and executes them sequentially against the accepted incumbent.
+Benchmark every experiment FIVE times. Retain only demonstrated end-to-end
+wins with no prefill or decode degradation; commit/push wins, then repeat.
+Do not finish after a batch or plateau. No subagents authorized.
 
-User clarified to CONTINUE optimizing after shutdown. Diagnostic server is running with VLLM_BOLT_DENSE_CACHE_GIB=2, GPU_MEMORY_UTILIZATION=0.70.
-CPU KV is currently 8 GiB. User requested 24 GiB on the NEXT restart;
-launcher updated to 24 GiB. Do not restart solely for this change.
-Next launch uses 262144 context ceiling (user requested); live ceiling32768.
-Shared GPU cache reports589475 tokens; CPU offload caches prefixes, not extra
-simultaneously active GPU KV. TP4/C8 retained; user discussed C6 but only
-explicitly requested the ceiling change.
-Watchdog: agents/tmp/bolt-opt/watch-memory-2.py, two-hour loop, log
- dense-cache-memory-2.jsonl; stops below8GiB host or above31GiB/GPU.
-Current accepted AITER f320662ff:1511.49/340.02 with dense small tiles,
-then1541.14 prefill/362.51 decode with partial routed K576 native handling.
-All4 rank offsets exact at M8/M64; short chat coherent. Dense cache remains
-268entries/2GiB per GPU; about24.5GiB total/GPU and30GiB host available.
-New profile: routedIQ2 33.53%, denseGS12817.17%, AR14.88%, BF16 GEMM9.26%,
-Mamba4.47%; packed fallback eliminated14.25% ->0.15%. Reprofile major wins.
-Latest prototypes ignored under agents/tmp/bolt-opt:
-- routed-cache: fully resident expert INT8 saves22-30% C8 kernel time, exact.
-- dynamic_cache_probe: GPU histogram and frequency-ranked64-slot cache,
-  refresh every256 calls; persistent120-block refresh kernel avoids launch
-  overhead. Uniform replay C8 gain ~4% UP/~2% DOWN; static routes overstate
-  long-term cache hits. No production cache yet.64 slots/all layers=2.805GiB.
-- routed-signed-grid:256KiB signed lookup slows kernels; reject.
-Real C8 chat route-frequency probe completed; normal kernels restored.
-Top32 experts capture48.2%, top64 62.8%, top128 80.9% of selections.
-80 projections, all ranks agree. routing-frequencies.json contains results.
-Next: bounded32-slot dynamic cache E2E trial (~1.4GiB/rank).
+The requested memory configuration is accepted; stop its old acceptance tests.
+Fixed contract: static dense INT8 ownership (original GPU packed tensors and
+codec metadata released), dense ceiling3GiB; dynamic experts keep packed
+originals, expert ceiling5GiB, slots=auto, refresh128. Actual277 dense
+projections/2,387,607,552INT8 values and4565expert pairs/114–119slots perlayer.
+GPU KV14e9bytes/rank, CPU24GiB local pin6GiB/rank, context262144, TP4/C8/NS7,
+INT8GS128 compute/KV, BF16 residual, FP32 Mamba, custom AR. All four GPU caps
+105W; thermal controller stopped AND disabled; nginx stays down. Its installed
+thermal-controller.conf dependency is renamed .disabled-static-cache-test.
+Current optimization owns isolated bolt-opt-loop.service on127.0.0.1:8021,
+LOG_DIR agents/tmp/bolt-opt/loop/runtime, lifecycle capture directory
+agents/tmp/bolt-opt/loop/batch01/host, chunk32steps, diagnosticRPC enabled.
+Production vllm-bolt is stopped (exit143 reportedfailed); do not start both.
 
-Diagnostic configuration before shutdown: localhost8021, TP4/C8/NS7, official packed weights,
-INT8 GS128 compute/KV, fp32 Mamba. Tuning/dev mode enabled. Key stays in
-ignored agents/tmp/bolt-eval/regression.key. Preserve unrelated user changes.
+Batch01: profile complete, five-run incumbent complete: median43.297s, pooled47.329outputtok/s,
+median928.430prefilltok/s and14.005decode tok/s/request; acceptance3.367–3.559.
+Experiment1 native routed prefill implemented; idle GPU checks pending.
+Rank0 trace648950kernels, all launch-correlated; packed routed prefill10.327s /
+23.162s in prefill-containing steps (44.58%). Dense GEMMs and collectives follow.
+Artifacts loop/batch01/{profile-analysis.json,csv/,host/gpu/}. Frozen eight
+4096-input/256-output natural technical prompts are loop/manifest-4k.json,
+SHA256263da19de5a5bc8823fe38d7113553c08f00fa453127dbbd523c74622d0bcda1.
+run.py resets GPU/CPU prefixes and asserts exact8/32768/2048 request/token
+metrics for every run. Prefill=32768/maxTTFT; decode=sum tokens after first
+burst /sum per-request generation spans; end-to-end=2048/whole-run walltime.
+Profile timings are excluded from speed comparisons. Each experiment has an
+untimed workload warmup and five measured runs. Aim for >=3% end-to-end gain
+beyond observed noise with neither prefill nor decode median/pooled rate worse;
+mark uncertain comparisons inconclusive. Full-context/fidelity remain deferred.
 
-Prior uncached AITER incumbent: fe49fc27a, 1176.45 prefill / 250.93 decode.
-Previous CK bridge measured 1315.52 prefill / 252.16 decode, coherent.
-Its source is saved ignored at agents/tmp/bolt-opt/packed_aiter_bridge.py and
-aiter-ck-wrapper.py. Current cache experiment replaces it with persistent
-GS128 weights and AITER blockscale using enable_fp_fusion=False.
-Rejected AITER GS128 bridge: 1248.79 / 114.35 (draft-rejection tail).
-Rejected extending CK to NVFP4 prefill: 1445.89 / 99.17 (rejection tail).
-Rejected LDS codebook: 1198.56 / 185.62. Original shared-UP native split
-and ordered reduction also caused rejection tails. All artifacts ignored
-under agents/tmp/bolt-opt; micro-ck.py and micro-ck-nv4.py tested real weights.
+Batch01 hypotheses (execute sequentially, no simultaneous candidate edits):
+1. Native register-local HIP routed kernels for M>64 eliminate the expensive
+   Triton packed conversion path. Preserve existing small-M execution; compare
+   real geometry/partial slices at largeM against packed reference first.
+2. Consume already-resident expert INT8 copies in prefills, retaining originals
+   and the same5GiB cap. Avoid decoding cached experts repeatedly; bounded route
+   refresh remains unchanged. Build on1 only if accepted; otherwise preserve
+   the incumbent path for misses and test a separate cache-aware prefill path.
+3. Fuse output router weighting +nine-expert reduction +BF16 conversion,
+   eliminating a large FP32 temporary and extra memory passes. Require matched
+   accumulation/rounding or model acceptance gate; no approximate shortcut.
+4. Specialize all-groups-selected routing (checkpoint n_group=topk_group=1),
+   removing group top2/mask work; consider the existing fused sigmoid/bias topK.
+   Preserve selected experts, renormalization and routing weights.
+5. One bounded dense-prefill GEMM tile/pipeline sweep using measured shapes;
+   leave decode dispatch intact. Count related variants as ONE experiment.
+No GPU micro/profile/benchmark overlap. User's prior no-new-baseline instruction
+applied to the completed memory task; new workload requires its own incumbent.
 
-Original 32-request benchmark differs from current 8-request C8 quick gate;
-do not mix their rates. Ledger contains the latest AITER bridge results.
-Protected unrelated root changes: AGENTS.md, logs/README.md deletion,
-scripts/serve_recipe_qwen38.sh, docs/recipes/qwen38_flash_next_support.md.
+Sources: AITER3b85a2150 committed/pushedcurvedmain (verify remote ref); root
+accepted memory integration and earlier prerequisites prepared for publication. Preserve unrelated work/staging. Before-snapshots
+in agents/tmp/bolt-opt/static-drop/before; memory tests/results recorded in
+ledger BOLT_STATIC_DENSE_EXPERT5_20261016, not a stable speedup claim.
+The root security finding was resolved by explicit user direction: the offload
+flag path now resolves relative to the checkout; no disclosure permission was
+granted. Existing Git history remains unchanged. All three diagnostic flags
+are absent, so the path correction preserves the measured serving behavior.
 
+Protected unrelated root changes include AGENTS.md, logs/README.md deletion,
+scripts/serve_recipe_qwen38.sh, docs/recipes/qwen38_flash_next_support.md;
+service migration and startup-watch edits also predate this task. Root-owned
+new test files should be chowned tocurved before handoff. Use Git mutations as
+curved to avoid creating root-owned Git objects. No venv dependency changes.
 
-Reload helper requires idle workers, creates fresh HIP pools, and recaptures
-both graph managers (~3s cached). Failed collective RPCs desynchronize worker
-response queues: restart instead of retrying. Never overlap GPU micros,
-profiling, and unprofiled benchmarks. Warm new prefill JIT shapes before timing.
+Costly prior evidence: CPU24 full-region registrations exceeded AMD host-memory
+accounting; rank-local pin/copy24GiB TP4 micro and full boots passed. The old
+watchdog targets production PID files; never reuse it for isolated operations.
+Profile at context256k/chatC8: routedIQ2 35.78%, denseGS12817.48%, customAR16.02%,
+rocBLAS8.9% (FP32 routers), Mamba5.03%, topk2.72%; reprofile actual4k workload.
+Dense preshuffle exact but slower; FP32 router split8 end-to-end327 vs346;
+IQ2 padding66->68 UP35–40%slower/DOWN9%faster. Do not repeat without new evidence.
+
+Recent rejected prototypes (all ignored agents/tmp/bolt-opt):
+- dynamic32-expert cache:1531.17/350.60 vs1544.58/361.69; reverted, buffers
+  released. Cached fullweight micro22-30% faster, but overhead/reuse lost E2E.
+  Real C8chat top32 experts48.2%, top64 62.8%, top12880.9% selections.
+  Layers have240-496 experts (NOT512); initial prototype crashed admitting
+  nonexistent padded experts. Fixed version archived packed_expert_cache_fixed.py
+  plus dynamic-cache-trial.diff. Real240-expert zero-ID/partial micros exact.
+- singleton SDOT path:1548.53/354.50; reverted despite4-12% C8 micro gains.
+- quant_table_probe caches3 INT8 magnitudes per32 weights:exact but20-60%
+  slower; reject. signed256KiB codebook also slower; reject.
+Older rejected CK/NVFP4/shared-UP/LDS variants and accepted history in ledger.
+
+Never overlap profiles, GPU micros, and unprofiled benchmarks. Diagnostic
+run-quick.py: one untimed8192-token prefill warmup, two measured cold C1
+prefills; decode8requests/C8/32input/1000output/temp0/seed0/2warmups. Older
+32request benchmarks are not comparable. No further production benchmarks
+while interactive traffic is active. Saved launcher must be edited atomically;
+a running shell can otherwise misread its remaining shutdown commands.

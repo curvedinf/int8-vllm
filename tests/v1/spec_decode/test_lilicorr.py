@@ -26,7 +26,7 @@ from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import CandidateSampler
 from vllm.v1.worker.gpu.spec_decode.lilicorr.speculator import LiLiCorrSpeculator
 
 
-@pytest.mark.parametrize("storage_dtype", [torch.uint8, torch.bfloat16])
+@pytest.mark.parametrize("storage_dtype", [torch.uint8, torch.int8, torch.bfloat16])
 def test_context_projection_uses_compute_dtype_with_packed_weights(storage_dtype):
     class Projection(nn.Module):
         input_size = 4

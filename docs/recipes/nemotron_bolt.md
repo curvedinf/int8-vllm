@@ -1,23 +1,36 @@
 # Nemotron Bolt with official packed weights on MI100
 
 This peer recipe runs the official NVIDIA Nemotron 3.5 Bolt 74B-A9B 24GB
-checkpoint and its LiLiCorr draft on four MI100 GPUs. It keeps the checkpoint's
-packed weights in GPU memory. Dense projections reuse a bounded INT8 GS128
-weight cache; uncached projections convert tiles inside the matrix kernels.
-It does not produce a replacement quantized checkpoint.
+checkpoint and its LiLiCorr draft on four MI100 GPUs. Static dense projections
+convert once to INT8 GS128 and release their original packed GPU tensors and
+codec metadata. Routed experts retain their packed originals and use a bounded
+INT8 cache for frequently selected experts; misses convert tiles inside the
+matrix kernels. The checkpoint files on disk are unchanged.
 
-**Serving validated; production activation pending:** eager and graph TP4/C8
+**Serving gates passed:** eager and graph TP4/C8
 serving, LiLiCorr acceptance, 28k context/prefix replay, RAM-prefix restoration,
 reasoning, tools, image/video and streaming pass. All eight AIS rank caches
 match the official checkpoint bytes. The final post-loader Qwen regression
 passed. A subsequent eight-cache-hit restart also passed C8, reasoning, tools,
 image, streaming, API authentication and disabled-development-endpoint checks.
-Production service activation remains pending.
+The root-managed `vllm-bolt.service` serves this recipe on port 8020.
 The Qwen recipe remains independently available.
 
 The [2026-10-15 performance profile](bolt_profile_20261015.md) identifies the
 packed matrix kernels as the dominant bottleneck and documents the remaining
 fidelity-validation gap.
+
+The user accepted the static dense / 5 GiB expert-cache configuration on
+2026-10-16. Five quick probes across two boots at 105 W power caps measured
+1,413–1,503 prefill tok/s and 168–422 aggregate decode tok/s. Combined decode
+throughput was 303 tok/s (40,000 tokens / 132.04 s), with acceptance lengths
+5.10–7.56. The requested historical reference was yesterday's 1,541 / 363;
+these variable results do not establish a speed gain. All requests completed,
+metrics account for all benchmark traffic, and short chat responses were
+coherent. The new optimization campaign uses a separate 4k-input/256-output
+C8 workload and five repetitions per experiment. Full fidelity and
+256k-context validation remain pending; see the experiment ledger for the
+individual outcomes and comparison limits.
 
 ## Checkpoints and execution
 
@@ -33,26 +46,46 @@ checkpoint. The Qwen DFlash2 draft cannot be reused.
 
 | Surface | Execution |
 | --- | --- |
-| IQ2_XXS experts and linears | Original packed bytes; tile decode, GS128 INT8 weight quantization and INT8 MFMA |
-| Q8_0 linears and LM head | Original packed bytes; same GS128 INT8 compute path |
-| Q8_0 embedding | Decode only the requested rows |
-| NVFP4 linears | Original nibbles, FP8 block scales and individual fused-projection global scales; tile conversion to GS128 INT8 |
+| IQ2_XXS experts and linears | Static dense INT8 GS128; experts use cached INT8 or tile conversion from retained packed originals |
+| Q8_0 linears and LM head | Static INT8 GS128 with FP32 group scales |
+| Embedding lookup | Checkpoint BF16 embedding, sharded by vocabulary |
+| NVFP4 linears | Static INT8 GS128; original nibbles, FP8 block scales and fused-projection global scales are released after conversion |
 | MoE/shared-expert ReLU2 intermediate | ReLU2 and GS128 INT8 output, consumed directly by the down projection |
 | Other packed GEMM inputs | GS128 INT8 activation quantization |
 | Residual streams and excluded draft weights | BF16; storage dtype never determines activation dtype |
 | Target and draft KV | `int8_block_g128` |
 | Mamba recurrent state | FP32 |
+| MoE routers | FP32 weights and computation |
 | Tensor parallel communication | vLLM custom all-reduce; Ring/Simple for other collectives |
 
 AITER's sibling checkout owns the packed kernels. INT32 group partials are
-scaled and accumulated in FP32. The dense cache adds at most 2 GiB of INT8
+scaled and accumulated in FP32. The dense cache holds at most 3 GiB of INT8
 weights per GPU (`VLLM_BOLT_DENSE_CACHE_GIB`, 0 disables it), using AITER
-blockscale GEMMs with FP32 scaling and unfused accumulation. Routed experts
-remain packed. The launcher defaults to 70% GPU memory utilization; the CPU
-KV tier is 24 GiB (effective on the next restart). Unaligned tensor-parallel
-slices retain the necessary
-original packed boundary blocks. Some floating intermediates remain between
-operations; the recipe does not claim an entirely INT8 residual stream.
+blockscale GEMMs with FP32 scaling and unfused accumulation.
+`VLLM_BOLT_DENSE_CACHE_DROP_PACKED=1` materializes these weights during loading
+and removes original packed tensors and codec metadata before graph capture.
+Both the layer and the cache relinquish source references; their FP32 GS128
+scales remain. Budget overflow leaves that projection's original packed path
+intact. Setting the flag to 0 retains the original packed dense tensors.
+
+A separate 5 GiB per-GPU expert-cache budget holds both INT8 projections of
+frequently selected experts. `VLLM_BOLT_EXPERT_CACHE_SLOTS=auto` registers all
+40 layer geometries before warmup, chooses equal per-layer capacity, then
+fills leftover bytes with the smallest complete expert pairs. This checkpoint
+fits 4,565 expert pairs: 114 slots per layer, with five additional slots in the
+smallest layer. The total payload and ranking metadata fit within 5 GiB. It
+learns from decode/verification routes and refreshes every 128 calls, keeping
+surviving slots and expanding only newly admitted experts. Misses use the
+ordinary IQ2 kernel. `VLLM_BOLT_EXPERT_CACHE_GIB=0` disables this cache;
+an explicit numeric `VLLM_BOLT_EXPERT_CACHE_SLOTS` retains fixed capacity.
+`VLLM_BOLT_EXPERT_CACHE_REFRESH` controls refresh cadence. Expert cached values
+serve at most 64 input tokens; larger prefills retain packed execution. All
+original packed expert weights remain resident, including boundary blocks for
+unaligned TP slices. The static dense payload is 2,387,607,552 INT8 values
+(2.224 GiB) in 277 fused projections per GPU. FP32 group scales are retained
+for all experts, including those without expanded INT8 copies. Some floating
+intermediates remain between operations; the recipe does not claim an
+entirely INT8 residual stream.
 
 AIS reads weights directly into GPU memory. On a repack-cache miss, the
 launcher enables `VLLM_AIS_REPACK_CPU_WRITE=1`: packed cache payloads are copied
@@ -139,11 +172,15 @@ The launcher reads `VLLM_API_KEY`, `LLAMA_API_KEY`, or `API_KEY_FILE` (default
 `/etc/llama/llama-api.key`). It serves `nemotron-bolt` on localhost port 8020.
 It fixes TP4/C8 and seven speculative tokens, matching the draft's trained
 eight-token block including the anchor. Defaults are 262,144 context tokens,
-8,512 batched tokens, 70% GPU memory utilization, and a 24 GiB CPU prefix tier.
+8,512 batched tokens, 14,000,000,000 bytes of GPU KV per GPU (`KVMEM`), separate
+3 GiB dense and 5 GiB routed-expert cache ceilings, and a 24 GiB CPU prefix tier. Explicit GPU
+KV bytes override the GPU memory-utilization setting, as in the Qwen recipe.
 There is no disk prefix tier. `EAGER=1` disables graphs for diagnostics.
-The 256k ceiling and 24 GiB CPU tier apply on the next restart. Existing
-serving measurements used a 32k ceiling and an 8 GiB CPU tier; long-context
-validation at the new ceiling is pending.
+The 256k ceiling and 24 GiB CPU tier pass the short C8 serving gate; validation
+at the full context length is pending. The 14 GB GPU KV arena reports
+3,283,288 effective shared tokens (12.52 full-length requests). CPU offload
+pins each rank's own slots with `VLLM_ROCM_PIN_LOCAL_OFFLOAD=1`, avoiding
+four registrations of the entire 24 GiB region and AMD's host-memory limit.
 
 The Qwen mixed-load scheduler policy is adapted to Bolt's 4,256-token hybrid
 page: at most one page of prefill is admitted every 16 rounds while decoders
@@ -191,8 +228,8 @@ On a diagnostic server started with `VLLM_SERVER_DEV_MODE=1`, adding
 the CPU tier, then repeats retrieval and records transfer metrics. Keep this
 development mode off in production.
 
-For systemd, the separate `scripts/vllm-bolt@.service` and
-`scripts/vllm-qwen38@.service` templates use the existing credential envfile
-and run as the named instance user. See [installation and recipe
+For systemd, the separate `scripts/vllm-bolt.service` and
+`scripts/vllm-qwen38.service` units use the existing credential envfile
+and run as `curved`. See [installation and recipe
 selection](services.md). Install/activate only after the intended configuration
 passes the serving gates.

@@ -135,28 +135,22 @@ class NemotronHMLP(nn.Module):
     def forward(self, x: torch.Tensor):
         if self.packed_relu2:
             from vllm.model_executor.layers.quantization.utils.packed_g128_int8 import (
-                packed_gemm,
                 quantize,
             )
 
             up, down = self.up_proj, self.down_proj
             q, scales = quantize(x.contiguous())
-            mid, mid_scales = packed_gemm(
+            mid, mid_scales = up.quant_method.apply_quantized(
+                up,
                 q,
                 scales,
-                up.weight,
-                up.packed_grid,
                 relu2=True,
                 quant_out=True,
-                codec=up.quant_method.codec,
             )
-            out = packed_gemm(
+            out = down.quant_method.apply_quantized(
+                down,
                 mid,
                 mid_scales,
-                down.weight,
-                down.packed_grid,
-                start=down.quant_method.start,
-                codec=down.quant_method.codec,
             ).to(x.dtype)
             if down.reduce_results and down.tp_size > 1:
                 out = tensor_model_parallel_all_reduce(out)

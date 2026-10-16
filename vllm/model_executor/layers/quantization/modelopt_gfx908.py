@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Official ModelOpt byte storage with tile-local GS128 INT8 computation."""
+"""ModelOpt GS128 INT8 execution with static dense and packed expert storage."""
+
+import os
 
 import torch
 from torch.nn import Parameter
@@ -14,6 +16,50 @@ from vllm.model_executor.layers.quantization.utils import packed_g128_int8 as op
 from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
+
+
+def prepare_static_dense_weight(layer, length, *, codec, start=0):
+    """Replace an immutable dense weight only when its INT8 copy fits in full."""
+    if os.environ.get("VLLM_BOLT_DENSE_CACHE_DROP_PACKED", "0") != "1":
+        return
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        ParallelLMHead,
+        VocabParallelEmbedding,
+    )
+
+    if isinstance(layer, VocabParallelEmbedding) and not isinstance(
+        layer, ParallelLMHead
+    ):
+        return
+    result = ops.prepare_dense_weight(
+        layer.weight,
+        layer.packed_grid,
+        length,
+        start=start,
+        codec=codec,
+        ws=getattr(layer, "weight_scale", None),
+        wg=getattr(layer, "packed_global_scales", None),
+    )
+    if result is None:
+        return
+    weight, groups = result
+    released = layer.weight.numel() * layer.weight.element_size()
+    layer.weight = Parameter(weight, requires_grad=False)
+    layer.register_buffer("weight_gs128", groups, persistent=False)
+    for name in (
+        "packed_grid",
+        "weight_scale",
+        "weight_scale_2",
+        "packed_global_scales",
+    ):
+        tensor = getattr(layer, name, None)
+        if tensor is not None:
+            released += tensor.numel() * tensor.element_size()
+            delattr(layer, name)
+    from aiter.ops.triton.gemm.basic.packed_dense_cache import _RELEASED_BYTES
+
+    device = weight.device
+    _RELEASED_BYTES[device] = _RELEASED_BYTES.get(device, 0) + released
 
 
 class PackedG128LinearMethod(LinearMethodBase):
@@ -66,13 +112,33 @@ class PackedG128LinearMethod(LinearMethodBase):
         layer.register_buffer(
             "packed_grid", ops.make_grid(layer.weight.device), persistent=False
         )
+        prepare_static_dense_weight(layer, self.k, codec=self.codec, start=self.start)
+
+    def apply_quantized(self, layer, q, scales, *, relu2=False, quant_out=False):
+        if hasattr(layer, "weight_gs128"):
+            return ops.int8_gemm(
+                q,
+                scales,
+                layer.weight,
+                layer.weight_gs128,
+                relu2=relu2,
+                quant_out=quant_out,
+            )
+        return ops.packed_gemm(
+            q,
+            scales,
+            layer.weight,
+            layer.packed_grid,
+            start=self.start,
+            codec=self.codec,
+            relu2=relu2,
+            quant_out=quant_out,
+        )
 
     def apply(self, layer, x, bias=None):
         shape = x.shape
         q, s = ops.quantize(x.reshape(-1, shape[-1]).contiguous())
-        y = ops.packed_gemm(
-            q, s, layer.weight, layer.packed_grid, start=self.start, codec=self.codec
-        )
+        y = self.apply_quantized(layer, q, s)
         if bias is not None:
             y += bias
         return y.to(x.dtype).view(*shape[:-1], layer.weight.shape[0])
@@ -155,6 +221,10 @@ class PackedG128MoEMethod(FusedMoEMethodBase):
         layer.register_buffer(
             "packed_grid", ops.make_grid(layer.w13_weight.device), persistent=False
         )
+        if os.environ.get("VLLM_BOLT_EXPERT_CACHE_SLOTS") == "auto":
+            from aiter.ops.triton.gemm.basic.packed_expert_cache import register_layer
+
+            register_layer(layer.w13_weight, layer.w2_weight, self.local_i, self.start)
 
     def apply(
         self, layer, x, topk_weights, topk_ids, shared_experts, shared_experts_input
@@ -168,9 +238,28 @@ class PackedG128MoEMethod(FusedMoEMethodBase):
         plan = moe_align_block_size(
             topk_ids, 16, layer.w13_weight.shape[0], pad_sorted_ids=True
         )
+        cache = None
+        if x.shape[0] <= 64:
+            from aiter.ops.triton.gemm.basic.packed_expert_cache import get_cache
+
+            cache = get_cache(
+                layer.w13_weight,
+                layer.w2_weight,
+                layer.packed_grid,
+                self.local_i,
+                self.start,
+            )
+            if cache is not None:
+                cache.step(topk_ids)
         q, s = ops.quantize(x.contiguous())
         mid, ms = ops.packed_experts(
-            q, s, layer.w13_weight, layer.packed_grid, topk_ids, plan=plan
+            q,
+            s,
+            layer.w13_weight,
+            layer.packed_grid,
+            topk_ids,
+            plan=plan,
+            cache=cache.up if cache is not None else None,
         )
         y = ops.packed_experts(
             mid,
@@ -181,6 +270,7 @@ class PackedG128MoEMethod(FusedMoEMethodBase):
             start=self.start,
             down=True,
             plan=plan,
+            cache=cache.down if cache is not None else None,
         )
         return (
             (y.view(*topk_ids.shape, -1) * topk_weights[..., None]).sum(1).to(x.dtype)

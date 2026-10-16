@@ -1377,6 +1377,11 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
             )
             if hasattr(layer, "input_scale"):
                 del layer.input_scale
+            from .modelopt_gfx908 import prepare_static_dense_weight
+
+            prepare_static_dense_weight(
+                layer, layer.input_size_per_partition, codec="nvfp4"
+            )
             return
         if not hasattr(layer, "has_bias"):
             layer.has_bias = getattr(layer, "bias", None) is not None
@@ -1417,15 +1422,20 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
 
             shape = x.shape
             q, scales = quantize(x.reshape(-1, shape[-1]).contiguous())
-            y = packed_gemm(
-                q,
-                scales,
-                layer.weight,
-                layer.packed_grid,
-                codec="nvfp4",
-                weight_scales=layer.weight_scale,
-                global_scale=layer.packed_global_scales,
-            )
+            if hasattr(layer, "weight_gs128"):
+                from .utils.packed_g128_int8 import int8_gemm
+
+                y = int8_gemm(q, scales, layer.weight, layer.weight_gs128)
+            else:
+                y = packed_gemm(
+                    q,
+                    scales,
+                    layer.weight,
+                    layer.packed_grid,
+                    codec="nvfp4",
+                    weight_scales=layer.weight_scale,
+                    global_scale=layer.packed_global_scales,
+                )
             if bias is not None:
                 y += bias
             return y.to(x.dtype).view(*shape[:-1], layer.weight.shape[0])

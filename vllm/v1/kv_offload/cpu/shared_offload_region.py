@@ -267,17 +267,60 @@ class SharedOffloadRegion:
         )
         return memoryview(np_arr)
 
+    def pin_worker_pages(self) -> None:
+        """Pin only this rank's strided slots, avoiding TP-fold host accounting."""
+        if self.is_pinned:
+            return
+        base = self._base.data_ptr()
+        ranges = []
+        if self.rank is None:
+            ranges.append((0, self.total_size_bytes))
+        else:
+            size = self._worker_area_end // (self.rank + 1)
+            for block in range(self.num_blocks):
+                start = block * self._row_stride + self.rank * size
+                end = min(
+                    ((start + size + self.page_size - 1) // self.page_size)
+                    * self.page_size,
+                    self.total_size_bytes,
+                )
+                start = (start // self.page_size) * self.page_size
+                if ranges and start <= ranges[-1][1]:
+                    ranges[-1] = (ranges[-1][0], max(end, ranges[-1][1]))
+                else:
+                    ranges.append((start, end))
+        runtime = torch.cuda.cudart()
+        self._pinned_addresses = []
+        for start, end in ranges:
+            result = runtime.cudaHostRegister(base + start, end - start, 0)
+            if result.value != 0:
+                for address in self._pinned_addresses:
+                    runtime.cudaHostUnregister(address)
+                self._pinned_addresses = []
+                raise RuntimeError(
+                    f"Worker-local host pin failed for rank={self.rank}: {result}"
+                )
+            self._pinned_addresses.append(base + start)
+        self.is_pinned = True
+        logger.info(
+            "Pinned rank=%s CPU offload slots: %.2f GiB in %d spans",
+            self.rank,
+            sum(end - start for start, end in ranges) / 2**30,
+            len(ranges),
+        )
+
     def cleanup(self) -> None:
         if self.is_pinned and self._base is not None:
             if current_platform.is_cuda_alike():
                 base_ptr = self._base.data_ptr()
-                result = torch.cuda.cudart().cudaHostUnregister(base_ptr)
-                if result.value != 0:
-                    logger.warning(
-                        "cudaHostUnregister failed for rank=%d (code=%d)",
-                        self.rank,
-                        result,
-                    )
+                for address in getattr(self, "_pinned_addresses", [base_ptr]):
+                    result = torch.cuda.cudart().cudaHostUnregister(address)
+                    if result.value != 0:
+                        logger.warning(
+                            "cudaHostUnregister failed for rank=%d (code=%d)",
+                            self.rank,
+                            result,
+                        )
             self.is_pinned = False
         # Release views before _base: each view holds a _base reference and a
         # direct StorageImpl reference.  Freeing views first lets both refcounts

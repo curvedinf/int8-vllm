@@ -8,5 +8,17 @@ from aiter.ops.triton.gemm.basic.gemm_packed_g128 import (
     packed_gemm,
     quantize,
 )
+from aiter.ops.triton.gemm.basic.packed_dense_cache import (
+    int8_gemm,
+    prepare_dense_weight,
+)
 
-__all__ = ["make_grid", "packed_embedding", "packed_experts", "packed_gemm", "quantize"]
+__all__ = [
+    "int8_gemm",
+    "make_grid",
+    "packed_embedding",
+    "packed_experts",
+    "packed_gemm",
+    "prepare_dense_weight",
+    "quantize",
+]
