@@ -32,13 +32,20 @@ C8 workload and five repetitions per experiment. Full fidelity and
 256k-context validation remain pending; see the experiment ledger for the
 individual outcomes and comparison limits.
 
-The first retained optimization on the new workload reuses resident expert
-INT8 copies during prefill (AITER `0d8d783ab`). Five 4,096-input/256-output C8
-trials measured 51.29 aggregate output tok/s versus 47.54 in five fresh
-incumbent controls. Pooled prefill improved 9.15% and per-request decode
-6.17%; end-to-end throughput improved 7.90%. Inputs, warmup, cache limits and
-105 W caps were held fixed. These are bounded workload results, with full
-fidelity and full-context validation still pending.
+The cache-aware prefill experiment (AITER `0d8d783ab`) was withdrawn in
+`15a3e4195` after correcting the aggregate decode measurement. Its historical
+7.90% end-to-end gain remains a whole-run result; the original per-request
+decode metric did not establish aggregate decode non-regression. In five new
+trials per implementation, the restored reference measured median aggregate
+prefill of 925.79 tok/s and aggregate decode of 96.71 tok/s, versus
+1,021.20 / 89.35 for the experiment. Decode counts only tokens arriving after
+all eight requests produced their first token, divided by the remaining
+generation time. Staggered admission leaves five or six active requests in
+that interval, so it measures the decode-only tail rather than steady C8.
+The experiment improved pooled whole-run output throughput by 5.70%, but
+pooled aggregate decode fell 2.39%; it failed the no-degradation gate. The
+five-run samples remain noisy and do not prove a causal decode slowdown.
+The requested dense/expert memory configuration remains accepted.
 
 ## Checkpoints and execution
 
@@ -87,10 +94,8 @@ surviving slots and expanding only newly admitted experts. Misses use the
 ordinary IQ2 kernel. `VLLM_BOLT_EXPERT_CACHE_GIB=0` disables this cache;
 an explicit numeric `VLLM_BOLT_EXPERT_CACHE_SLOTS` retains fixed capacity.
 `VLLM_BOLT_EXPERT_CACHE_REFRESH` controls refresh cadence. Decode/verification
-calls with at most 64 input tokens own admission and refresh. Larger prefills
-reuse the existing copies without changing ranking or allocation; misses use
-native packed conversion. Before caches exist, loading/profiling prefills use
-the original Triton packed path. All original packed expert weights remain
+calls with at most 64 input tokens use the cache and own admission and refresh.
+Larger prefills use the original Triton packed path. All original packed expert weights remain
 resident, including boundary blocks for
 unaligned TP slices. The static dense payload is 2,387,607,552 INT8 values
 (2.224 GiB) in 277 fused projections per GPU. FP32 group scales are retained
