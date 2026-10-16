@@ -65,7 +65,7 @@ serve() {
     --video-pruning-rate 0.5
     --media-io-kwargs '{"video":{"fps":2,"num_frames":256}}'
     --tensor-parallel-size 4 --max-num-seqs 8 --dtype bfloat16
-    --max-model-len "${MAX_MODEL_LEN:-32768}"
+    --max-model-len "${MAX_MODEL_LEN:-262144}"
     --max-num-batched-tokens "${MAX_BATCHED_TOKENS:-8512}"
     --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.70}"
     --kv-cache-dtype int8_block_g128 --mamba-ssm-cache-dtype float32

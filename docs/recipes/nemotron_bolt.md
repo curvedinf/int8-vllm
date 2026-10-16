@@ -138,11 +138,12 @@ scripts/serve_recipe_bolt.sh stop
 The launcher reads `VLLM_API_KEY`, `LLAMA_API_KEY`, or `API_KEY_FILE` (default
 `/etc/llama/llama-api.key`). It serves `nemotron-bolt` on localhost port 8020.
 It fixes TP4/C8 and seven speculative tokens, matching the draft's trained
-eight-token block including the anchor. Defaults are 32,768 context tokens,
-8,512 batched tokens, 90% GPU memory utilization, and an 8 GiB CPU prefix tier.
+eight-token block including the anchor. Defaults are 262,144 context tokens,
+8,512 batched tokens, 70% GPU memory utilization, and a 24 GiB CPU prefix tier.
 There is no disk prefix tier. `EAGER=1` disables graphs for diagnostics.
-The configured 32k limit is intentional for this validated recipe; raising
-`MAX_MODEL_LEN` does not establish validation at the checkpoint's full 256k limit.
+The 256k ceiling and 24 GiB CPU tier apply on the next restart. Existing
+serving measurements used a 32k ceiling and an 8 GiB CPU tier; long-context
+validation at the new ceiling is pending.
 
 The Qwen mixed-load scheduler policy is adapted to Bolt's 4,256-token hybrid
 page: at most one page of prefill is admitted every 16 rounds while decoders
