@@ -104,16 +104,33 @@ source/harnessfrozen;peakVRAM30.948GiB. RestoredONLY4root/2AITerfiles; AITERclea
 3f8045a90. Rawfive/source/micro underB04exp4-*/exp4-saved. Negativepooled0.18%
 isnotcausalproof; keepaccepted64-rowincumbent.
 
-CURRENT B04E5 shared-expert-overlap DESIGNREADY, nocodeyet. Existingaux_stream
-isCUDA-alike, butSharedExperts._determine_shared_experts_order CUDA-only.
-ChangecapabilitychecktoCUDA-alike; Boltlauncherthreshold8512 (currentdefault256),
-retainsallEPLB/sequenceparallel/internalMK/disablestreamguards andexistingfork/
-join/record_streamprotocol. Sharedexpertreduce_resultsFalse; routedinput1024
-versusshared4096, noactivationquantreuse. ValidateCPUplatform/order/guard/limit
-checks andrealGPUstream/lifetime/graph/coherence,KV/battery thenEXACTLYfive.
-DiagnosticunitSTOPPING19550; monitor94941willend;E4bench4013exit0. Gate/outputB04.
-RootE4ledger/notes pendingsecurity/commit/push. ReferenceB03E1originalfive/
-B04incumbent,retained1999.5434aggregateprefill/161.5316aggregatedecode.
+B04E5 originalfiveCOMPLETE/inconclusive/reverted: median2018.7042prefill /
+160.8978decode;pooledwhole+0.393% below3%,medianprefill+0.958%/decode-0.392%.
+44component/36realchecksPASS;5affectedGPUcasespassedafterproducerstreamsetup.
+All5gatesPASS/sourceharnessfrozen;peakVRAM31.845GiB vs~31.22incumbent. Restored
+ONLY2rootproductionfiles/removedonlybacked-upnewtest. Allcode/rawfive underB04
+exp5-*/exp5-saved. Both productioncapabilityandBoltthresholdbacktooriginals.
+
+CURRENT: Batch04 allFIVEexperiments complete, no retainedperformancechanges.
+Bothruntimecode trees equalacceptedincumbent (rootperformance551af7862b,
+AITER3f8045a90), apartfromprotectedunrelatedrootwork. B04E1two-page, E2route128,
+E3singlelaunchcachedprefill, E4denseepiloguefusion, E5sharedoverlap allreverted.
+Exactlyfiveperexperiment, noextensions/newbaseline. E3/E4wholematerialgains but
+pooleddecode-0.502%/-0.181% violatedpredeclaredbothmedianANDpooledphasegate;
+notcausalproof, noextra runs. Do notsilentlyrelaxgateafterseeingresults.
+
+NEXT: Startbatch05freshprofile ofacceptedincumbent automatically. ReuseB03E1
+originalfive asreference (medians1999.5434aggregateprefill/161.5316aggregatedecode).
+No newfive-runbaseline. DiagnosticunitSTOPPING28397;E5bench22691exit0/monitor69931
+willend. Runtimegate/outputcurrentlyB04; move lifecycle dropin/gate/outputtoB05,
+KV/batterythenbootacceptedE1/profileonly. Analyze beforedesignFIVEnewscopes;
+favorfreshstructuralmechanisms/compositionthataddressesmeasuredcost, avoid
+repeatingexhaustedknobs. Candidateleadsforresearchonly: integratedcachehit plus
+header-broadcast/factorizedintegerIQ2misspipeline; exactMoEweightedreducefusion;
+vectorizedmultirowactivationquant; denseproducer/consumerquantrelay; inspect
+attention/collectivecompute fromfreshprofile. NoB05experimentcodeimplemented.
+E5ledger/notes pendingsecurity/commit/push. Keepcurrentmemory/105W/allservices
+constraints andfrozenmanifest. Do notstopatbatchboundary.
 
 Campaign artifacts under agents/tmp/bolt-opt/loop/ (ignored): frozenrun.py,
 compare.py,phase_metrics.py,manifest-4k.json. benchmark.lock prevents overlap;
