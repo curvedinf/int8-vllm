@@ -68,20 +68,37 @@ ZEROsignencodings(original+0/Torch-0),notcandidate;diagnostickept,correctedONLY
 oraclefiniteNONzero bits+zero numericalvalues+nonfiniteclasses;candidate rawzero
 bitsremainedstrict. Prototype/finalmathASTsameexceptdeadunusedsplittemps. Do not
 rerunthiscandidate;canonicalledger has fullprovenance. Coherentoutputs reviewed.
-NEXTB08E3 remove redundant single-group routerwork. NoE3runtimecode yet.
-E3..E5 registered experiments-plan.json. E3design saved exp3-design.md:
-REALentry is GroupedTopKRouter._compute_routing (acceptedprefill calls
-router.select_experts -> BaseRouter._select_experts -> _compute_routing),NOTthe
-separateGroupedTopkCustomOp.forward_hip. Preservevalid_grouping/AITERdispatch,
-newhelpercompiledsamebackend/dynamic/options,onegroup/gfx908/M>64/F32contiguous.
-SAMEfinalTorchTopK/EXACTIDs+weightbits evenforties/nonfinite;compiledunsorted
-expertsetalone insufficient forunchangedcombinebits. Originalcompiled/native
-function untouched. No E3runtimecode/GPUwork whileE2frozen.
+B08E3 COMPLETE/REVERTED afterEXACT5. Median2348.5019prefill/166.7331decode:
++2.0899%/-0.9215%;pooledprefill+1.7227%/decode-1.6988%/whole+0.1563% =>reject.
+No extra runs. OriginalB07exp4five retained. Peak31.562332GiB (~1GiBaboveincumbent);
+allocationcause notisolated,nomemory/cacheconfigchanged. Bench91168/monitor20278/
+stop13232exit0;ALL4pathqualifiedBEFOREfirsttrial. ALLsource/proof/harness/cap/token/
+protectedwork checksPASS;coherentoutputsreviewed. RestoredONLYtrackedrouter from
+router-original.py,removed2hash-verifiednewfiles;keepattention/normfusion. AITER3c74
+clean. Rawfive/frozen26sources/19proofs underexp3-* /exp3-saved,canonicalledger.
+Correctness: actualROUTER1x/RUNNERoutput5x(factoryapply_routed_scale_to_output=True);
+400actual1legalTopKscoremultiset+ORIGINALconditionalF32weightbitsPASS,15actualgate/
+30graphs+30timingsPASS,final87tests/KV/battery4/4PASS. Routercomponent~49%time
+reduction notenoughE2E underfive. Firstscale5component/87checks archived/excluded.
+InitialstrictIDgate failed156/400,butORIGINALrepeat IDsdiffer10/12;calibratedSAME400
+beforeANYperformanceusinglegalTopKchoices+conditionaloriginalmathwithsameIDs.
+FixtureONLYinjectsfinalk9IDs;groupk2/k1stillrun,assert[2,1,9]. No productioninjection/
+tolerances/architecture/performance/trialbudgetchange. Fullfidelity/256kdeferred.
+DO NOTreplayE3unchanged. NextB08E4ordinarynorm+GS128producer toMamba/attention,
+usingACCURATErank-cacheTPweights;readexp4-design.md/exp4-sharding-audit.json.
+NoE4code/GPUworkyet. E5design exp5-design.md;nativeDOTcontenthashloader notedbelow.
 E4design exp4-design.md: exactnativeMamba in_proj sourceNVFP4,quant_method is
 ModelOptNvFp4W4A16LinearMethod(packed_g128=True),notPackedG128LinearMethod;
 staticresident INT8+weight_gs128 directint8_gemm/F32->normal.dtype isoldapplymath.
 Supportexactknownresidentclasses orwouldexclude40Mamba. AttentionmergedQKVQ8
-PackedG128. Newexternalprefillhelpercanreplayoriginalpostprojectionoperations
+PackedG128. ACTUALTPGEOMETRY exp4-sharding-audit.json: Q32/KV2/head128 =>localQ1024+K128+V128=1280,
+KVreplicatedrankpairs0/1,2/3. Mambafivegroups global8192/8192/1024/1024/128 ->local
+2048/2048/256/256/32=4640. AISrankmeta.shapeGLOBAL butblock_len/runsLOCALcompact;
+readrankbinbytepayload for exactdeployedweights,notnaivequarteroriginaltensor.
+Rank0inprojpayload9502720bytes/scales1187840,KVeach557056. GlobalNVFP4scale_2scalar
+repeated5segments. PriorB08E1fixturecheckedrealrowsubsets,notexactMamba/KVmergedTP;
+E1reverted,verdictunchanged;do not repeat coverageoverclaim inE4.
+Newexternalprefillhelpercanreplayoriginalpostprojectionoperations
 (mambaopaqueop->unchangedgatednorm/out_proj;attention split->attn->o_proj),keeping
 nativeMixer2/Attentionforward/API/source untouched. Discardq/scalesafterprojection.
 E5design exp5-design.md: actualnative _load CONTENT-HASHES HIPsource+hipccversion+
