@@ -97,11 +97,38 @@ ONLYimmutablepolicy bool indecoderconstructors; final104tests includeBOTHexpired
 contextactualforwardsPASS,KV/battery4/4/Ruff/formatPASS. GPUmath/consumerASTsameas
 192actualTPcase/96timing candidate;32AISbytegates/all4TP exact. Firstfailedboot/
 setupfailures retained inproofchain; no numericalchanges or weakenedchecks.
-ACTIVE NEXT B08E5 sparse expert DOT4; runtime notimplemented yet. CPUcompilerprobe
-7446exit0 emitsgfx908 v_dot4c_i32_i8_e32 from__builtin_amdgcn_sdot4; capabilityONLY,
-noGPU/perfclaim. exp5-dot4-capability.json and exp5-validation-plan.json register
-12actualE/widthprofiles(total40layers), allTP/M8/64,thresholds1/2 onlybeforefive.
-Unitstopped/allGPUjobsclosed; preservefixedcache/static/dynamic/power settings.
+B08E5 COMPLETE/REVERTED after EXACT5. Median2302.4592prefill/170.4467decode:
++0.0884%/+1.2852%;pooledprefill-0.0512%/decode-1.1793%/whole-0.7142% =>reject.
+OriginalB07exp4five retained; no extra runs. Bench10355/monitor39149/stop76487exit0;
+ALLsource/proof/harness/counter/token/cap/protectedbytes+mtime gatesPASS. Realwarmup
+all4sparsebranches afterstartup explicitlyarmed, fourcomplete staticmarkersafter
+warmupstart. Coherentpreviews/twofullsamplesreviewed. Peak30.691620GiB. RestoredONLY
+rootgpu_worker.py/AITERnativebinding,removed3hash-verifiednewAITerfiles;accepted
+MoEnorm/attention retained. AITER3c74 clean. Rawfive/frozen30sources/33proofs under
+exp5-* /exp5-saved;canonicalledger. Native algorithm correct butno E2E win.
+305focusedchecks+4strengthenedmarker assertions/KV/battery4/4PASS.196checkpointbyte
+gates/32768TPgather geometriesPASS. FourAIS payloads include extra probe-read spans;
+gather logicalTP slices,notwholecompactblockreshape. Exact helpers/proofs retained.
+192actualTP pipeline comparisons/384current-inputgraphs pass;limit1 selected from
+ONLY1/2 using288componenttimings:M8+2.753%/M64+1.038% beforediagnosticarm repair;
+all numericalcode unchanged. Firstbootmarkerfired duringdummycapture; canceled
+incompleteuntimedwarmup BEFOREANYmeasurement(8051exit143/4073exit0/86928exit0).
+Defaultdisarmed2 +after-startup armRPC +staticranklines +journalwarmupepoch fixed
+qualification;8CPUcases/4graphcapture-arm-state/4static-output assertionsPASS.
+Allruntime arm hooks were reverted withE5; diagnostic harness enhancement remains
+ignored run.pySHA d05ada8f44803882596a4cd1eb6db12fe459ea5cbe826bd220e95d99f7182802;
+oldrun savedrun-before-sparse-arm.py. Workload/timing/hardware/runloop ASTunchanged;
+otherharnesshashesunchanged. Futureoriginalstack profiles use default armFalse.
+B08 ALLFIVE complete, nonekept. NEXT B09 freshbounded4k/256/C8 profile,EXCLUDEDfrom
+performance. Unitstopped/allGPUjobsclosed. Copy ORIGINALB07exp4five asB09incumbent,
+freeze currentaccepted runtime andnewharness. Keep same105W/static3/dynamic5/KV
+contract. Research drafts B08/next-batch-opportunities.md (NOTregisteredexperiments):
+GEMM BF16-roundedF32 wire stores removeintermediatecasts withoutwire/orderchange;
+nativeMoEnorm directlystores BF16-roundedgate-readyF32,originalBF16dtype metadata;
+LDS narrowN wholeKweightstrip reuse acrosssuccessive64-rowtiles;L2tiletraversal.
+Reassessafterfreshprofile and register ALLFIVE before code. Do not repeat rejected
+variants unchanged. Currentoriginalreference median2300.424995/168.283886,pooled
+aggregate decode170.745656/whole80.575790. No new baseline or extra controls.
 E4design exp4-design.md: exactnativeMamba in_proj sourceNVFP4,quant_method is
 ModelOptNvFp4W4A16LinearMethod(packed_g128=True),notPackedG128LinearMethod;
 staticresident INT8+weight_gs128 directint8_gemm/F32->normal.dtype isoldapplymath.
@@ -122,7 +149,7 @@ all dependencies. NativeMT1/NW2,wave64,n=wave16+lane%16;8DOT4perlane plusinteger
 xor16/xor32 givesexact128dot;occupancyfromSORT valid16bitballot,threshold1or2.
 Preserveoriginaldecoder/cache/sw/inv/F32order/nativeMFMAfallback source/ISA. Verify
 localcompilerDOT4ISA first;liveALL4qualificationmust proveactualsparseeligibility,
-notjustmixedkernel invocation. E4complete/reverted;E5readyforimplementation.
+notjustmixedkernel invocation. E4complete/reverted;E5finalarmedcandidatebooting.
 
 Converter: scripts/kineto_to_agent_csv.py --output CSV_DIR GPU_JSON_GZ...
 Analyzer: scripts/analyze_agent_profile.py --gpu-csv CSV_DIRECTORY --host HOST_DIR
