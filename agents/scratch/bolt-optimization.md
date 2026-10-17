@@ -18,7 +18,7 @@ check clock, shorten reasoning, keep waits below30seconds.
 ## Current state and next action
 
 Acceptedincumbent B07E4 nativeMoEnorm+GS128fusion plusB07E1 attention.
-Rootmain fusion taskcommit(currentpublishedwork;parent6ff8cacea4);AITERmain
+Rootmain4711913204533dfe702bd7e9ed7d23d07a08503b pushed/remoteverified;AITERmain
 3c74adc198e55aeb5bcd41516bddfb3ccadf6725 companion. B07exp4-{0..4} ORIGINALFIVE
 isE5reference: median2300.4249954aggregateprefill/168.2838861aggregate decode;
 pooleddecode170.7456560,pooledwhole80.5757898. Do notoverwriteexp1originalfive
@@ -190,17 +190,29 @@ oldrun-before-E4-journal-pids.py retained,manifestrefrozenBEFOREonewarmup/EXACT5
 AITERcompanion3c74adc198e55aeb5bcd41516bddfb3ccadf6725 stagedsecurityPASS;
 publishAITERfirstthenrootcaller/ledger/noteswithfinalstagedsecurityandremoteverify.
 
-ACTIVEB07E5 next: groupTWOexistinglargefallbacklatent/sharedPyNcclreductions,
-separatebuffers/samemessages/order/noconcat/noquantboundarymove. CPUdesign
-exp5-design.md,planregistered. NoE5runtimeedits/GPUworkyet. Currentactualdtypeaudit
-12772exit0 exp5-current-ar-dtype-audit.json: _tp_ar_fp32_mode returnsSTRING0whenunset;
-GroupCoordinator/functionalall_reduce useifmode,so0isTRUTHY. LogicalBF16ALREADY
-promotestoF32beforedispatch/downcastsafter. DO NOTfixflagorswitchwireprecision.
-E5groupsSAMEactualF32messages;originalpromotions+allocateBOTHoutputsBEFOREgroup_start,
-originaldowncastsAFTERgroup_end. Checkallbackendeligibilityonactualpromotedmessages.
-SinceE4KEPT,wirebothlegacyrunnercompletionANDnewnemotron_h_prefill completion,
-otherwisewouldqualifyunusedpath. ReferenceORIGINALexp4five,NOTexp1orincumbent;
-exact5/no extensions/newbaseline. Preserveall6acceptedfusionfileswhenrevertingE5.
+B07E5 COMPLETE/numericREJECTED/revertedBEFOREperformance. ActualTP4customAR/
+PyNcclfallback192pairs(48/rank,M2048/4096/4160/4256,4logicaldtypepairs,random/
+cancellation/zeros):116casesfail,748670736changedoutputvalues;random52failures/
+cancellation64/zeros0. BF16randomalsodiffers. Allranksidenticalmismatchcounts.
+No graph/timing/E2E afterfailedexactnessgate,NOspeedclaim/extra5. Source/proofs
+exp5-saved/exp5-sources.json /exp5-tp4/rank0..3.json,summaryexp5-tp4-summary.json.
+ONEgroupedarchitecture,88protocol/integrationchecksPASS,KV/battery4/4/RuffPASS;
+standalonemissingConfigfixture44604failedbeforecomparisons,corrected80822exit1
+AFTERall192cases. RestoredONLY2trackedrootcallers/removed2hash-verifiednewfiles;
+acceptedE4fusionandE1attention retained, AITER3c74clean. WireF32promotions unchanged.
+CurrentARflagSTRING0isTRUTHY:BF16alreadyupcasttoF32beforedispatch/downcastafter.
+DO NOTfixflag/switchwireprecisionwithoutnewacceptancecontract. Groupedsubmission
+changedbitsconsistentwithreductionorder,notroot-caused;do notreplayunchanged.
+
+Batch07allFIVEcomplete: E1andE4kept;E2/E3reverted;E5numericrejectedbeforetiming.
+ACTIVEB08 next:fresh4096/256/C8boundedprofileofacceptedE4+E1,thenregisterFIVE
+newcross-scopeexperimentsbeforeimplementation. ReferenceORIGINALB07exp4five,
+copybyte-for-byteasB08incumbent-{0..4};no newbaseline/extensions. Currentmetric
+2300.4249954aggregateprefill/168.2838861aggregate decode,pooleddecode170.7456560.
+Rootacceptedruntime4711913204/AITER3c74adc198,published/remoteverified;E5ledger
+metadata-onlycommitpending. NoGPUworkrunning;80822exit1/Elasticworkersclosed.
+SetlifecycleunitdropinB08andcreatewritablehostdirbeforeprofileboot. Useupdated
+qualifierPIDcorrelation(runSHA06026268...),harnessphasefunctionsunchanged.
 
 E1precommitpubliccredits: originalanddedicatedsource retain4upstreamauthorlines
 EACH. Securityhelper nowacceptsmultiple --public-attribution-review flags, checks
