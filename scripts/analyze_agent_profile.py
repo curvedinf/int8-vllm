@@ -30,10 +30,15 @@ def category(name):
         return "GEMM_quantization"
     if "_quantize_g128" in name:
         return "quantization"
+    if "_rms_norm_g128" in name:
+        return "normalization_quantization"
     if any(s in name for s in ("allreduce", "all_reduce", "cross_device", "car_",
                                "nccl", "rccl")):
         return "collective"
-    if any(s in name for s in ("g128", "unified_attention", "fmha", "reduce_segments")):
+    if any(s in name for s in (
+        "g128_core", "g128_prefill", "g128_i8dot", "page_prefill_kernel",
+        "unified_attention", "fmha", "reduce_segments",
+    )):
         return "attention"
     if any(s in name for s in ("delta_rule", "fwd_h", "fwd_o", "fwd_intra", "wy_",
                                "sigmoid_gating", "solve_tril", "cumsum",
@@ -42,7 +47,9 @@ def category(name):
         return "GDN_recurrence"
     if "conv1d" in name:
         return "GDN_convolution"
-    if any(s in name for s in ("gemm", "matmul", "cijk_", "tiny_ba")):
+    if any(s in name for s in (
+        "gemm", "matmul", "cijk_", "tiny_ba", "packed_all<", "packed_routed<",
+    )):
         return "GEMM"
     if any(s in name for s in ("norm", "rms")):
         return "normalization"
