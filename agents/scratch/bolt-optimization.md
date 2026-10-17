@@ -59,23 +59,25 @@ ANDdisabled. nginx stopped; no80/443listeners. Installed Bolt thermal dependency
 renamed thermal-controller.conf.disabled-static-cache-test; do not reintroduce.
 Production vllm-bolt stopped; never start alongside isolated diagnostic unit.
 
-Diagnostic bolt-opt-loop.service BOOTING E4fusednativeUP at00:24UTC;
-monitor exp4 and run.py bench exp4 --batchbatch02 --repeat5 active. Final36
-component/32realcheckpoint checks exact; KVmicroPASS,battery4/4. Fusionuses
-NW8/whole128-columnCTA, subgroup16max/LDSmaxima/onebarrier, preciseRTEscale
-andINT8output. Mainwrapper avoidsFP32partial andreducer fornativeUP. DOWNand
-prefills remain15a3; E2hoisting/E3integerprefill code remainreverted. NewCAPI
-launch_routed_quantized andoptionalnativequant_scales. Source/harnesshashes
-exp4-sources.json, fullbackup/diffexp4-saved. PerformanceNOTadoptedyet; compare
-originalfive pre-e2-control vs EXACTLYfiveexp4, thenkeep/revertwithoutrepeats.
+Diagnosticunit BOOTING E5shortcohort at00:43UTC. Monitor exp5 (session62056)
+and run.py bench exp5 --batchbatch02 --repeat5 (session7432) active; logexp5-
+bench.log. Candidatechanges ONLYroot scheduler.py, Boltlauncher andtestscheduler.
+AITERclean15a3; allE1-E4runtime code reverted. Source/diff backup exp5-saved,
+identity exp5-sources.json. Policydefaultoff exceptBoltlauncheroptin1. Unchanged
+shared4256/total8512tokenbudgets; offcadenceadmission onlyinitialsingle-page
+textcohort, everyrunningrequest+head eligible. Output+placeholders horizon
+C8*(NS7+1)=64. Per-requestguards preserve longhead aftershortadmission. Mature/
+long/blocked/MM/LoRA/preempt/stale retainoldcadence. Qwendefaultsunchanged.
+55CPUdecision/alignment/fairnesstests PASS, KVmicroPASS,battery4/4,ruff/bashPASS.
+Verify startup logger page4256/horizon64, thenuseEXACTLYfive vs pre-e2-control.
+No extensions, no baseline repeatfornoise. Need5raw/summaries/compare, coherence
+inspection ofexistingoutputs, verdict, codecommit/pushonlyifphase/materialgates.
 
-E3originalfive inconclusive/reverted: median950.385prefill/96.587aggregatedecode,
-pooled97.976decode/48.904whole. Whole+2.621%below3%, mediandecode-0.122%.
-E2alsoinconclusive/reverted: whole+2.016%, decodemedian-3.392%. Ledgerrows and
-allartifacts retained. Currentincumbent remains925.793prefill/96.705decode.
-AfterE4, implementE5boundedinitialshortcohortadmission perdesignfile. Production
-staysstopped; isolatedunit8021/lifecyclebatch02/host/gateoff. NoGPUoverlap or
-baseline/perf extensionsfornoise. No performancechanges adoptedthisbatchyet.
+E4fiveinconclusive/reverted: median942.548prefill/99.962aggregatedecode, pooled
+97.124decode/48.282whole. Bothphasegatespass; whole+1.317%below3%. Allsources/
+codegen/results exp4-* retained; ledgerverdict appended. Currentincumbent
+925.793prefill/96.705decode. AfterE5 complete, startnextprofile/five-scopebatch
+withoutaskingorending. Productionoff/nginxoff/controlleroff/105W fixed.
 
 Batch02 reference profile:590501kernels/alllaunchcorrelated; prefill+mixed
 23.3892rank0kernel-seconds, packedrouted10.3514s/44.257%;collectives3.8049s
@@ -170,3 +172,14 @@ rcp.log. Finalhelper uses explicitv_rcp_f32 inlineASM; actualGPUerror bound
 Final9componentchecks,32realchecks,KVmicroPASS,battery4/4. Finalsourceidentity
 exp3-sources.json/backupexp3-saved. Allpreviousvariant/failure evidence retained.
 Finalfive-run client/session isactive after00:08boot; do not launch a duplicate.
+
+Next-batch fusion lead (E4codegen/epilogue-counts.json):8precisedivision
+sequences per4localoutputs. ComputeGS128scale onceperrowleader andbroadcast
+instead ofeachoutputlane (requiresanotherbarrier). Further research: guarded
+fastactivationquotient, q0=RTE(v*approxRcp(scale)), ordinarypreciseF32division
+onlywhenapproxquotient iswithin2^-12 ofanintegerhalf. Needhardwarercperror
+bound forarbitraryF32scales (finiteSX>=1e-30 andmaxact/127), exacttie/near-tie
+andextreme tests. MustpreserveDOUBLErounding: originalRTE(F32_RTE(v/scale)),
+notdirectrationalrounding. FMA/exactboundaryrepair alone differsnearties.
+No implementationorGPUproof ofthis lead; keepfornextbatch. CurrentE5source
+muststayfrozen whileitbenchmarks.
