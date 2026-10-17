@@ -12,12 +12,18 @@ PID_FILE="${LOG_DIR}/supervisor.pid"
 
 alive() {
   [[ -r "${PID_FILE}" ]] || return 1
-  local pid
+  local pid argument previous=''
   pid="$(cat "${PID_FILE}")"
   [[ "$pid" =~ ^[0-9]+$ ]] || return 1
   kill -0 "$pid" 2>/dev/null || return 1
   [[ -r "/proc/${pid}/cmdline" ]] || return 1
-  tr '\0' ' ' < "/proc/${pid}/cmdline" | rg -q 'serve_recipe_bolt.sh supervise'
+  while IFS= read -r -d '' argument; do
+    if [[ "$previous" == */serve_recipe_bolt.sh || "$previous" == serve_recipe_bolt.sh ]]; then
+      [[ "$argument" == supervise ]] && return 0
+    fi
+    previous="$argument"
+  done < "/proc/${pid}/cmdline"
+  return 1
 }
 
 serve() {

@@ -13,10 +13,15 @@ native MoE norm/GS128 fusion remain accepted, above weighted9 reduction,
 B03 route64 and B02 short-prefill cohort. Canonical settings and routine-gate
 results live in docs/recipes/nemotron_bolt.md and the experiment ledger.
 
-The standard vllm-bolt.service is active/enabled on localhost8020. Its actual
+The standard vllm-bolt.service serves on localhost8020. Its actual
 process argv/env was checked against TP4/C8/NS7, graphs, INT8 KV, BF16 model,
-FP32 state and 3GiB dense/5GiB expert cache settings. All four caps remain105W;
-thermal controller stopped+disabled, nginx stopped. The isolated optimization
+FP32 state and 3GiB dense/5GiB expert cache settings. Production nginx and the
+thermal controller are enabled; live caps vary. The controller must NEVER stop
+Bolt: core >90C / memory >89C reduces 1W per five minutes; core >95C / memory
+>90C cuts 20%, repeating after ten seconds while hot, bounded by the minimum.
+Faults only lower power. Its canonical source and deployment instructions are
+in the Bolt recipe. Fixed105W below describes benchmark conditions only.
+The isolated optimization
 unit and its owned profiler drop-in were retired; no automatic optimizer runs.
 Keep existing production credentials private. Do not hot-reload kernels: it
 can duplicate scale caches and bias cache/memory state.

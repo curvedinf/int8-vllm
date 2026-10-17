@@ -41,7 +41,46 @@ with their original packed GPU tensors released, 5 GiB/GPU for dynamic expert
 INT8 copies with packed expert originals retained, 14 GB/GPU for KV, and
 24 GiB total for CPU prefix offload. TP4/C8, LiLiCorr NS=7, BF16 residuals,
 INT8-G128 target/draft KV, FP32 Mamba state and custom all-reduce remain fixed.
-The thermal power controller is stopped and disabled for this 105 W setup.
+The 105 W results above are fixed-power benchmark measurements. Production
+runs with nginx and the thermal power controller enabled; its live caps vary.
+
+### Thermal power control
+
+The controller only changes GPU power caps. It never stops Bolt, including
+when a temperature remains high, the minimum cap is reached, or the controller
+encounters a sensor/driver fault. The separate thresholds are:
+
+| Sensor | Reduce by 1 W per five minutes | Cut by 20% immediately |
+| --- | --- | --- |
+| GPU edge/junction | Above 90°C | Above 95°C |
+| Memory | Above 89°C | Above 90°C |
+
+A five-minute GPU average above 90°C also requests the 1 W reduction.
+Emergency cuts repeat after ten seconds if still over the emergency threshold;
+all reductions stop at the configured minimum cap. Thermal reductions apply
+regardless of utilization. Increases remain 1 W per five minutes, after warmup,
+with cool averages/peaks and every card above 95% GFX utilization.
+
+The boot cap remains 90 W and the configured range remains 60–145 W in
+`/etc/default/rocm-downclock`. Restarting the controller preserves the live
+cap. Its failsafe lowers caps to the minimum without stopping workloads. Bolt
+has no required dependency on the controller, so controller failure or restart
+does not stop the server.
+
+The canonical source is `scripts/mi100_thermal_controller.py`, deployed to
+`/usr/local/sbin/mi100-thermal-controller.py` for the existing
+`mi100-thermal-controller.service`. After updating it:
+
+```bash
+sudo install -m 0755 scripts/mi100_thermal_controller.py \
+  /usr/local/sbin/mi100-thermal-controller.py
+sudo systemctl restart mi100-thermal-controller.service
+```
+
+Policy and fault regressions run with
+`.venv/bin/python -m pytest tests/test_mi100_thermal_controller.py tests/test_bolt_launcher.py`.
+The launcher checks supervisor identity with Bash built-ins, so its systemd
+stop/start path does not require ripgrep in the service PATH.
 
 ## Routine validation (2026-10-17)
 
