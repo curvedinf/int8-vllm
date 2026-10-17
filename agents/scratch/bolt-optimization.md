@@ -55,9 +55,42 @@ Restored ONLY rootmarker/AITERdensecache, removed2hash-verifiedAITERnewfiles;
 accepted attention/normfusion retained. Rawfive/frozen21sources/7proofs remain
 under B08exp1-* / exp1-saved; decision in canonical ledger. Coherentpreviews/
 fullsamples reviewed. AITERmain remains3c74/no pending changes.
-NEXTB08E2 pairedIQ2Dheader reuse design saved exp2-design.md; paired-original.py
-is byte-identical original core. Design only/no runtime edits or GPU work yet.
-NoE2runtimeworkstarted. AllFIVEalreadyregisteredinexperiments-plan.json.
+B08E2 COMPLETE/REVERTED afterEXACT5;ALLsource/proof/harness/cap/token/qualification/
+protectedwork gatesPASS. Median2304.3353prefill/168.9297decode(+0.170%/+0.384%),but
+pooledprefill-0.0491%/decode-1.4633%/whole-0.7848% =>reject. No extra runs. Original
+B07exp4five reference retained. Peak30.563606GiB. Bench67816/monitor21558/stop17026
+exit0;ALL4pathqualifiedBEFOREfirsttrial. RestoredONLYrootmarker/AITERwrapper and
+removed2hash-verifiedAITERnewfiles. AITERmain3c74 clean;keepattention/normfusion.
+Rawfive/21sources/11proofs underexp2-* /exp2-saved. ONEarchitecture/component+0.22%
+wasinsufficientE2E;201M/all65536Dpatterns rawbits/INT8/scales exact,181tests/88FINAL
+actualTPcases/16graphs/KV/battery4/4PASS. IndependentTorchbyteoracle firstfailed36
+ZEROsignencodings(original+0/Torch-0),notcandidate;diagnostickept,correctedONLY
+oraclefiniteNONzero bits+zero numericalvalues+nonfiniteclasses;candidate rawzero
+bitsremainedstrict. Prototype/finalmathASTsameexceptdeadunusedsplittemps. Do not
+rerunthiscandidate;canonicalledger has fullprovenance. Coherentoutputs reviewed.
+NEXTB08E3 remove redundant single-group routerwork. NoE3runtimecode yet.
+E3..E5 registered experiments-plan.json. E3design saved exp3-design.md:
+REALentry is GroupedTopKRouter._compute_routing (acceptedprefill calls
+router.select_experts -> BaseRouter._select_experts -> _compute_routing),NOTthe
+separateGroupedTopkCustomOp.forward_hip. Preservevalid_grouping/AITERdispatch,
+newhelpercompiledsamebackend/dynamic/options,onegroup/gfx908/M>64/F32contiguous.
+SAMEfinalTorchTopK/EXACTIDs+weightbits evenforties/nonfinite;compiledunsorted
+expertsetalone insufficient forunchangedcombinebits. Originalcompiled/native
+function untouched. No E3runtimecode/GPUwork whileE2frozen.
+E4design exp4-design.md: exactnativeMamba in_proj sourceNVFP4,quant_method is
+ModelOptNvFp4W4A16LinearMethod(packed_g128=True),notPackedG128LinearMethod;
+staticresident INT8+weight_gs128 directint8_gemm/F32->normal.dtype isoldapplymath.
+Supportexactknownresidentclasses orwouldexclude40Mamba. AttentionmergedQKVQ8
+PackedG128. Newexternalprefillhelpercanreplayoriginalpostprojectionoperations
+(mambaopaqueop->unchangedgatednorm/out_proj;attention split->attn->o_proj),keeping
+nativeMixer2/Attentionforward/API/source untouched. Discardq/scalesafterprojection.
+E5design exp5-design.md: actualnative _load CONTENT-HASHES HIPsource+hipccversion+
+flags andctypesloads kernel.so;NOTmodule*.soJIT. Newseparatesource/binding ownhash
+all dependencies. NativeMT1/NW2,wave64,n=wave16+lane%16;8DOT4perlane plusinteger
+xor16/xor32 givesexact128dot;occupancyfromSORT valid16bitballot,threshold1or2.
+Preserveoriginaldecoder/cache/sw/inv/F32order/nativeMFMAfallback source/ISA. Verify
+localcompilerDOT4ISA first;liveALL4qualificationmust proveactualsparseeligibility,
+notjustmixedkernel invocation. NoE4/E5implementationorGPUworkyet.
 
 Converter: scripts/kineto_to_agent_csv.py --output CSV_DIR GPU_JSON_GZ...
 Analyzer: scripts/analyze_agent_profile.py --gpu-csv CSV_DIRECTORY --host HOST_DIR
