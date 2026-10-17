@@ -15,7 +15,7 @@ For ongoing work, read and update [scratch records](../../passive/scratch-space/
 
 1. Identify the acceptance claims, consequential failure modes, and existing evidence. Account for the requested test budget and project gates.
 2. Map each claim to the smallest adequate check. Reuse existing tests and fixtures where suitable; include actual entrypoints, adverse conditions, and lifecycle boundaries when those are part of the claim.
-3. Separate component proof from real integration and user-experience proof. Simulators can isolate a mechanism; they cannot establish unmodeled network, hardware, rendering, or external-service behavior.
+3. Separate component proof from real integration and user-experience proof. For a guarded optimization, verify deployed input geometry and that the representative workload selects the candidate path before spending its measurement budget. Simulators can isolate a mechanism; they cannot establish unmodeled network, hardware, rendering, or external-service behavior.
 4. Execute when authorized, retaining results and relevant candidate/configuration identity. A plan-only request produces the proposed checks and unresolved obligations instead.
 5. Report which claims passed, failed, remain untested, or rely on substitute evidence. Rerun invalidated checks; deduplicate equivalent runner coverage.
 

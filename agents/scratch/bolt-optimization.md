@@ -88,13 +88,32 @@ exited0;allcap/token/source/harness gatesPASS,peak30.7184GiB. Initialcomponent
 attempt brieflyoverlappedfinishingbattery,terminated143 thenreran93afterbattery
 exit0;no measuredtrial affected. E2ledger1b492bcd63 pushed/remoteverified.
 
-ACTIVE B06E4 attention: inactiveCPUprototype attention_unroll_prototype.py and
-attention-probe.py inB06. ExistingROCM_AITERbackend groupedG128 routesroot
-triton_unified_attention.py; head128/localQ8/KV1(GQA8),BLOCK_M16/BLOCK_Q2,KVtile32.
-Boundedunroll2/4 plusONEquerytile64 choice, keytile32/MFMA16 fixed; sequential
-QK/softmax/PV recurrence, pageindexreuseacrossadjacenttiles, native/decode guard.
-OnlyCPUignoredprototypes yet, noE4runtime edits. InitialGPUprobe94229 exit0: all4boundedvariants bitwiseequal
-AFTERE3bench/monitor/stop exit0. NoGPUoverlap. Reference stays originalB05E2five.
+B06E4 COMPLETE/inapplicable/reverted afterEXACTLY5: observedmedian2085.2863416
+aggregateprefill/165.1609087decode,pooleddecode165.0625913,whole+.628%. Optimized
+pathwasINACTIVE: actualKVpages4256tokens(13332-keytiles),componentassumed64.
+TenlivebootcompiledTTIRs show4256constant/BM16/defaultMFMA. No speedclaimor
+retentiondespitepositivephases;source/testrestoredtosnapshots/HEAD. Alloriginalfive,
+frozensources/proofs B06exp4-saved/exp4-* retained. KV/battery4/4,30checks,
+14originalsourcecomparisons/5nativeISAidentical arecomponentproofonly. Corrected
+futureattention requiresactual4256geometry/pairstraddles anddeployedpath proof,
+not anextraE4retry. Bench11554/monitor88661/stop12580 exit0,peak30.7184GiB.
+
+ACTIVE B06E5: CPU-only3productionfile prototypes ready exp5-prototype/ with
+exp5-original/ snapshots. Modelquantizes4096inputonce;fc1 consumesq/scales with
+originalBF16latentcast;explicitperforwardq/scales payload throughsharedopaqueop/
+fake/runner/SharedExperts intoMLP. Noprecomputedoutputalias/globalcache/stash;
+nativeold6argcall. GuardsSP/DP/PCP/EP/EPLB/DBO/LoRA/hooks/bias/nonPacked/overlap,
+maxQ>64/gfx908, payloadgeometry/dtypes/contiguity. Notyetapplied/run. Nextapply
+onlyownedfunctionchanges,testquantcallcount/bits/protocol/fake/graph/actualweights,
+KV/battery, verifyliveeligibilityfromactualmodel/configbeforefive. Reference
+originalB05E2fiveunchanged. Root3a3f44e43b ledgerpushed/remoteverified.
+
+E4unchangedpublicsourcecredits verifiedagainstofficialrawGithub; ignoredreview/
+snapshot/hash retained. Securityhelper optional--public-attribution-review only
+classifiesunchangedlabeledpubliccreditsmatchedagainstHEAD/upstream; nodisclosure
+policyexception. NoE4sourcecommitted. compare.py guidance-onlynote corrected
+AFTERE4frozenhashverification:exactfive,noextra controls. Arithmeticunchanged,
+oldhelper retained B06compare-before-E5.py;freeze updatedhashforE5.
 
 ## Fixed serving contract
 
