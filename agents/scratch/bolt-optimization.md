@@ -69,17 +69,25 @@ B06exp1-saved/exp1-*. Restoredonly4trackedAITERfiles andremovedbacked-upnewtest;
 AITERcleanba264/acceptedcombine retained. Rootruntimeunchanged. Server stopped;
 bench67897/monitor88109 exited0. New ledger/notes pendingcommit.
 
-ACTIVE B06E2 immutable densepreshuffle: inactive prototypepreshuffle_exact_
-prototype.py preparedfromAITERkernel withcurrentleftassociation/FPfusionOFF.
-Micro session83216(preshuffle-micro.py) running onidleGPU; logexp2-preshuffle-
-micro.log. No production E2edits yet. Samepayloadbytes,onepersistentINT8copy,
-logical[N,K]metadata;eligibleN%16==0/K%128==0,otherweightsrowmajorfallback. New
-resident_preshuffle cachekey cantracklayout withoutstaleaddressmarkers; clear
-cachealso clearslayout. Wrapperusesrowmajoractscales; preserveFP32scale/group
-order,outputcasts,cacheownership/releasedoriginals. Followplanvalidationthen
-EXACTLY5 versusB06incumbent(originalB05E2five), no newbaseline/extensions.
-RemainingE3uint16header/E4attentionmetadata/E5sharedinputquantreuse registered
-inB06plan; no futureproductionedits duringcurrentcandidate'sfive.
+B06E2 COMPLETE/inconclusive/reverted afterexactlyfive: median2088.2307235prefill/
+161.6718427decode,pooleddecode162.2723956(-.894%),medianprefill+.323%/decode
+-.642%,whole+.299%.35component/78actualallTPchecks,KV/battery4/4/Ruff pass;
+FP32/BF16/INT8/scalesexact.237eligible/40fallbackstatics preservedonecopy/bytes;
+peak30.971GiB. Allsource/originalfive B06exp2-saved/exp2-* retained. Restoredonly
+2AITERfiles/removedverifiednewtest; AITERcleanba264/acceptedcombine. Serverstopped,
+bench75994/monitor39821 exited0. E2ledger/notes pendingcommit;E1989cf1caeb pushed.
+
+ACTIVE B06E3 wideIQ2headerreads: inactiveprototype decode_u16_prototype.py and
+independentbyteoracle passed150994944FP32bitcomparisons acrossALL65536FP16
+patterns(inclNaNs/Inf/signzero),nineoffsets/tails/cross256; proofsession5751exit0.
+No E3productionchanges yet. Nextintegratenew_decode3uint16loads replacing6byte
+loads, preserveFP32operations andoriginalbytesoracle fortests/micro. NativeHIP
+unchanged; shareddecoderusedprefill/cachefill/weightscaleprep. VerifygeneratedISA
+reallyreducesloadinstructions; allTP/cache/graph/actualweights +KV/battery, then
+fixedEXACTLY5 versusoriginalB06incumbent five. Preserveoriginalexpertstorage and
+cachebudgets; no LUTretained. Sourceword_reads_original.py snapshotsoriginalcore.
+RemainingE4attentionmetadata/E5sharedinputquantreuse inplan; nofuture runtimeedits
+whilecurrentcandidatefive runs. RootruntimebacktoacceptedE2; no newbaseline.
 
 ## Fixed serving contract
 
@@ -170,3 +178,11 @@ llvm-objdump --offloading extractssidefiles; useignoredcopies. NativeMT>1 must
 match16*MTplan/COUNT. Actualexpertcounts240-496,never512. Maintain-scratch checked/
 notdueOct15. Existing skill criteria alreadycover usercorrections; no duplicate
 refinement added.
+
+UpcomingE3 inactiveGPUoracle/prototypes ready inB06decode_u16_prototype.py/
+check-word-reads-gpu.py; notrunyet. E4activepathcorrectedbeforeimplementation:
+ROCM_AITERbackend groupedG128 dispatchesroottriton_unified_attention.py,not
+genericAITER2Dkernel. Checkpointhead128/localQ8/KV1(GQA8), rawtracegrids2049..
+2084x1/256threads =>BLOCK_M16/BLOCK_Q2,defaultKVtile32. Planallowsbounded
+metadataunroll2/4 plusONEquerytile64 option, Ktile32/MFMA16 fixed/native
+decodeguardunchanged; mustprovebitwise. No E3-E5runtimeedits duringE2five.
