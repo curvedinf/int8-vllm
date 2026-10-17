@@ -379,6 +379,12 @@ class NemotronHMoEDecoderLayer(nn.Module):
         residual: torch.Tensor | None,
         **kwargs,
     ):
+        if hidden_states.shape[0] >= 256:
+            from vllm.model_executor.models.nemotron_h_prefill import try_prefill
+
+            result = try_prefill(self, hidden_states, residual)
+            if result is not None:
+                return result
         if residual is None:
             residual = hidden_states
             hidden_states = self.norm(hidden_states)

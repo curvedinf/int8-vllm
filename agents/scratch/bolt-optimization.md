@@ -17,13 +17,13 @@ check clock, shorten reasoning, keep waits below30seconds.
 
 ## Current state and next action
 
-Accepted incumbent: B07E1 dedicated4256-pageG128prefill,rootmain
-a079b82640a6b07a652b96947a66f2d08e0eae16 pushed/remoteverified; AITERmain
-ba264db0b19c6b058c981533bf424332659ed5fe unchanged/pushed.
-B07exp1-{0..4}.json ORIGINALFIVE isreferenceforE2..E5: median2235.6512733aggregate
-prefill/165.5856116aggregate decode;pooleddecode166.8156138,pooledwhole78.4761416.
-Do notoverwriteB07incumbent-{0..4} (oldB05E2five) orrerunbaseline. ExistingB05E2
-weightedcombine/rootd70e9b6, B03route64 andB02shortcohort retained underneath.
+Acceptedincumbent B07E4 nativeMoEnorm+GS128fusion plusB07E1 attention.
+Rootmain fusion taskcommit(currentpublishedwork;parent6ff8cacea4);AITERmain
+3c74adc198e55aeb5bcd41516bddfb3ccadf6725 companion. B07exp4-{0..4} ORIGINALFIVE
+isE5reference: median2300.4249954aggregateprefill/168.2838861aggregate decode;
+pooleddecode170.7456560,pooledwhole80.5757898. Do notoverwriteexp1originalfive
+(previousreference)orincumbentoldB05copies;no newbaseline. Underlyingweighted
+combine/rootd70e9b6,B03route64,B02shortcohort andB07E1attention retained.
 
 B05E3 COMPLETE/reverted afterfive: median2152.7672311prefill/165.0328814decode,
 pooleddecode162.2629241(-0.900%), whole+1.843%.142component/regression checks,
@@ -129,7 +129,8 @@ withprefill-onlyexplicitpayload/nativelegacyop preserved;5groupTWOexisting
 largefallbackPyNcclcollectives,separatebuffers/samedtypes/counts/noconcat.
 All4livepathqualification requiredBEFOREeachfive. CPUresearch/details in
 batch07-prep/research.md;actualKVpages4256/133tiles confirmed,notinitial64log.
-SelectednumericenvAR_FP32unset->0,FUSED_NORM_QUANTunset->False;preserveactual
+SelectednumericenvAR_FP32unset->STRING0(TRUTHY,currentBF16messagespromotetoF32),
+FUSED_NORM_QUANTunset->False;preserveactual
 inputdtypes,do notinferfromcustom<float>name. NoB07runtimecodeyet. B07E1 COMPLETE/KEPT afterEXACTLY5: median2235.6512733prefill/165.5856116decode,
 pooleddecode166.8156138(+1.880%),prefillmedian+7.405%/pooled+7.698%,whole+5.125%.
 All4qualifiedactiveBEFOREfirsttrial;counter/token/cap/source/harness/coherencegates
@@ -168,14 +169,38 @@ no harness/runtimechange. Replacement85801 ONEwarmup/EXACT5,monitor36691/stop198
 all0. Source/proofs/originalfive exp3-saved/exp3-* preserved. RestoredONLY3rootprod
 files/removenewroottest+3AITERnewfilesafterhashcheck;acceptedE1attention retained.
 
-ACTIVEB07E4: nativeMoERMSNorm+GS128dualoutputfusion,explicitforwardq/scales to
-latent/sharedconsumers. CPUdesign exp4-design.md; E5groupedcollectivedesign
-exp5-design.md. E3wasREJECTED,soNOdirectBF16store helper exists/useoriginalF32cast.
-Implementseparateprefillentry/opaqueop,keeplegacyMoE/runner/sharednativeAPIs/source
-unchanged;onlyearlyM>=256guardinMoEDecoder.forward. NoTensorattr/globalqstash.
-SupportactualF32/BF16input/residual dtypes,copyactualAITERnormmath/defaultFPfusion,
-originalGS128max/div_rn/nearbyint. Boundtwoepiloguelayouts asregistered. NoE4runtime
-editsyet. ReferenceORIGINALB07exp1five,NOToldincumbent,no newbaseline/extensions.
+B07E4 COMPLETE/KEPT afterEXACTLY5: median2300.4249954aggregateprefill/
+168.2838861decode;pooleddecode170.7456560(+2.356%),prefillmedian+2.897%/
+pooled+2.739%,whole+2.676%. All4qualifiedBEFOREfirsttrial;alltoken/cap/source/
+harness/coherentpreviewgatesPASS,sampledpeak30.562191GiB. 108productiontests/
+96actualoperation-checkpointcasesPASS,KV/battery4/4/Ruff. 120producerprototype/
+192actualprojectionvariantcases/12graphproofsPASS. TWOlayouts only:corrected
+8pairedchecks/12timings4096reload+6.398%/register+8.085%,heldout4160+6.797%/+8.360%;
+REGISTERselectedbeforeintegration/E2E. Initial12timingsexcludedbecausegraphinput
+mutationnotrestored;equal-inputcorrectiononly,nofurther variant orE2E. Native
+APIs/sourceunchangedexceptearlyMoEDecoderM>=256guard;newprefillopaqueoperation,
+explicitq/scales,noTensorattr/globalstash,originalnormloop/defaultFPfusionTrue/
+4warps/collectives/scalefc2/cachebytes preserved. 3oldprojectionquantcalls->1fc2
+quantplusfusednormquant. New6filesexp4-saved/exp4-sources.json(11incloriginals).
+Bench97395/monitor8760/stop20873all0,serverstopped. Firstwaitingclient80562stopped143
+BEFOREANYrequest/warmup:earlymarkersomitTPprefix. QualifierONLYusescurrentjournal
+JSON+uniquePID->rank;6CPUcases/actualall4PASS,ambiguous/missingrejected;timing/
+workload/hardwareASTunchanged. NewrunSHA06026268cae372bbade6afde0ef8e819240bb9ebca21fec9938b29625d8ef04e;
+oldrun-before-E4-journal-pids.py retained,manifestrefrozenBEFOREonewarmup/EXACT5.
+AITERcompanion3c74adc198e55aeb5bcd41516bddfb3ccadf6725 stagedsecurityPASS;
+publishAITERfirstthenrootcaller/ledger/noteswithfinalstagedsecurityandremoteverify.
+
+ACTIVEB07E5 next: groupTWOexistinglargefallbacklatent/sharedPyNcclreductions,
+separatebuffers/samemessages/order/noconcat/noquantboundarymove. CPUdesign
+exp5-design.md,planregistered. NoE5runtimeedits/GPUworkyet. Currentactualdtypeaudit
+12772exit0 exp5-current-ar-dtype-audit.json: _tp_ar_fp32_mode returnsSTRING0whenunset;
+GroupCoordinator/functionalall_reduce useifmode,so0isTRUTHY. LogicalBF16ALREADY
+promotestoF32beforedispatch/downcastsafter. DO NOTfixflagorswitchwireprecision.
+E5groupsSAMEactualF32messages;originalpromotions+allocateBOTHoutputsBEFOREgroup_start,
+originaldowncastsAFTERgroup_end. Checkallbackendeligibilityonactualpromotedmessages.
+SinceE4KEPT,wirebothlegacyrunnercompletionANDnewnemotron_h_prefill completion,
+otherwisewouldqualifyunusedpath. ReferenceORIGINALexp4five,NOTexp1orincumbent;
+exact5/no extensions/newbaseline. Preserveall6acceptedfusionfileswhenrevertingE5.
 
 E1precommitpubliccredits: originalanddedicatedsource retain4upstreamauthorlines
 EACH. Securityhelper nowacceptsmultiple --public-attribution-review flags, checks
