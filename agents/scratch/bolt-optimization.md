@@ -48,23 +48,38 @@ Prototype4.07xproducer didnot yield a phase-nondegrading stack. Restored only
 5rootproductionfiles/2AITERfiles andremoved2snapshot-verifiednewtests. Allsource,
 proofs/originalfive inB05exp5-saved/exp5-*; no E5code retained. AcceptedE2 stays.
 
-ACTIVE B06 profiling: isolated unit boot06:51:59UTC withlifecycle dropinB06;
-profile session81066(run.py profile incumbent --batch batch06),monitor9831.
-Profile includesonewarmup+oneboundedcapture, excludedfromfive-run metric.
-Reference B06incumbent-{0..4}.json arebyte-identicalcopies ofB05exp2 originalfive;
-no newmeasured baseline. Profileconversion/analysis notstarted; no B06experiments
-registered orimplemented yet. Aftercapture exits0, stopunit, convertKinetoCSV/
-analyzehost+GPU, identifybottlenecks andregisterFIVE experiments beforecoding.
-Then execute sequentially/exactlyfive each, compareB06incumbent untilnewwinner.
-B05negativeverdictsE3e2686252a9/E46c7c7b2426 pushed/remoteverified; E5ledger/notes
-nowpendingcommit. Root/AITERruntime backtoacceptedE2; preservecombine export.
+ACTIVE B06: freshprofile complete; server stopped; profile81066/monitor9831,
+converter58468/analyzer94412 exited0. Correct analyzer --gpu-csv takesDIRECTORY,
+notkernelCSVfile (emptyinitialattemptwasoverwritten; actual298917kernels). Rank0
+pid1636360,all298917 launch-correlated. Prefill/mixedsum15.2717rank0kernel seconds:
+dense/otherGEMM29.320%,packed24.826%,collectives20.011%(includeswaiting),
+attention9.909%,quant0.57735s. Profiletimes excludedfrommetric.
 
-ResearchleadONLY inignored B05nextbatch-research-leads.json: exactinteger IQ2
-quantlookup (48termclasses, inversemaxmap+48x48table3638bytes, potentiallyfits
-348344unusedbudget withoutslotloss) andaligneduint16 headerloads. Requiresfresh
-profilejustification andNEW maxterm-recovery/finitehalf/zeros/sign/tail proofs;
-prioralpha proofalone insufficient. No sourcecode or newbatchplan yet. Do not
-repeatfailedheader/factorizedcomposition unchangedforanotherchanceatfive.
+B06experiments-plan.json registersFIVE beforeimplementation:1exactintegerIQ2
+quantLUT;2immutableAITERINT8preshuffle;3aligneduint16IQ2headerreads;4attention
+metadatahoist/prefetch/unroll preservingmathorder;5latent/sharedinputquantreuse
+viaexplicitforwardpayload,no globalcache. Allconstraints/validation inplan.
+B06E1 COMPLETE/rejected/reverted afterexactlyfive: median2007.5566699aggregate
+prefill/165.1814276decode; pooleddecode162.9159325(-.501%),prefill-3.553%,whole
+-2.488%. Componentrate-14.827%/-14.709% alreadynegative; no postmicrotuning or
+extraE2Eruns. ProofCPU149323776signedquant/3047328maxrecovery andGPU130023424
+values zero;84components/64actualallTPcases PASS;KV/battery4/4/Ruff. LUT4KiB
+reservation fitunchanged4565pairs/allGPUs. Allsource/proofs/originalfive retained
+B06exp1-saved/exp1-*. Restoredonly4trackedAITERfiles andremovedbacked-upnewtest;
+AITERcleanba264/acceptedcombine retained. Rootruntimeunchanged. Server stopped;
+bench67897/monitor88109 exited0. New ledger/notes pendingcommit.
+
+ACTIVE B06E2 immutable densepreshuffle: inactive prototypepreshuffle_exact_
+prototype.py preparedfromAITERkernel withcurrentleftassociation/FPfusionOFF.
+Micro session83216(preshuffle-micro.py) running onidleGPU; logexp2-preshuffle-
+micro.log. No production E2edits yet. Samepayloadbytes,onepersistentINT8copy,
+logical[N,K]metadata;eligibleN%16==0/K%128==0,otherweightsrowmajorfallback. New
+resident_preshuffle cachekey cantracklayout withoutstaleaddressmarkers; clear
+cachealso clearslayout. Wrapperusesrowmajoractscales; preserveFP32scale/group
+order,outputcasts,cacheownership/releasedoriginals. Followplanvalidationthen
+EXACTLY5 versusB06incumbent(originalB05E2five), no newbaseline/extensions.
+RemainingE3uint16header/E4attentionmetadata/E5sharedinputquantreuse registered
+inB06plan; no futureproductionedits duringcurrentcandidate'sfive.
 
 ## Fixed serving contract
 
