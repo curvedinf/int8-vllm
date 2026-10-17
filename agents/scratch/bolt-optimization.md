@@ -77,17 +77,25 @@ B04E1 originalfiveCOMPLETE/inconclusive/reverted: median2069.0517prefill /
 58CPUchecks,KV/battery4/4 passed. Startup pages2verified. Restoredonly3ownedroot
 files; originalonepagecohort retained. Allsource/rawfive underB04exp1-*.
 
-CURRENT B04E2 API exploration APPLIED onlyAITerwrapper/test_route_tiles. Adds
-block128 andexplicitnum_warps4/8 whiledefaultremainsold4 andnativeunchanged.
-No selectedperformance configyet; rootmethod unchanged. KV micro PASS, battery4/4
-and43componentchecks PASS. Boundedmicro64/4 vs64UP8-DOWN4 vs64/8 vs128/8
-active session22921 (exp2-thread-micro.log); thenrealweights beforeboot.
-ReferenceB03E1 originalfive unchanged.
-OfflineISA underB04 exp2-* showslarger128 tile increasesprivate spills (sample
-DOWN640:636B vs100B baseline);64/8 UP48B/DOWN240B, so direction-awarechoice may
-matter. SelectONEfinalconfigbeforeEXACTLYfiveC8runs; noextensions. Diagnostic
-unitSTOPPED, lifecycle gate/output B04. E1verdictledger/notes includedwiththis
-checkpoint. LaterE3-E5 onlyplanned, no runtimechanges.
+B04E2 originalfiveCOMPLETE/inconclusive/reverted: median2052.9375prefill /
+162.2247decode; pooledwhole+0.832% below3%, pooleddecode-1.677%. 58integrated/
+32realchecks PASS;96completeMLPmicrotimings +24.829%/25.253% discovery/heldout
+butdidnottransfermaterially. Source/harnessfrozen, all5gates passed. RestoredONLY
+2root/2AITerfiles, accepted64-rowE1 retained. PeakVRAM31.212GiB. Rawfive/source/
+ISA/micro underB04exp2-* andexp2-saved. Initialreset-failed transientGC caused
+zerorequest startupfailure; regeneratedidenticalunit, retainedfailurelogs. Do
+notreset-failed transientunit beforestart (wouldunloadit).
+
+CURRENT B04E3 designready, nocodeyet: cache-awareprefill viaSINGLElaunchuniform
+hit/missbranch inpackedGEMM, hitloadsresidentINT8/missoriginalpackeddecoder.
+AvoidB02two-launchcost whileusingaccepted64-rowtile/cohort. Read-onlylookupof
+alreadyallocatedcache; prefilldoesnotallocate,learn,admit,orrefresh. Cache5GiB/
+refresh128/originalspreserved. Nextimplementwrapper/kernel/find_projection and
+exactmixedhit/miss/graph/no-unwrittenreadschecks, KV/battery/realweights; select
+onefinalvariant thenEXACTLYfive. ReferenceB03E1originalfive/B04incumbent,
+retainedmetric1999.5434aggregateprefill/161.5316aggregatedecode. Diagnosticunit
+STOPPED afterE2 (session35470); runtimegate/outputB04. E2ledger/notes pending
+security/commit/push. LaterE4-E5 plannedonly.
 
 Campaign artifacts under agents/tmp/bolt-opt/loop/ (ignored): frozenrun.py,
 compare.py,phase_metrics.py,manifest-4k.json. benchmark.lock prevents overlap;
