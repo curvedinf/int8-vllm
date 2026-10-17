@@ -282,9 +282,7 @@ class PackedG128MoEMethod(FusedMoEMethodBase):
             cache=cache.down if cache is not None else None,
             block_size=block_size,
         )
-        return (
-            (y.view(*topk_ids.shape, -1) * topk_weights[..., None]).sum(1).to(x.dtype)
-        )
+        return ops.combine_experts(y, topk_weights, x.dtype)
 
 
 PackedG128MoEMethod.weight_loader.supports_moe_loading = True

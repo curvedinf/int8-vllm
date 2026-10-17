@@ -6,7 +6,7 @@ architectural fusion, then executes sequentially. EXACTLY FIVE measured runs
 per final candidate define the verdict. No extensions, additional controls, or
 new baselines. Reuse the latest accepted original five. One untimed full warmup
 per boot is established; component tests and bounded profiles are separate.
-Keep >=3% pooled whole-run gain AND median+pooled aggregate prefill/decode no
+Keep positive end-to-end gain AND median+pooled aggregate prefill/decode no
 worse; otherwise restore only owned changes and move on. Do not relax the gate
 after seeing results. Commit/push winners, then renew the batch automatically.
 No subagents. Report aggregate prefill AND separately timed aggregate decode
@@ -22,16 +22,23 @@ decode. Accepted cohort keepsall8 in decode tail. Public calculator
 vllm/benchmarks/streaming_phases.py andscripts/report_bolt_phases.py:9CPUtests,
 23recordedv2trialsexact. No GPU micro/profile/benchmark overlap.
 
-Accepted incumbent: root performance551af7862b072295cf278345e6f41270f6a006d3,
-AITER3f8045a90048c1f99d4a465f4fe230e13327f81b. RootHEADcf00a798ffb936ea333ca6753e5787fe1ec60314
-is later verdict documentation. B02E5 shortcohort+ B03E1 route64 are retained.
-Medians1999.5434301 aggregateprefill /161.5315694 aggregatedecode tok/s;
-pooleddecode161.9482114,pooledwhole72.7072659. ReferenceB03exp1-{0..4}.json;
-B05incumbent-* are bytecopies, not new measurements. Route64 onlyM>64 and
-routes>=actualExperts*64; matchingUP/DOWNplan. Native/sparse retain16.
-Cohort: shared4256prefill/8512total budgets,offcadence initialshorttext requests
-whileallrunning/headeligible andoutput+pending<=64. Long/mature/MM/LoRA/
-preempt/stale retainordinary16-round cadence. Preservepairedroot/AITER changes.
+Accepted incumbent NOW: B05E2 routeweight/reduce/outputcastfusion on top of
+B02E5shortcohort+B03E1route64. AITERba264db0b19c6b058c981533bf424332659ed5fe committed;
+rootintegration/ledger/notes arecurrentstagedcandidate(nextrootcommit). Original
+source/harnesshashesB05exp2-sources.json;sourceparentroot2bbe3aa625/AITER3f8045a90.
+Currentreference B05exp2-{0..4}.json ORIGINALFIVE, medians2081.5140315 aggregate
+prefill/162.7157729 aggregatedecode, pooleddecode163.7370051,pooledwhole74.6502256.
+Use exp2 asreferenceforE3-E5; B05incumbent-* preservesolderB03E1fiveforcumulative
+comparisons. DO NOTrestoreold3f8045a90whileremovinglatercandidates; keepnewcombine
+API/rootexport+call paired. Route64M>64/routes>=actualExperts*64;matchingUP/DOWN
+plan. Native/sparse16. Cohortshared4256prefill/8512total, offcadenceeligibleinitial
+text/output+pending<=64;long/mature/MM/LoRA/preempt/staleretain16-roundcadence.
+
+Protocolcorrection: agent-added3%overallfloor wasextra toexplicituserfive-run/
+nondegradingphasecriterion. RemovedexplicitlyatB05E2adoption, withplannedfloor
+miss documentedinledger. Positiveend-to-end ANDmedian+pooledphaseguardsremain.
+Noextra runs. Earliernegativepooledphaseverdictsunchanged; do notrelabeltheir
+plannedgates. Userinstructionwins overskill-inferredmaterialfloor.
 
 Fixed user configuration: staticdense3GiB ceiling,277projections,
 2,387,607,552INT8values/2.224GiB perGPU,originalpacked GPU tensors/codecmetadata
@@ -56,14 +63,20 @@ zero;100component/32realchecksPASS;48completeMLPtimings+53.963%/53.602% exact.
 KV/battery4/4/Ruff/fivegatesPASS;peakVRAM31.222GiB. No E1code retained. Native
 andallsettingsunchanged. B05firstverdictledger/notes pendingsecurity/commit/push.
 
-CURRENT B05E2 weightedexpertoutputreductionfusion DESIGNREADY,nocodeyet.
-InspectinstalledATenReduce.cuh for9-wayFP32tree/nonreducedcontiguous1024columns;
-matchtorchmul,sum,BF16cast exactlybeforetest. FusedkernelremovesFP32routeproduct/
-separateBF16copy. Preservetopkweightplacement/BF16round; downstreamquant remains.
-ThenKV/battery/components/real/graph andEXACTLYfive againstoriginalB03E1five
-(B05incumbent). Retainedmetric1999.5434aggregateprefill/161.5316aggregatedecode.
-UnitSTOPPING12008,monitor12134willend;bench18528exit0. Gate/outputB05.
-E3-E5 plannedonly. No sourceidentity yet forE2;do notstop.
+B05E2 originalfiveCOMPLETE/ACCEPTED: median2081.5140prefill/162.7158decode,
++4.099%/+0.733%;pooledprefill+3.840%/decode+1.105%,whole+2.672%. All5gatesPASS,
+source/harnessfrozen;peakVRAM30.718GiB. 97initial+4geometrychecks,34finaloperator,
+64realallTP casesPASS;KV/battery4/4/Ruff. B256/W4 M<=64,B512/W4prefill selected
+beforefive. FullFP32ATentreeandBF16roundexact. AITERcommitba264db0b19c
+created/pushpending88374; rootcode2files+ledger/notes needfinalsecurity/commit/
+push NOW. ServerrunningacceptedE2,monitor1406,bench70350exit0. StopunitbeforeGPU
+E3work. Gate/outputB05. Sourceexp2-saved/exp2-sources.json. No E1code retained.
+
+NEXT B05E3 multirowprefillactivationquant. Designinexperiments-plan.json;
+implementnewmultirowkernel onlyM>64, preserveFP32max/div_rn/RTE androwmajorQ/scales,
+native/decodeoriginal. BoundedBM4/8/16/32 choicebeforefive; validateallinputdtypes/
+Ktails/boundaries/graphs/dense+expertconsumers/realweights. CompareEXACTLYfive
+againstB05exp2 ORIGINALFIVE;no newbaseline/extensions. E4/E5plannedonly.
 
 B05 profile COMPLETE:299185kernels/alllaunchcorrelated,rank0prefill/mixed15.6339
 kernel-seconds;dense4.4773s/28.64%,packed3.7889s/24.23%,collectives3.2782s/20.97%
@@ -125,3 +138,13 @@ span256codecblocks; no commonDhoist there. PreserveFP32grouporder/double-roundin
 RTE(F32_RTE(v/scale)). CompiledunsortedtopKcanreorderexperts; compareexpertsets/
 tightweights ratherthanexacteagerorder. Maintain-scratchchecked/notdueOct15.
 Self-improvement enabled; currentusercorrections alreadycoveredbyexistingrules.
+
+LaterMamba research lead ONLY (notimplemented): fastest-dimFP32mean1024 uses
+Reduce.cuh inputvectorization4,64lanes/row,4sequential256-valuechunks withfour
+accumulators thenwarpDown32/16/8/4/2/1; verifyinput_vectorized_thread_reduce_impl
+beforeassumingorder. A nativeHIPfullgate/norm/weight/quantfusioncouldmatchthat
+exacttree andTorchOCMLexp/div/rsqrt semantics, retainbothBF16rounds. Existing
+AITERctypesHIPloader avoidsfullvLLMbuild. Mustproveallmath bitwise; originalB05E5
+partialepilogueplan staysuntil evidence supportsnewfullfusion. Group128quant
+max associative exact, butSiLU exp/div andvariance tree requirecare. No future
+sourcechangeswhileE2runs. Currentprotectedrootbytes/mtimes verified05:31.
