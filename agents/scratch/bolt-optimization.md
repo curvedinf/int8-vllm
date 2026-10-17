@@ -22,7 +22,7 @@ AITERba264db0b19c6b058c981533bf424332659ed5fe, bothmain/pushed/remoteverified.
 B05E2 exact routeweight/reduce/outputcast fusion atop B02E5shortcohort and
 B03E1route64. Reference B05exp2-{0..4}.json ORIGINALFIVE: median2081.5140315
 aggregate prefill/162.7157729aggregate decode; pooleddecode163.7370051,
-pooledwhole74.6502256. Use exp2 forE4/E5, no newbaseline.
+pooledwhole74.6502256. Use originalfive forB06E4/E5, no newbaseline.
 
 B05E3 COMPLETE/reverted afterfive: median2152.7672311prefill/165.0328814decode,
 pooleddecode162.2629241(-0.900%), whole+1.843%.142component/regression checks,
@@ -67,7 +67,7 @@ values zero;84components/64actualallTPcases PASS;KV/battery4/4/Ruff. LUT4KiB
 reservation fitunchanged4565pairs/allGPUs. Allsource/proofs/originalfive retained
 B06exp1-saved/exp1-*. Restoredonly4trackedAITERfiles andremovedbacked-upnewtest;
 AITERcleanba264/acceptedcombine retained. Rootruntimeunchanged. Server stopped;
-bench67897/monitor88109 exited0. New ledger/notes pendingcommit.
+bench67897/monitor88109 exited0. Ledger989cf1caeb pushed/remoteverified.
 
 B06E2 COMPLETE/inconclusive/reverted afterexactlyfive: median2088.2307235prefill/
 161.6718427decode,pooleddecode162.2723956(-.894%),medianprefill+.323%/decode
@@ -75,19 +75,26 @@ B06E2 COMPLETE/inconclusive/reverted afterexactlyfive: median2088.2307235prefill
 FP32/BF16/INT8/scalesexact.237eligible/40fallbackstatics preservedonecopy/bytes;
 peak30.971GiB. Allsource/originalfive B06exp2-saved/exp2-* retained. Restoredonly
 2AITERfiles/removedverifiednewtest; AITERcleanba264/acceptedcombine. Serverstopped,
-bench75994/monitor39821 exited0. E2ledger/notes pendingcommit;E1989cf1caeb pushed.
+bench75994/monitor39821 exited0. E2ledger1b492bcd63 pushed/remoteverified.
 
-ACTIVE B06E3 wideIQ2headerreads: inactiveprototype decode_u16_prototype.py and
-independentbyteoracle passed150994944FP32bitcomparisons acrossALL65536FP16
-patterns(inclNaNs/Inf/signzero),nineoffsets/tails/cross256; proofsession5751exit0.
-No E3productionchanges yet. Nextintegratenew_decode3uint16loads replacing6byte
-loads, preserveFP32operations andoriginalbytesoracle fortests/micro. NativeHIP
-unchanged; shareddecoderusedprefill/cachefill/weightscaleprep. VerifygeneratedISA
-reallyreducesloadinstructions; allTP/cache/graph/actualweights +KV/battery, then
-fixedEXACTLY5 versusoriginalB06incumbent five. Preserveoriginalexpertstorage and
-cachebudgets; no LUTretained. Sourceword_reads_original.py snapshotsoriginalcore.
-RemainingE4attentionmetadata/E5sharedinputquantreuse inplan; nofuture runtimeedits
-whilecurrentcandidatefive runs. RootruntimebacktoacceptedE2; no newbaseline.
+B06E3 COMPLETE/rejected/reverted afterexactlyfive: median2098.7817504prefill/
+154.1559830decode,pooleddecode158.5602029(-3.162%),medianprefill+.830%,whole-.652%.
+GPU150994944F32bitcomparisons/all65536halfpatterns inclNaN/Inf zero;93components/
+64actualallTPcases exact,KV/battery4/4/Ruff PASS. ISA98ubyte ->80ubyte+9ushort;
+completeMLP+3.009%4096/+3.593%heldout4160 didnotpassstackguard. Allsource/proofs/
+originalfive B06exp3-saved/exp3-* retained. Restoredonlydecoder/removedverifiedtest;
+AITERcleanba264/acceptedcombine retained. Serverstopped,bench52456/monitor73668
+exited0;allcap/token/source/harness gatesPASS,peak30.7184GiB. Initialcomponent
+attempt brieflyoverlappedfinishingbattery,terminated143 thenreran93afterbattery
+exit0;no measuredtrial affected. E2ledger1b492bcd63 pushed/remoteverified.
+
+ACTIVE B06E4 attention: inactiveCPUprototype attention_unroll_prototype.py and
+attention-probe.py inB06. ExistingROCM_AITERbackend groupedG128 routesroot
+triton_unified_attention.py; head128/localQ8/KV1(GQA8),BLOCK_M16/BLOCK_Q2,KVtile32.
+Boundedunroll2/4 plusONEquerytile64 choice, keytile32/MFMA16 fixed; sequential
+QK/softmax/PV recurrence, pageindexreuseacrossadjacenttiles, native/decode guard.
+OnlyCPUignoredprototypes yet, noE4runtime edits. InitialGPUprobe94229 exit0: all4boundedvariants bitwiseequal
+AFTERE3bench/monitor/stop exit0. NoGPUoverlap. Reference stays originalB05E2five.
 
 ## Fixed serving contract
 
@@ -147,7 +154,7 @@ Profileonewarmup+boundedrank0capture32steps/chunk, activegate removedfinally;
 profiletimes excludedfrommetric. monitor.py samples sysfs2s/noGPUcontext.
 
 Isolatedbolt-opt-loop.service port8021,Usercurved,MemoryMax56GiB/Swap8GiB;
-7-8minfreshboot. Runtime lifecycle dropinB05; activegate must beabsent before
+7-8minfreshboot. Runtime lifecycle dropinB06; activegate must beabsent before
 bench. HotreloadcanOOM byduplicating~0.5GBscales. Stop143/failed is normal;
 DO NOTreset-failed (GCs transientunit). If unit disappears,recreate identical
 properties/envfile privately. Never print APIkey/fullenv; runner reads private
@@ -178,11 +185,3 @@ llvm-objdump --offloading extractssidefiles; useignoredcopies. NativeMT>1 must
 match16*MTplan/COUNT. Actualexpertcounts240-496,never512. Maintain-scratch checked/
 notdueOct15. Existing skill criteria alreadycover usercorrections; no duplicate
 refinement added.
-
-UpcomingE3 inactiveGPUoracle/prototypes ready inB06decode_u16_prototype.py/
-check-word-reads-gpu.py; notrunyet. E4activepathcorrectedbeforeimplementation:
-ROCM_AITERbackend groupedG128 dispatchesroottriton_unified_attention.py,not
-genericAITER2Dkernel. Checkpointhead128/localQ8/KV1(GQA8), rawtracegrids2049..
-2084x1/256threads =>BLOCK_M16/BLOCK_Q2,defaultKVtile32. Planallowsbounded
-metadataunroll2/4 plusONEquerytile64 option, Ktile32/MFMA16 fixed/native
-decodeguardunchanged; mustprovebitwise. No E3-E5runtimeedits duringE2five.
