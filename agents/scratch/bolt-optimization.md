@@ -79,12 +79,22 @@ inconclusive/reverted. Median1991.8908prefill/155.5264decode; pooledwhole
 KVmicro,battery4/4 allpass. Sources/rawfive/ISA exp3-* retained; no extensions.
 All3productionAITerfiles restored to3f8045a90 andonlybacked-up newtest removed.
 AITERclean baseline. Rootaccepted performance551af7862b; laternotesonly commits.
-Diagnostic unit STOPPED; E4 KVmicro PASS, battery session82842 active, then run
-26inactive MLP exact/cache/graph tests (test_inactive_mlp.py) with GPU0 and no
-server. They bind CPUcompiled full/groupwise .so through mlp_probe.py. Resolve
-correctness, realcheckpoint, boundedmicro variant selection before deploying
-one final E4 source and running EXACTLYfive vs acceptedE1. Current accepted
-aggregate1999.5434prefill/161.5316decode remains reference.
+E4 originalfive COMPLETE/rejected/reverted. Median1765.6621prefill /
+140.9061decode; pooledwhole-12.354%, medianprefill-11.697%/decode-12.769%.
+18final integrated checks +46unaffected checks and64actualcheckpoint cases
+exact; KV/battery4/4 pass. All7ownedsource/testfiles restored; removedonly
+itsbacked-upnewtest. E1route64/cohortincumbent remains1999.5434/161.5316.
+E4source/rawfive/codegen/micro/failurelogs exp4-* retained. Do not repeat
+full/groupwise MLP fusion without reducing register/Y-traffic cost.
+
+Diagnostic unit STOPPED. E5 KVmicro PASS,battery4/4 PASS. Prototype session
+82124 is running17inactive staging checks (test_inactive_staging.py) onGPU0 withoutserver.
+Demand-filtered32MiB staging prototype exp5-stage-prototype.py plusoffline
+compiler proofready; uses routeplan presence flags inworkspace tail. No E5
+GPUvalidation/perf yet. Native decode must stay original; temporary staging
+prefillonly, persistent5GiB expertcache/originalpackedweights unchanged.
+Aftercorrectness/realweights/boundedchunkselection integrate ONEfinalvariant
+andrun EXACTLYfive vs acceptedE1. AfterE5 beginfreshprofile andnextfive scopes.
 
 Batch03 incumbent profile COMPLETE:305783 launch-correlated kernels,
 22.2209rank0 prefill/mixed kernel-seconds, packed10.2139s/45.965%. RawGPU
@@ -227,3 +237,9 @@ chunk tails/skew/TP offsets/graphs. NoGPUvalidation yet. E1peak observedVRAM
 31.223GiB (~795MiB nominalheadroom), so32MiB staging is bounded; persistent
 expertcache remains5GiB. Prototypes are ignoredfiles only and do not alter
 currentE3source. Noadditionalperformance controls/repeats authorized.
+
+E5inactive staging now demand-filters unselectedexperts using routeplan flags.
+Flags occupy tail ofsame32MiB workspace, avoiding extra allocations or persistent
+cachecapacity. _stage skips unselectedE; groupedGEMM chunk guards prevent reading
+unwritten intermediate data. Offlinecompiler probe updated andpasses, liveE4
+source unchanged. GPU17case staged suite remains unrun until E4 completes.
