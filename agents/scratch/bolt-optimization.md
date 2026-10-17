@@ -48,24 +48,46 @@ muststaydown (runnerchecks everyrun); production vllm-bolt stopped. Never start
 production alongside isolated bolt-opt-loop. Fullfidelity/256kvalidation deferred
 by user; do not claim it passed. Do not resume old acceptedmemory testing.
 
-CURRENT: B03 allfive experiments complete. E1route64 is the only retained
+B03 allfive experiments complete. E1route64 is the only retained
 B03performance change; E2-E5 reverted. E5 originalfive median1889.1058prefill /
 160.4105decode, pooledwhole-4.291%, pref-5.523% ->reject. 18prototype/64integrated/
 32realchecks pass; synthetic sparsegain didnottransfer. Exactcode/rawfive/hashes
 exp5-saved/exp5-sources.json andotherexp5-* retained. RestoredONLY3rootfiles and
 removedONLY2backed-up AITERnewfiles; AITERclean3f8045a90. No E3/E4 restored.
 
-Batch04freshprofile next, NOTa newbaseline. Runtime lifecycle dropin moved to
-batch04 anddaemon-reloaded; directoryalreadycurved-owned. DiagnosticunitSTOPPED,
-incumbentKV micro PASS,battery session6754 active, thenbootacceptedE1. Run
-run.py profile incumbent --batchbatch04, monitorincumbent; record sessions when
-launched. Profile includesoneuntimedwarmup andboundedrank0trace, not fiveperf
-runs; keepacceptedB03E1 originalfive asmetric/reference. Analyze freshprofile,
-identify currentcomputeopportunities anddesign FIVE newscopes witharchitectural
-work beforeimplementation; thenexecuteeachsequentially/exactlyfive. No stop at
-batchboundary. Currentmetrics1999.5434aggregateprefill/161.5316aggregatedecode.
-E5ledger row/notes readyforsecuritygate/commit/push; pendingrootchanges are
-notes/ledger only beyondprotected unrelatedwork.
+Batch04profile COMPLETE (acceptedE1, not anewbaseline):302448launch-correlated
+kernels,15.8475rank0prefill/mixedkernel-seconds. Dense/otherGEMM4.4805s/28.27%,
+packed3.8064s/24.02%,collectives3.4533s/21.79%(includeswaiting),attention1.5228s/
+9.61%. Rawtraces/CSV/analysis/opportunities underbatch04. Runtimegate/output
+batch04. ExistingB03E1 originalfive copiedbyte-for-byte tobatch04/incumbent-*,
+retainedmetric1999.5434aggregateprefill/161.5316aggregatedecode. No new five-run
+baseline wasrun. Sourceidentityincumbent-sources.json. B03verdictledger published
+root77098ba09a; AITER3f8045a90 clean.
+
+B04experiments-plan.json registers FIVEscopes beforeimplementation:1two-page
+initialshortcohort admission;2largerexpert128-row reuse;3cachedINT8prefill reuse
+withguardedpackedmisses;4denseUP/activation/quant epilogue fusion (dense share now
+larger, revisit onlywithnewshapes);5ROCmsharedexpert fork/join overlap (existing
+auxstreamCUDA-alike but decisionCUDA-only, threshold256). Readsourceconfirmed
+sharedexpertinput4096 differsfromroutedlatent1024, so no directshared/routed
+activationquant reuse. No future experiments implemented yet.
+
+B04E1 originalfiveCOMPLETE/inconclusive/reverted: median2069.0517prefill /
+159.0614decode; pooledwhole+0.277% below3%, medianprefill+3.476%/decode-1.529%.
+58CPUchecks,KV/battery4/4 passed. Startup pages2verified. Restoredonly3ownedroot
+files; originalonepagecohort retained. Allsource/rawfive underB04exp1-*.
+
+CURRENT B04E2 API exploration APPLIED onlyAITerwrapper/test_route_tiles. Adds
+block128 andexplicitnum_warps4/8 whiledefaultremainsold4 andnativeunchanged.
+No selectedperformance configyet; rootmethod unchanged. KV micro PASS, battery4/4
+and43componentchecks PASS. Boundedmicro64/4 vs64UP8-DOWN4 vs64/8 vs128/8
+active session22921 (exp2-thread-micro.log); thenrealweights beforeboot.
+ReferenceB03E1 originalfive unchanged.
+OfflineISA underB04 exp2-* showslarger128 tile increasesprivate spills (sample
+DOWN640:636B vs100B baseline);64/8 UP48B/DOWN240B, so direction-awarechoice may
+matter. SelectONEfinalconfigbeforeEXACTLYfiveC8runs; noextensions. Diagnostic
+unitSTOPPED, lifecycle gate/output B04. E1verdictledger/notes includedwiththis
+checkpoint. LaterE3-E5 onlyplanned, no runtimechanges.
 
 Campaign artifacts under agents/tmp/bolt-opt/loop/ (ignored): frozenrun.py,
 compare.py,phase_metrics.py,manifest-4k.json. benchmark.lock prevents overlap;
