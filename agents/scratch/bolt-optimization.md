@@ -65,30 +65,38 @@ ANDdisabled. nginx stopped; no80/443listeners. Installed Bolt thermal dependency
 renamed thermal-controller.conf.disabled-static-cache-test; do not reintroduce.
 Production vllm-bolt stopped; never start alongside isolated diagnostic unit.
 
-Diagnostic unit ACTIVE with accepted B03E1; five complete, no active benchmark.
-B03E1 monitor session70399 exits on stop. Originalbench session89710 complete.
-Source/diff exp1-saved; exp1-sources.json; allchecks/source/hardware verified.
-B03 profile COMPLETE:305783 launch-correlated kernels,22.2209rank0 prefill/mixed
-kernel-seconds, packed routed10.2139s/45.965%. RawGPU traces remain batch02/
-host/gpu/batch03-incumbent-* because old runtimegate pointedthere. CSV/analysis
-and opportunities saved batch03/. Current runtime lifecycle host/gate now
-point to batch03, next capture should use --batch batch03. Profile timings
-excluded. E1five are current metric; no need another profile before E2.
+Diagnostic unit STOPPED after E2 originalfive. E2 inconclusive/reverted:
+median2123.8428prefill/159.4790decode; pooledwhole+2.642% below3%,
+mediandecode-1.271%/pooled-1.936%. Originalfive sole metric; no extensions.
+44componentchecks (allfinitehalfscales),32realchecks,48boundedmicrotimings
+exact; sources/ISA/design/rawfive/decision under batch03/exp2-*. Current
+incumbent remains E1 at1999.5434prefill/161.5316decode, pooledwhole72.7073.
+E2kernel restored to3f8045a90; only its backed-up untracked test removed.
 
-Batch03 experiments-plan.json preregisters five scopes:1route reuse ACCEPTED;
-2IQ2 header memory layout;3native UP/ReLU2/quant fusion with row-leader scales;
-4whole expert MLP fusion;5bounded temporary INT8 expert staging. E2prototypes
-are INACTIVE ignored files only; active runtime source frozen. Offline codegen
-shows naive16-bit headers can increase load count. Eightway header broadcast
-(exp2-eightway-full.py) cuts repeatedheader work; keep original byte decoder
-for ungrouped/misaligned paths and scale preparation, then independent GPU
-checks before final five. Root memory/precision/cache/admission fixed.
-E3inactive leader-scale nativeprototype compiles;6whole-kernel precise divisions
-vs old8epilogue,2barriers. E4inactivewholeMLP prototype MT1/2/4: bounded512-thread
-codegen MT1no spills/128VGPR;MT2has33spills/136private bytes;MT4has360spills/
-1056private. Need reduce registers or limit nativefusion; do not blindly deploy
-spillingprefill kernel. All sources/ISA/buildlogs under batch03/exp{2,3,4}-*.
-Continue E2 now, exactlyfive per candidate; no GPU experiments overlap serving.
+E3 nativeUP/ReLU2/GS128INT8 fusion APPLIED but not yet GPUvalidated. Only
+AITER nativeHIP/nativePython/packed-wrapper/new nativequant test touched;
+prepared exact sources exp3-next-source/. Retains E1 routeblock64 API. Output
+scale computed once perrowleader,2barriers, fullFP32 division/RTE. No approximate
+quotient. KVmicro PASS; battery session92107 active, then50componentcases and32real
+checkpoint checks at m8/64 before boot. Then exactlyfive vs accepted E1, no
+newbaseline. Inactive leadercodegen9->6wholekernel precise divisions, no spills.
+Runtime nextboot lifecycle gate/output points to batch03. No overlappingGPU
+work. Roothead551af7862b/AITERhead3f8045a90 are accepted baseline; pending E3
+performance code is uncommitted. Preserve unrelated rootchanges.
+
+Batch03 incumbent profile COMPLETE:305783 launch-correlated kernels,
+22.2209rank0 prefill/mixed kernel-seconds, packed10.2139s/45.965%. RawGPU
+traces remain batch02/host/gpu/batch03-incumbent-* (old runtimegate). CSV,
+analysis/opportunities under batch03. Timings excluded from performance metric.
+Plan:1route reuse ACCEPTED;2headerbroadcast reverted;3rowleader fusion underway;
+4whole expert MLP fusion;5bounded temporaryINT8 expert staging. E4inactive
+full/groupwise native prototypes and direct binding mlp_probe.py CPUcompile.
+Fullsinglelaunch MT1 no spills/128VGPR; largerprefill variants spill even with
+knownshape specialization. Groupwise fusedUP/ReLU2/quant/DOWN with ordered
+FP32 Y feedback removes full-H register array: MT1/2/4 use51/83/125VGPR, no
+spills/private. SameMAC/grouporder; tradeoffmoreYtraffic/3-5launches. Need GPU
+exactness, realcheckpoint/graph and boundedmicro variant selection AFTER E3.
+No E4GPUtests or perfclaims yet; design exp4-fusion-design-research.json.
 
 Batch02 reference profile:590501kernels/alllaunchcorrelated; prefill+mixed
 23.3892rank0kernel-seconds, packedrouted10.3514s/44.257%;collectives3.8049s
