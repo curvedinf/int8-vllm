@@ -73,16 +73,18 @@ exact; sources/ISA/design/rawfive/decision under batch03/exp2-*. Current
 incumbent remains E1 at1999.5434prefill/161.5316decode, pooledwhole72.7073.
 E2kernel restored to3f8045a90; only its backed-up untracked test removed.
 
-E3 nativeUP/ReLU2/GS128INT8 fusion APPLIED but not yet GPUvalidated. Only
-AITER nativeHIP/nativePython/packed-wrapper/new nativequant test touched;
-prepared exact sources exp3-next-source/. Retains E1 routeblock64 API. Output
-scale computed once perrowleader,2barriers, fullFP32 division/RTE. No approximate
-quotient. KVmicro PASS; battery session92107 active, then50componentcases and32real
-checkpoint checks at m8/64 before boot. Then exactlyfive vs accepted E1, no
-newbaseline. Inactive leadercodegen9->6wholekernel precise divisions, no spills.
-Runtime nextboot lifecycle gate/output points to batch03. No overlappingGPU
-work. Roothead551af7862b/AITERhead3f8045a90 are accepted baseline; pending E3
-performance code is uncommitted. Preserve unrelated rootchanges.
+E3 nativeUP/ReLU2/GS128INT8 rowleader fusion originalfive COMPLETE,
+inconclusive/reverted. Median1991.8908prefill/155.5264decode; pooledwhole
+-1.415%, medianprefill-0.383%/decode-3.718%.50componentchecks/32realchecks,
+KVmicro,battery4/4 allpass. Sources/rawfive/ISA exp3-* retained; no extensions.
+All3productionAITerfiles restored to3f8045a90 andonlybacked-up newtest removed.
+AITERclean baseline. Rootaccepted performance551af7862b; laternotesonly commits.
+Diagnostic unit STOPPED; E4 KVmicro PASS, battery session82842 active, then run
+26inactive MLP exact/cache/graph tests (test_inactive_mlp.py) with GPU0 and no
+server. They bind CPUcompiled full/groupwise .so through mlp_probe.py. Resolve
+correctness, realcheckpoint, boundedmicro variant selection before deploying
+one final E4 source and running EXACTLYfive vs acceptedE1. Current accepted
+aggregate1999.5434prefill/161.5316decode remains reference.
 
 Batch03 incumbent profile COMPLETE:305783 launch-correlated kernels,
 22.2209rank0 prefill/mixed kernel-seconds, packed10.2139s/45.965%. RawGPU
@@ -215,3 +217,13 @@ UP/middle global buffers and launches; inspect VGPR/spills before five trials.
 Need exact independent full-MLP oracle, partial widths/TP offsets/cache misses
 and graph replay. No implementation yet. Select five distinct mechanisms from
 fresh profile, implement sequentially, run exactly five per candidate.
+
+Inactive future checks ready under batch03: mlp_probe.py plus
+test_inactive_mlp.py (26full/groupwise exact/cache/graph cases); run only after
+E3 completes and server stops. E5exp5-stage-prototype.py compiles offline
+(stage2KiB LDS/GEMM16KiB) with32MiB workspace/CHUNK32, chunk-guarded UP/DOWN,
+same grouporder and alloriginalprecision; test_inactive_staging.py17cases for
+chunk tails/skew/TP offsets/graphs. NoGPUvalidation yet. E1peak observedVRAM
+31.223GiB (~795MiB nominalheadroom), so32MiB staging is bounded; persistent
+expertcache remains5GiB. Prototypes are ignoredfiles only and do not alter
+currentE3source. Noadditionalperformance controls/repeats authorized.
