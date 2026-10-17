@@ -32,17 +32,16 @@ arithmetic preserved. BM16 selectedfrom4/8/16/32 beforefive, weighted kernel
 originalfive andchecks inB05exp3-* /exp3-saved. AITER restored exactly toba264;
 newquantizer test removed onlyafter snapshot verification. No E3code retained.
 
-ACTIVE B05E4 immutable denseFP32scale layout. Server stopped afterE3;monitor9324
-andbench46849 exited0. Pre-implementationmicro session73092 compares original
-versus N-contiguous groups usingexisting stride-aware GEMM; logB05exp4-scale-
-layout-micro.log. No production E4code yet. Prepared scale-layout-micro.py and
-check-layout-real.py ignored. Then implement transpose-copy-transpose ONLY at
-staticpromotion AFTER expansion; replace resident entry and freeoldlayout.
-Keep expert/lazy groups raw row-major. Exactvalues, sameFP32metadata bytes,
-cacheceilings/ownership unchanged. Test ownership/graph/allcodecs/realprojections,
-KV/battery; freeze sources then exactlyfive exp4 versus exp2 originalfive.
-B05exp4-dense-shapes.json:277 runtime projections,2387607552INT8values,14shapes;
-checkpointmerges8QKV and5draft gate/up explain298raw->277runtime.
+B05E4 COMPLETE/reverted: exactlyfive median2111.7576106prefill/164.3918404decode;
+pooleddecode163.6306389(-0.06496%),whole+1.080%. Tinynegative isnotcausalproof;
+no extra runs or gate changes. KV/battery4/4/Ruff,29components and78actual
+checkpointcases exact.112operator timings+6.756%4096/+6.882%4160. Source/rawfive
+exp4-saved/exp4-* preserved. Restored onlypacked_dense_cache.py/removednewtest;
+AITERcleanba264. Server stopped, bench24441/monitor22433 exited0. B05E3 ledger/
+notes e2686252a9 pushed/remoteverified. Acceptedreference stays exp2 originalfive.
+
+ACTIVE B05E5 prototype component selection session89510, inactiveignored
+mamba_quant_prototype.py/mamba-quant-micro.py. No runtime E5source yet.
 
 B05E5 planned Mamba normalization producer fusion; inspect ignored
 B05exp5-seam-design.json. BoltusesMambaMixer2,notQwenGDN. Groups8/TP4/localI2048,
