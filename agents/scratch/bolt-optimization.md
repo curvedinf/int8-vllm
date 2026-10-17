@@ -17,8 +17,9 @@ check clock, shorten reasoning, keep waits below30seconds.
 
 ## Current state and next action
 
-Accepted incumbent: B07E1 dedicated4256-pageG128prefill,nowinrootworkingtree
-forpublication to main; AITERba264db0b19c6b058c981533bf424332659ed5fe unchanged.
+Accepted incumbent: B07E1 dedicated4256-pageG128prefill,rootmain
+a079b82640a6b07a652b96947a66f2d08e0eae16 pushed/remoteverified; AITERmain
+ba264db0b19c6b058c981533bf424332659ed5fe unchanged/pushed.
 B07exp1-{0..4}.json ORIGINALFIVE isreferenceforE2..E5: median2235.6512733aggregate
 prefill/165.5856116aggregate decode;pooleddecode166.8156138,pooledwhole78.4761416.
 Do notoverwriteB07incumbent-{0..4} (oldB05E2five) orrerunbaseline. ExistingB05E2
@@ -137,18 +138,25 @@ KeeporiginalgenericJITsource andall6native/genericISAidentical.35productiontests
 26prototypebitchecks,14finalsourcebitchecks,KV/battery4/4/newRuffPASS. OnlyBM16/64
 choices:actual4256-pageoriginal4096 11.88739ms->64 4.50232;heldout4160 12.26406->
 4.64174. Frozen3source/testfiles exp1-saved/exp1-sources.json. Accepted3files+
-ledger/note needfinalstagedsecurity/commit/push;usebothpubliccreditreviewflagsbelow.
+ledger/note publishedunder a079b82640;finalstagedsecurity PASS withbothpubliccredit
+reviews, eight unchanged/copiedpublicauthorcredits distinguishedfromprivatedata.
 
-NEXTB07E2 isolatedfactorIQ2. Inactivefactor_isolated_prototype.py/factor-original.py/
-check-factor-isolated-gpu.py ready,NOTRUN. factorhelper usesincumbent128-lanebyte
-metadata,no8wayloads/nocachehit/nativechanges; finitecommon256base usesintegerterm
-andalpha=(D*.125)*DIVRN(1,originalF32sw). Crossing256/nonfiniteD tile explicitold
-_decoder fallback. CPU149323776signed-case proofreusedconditions/hash recorded
-exp2-reused-cpu-proof.json;independentGPU65536halfpatterns/allunaligned/tails/
-crosscasesstillREQUIRED. Expandedoffset1commonblockneedsGPUproof. AfterE1publish,
-runthisoraclethenactualcompleteMLP/micro/constraints;newprefill-onlykernelcopy
-keepsoriginalgeneric/native/cachefillfunctionsunchanged. No E2runtimeeditsyet.
-Referenceexp1originalfive,notoldincumbent. Sourcegroups/cachebudgetsunchanged.
+B07E2 COMPLETE/inconclusive/reverted afterEXACTLY5: median2273.6122105aggregate
+prefill/165.3744938decode;pooleddecode166.128282(-.412%),medianprefill+1.698%/
+decode-.127%,whole+.602%. ALL4qualifiedbeforefirsttrial;alltoken/cap/source/harness/
+coherencegatesPASS,sampledpeak30.719116GiB. CPU149323776finiteproofreused;newGPU
+184549376values/ALL65536halfpatterns/22offset-tailcaseszero.88components/84actual
+allTPcheckpointcasesPASS;KV/battery4/4/Ruff. Two preregisteredvariants only: guarded
+completeMLP+2.121%4096/+2.099%4160selected;unguarded+.059%/-.061%rejectedBEFOREfive.
+Both184MproofsPASS. Originalbyte/native/cachefill/cachehit unchanged, dedicated
+prefillkernel. Restoredonlyrootmarker/AITERwrapper,removedtwohash-verifiednewfiles;
+acceptedE1attention/roota079 andAITERba264 retained. Bench45545/monitor13251/stop31285
+exit0;serverstopped. Allsource/proofs/originalfive exp2-saved/exp2-* retained.
+
+ACTIVEB07E3: isolateplainbiasfreeBF16prefill finalGEMMstore,avoidF32output+cast;
+noUPquant/relu2composition. ImplementseparateAITERprefillwrapper/rootdispatchfor
+residentPackedG128andNVFP4; keeporiginalnative/defaultF32/biaspaths unchanged.
+UseoriginalB07exp1five asreference,NOToldincumbent,no newbaseline or extensions.
 
 E1precommitpubliccredits: originalanddedicatedsource retain4upstreamauthorlines
 EACH. Securityhelper nowacceptsmultiple --public-attribution-review flags, checks
