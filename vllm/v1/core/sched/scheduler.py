@@ -29,10 +29,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsManager,
 )
-from vllm.profiler.lifecycle import lifecycle
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.utils import get_mm_features_in_window
+from vllm.profiler.lifecycle import lifecycle
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -417,10 +417,32 @@ class Scheduler(SchedulerInterface):
                 self.max_num_scheduled_tokens,
             )
         self._step_prefill_limit = 0
+        self.short_prefill_cohort = (
+            os.environ.get("VLLM_BOLT_SHORT_PREFILL_COHORT", "0") == "1"
+        )
+        if self.short_prefill_cohort:
+            logger.info(
+                "Initial short-prefill cohort: page=%d tokens, output horizon=%d",
+                self.block_size,
+                self.max_num_running_reqs * (self.num_spec_tokens + 1),
+            )
         self.prefix_fair_admission = (
             os.environ.get("VLLM_GFX908_PREFIX_FAIR_ADMISSION", "0") == "1"
         )
         self._prefix_bypassed_heads: set[str] = set()
+
+    def _short_prefill_cohort_eligible(self, request: Request) -> bool:
+        """Bound early single-page admission without delaying mature decoders."""
+        horizon = self.max_num_running_reqs * (self.num_spec_tokens + 1)
+        return (
+            request.num_prompt_tokens <= self.block_size
+            and request.num_output_tokens + request.num_output_placeholders <= horizon
+            and request.status in (RequestStatus.WAITING, RequestStatus.RUNNING)
+            and not request.num_preemptions
+            and not request.num_stale_output_tokens
+            and not request.mm_features
+            and request.lora_request is None
+        )
 
     def _prioritize_cached_waiter(self, queue: RequestQueue, budget: int) -> None:
         """Allow one short cached follow-up ahead of each long FCFS head.
@@ -613,6 +635,7 @@ class Scheduler(SchedulerInterface):
             else 0
         )
         prefill_budget = self._step_prefill_limit or token_budget
+        short_cohort_step = False
         if (
             self._step_prefill_limit
             and self.current_step % self.mixed_prefill_interval != 0
@@ -621,6 +644,15 @@ class Scheduler(SchedulerInterface):
             # rounds. Prefills advance at least once per interval; once no
             # decoders remain, ordinary bulk prefill resumes immediately.
             prefill_budget = 0
+            if self.short_prefill_cohort and all(
+                self._short_prefill_cohort_eligible(r) for r in self.running
+            ):
+                queue = self._select_waiting_queue_for_scheduling()
+                if queue and self._short_prefill_cohort_eligible(queue.peek_request()):
+                    # Fill an initial short cohort using the same shared budget.
+                    # Long prompts and established decoders retain the cadence.
+                    prefill_budget = self._step_prefill_limit
+                    short_cohort_step = True
         spec = self.vllm_config.speculative_config
         draft_slots = spec.max_num_new_slots_for_drafting if spec is not None else 0
         input_budget = self.scheduler_config.max_num_batched_tokens
@@ -718,6 +750,10 @@ class Scheduler(SchedulerInterface):
             is_prefill = request.num_computed_tokens < request.num_prompt_tokens
             if is_prefill:
                 num_new_tokens = min(num_new_tokens, prefill_budget)
+                if short_cohort_step and not self._short_prefill_cohort_eligible(
+                    request
+                ):
+                    num_new_tokens = 0
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
@@ -1140,6 +1176,11 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens = min(num_new_tokens, request_token_budget)
                     if num_computed_tokens < request.num_prompt_tokens:
                         num_new_tokens = min(num_new_tokens, prefill_budget)
+                        if (
+                            short_cohort_step
+                            and not self._short_prefill_cohort_eligible(request)
+                        ):
+                            num_new_tokens = 0
                         if num_new_tokens == 0:
                             break
                     assert num_new_tokens > 0

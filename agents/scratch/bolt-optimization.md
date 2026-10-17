@@ -11,7 +11,7 @@ decode degradation, commit/push wins, then repeat. No subagents authorized.
 Report AGGREGATE prefill and decode regularly. Corrected v2 client uses one
 shared monotonic clock: prefill ends at the latest first-token event; decode
 counts only later token events / remaining generation-only duration. Record
-remaining requests (5-6 under current admission); this is the decode-only tail,
+remaining requests (8 under accepted short-cohort admission); this is the decode-only tail,
 not steady full-C8. Whole-run output throughput is separate. Old per-request
 rates cannot establish aggregate decode. Synthetic clock/burst check passed.
 Frozen manifest SHA256263da19de5a5bc8823fe38d7113553c08f00fa453127dbbd523c74622d0bcda1,
@@ -23,12 +23,18 @@ Predefined gate: >=3% pooled whole-run gain; median AND pooled aggregate
 prefill/decode no worse. Inconclusive comparisons are not adopted. Full
 fidelity/256k validation remains deferred under the user contract.
 
-Current incumbent: AITER15a3e419553d970169edbf386a4ff7166dcc2f2a, exact tree of
+Current incumbent: accepted B02E5 short-prefill cohort in root scheduler and
+Bolt launcher; AITER15a3e419553d970169edbf386a4ff7166dcc2f2a, exact tree of
 3b85a215 (requested memory changes, original packed Triton large-prefill path).
-Published rollback of0d8d783ab cache-aware prefills. Root48a1e1e629 before
-current documentation/ledger update; independent LiLiCorr fixture fix
-eaa11b900b stays. Current five-run medians: aggregate prefill925.7928tok/s,
-aggregate decode96.7054tok/s; pooleddecode92.4945; pooledwhole-run47.6546.
+Published rollback of0d8d783ab cache-aware prefills. Independent LiLiCorr
+fixture fix eaa11b900b stays. Accepted five-run medians: aggregate prefill
+1418.5774tok/s, aggregate decode156.6346tok/s; pooleddecode155.7715;
+pooledwhole-run57.8383. Retained reference medians925.7928/96.7054,
+pooleddecode92.4945 and pooledwhole47.6546. B02E5 whole-run+21.370%,
+medianprefill+53.228%/decode+61.971%; both pooled phase gates pass. All eight
+requests remain in candidate decode tail versus five or six in reference.
+This is admission/occupancy improvement, not a kernel-speed claim. Existing
+five candidate/reference runs are the metric; no extra baseline or extensions.
 Corrected E2 candidate: medians1021.1976prefill/89.3540decode; pooleddecode
 90.2872, pooledwhole50.3717. End-to-end+5.702%, pooledprefill+7.396%, but
 pooleddecode-2.386%/mediandecode-7.602% fails phase gate. No proven causal
@@ -59,9 +65,16 @@ ANDdisabled. nginx stopped; no80/443listeners. Installed Bolt thermal dependency
 renamed thermal-controller.conf.disabled-static-cache-test; do not reintroduce.
 Production vllm-bolt stopped; never start alongside isolated diagnostic unit.
 
-Diagnosticunit BOOTING E5shortcohort at00:43UTC. Monitor exp5 (session62056)
-and run.py bench exp5 --batchbatch02 --repeat5 (session7432) active; logexp5-
-bench.log. Candidatechanges ONLYroot scheduler.py, Boltlauncher andtestscheduler.
+Diagnostic unit ACTIVE with accepted E5shortcohort, boot00:43UTC, ready00:50.
+Original five measured trials COMPLETE; exp5-{0..4}.json/summary/comparison.
+First client failed nginx-off precondition before any requests; stopped nginx
+again under user authorization, then ran the original five. Incident logs
+exp5-blocked-nginx-before-requests.log and exp5-readiness-incident.json.
+Batch03 incumbent profile COMPLETE: run.py profile batch03-incumbent
+--batch batch02, log batch02/batch03-incumbent-profile.log. Existing runtime
+host gate/output still point to batch02; capture there, analyze under batch03.
+No additional speed baseline: use accepted E5 five as the next reference.
+Performance changes ONLYroot scheduler.py, Boltlauncher andtestscheduler.
 AITERclean15a3; allE1-E4runtime code reverted. Source/diff backup exp5-saved,
 identity exp5-sources.json. Policydefaultoff exceptBoltlauncheroptin1. Unchanged
 shared4256/total8512tokenbudgets; offcadenceadmission onlyinitialsingle-page
@@ -69,14 +82,15 @@ textcohort, everyrunningrequest+head eligible. Output+placeholders horizon
 C8*(NS7+1)=64. Per-requestguards preserve longhead aftershortadmission. Mature/
 long/blocked/MM/LoRA/preempt/stale retainoldcadence. Qwendefaultsunchanged.
 55CPUdecision/alignment/fairnesstests PASS, KVmicroPASS,battery4/4,ruff/bashPASS.
-Verify startup logger page4256/horizon64, thenuseEXACTLYfive vs pre-e2-control.
-No extensions, no baseline repeatfornoise. Need5raw/summaries/compare, coherence
-inspection ofexistingoutputs, verdict, codecommit/pushonlyifphase/materialgates.
+Startup page4256/horizon64 verified; all five counter/token/power gates pass,
+existing responses coherent. Early short responses may wait while peers
+prefill; long/mature decoder cadence remains protected. Full fidelity/256k
+remain deferred. Canonical recipe and accepted ledger row describe the scope.
 
 E4fiveinconclusive/reverted: median942.548prefill/99.962aggregatedecode, pooled
 97.124decode/48.282whole. Bothphasegatespass; whole+1.317%below3%. Allsources/
 codegen/results exp4-* retained; ledgerverdict appended. Currentincumbent
-925.793prefill/96.705decode. AfterE5 complete, startnextprofile/five-scopebatch
+1418.577prefill/156.635decode. AfterE5 complete, startnextprofile/five-scopebatch
 withoutaskingorending. Productionoff/nginxoff/controlleroff/105W fixed.
 
 Batch02 reference profile:590501kernels/alllaunchcorrelated; prefill+mixed
@@ -153,16 +167,17 @@ legacy baseline. Prior rejected dynamic32expert cache (1531/351vs1545/362),
 singletonSDOT,quanttables,densepreshuffle,FP32routersplit8,IQ2padding66->68:
 see priorledger/artifacts before repeating. Actual experts240-496, never512.
 
-Newpre-E3 research: actualIQ2magnitudes8/25/43, integertermsgrid*(2s+1),
+Pre-E3 research: actualIQ2magnitudes8/25/43, integertermsgrid*(2s+1),
 48terms/nohalf127-scaledratios/minimumroundingmargin0.0026087. CPUproof
 next-integer-quant-{research,cpu}.json covers31743positivefinitehalfbasevalues
 and37,329,768validratios; +/-1e-6reciprocalerror preservesfactorrecovery and
 quantization. ExistingFP32groupscales remainunchanged; recovermaxfactor as
 round(sw*1016/absD), thenquantizeintegerterm*127/maxfactor. ZeroDneedszeroout;
 negativeDsignfold; crossing256-blockwindows retainoriginaldecoder. No extra
-metadata/capacity changes. Not GPUvalidated oradopted. RevisedplannedE3 to
+metadata/capacity changes. GPU exactness subsequently passed; E3 end-to-end
+gain below3%, reverted. RevisedplannedE3 to
 this arithmetic mechanism beforeimplementation; savedpriorplan. RouteAPI/
-32-64rowreuse deferred to nextbatch. NativeE2sourceunchanged while it runs.
+32-64rowreuse deferred to nextbatch. NativeE2 code was also reverted.
 
 E3compiler correction before any measured trial: ordinaryTrition division
 still emitted2precise sequences. Initialboot stopped whileloading (no warmup/
@@ -171,7 +186,7 @@ rcp.log. Finalhelper uses explicitv_rcp_f32 inlineASM; actualGPUerror bound
 <=1e-6andallintegeroutputcases stillpass. Codegen2RCP/0divscale/0divfixup.
 Final9componentchecks,32realchecks,KVmicroPASS,battery4/4. Finalsourceidentity
 exp3-sources.json/backupexp3-saved. Allpreviousvariant/failure evidence retained.
-Finalfive-run client/session isactive after00:08boot; do not launch a duplicate.
+Finalfive-run E3 result is inconclusive/reverted; see ledger and exp3 artifacts.
 
 Next-batch fusion lead (E4codegen/epilogue-counts.json):8precisedivision
 sequences per4localoutputs. ComputeGS128scale onceperrowleader andbroadcast
@@ -181,5 +196,17 @@ onlywhenapproxquotient iswithin2^-12 ofanintegerhalf. Needhardwarercperror
 bound forarbitraryF32scales (finiteSX>=1e-30 andmaxact/127), exacttie/near-tie
 andextreme tests. MustpreserveDOUBLErounding: originalRTE(F32_RTE(v/scale)),
 notdirectrationalrounding. FMA/exactboundaryrepair alone differsnearties.
-No implementationorGPUproof ofthis lead; keepfornextbatch. CurrentE5source
-muststayfrozen whileitbenchmarks.
+No implementationorGPUproof ofthis lead; keepfornextbatch.
+
+Other next-batch leads, pending fresh accepted-incumbent profile:32/64-row
+packed weight reuse (next-row-reuse-design.json; must align route plan and
+COUNT guards, retain native16-row path), vectorized aligned IQ2 header loads
+(66-byte blocks allow16-bit but not all32-bit aligned reads), bounded temporary
+expert INT8 staging without enlarging the5GiB cache, and whole expert MLP
+fusion. MLP fusion sketch: one CTA per expert/16-route tile loops Igroups;
+UP+ReLU2+GS128 INT8 in LDS, eight DOWN128-column accumulators, ordered FP32
+group accumulation and precise RTE; write final routedFP32 output only. Avoid
+UP/middle global buffers and launches; inspect VGPR/spills before five trials.
+Need exact independent full-MLP oracle, partial widths/TP offsets/cache misses
+and graph replay. No implementation yet. Select five distinct mechanisms from
+fresh profile, implement sequentially, run exactly five per candidate.

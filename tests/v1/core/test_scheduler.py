@@ -6206,3 +6206,144 @@ def test_encoder_input_skipped_when_connector_already_has_the_item(ec_role: str)
 
     assert output.num_scheduled_tokens[req_id] > 0
     assert not output.scheduled_encoder_inputs.get(req_id)
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["long", "mature", "inflight", "blocked", "preempted", "stale", "mm", "lora"],
+)
+def test_short_prefill_cohort_rejects_ineligible_requests(case):
+    scheduler = create_scheduler(max_num_seqs=8, max_num_batched_tokens=64)
+    (request,) = create_requests(num_requests=1, num_tokens=12, max_tokens=32)
+    assert scheduler._short_prefill_cohort_eligible(request)
+    if case == "long":
+        (request,) = create_requests(num_requests=1, num_tokens=32)
+    elif case == "mature":
+        request.append_output_token_ids([0] * 9)
+    elif case == "inflight":
+        request.num_output_placeholders = 9
+    elif case == "blocked":
+        request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    elif case == "preempted":
+        request.num_preemptions = 1
+    elif case == "stale":
+        request.num_stale_output_tokens = 1
+    elif case == "mm":
+        request.mm_features = [Mock()]
+    else:
+        request.lora_request = Mock()
+    assert not scheduler._short_prefill_cohort_eligible(request)
+
+
+def test_short_prefill_cohort_shares_budget_and_preserves_long_head(monkeypatch):
+    monkeypatch.setenv("VLLM_GFX908_MIXED_PREFILL_TOKENS", "16")
+    monkeypatch.setenv("VLLM_GFX908_MIXED_PREFILL_INTERVAL", "4")
+    monkeypatch.setenv("VLLM_BOLT_SHORT_PREFILL_COHORT", "1")
+    scheduler = create_scheduler(max_num_seqs=8, max_num_batched_tokens=64)
+    (decode,) = create_requests(
+        num_requests=1, num_tokens=4, max_tokens=32, req_ids=["decode"]
+    )
+    scheduler.add_request(decode)
+
+    def complete(output):
+        ids = list(output.num_scheduled_tokens)
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=ids,
+                req_id_to_index={r: i for i, r in enumerate(ids)},
+                sampled_token_ids=[
+                    [0]
+                    if scheduler.requests[r].num_computed_tokens
+                    >= scheduler.requests[r].num_prompt_tokens
+                    else []
+                    for r in ids
+                ],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+
+    complete(scheduler.schedule())
+    for request in create_requests(
+        num_requests=2, num_tokens=12, req_ids=["short0", "short1"]
+    ):
+        scheduler.add_request(request)
+    (long,) = create_requests(num_requests=1, num_tokens=40, req_ids=["long"])
+    scheduler.add_request(long)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"decode": 1, "short0": 12, "short1": 4}
+    complete(output)
+    # A long head retains the ordinary off-cadence decision even after a short
+    # cohort has consumed some budget. It cannot inherit the cohort allowance.
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"decode": 1, "short0": 1}
+    complete(output)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens["short1"] == 8
+    assert output.num_scheduled_tokens["long"] == 8
+
+
+@pytest.mark.parametrize(
+    "enabled,long_decoder,mature",
+    [
+        (False, False, False),
+        (True, True, False),
+        (True, False, True),
+    ],
+)
+def test_short_prefill_cohort_keeps_existing_decode_protection(
+    enabled, long_decoder, mature, monkeypatch
+):
+    monkeypatch.setenv("VLLM_GFX908_MIXED_PREFILL_TOKENS", "16")
+    monkeypatch.setenv("VLLM_GFX908_MIXED_PREFILL_INTERVAL", "4")
+    monkeypatch.setenv("VLLM_BOLT_SHORT_PREFILL_COHORT", str(int(enabled)))
+    scheduler = create_scheduler(max_num_seqs=8, max_num_batched_tokens=64)
+    (decode,) = create_requests(
+        num_requests=1,
+        num_tokens=32 if long_decoder else 4,
+        max_tokens=32,
+        req_ids=["decode"],
+    )
+    scheduler.add_request(decode)
+    output = scheduler.schedule()
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["decode"],
+            req_id_to_index={"decode": 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    if mature:
+        decode.append_output_token_ids([0] * 8)
+        decode.num_computed_tokens = decode.num_tokens - 1
+    (short,) = create_requests(num_requests=1, num_tokens=12, req_ids=["short"])
+    scheduler.add_request(short)
+    assert "short" not in scheduler.schedule().num_scheduled_tokens
+
+
+@pytest.mark.parametrize(
+    "prompt,outputs,inflight,expected",
+    [
+        (4256, 64, 0, True),
+        (4257, 0, 0, False),
+        (4096, 65, 0, False),
+        (4096, 8, 56, True),
+        (4096, 8, 57, False),
+    ],
+)
+def test_short_prefill_cohort_page_and_speculative_horizon(
+    prompt, outputs, inflight, expected
+):
+    from types import SimpleNamespace
+
+    policy = SimpleNamespace(block_size=4256, max_num_running_reqs=8, num_spec_tokens=7)
+    (request,) = create_requests(num_requests=1, num_tokens=prompt, max_tokens=256)
+    request.append_output_token_ids([0] * outputs)
+    request.num_output_placeholders = inflight
+    assert Scheduler._short_prefill_cohort_eligible(policy, request) is expected

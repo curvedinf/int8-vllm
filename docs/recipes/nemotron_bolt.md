@@ -47,6 +47,19 @@ pooled aggregate decode fell 2.39%; it failed the no-degradation gate. The
 five-run samples remain noisy and do not prove a causal decode slowdown.
 The requested dense/expert memory configuration remains accepted.
 
+The initial short-prefill cohort policy is accepted from batch 02 experiment 5
+(2026-10-17). Exactly five runs of the frozen 4k-input/256-output C8 workload
+at 105 W measured median aggregate prefill of **1,418.58 tok/s** and aggregate
+decode of **156.63 tok/s**, versus the retained reference's 925.79 / 96.71.
+Pooled whole-run throughput improved 21.37%; median and pooled rates improved
+for both phases. This reuses the reference's existing five runs; no additional
+reference or candidate repetitions were added. Earlier admission keeps all
+eight requests active in the candidate's decode-only tail, versus five or six
+under the reference. The gain reflects scheduling and batch occupancy rather
+than an isolated kernel speedup. Scheduler/alignment/fairness checks pass
+(55), INT8 KV micro passes, and the gfx908 battery is 4/4. The workload, source
+hashes, raw rates and comparison limits are recorded in the experiment ledger.
+
 To reproduce the aggregate calculation from streamed trial JSON containing
 shared-clock token events, run
 `PYTHONPATH="$PWD" .venv/bin/python scripts/report_bolt_phases.py`
@@ -207,9 +220,17 @@ pins each rank's own slots with `VLLM_ROCM_PIN_LOCAL_OFFLOAD=1`, avoiding
 four registrations of the entire 24 GiB region and AMD's host-memory limit.
 
 The Qwen mixed-load scheduler policy is adapted to Bolt's 4,256-token hybrid
-page: at most one page of prefill is admitted every 16 rounds while decoders
-are active, with fair prefix admission. This trades new-request latency for
-decoder progress. Qwen's specialized HD256/GQA6 attention kernels do not apply
+page: normally at most one page of prefill is admitted every 16 rounds while
+decoders are active, with fair prefix admission. Bolt additionally fills an
+initial cohort of single-page text prompts on intervening rounds while every
+running request and the waiting head remain eligible. Accepted output plus
+pending output must be at most 64 tokens under C8/NS7. The shared 4,256-token
+prefill budget and 8,512-token total budget remain in force. Long prompts,
+mature decoders, multimodal/LoRA requests, preempted requests and blocked or
+stale requests retain the ordinary admission cadence. Set
+`VLLM_BOLT_SHORT_PREFILL_COHORT=0` to disable this addition. Filling the cohort
+improves aggregate throughput but can delay early responses while their peers
+prefill. Qwen's specialized HD256/GQA6 attention kernels do not apply
 to Bolt's HD128/GQA8 layout; Bolt uses the generic unified attention path with
 INT8-G128 KV and split-K speculative verification. Its larger Mamba state also
 requires a different page alignment. The Qwen-specific draft convolution
