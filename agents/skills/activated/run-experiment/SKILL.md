@@ -12,8 +12,8 @@ Answer a specific question with observations. A negative or inconclusive result 
 For ongoing work, read and update [scratch records](../../passive/scratch-space/SKILL.md) in `agents/scratch/`: hypotheses, reproduction details, results including failures, and verdicts.
 
 1. Define the question, alternatives, relevant metric or observable outcome, and decision criterion before collecting results. Set a bounded scope; reject post-hoc success thresholds.
-2. Establish the baseline and record consequential inputs, configuration, source/artifact identity, and environment. Separate exploratory tuning from held-out evaluation to control selection bias.
-3. Run comparable trials. Control unrelated changes, warmup, execution order, and competing load as relevant. Preserve raw outcomes, including failures; repeat enough to characterize measurement variance.
+2. Establish the baseline and record consequential inputs, configuration, source/artifact identity, and environment. Before expensive runs, verify prerequisites and artifact-write access using the identity that will execute the work. Separate exploratory tuning from held-out evaluation to control selection bias.
+3. Run comparable trials within the agreed trial budget. Control unrelated changes, warmup, execution order, and competing load as relevant. Preserve raw outcomes, including failures. Honor explicit trial limits; report remaining measurement uncertainty instead of extending the run count.
 4. Compare the target outcome alongside correctness and resource tradeoffs. Distinguish a component measurement from end-to-end behavior, and correlation from causal attribution.
 5. Deliver the result, reproduction details, uncertainty, and resulting decision. Keep an experiment separate from production adoption unless adoption was requested.
 

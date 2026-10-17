@@ -16,7 +16,8 @@ Check clock and issue commentary within60seconds; keep waits below30seconds.
 
 Accepted runtime: root4711913204533dfe702bd7e9ed7d23d07a08503b,
 AITER3c74adc198e55aeb5bcd41516bddfb3ccadf6725, BOTHmain/pushed/remoteverified.
-RootHEAD7cce1108e9aaf5a396c8c68909788dce4c5726b8 adds only E5 rejection ledger.
+Root31a1ee209e adds profile category-label correction/evidence only; serving remains
+the accepted runtime above. Subsequent metadata commits record rejected trials.
 Keep B07E1 dedicated4256-page attention AND B07E4 nativeMoEnorm+GS128fusion.
 Underlying weighted9waycombine(rootd70e9b6),B03route64/B02shortcohort remain.
 
@@ -43,11 +44,20 @@ bounded3configs;2pairedK256IQ2D/headerreuse(originalfloatmath,nofactor/LUT);
 3removeactualsingle-group routerdeadwork(keepSAMEfinalTorchTopK/order);
 4extendordinaryDecoderRMSNorm+GS128producer toMambain_proj/attentionQKV(notB05
 postSSMgatednorm);5native<=1/2-valid-routeINT8vectorDOTalgorithm/originalMFMAfallback.
-ACTIVEE1 next: separateprefilldenseentry withoriginalFP32accum/output/epilogues,
-BK128/FPfusionFalse,originalnativehelperbody preserved. Original128/128/W8/S1
-control plus64/128/W4/S1,128/64/W4/S2,128/128/W8/S2 only. Chooseweightedcomplete
-projectionatM4160,4096/4256heldout AFTERbitchecks;ONEselectedcandidategetsEXACT5.
-NoB08runtimeeditsyet. Analyzer/ledger/thisnotecommitpendingbeforeE1implementation.
+B08E1 COMPLETE/REVERTED after EXACT5, source/proof/harness/ALL4/cap/token/
+protectedwork checksPASS. Median2322.8244prefill/163.7665decode:prefill+0.974%,
+decode-2.684%;pooledprefill+0.572%,decode-2.688%,whole-1.190%. Retain original
+B07exp4five reference; no additional runs. KV/battery4/4/105tests/180actualcases/
+220prototypebitchecksPASS;componentstage2+5.733%4160/+5.116%4096/+5.940%4256
+was insufficient E2E. Originalnativebody preserved. Bench99557/monitor57007/
+stop37980 all exit0; all4pathqualified BEFOREfirstmeasured. Peak30.586758GiB.
+Restored ONLY rootmarker/AITERdensecache, removed2hash-verifiedAITERnewfiles;
+accepted attention/normfusion retained. Rawfive/frozen21sources/7proofs remain
+under B08exp1-* / exp1-saved; decision in canonical ledger. Coherentpreviews/
+fullsamples reviewed. AITERmain remains3c74/no pending changes.
+NEXTB08E2 pairedIQ2Dheader reuse design saved exp2-design.md; paired-original.py
+is byte-identical original core. Design only/no runtime edits or GPU work yet.
+NoE2runtimeworkstarted. AllFIVEalreadyregisteredinexperiments-plan.json.
 
 Converter: scripts/kineto_to_agent_csv.py --output CSV_DIR GPU_JSON_GZ...
 Analyzer: scripts/analyze_agent_profile.py --gpu-csv CSV_DIRECTORY --host HOST_DIR
@@ -55,7 +65,7 @@ Analyzer: scripts/analyze_agent_profile.py --gpu-csv CSV_DIRECTORY --host HOST_D
 PreviousB07 profile rank0pid1705452/312403kernels all launch-correlated,3chunks;
 prefill/mixed kernelSUM15.25728s,notTP4wall: dense29.561%,packed24.798%,
 collectives19.505%(includeswaiting),attention9.944%,quant.57984s,norm.12764s.
-B08 profile will re-establish shares AFTER E1/E4 wins.
+B08 profile establishes shares AFTER accepted B07E1/E4 wins.
 
 ## Fixed serving contract
 
