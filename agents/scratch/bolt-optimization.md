@@ -23,18 +23,18 @@ Predefined gate: >=3% pooled whole-run gain; median AND pooled aggregate
 prefill/decode no worse. Inconclusive comparisons are not adopted. Full
 fidelity/256k validation remains deferred under the user contract.
 
-Current incumbent: accepted B02E5 short-prefill cohort in root scheduler and
-Bolt launcher; AITER15a3e419553d970169edbf386a4ff7166dcc2f2a, exact tree of
-3b85a215 (requested memory changes, original packed Triton large-prefill path).
-Published rollback of0d8d783ab cache-aware prefills. Independent LiLiCorr
-fixture fix eaa11b900b stays. Accepted five-run medians: aggregate prefill
-1418.5774tok/s, aggregate decode156.6346tok/s; pooleddecode155.7715;
-pooledwhole-run57.8383. Retained reference medians925.7928/96.7054,
-pooleddecode92.4945 and pooledwhole47.6546. B02E5 whole-run+21.370%,
-medianprefill+53.228%/decode+61.971%; both pooled phase gates pass. All eight
-requests remain in candidate decode tail versus five or six in reference.
-This is admission/occupancy improvement, not a kernel-speed claim. Existing
-five candidate/reference runs are the metric; no extra baseline or extensions.
+Current incumbent: accepted B02E5 short-prefill cohort plus B03E1 packed
+64-row prefill reuse. AITER3f8045a90 (matching route-tile API) and root
+modelopt_gfx908.py must travel together. Native decode/sparse batches keep16;
+M>64 and routes>=actualExperts*64 selects64 for both UP/DOWN and its plan.
+Independent LiLiCorr fixture fix eaa11b900b stays. Accepted B03E1 originalfive
+medians: aggregate prefill1999.5434tok/s / decode161.5316tok/s; pooleddecode
+161.9482 and pooledwhole72.7073. Against accepted B02E5 existingfive
+1418.5774/156.6346, pooledwhole+25.708%, medianprefill+40.954%/decode+3.126%;
+both pooled phase rates pass. All8requests in both decode tails. No extra
+baseline/extension; these exactfive become E2 reference. This prefill change
+does not establish an isolated decode speedup. Earlier0d8cached-prefill
+experiment remains withdrawn; no unrelated B02 kernels restored.
 Corrected E2 candidate: medians1021.1976prefill/89.3540decode; pooleddecode
 90.2872, pooledwhole50.3717. End-to-end+5.702%, pooledprefill+7.396%, but
 pooleddecode-2.386%/mediandecode-7.602% fails phase gate. No proven causal
@@ -65,33 +65,30 @@ ANDdisabled. nginx stopped; no80/443listeners. Installed Bolt thermal dependency
 renamed thermal-controller.conf.disabled-static-cache-test; do not reintroduce.
 Production vllm-bolt stopped; never start alongside isolated diagnostic unit.
 
-Diagnostic unit ACTIVE with accepted E5shortcohort, boot00:43UTC, ready00:50.
-Original five measured trials COMPLETE; exp5-{0..4}.json/summary/comparison.
-First client failed nginx-off precondition before any requests; stopped nginx
-again under user authorization, then ran the original five. Incident logs
-exp5-blocked-nginx-before-requests.log and exp5-readiness-incident.json.
-Batch03 incumbent profile COMPLETE: run.py profile batch03-incumbent
---batch batch02, log batch02/batch03-incumbent-profile.log. Existing runtime
-host gate/output still point to batch02; capture there, analyze under batch03.
-No additional speed baseline: use accepted E5 five as the next reference.
-Performance changes ONLYroot scheduler.py, Boltlauncher andtestscheduler.
-AITERclean15a3; allE1-E4runtime code reverted. Source/diff backup exp5-saved,
-identity exp5-sources.json. Policydefaultoff exceptBoltlauncheroptin1. Unchanged
-shared4256/total8512tokenbudgets; offcadenceadmission onlyinitialsingle-page
-textcohort, everyrunningrequest+head eligible. Output+placeholders horizon
-C8*(NS7+1)=64. Per-requestguards preserve longhead aftershortadmission. Mature/
-long/blocked/MM/LoRA/preempt/stale retainoldcadence. Qwendefaultsunchanged.
-55CPUdecision/alignment/fairnesstests PASS, KVmicroPASS,battery4/4,ruff/bashPASS.
-Startup page4256/horizon64 verified; all five counter/token/power gates pass,
-existing responses coherent. Early short responses may wait while peers
-prefill; long/mature decoder cadence remains protected. Full fidelity/256k
-remain deferred. Canonical recipe and accepted ledger row describe the scope.
+Diagnostic unit ACTIVE with accepted B03E1; five complete, no active benchmark.
+B03E1 monitor session70399 exits on stop. Originalbench session89710 complete.
+Source/diff exp1-saved; exp1-sources.json; allchecks/source/hardware verified.
+B03 profile COMPLETE:305783 launch-correlated kernels,22.2209rank0 prefill/mixed
+kernel-seconds, packed routed10.2139s/45.965%. RawGPU traces remain batch02/
+host/gpu/batch03-incumbent-* because old runtimegate pointedthere. CSV/analysis
+and opportunities saved batch03/. Current runtime lifecycle host/gate now
+point to batch03, next capture should use --batch batch03. Profile timings
+excluded. E1five are current metric; no need another profile before E2.
 
-E4fiveinconclusive/reverted: median942.548prefill/99.962aggregatedecode, pooled
-97.124decode/48.282whole. Bothphasegatespass; whole+1.317%below3%. Allsources/
-codegen/results exp4-* retained; ledgerverdict appended. Currentincumbent
-1418.577prefill/156.635decode. AfterE5 complete, startnextprofile/five-scopebatch
-withoutaskingorending. Productionoff/nginxoff/controlleroff/105W fixed.
+Batch03 experiments-plan.json preregisters five scopes:1route reuse ACCEPTED;
+2IQ2 header memory layout;3native UP/ReLU2/quant fusion with row-leader scales;
+4whole expert MLP fusion;5bounded temporary INT8 expert staging. E2prototypes
+are INACTIVE ignored files only; active runtime source frozen. Offline codegen
+shows naive16-bit headers can increase load count. Eightway header broadcast
+(exp2-eightway-full.py) cuts repeatedheader work; keep original byte decoder
+for ungrouped/misaligned paths and scale preparation, then independent GPU
+checks before final five. Root memory/precision/cache/admission fixed.
+E3inactive leader-scale nativeprototype compiles;6whole-kernel precise divisions
+vs old8epilogue,2barriers. E4inactivewholeMLP prototype MT1/2/4: bounded512-thread
+codegen MT1no spills/128VGPR;MT2has33spills/136private bytes;MT4has360spills/
+1056private. Need reduce registers or limit nativefusion; do not blindly deploy
+spillingprefill kernel. All sources/ISA/buildlogs under batch03/exp{2,3,4}-*.
+Continue E2 now, exactlyfive per candidate; no GPU experiments overlap serving.
 
 Batch02 reference profile:590501kernels/alllaunchcorrelated; prefill+mixed
 23.3892rank0kernel-seconds, packedrouted10.3514s/44.257%;collectives3.8049s

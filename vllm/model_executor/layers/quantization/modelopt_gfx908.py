@@ -235,8 +235,16 @@ class PackedG128MoEMethod(FusedMoEMethodBase):
             moe_align_block_size,
         )
 
+        # Share packed weight reconstruction across more prefill rows when
+        # average expert occupancy can fill a tile. Keep sparse batches and
+        # native decode on their original 16-row alignment plan.
+        block_size = (
+            64
+            if x.shape[0] > 64 and topk_ids.numel() >= layer.w13_weight.shape[0] * 64
+            else 16
+        )
         plan = moe_align_block_size(
-            topk_ids, 16, layer.w13_weight.shape[0], pad_sorted_ids=True
+            topk_ids, block_size, layer.w13_weight.shape[0], pad_sorted_ids=True
         )
         cache = None
         if x.shape[0] <= 64:
@@ -260,6 +268,7 @@ class PackedG128MoEMethod(FusedMoEMethodBase):
             topk_ids,
             plan=plan,
             cache=cache.up if cache is not None else None,
+            block_size=block_size,
         )
         y = ops.packed_experts(
             mid,
@@ -271,6 +280,7 @@ class PackedG128MoEMethod(FusedMoEMethodBase):
             down=True,
             plan=plan,
             cache=cache.down if cache is not None else None,
+            block_size=block_size,
         )
         return (
             (y.view(*topk_ids.shape, -1) * topk_weights[..., None]).sum(1).to(x.dtype)

@@ -61,3 +61,62 @@ def test_expert_name_index_preserves_replicas():
         ("w13_weight", "experts.gate_up_proj", 0, "w1"),
     ]
     assert _index_expert_mapping(mapping) == {"2": mapping[:3]}
+
+
+@pytest.mark.parametrize(
+    "tokens,experts,expected_block",
+    [
+        (8, 240, 16),
+        (64, 240, 16),
+        (65, 240, 16),
+        (1706, 240, 16),
+        (1707, 240, 64),
+        (4096, 496, 64),
+    ],
+)
+def test_expert_projections_share_route_plan_and_tile(
+    tokens, experts, expected_block, monkeypatch
+):
+    from aiter.ops.triton.gemm.basic import packed_expert_cache
+
+    from vllm.model_executor.layers.fused_moe import moe_align_block_size as alignment
+    from vllm.model_executor.layers.quantization import modelopt_gfx908 as packed
+
+    method = PackedG128MoEMethod(
+        SimpleNamespace(
+            activation=MoEActivation.RELU2_NO_MUL,
+            moe_parallel_config=SimpleNamespace(ep_size=1),
+            tp_rank=0,
+        )
+    )
+    method.start, method.local_i = 0, 4
+    layer = SimpleNamespace(
+        apply_router_weight_on_input=False,
+        w13_weight=torch.empty((experts, 4, 1, 66), dtype=torch.uint8),
+        w2_weight=torch.empty((experts, 4, 1, 66), dtype=torch.uint8),
+        packed_grid=torch.empty(2048, dtype=torch.uint8),
+    )
+    ids = torch.zeros((tokens, 9), dtype=torch.int32)
+    plan = (object(), object(), object())
+    calls = []
+
+    def align(got_ids, block, got_experts, *, pad_sorted_ids):
+        assert got_ids is ids and block == expected_block
+        assert got_experts == experts and pad_sorted_ids
+        return plan
+
+    def projection(q, scales, weight, grid, got_ids, **kwargs):
+        assert got_ids is ids and kwargs["plan"] is plan
+        assert kwargs["block_size"] == expected_block
+        calls.append(kwargs.get("down", False))
+        value = torch.zeros((tokens * 9, 4))
+        return value if kwargs.get("down") else (value.to(torch.int8), value)
+
+    monkeypatch.setattr(alignment, "moe_align_block_size", align)
+    monkeypatch.setattr(packed_expert_cache, "get_cache", lambda *a: None)
+    monkeypatch.setattr(packed.ops, "quantize", lambda x: (x.to(torch.int8), x))
+    monkeypatch.setattr(packed.ops, "packed_experts", projection)
+    x = torch.zeros((tokens, 4), dtype=torch.bfloat16)
+    output = method.apply(layer, x, torch.ones((tokens, 9)), ids, None, None)
+    assert calls == [False, True]
+    assert output.shape == x.shape and output.dtype == x.dtype

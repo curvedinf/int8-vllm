@@ -60,6 +60,17 @@ than an isolated kernel speedup. Scheduler/alignment/fairness checks pass
 (55), INT8 KV micro passes, and the gfx908 battery is 4/4. The workload, source
 hashes, raw rates and comparison limits are recorded in the experiment ledger.
 
+Batch 03 experiment 1 additionally shares packed expert reconstruction across
+64 prefill rows. Exactly five runs measured median aggregate prefill of
+**1,999.54 tok/s** and decode of **161.53 tok/s** at the same 105 W caps,
+versus 1,418.58 / 156.63 for the accepted cohort policy. Pooled whole-run
+throughput improved 25.71%; median and pooled phase rates passed the
+non-regression gate. These five runs become the next experiment's reference.
+The native decode kernel is unchanged; the small observed decode difference
+does not establish a kernel improvement. AITER `3f8045a90` supplies the matching
+route-tile API and is required with this change. Component, real-checkpoint,
+held-out shape and graph checks preserve exact INT8 values and FP32 scales.
+
 To reproduce the aggregate calculation from streamed trial JSON containing
 shared-clock token events, run
 `PYTHONPATH="$PWD" .venv/bin/python scripts/report_bolt_phases.py`
@@ -116,7 +127,10 @@ ordinary IQ2 kernel. `VLLM_BOLT_EXPERT_CACHE_GIB=0` disables this cache;
 an explicit numeric `VLLM_BOLT_EXPERT_CACHE_SLOTS` retains fixed capacity.
 `VLLM_BOLT_EXPERT_CACHE_REFRESH` controls refresh cadence. Decode/verification
 calls with at most 64 input tokens use the cache and own admission and refresh.
-Larger prefills use the original Triton packed path. All original packed expert weights remain
+Larger prefills use the Triton packed path with 64-row tiles when total routes
+average at least 64 per actual expert; sparse batches retain 16-row tiles.
+Both expert projections share the same matching route alignment plan.
+All original packed expert weights remain
 resident, including boundary blocks for
 unaligned TP slices. The static dense payload is 2,387,607,552 INT8 values
 (2.224 GiB) in 277 fused projections per GPU. FP32 group scales are retained
