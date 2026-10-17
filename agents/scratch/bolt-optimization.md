@@ -120,7 +120,7 @@ ignored run.pySHA d05ada8f44803882596a4cd1eb6db12fe459ea5cbe826bd220e95d99f71828
 oldrun savedrun-before-sparse-arm.py. Workload/timing/hardware/runloop ASTunchanged;
 otherharnesshashesunchanged. Futureoriginalstack profiles use default armFalse.
 B08 ALLFIVE complete, nonekept. ACTIVE B09 profileCOMPLETE,ALLFIVE registered
-beforecode inB09/experiments-plan.json/canonicalledger. Unitstopped/allGPUjobsclosed.
+beforecode inB09/experiments-plan.json/canonicalledger. Current E2 status below.
 Profile21560/monitor27713/stop7273/converter85651/analyzer50310exit0. Rank0PID1868713,
 281348kernelsALLlaunch-correlated,3chunks. KernelSUM13.866725s(notTP4wall):dense32.341%,
 packed27.285%,collectives20.494%(waitincluded),copies3.530%,quant2.194%,normquant1.515%.
@@ -148,20 +148,37 @@ Prototype165rawbits/162timingsPASS,g8selectedversusg4thoughcomponentnearneutral.
 rowwindows/fullreplicateddraftFC/probe-rangegather;GPU432projectionbits/72graphs
 PASS. KV/battery4/4/107focused+4finaldispatchsmokePASS;originaloracle/helperAST
 preserved. No GPU kernel/native arithmetic/cache/dtype/budget changes.
-ACTIVE NEXT B09E2 native register-fed denseMFMA; NOTimplemented yet. Design
-B09exp2-design.md. E1rejected so inheritGROUP_M1;onlyMT4(64x128)andMT8(128x128),
-8waves/GS128/singleKpartition/FPcontractoff. RawresidentINT8X/W,oldnativeverified
-laneMFMA mapping;originalsequential((float(dot)*sx)*sw) F32groups/output epilogues.
-NativeM<=64 unchanged;K%4==0 loads,otherKgenericfallback. Newseparatenative
-content-addressedsource/binding;originalTriton/native asindependentreference.
-ReuseB09dense_case_plan.py/dense_rank_support.py/exp1-rank-cache-proof.json(68)
-forEXACT9AIS TPmatrix surfaces(all4ranks),notnaiveMamba/KVslices. Currenthelper
-check-dense-traversal-real.py importsdeletednewAITertest;extract independent
-_original_int8_gemm fromexp1-saved test intoignoredcommon/reference ornewE2test.
-Completeweightedprojection4160discovery/4096+4256heldout/BF16-F32,onlytwo macrotiles
-before EXACT5 finalcandidate. Fullfidelity/256kuser-deferred;keepallprecision/
-memory/cache settings. Unitstopped/allGPUjobsclosed. Profiler
-unitdropinpointsB09host/active. Keep105W/static3/dynamic5/KV/precision unchanged.
+B09E2 COMPLETE/REVERTED after EXACT5. Median1415.9199prefill/159.4661decode:
+-38.4496%/-5.2399%;pooledprefill-38.6372%/decode-7.8347%/whole-28.0260%.
+Allsource/proof/harness/counter/token/cap/protectedbytes+mtimechecksPASS;ALL4static
+nativebranchqualified BEFOREfirsttrial. Coherentpreviews/twofullsamplesreviewed.
+Bench1923/monitor11922/stop7545exit0;unitstopped/allGPUjobsclosed. Peak30.585510GiB.
+RestoredONLYAITertrackedcache/removed3hash-verifiednewfiles,AITER3c74clean.
+OriginalB07exp4five remainsreference,noextra variants/runs. Rawfive/frozen27sources/
+23proofs underB09exp2-* /exp2-saved;canonicalledger. Native MT8 selectedONLYversusMT4
+butboth~3xcomponenttime versusoriginal. InitialcompilerdefaultmaxWG1024causedMT8
+328B/threadscratch;matchingactual512 launchbound removedscratch,mathunchanged,
+SAME70rawbitproof/162componentcasesrepeated, no addedgeometry. Final70rawbits,
+432exactallTP actualprojectioncases+72graphsPASS;KV/battery4/4/focused112initial
+passesplus38finalnativepasses(notdistinctcounts)PASS. Solefirsttestfailure was
+caplogrootcaptureofnonpropagatinglogger;fixedONLYtesthandler. Generic/nativeold
+kernels/epilogues/cache/dtype/budgets unchanged. Attention/nativeMoEnorm retained.
+ACTIVE B09E3 NEXT: wire-ready GEMM store/completion fusion. Designonly in
+B09exp3-design.md;NO E3implementation yet. Ordinary biasfree exactRowParallel
+Mambaout4096x2048(40)/attentionout4096x1024(8),largeBF16M>64,TP4,residentINT8,
+nohooks/compile/grad/LoRA,skip_reduce/MLPint8CAR/decodeINT8features fallback.
+Actualquantclasses PackedG128LinearMethod AND ModelOptNvFp4W4A16LinearMethod
+(packed_g128=True); no forwardVllmConfig reads. Newseparate Tritonkernel only
+finalstore changes: PyTorchBF16round inclNaN0x7fc0, promoteexactbitsbackF32.
+SameoriginalGEMM128tile/stage1/G1/FPfusionFalse;sameSINGLEF32collective shape/order/
+backend,finalBF16cast. Preserve truthySTRING0ARbehavior. NativeM<=64 untouched;
+latentoutReplicatedLinear/sharedopaque reduceFalse are NOT ordinaryRow targets.
+Reuse allTPAIS bytefixtures andindependent dense_reference. Need exactrounding,
+allTPactualwirebits,WHOLETP4 UNGROUPEDsamecollective output bits/currentgraphs,
+componentcompleteop,KV/battery/focused/ALL4path thenONEwarmup/EXACT5. NEVERgroupAR.
+Research exp4-design.md clarifies normstoreNaN preservesoriginalTRITONBF16payload,
+unlikeE3replacingTorchBF16cast. future-launch-bound-opportunity.md islaterbatch
+researchonly: inspectoriginalnativepackedISA afterB09, donot addvariantsnow.
 Researchdrafts B08/next-batch-opportunities.md;B09plan isauthoritativefornextbatch.
 E4design exp4-design.md: exactnativeMamba in_proj sourceNVFP4,quant_method is
 ModelOptNvFp4W4A16LinearMethod(packed_g128=True),notPackedG128LinearMethod;
@@ -268,7 +285,7 @@ UNREQUESTEDextra5 exp1-repeat-* EXCLUDED; never repeat. B01cacheprefill0d8 withd
 ## Harness and operation
 
 loop/run.py/compare.py/phase_metrics.py/manifest-4k.json frozen per candidate.
-CurrentrunSHA06026268cae372bbade6afde0ef8e819240bb9ebca21fec9938b29625d8ef04e;
+CurrentrunSHAd05ada8f44803882596a4cd1eb6db12fe459ea5cbe826bd220e95d99f7182802;
 compareSHA678abddfd7c5f0ef2a3a14ecfa1383b1baf94f71abfbd53d574f4e99c2527e10;
 phaseSHA452486851c8d596d89747a818cec5ad46d8191ed023db59861cd78563a299c58;
 manifest263da19de5a5bc8823fe38d7113553c08f00fa453127dbbd523c74622d0bcda1.
