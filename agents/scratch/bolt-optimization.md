@@ -98,15 +98,28 @@ frozensources/proofs B06exp4-saved/exp4-* retained. KV/battery4/4,30checks,
 futureattention requiresactual4256geometry/pairstraddles anddeployedpath proof,
 not anextraE4retry. Bench11554/monitor88661/stop12580 exit0,peak30.7184GiB.
 
-ACTIVE B06E5: CPU-only3productionfile prototypes ready exp5-prototype/ with
-exp5-original/ snapshots. Modelquantizes4096inputonce;fc1 consumesq/scales with
-originalBF16latentcast;explicitperforwardq/scales payload throughsharedopaqueop/
-fake/runner/SharedExperts intoMLP. Noprecomputedoutputalias/globalcache/stash;
-nativeold6argcall. GuardsSP/DP/PCP/EP/EPLB/DBO/LoRA/hooks/bias/nonPacked/overlap,
-maxQ>64/gfx908, payloadgeometry/dtypes/contiguity. Notyetapplied/run. Nextapply
-onlyownedfunctionchanges,testquantcallcount/bits/protocol/fake/graph/actualweights,
-KV/battery, verifyliveeligibilityfromactualmodel/configbeforefive. Reference
-originalB05E2fiveunchanged. Root3a3f44e43b ledgerpushed/remoteverified.
+B06E5 COMPLETE/inconclusive/reverted afterEXACTLY5: median2101.5895159aggregate
+prefill/165.2888644decode,pooleddecode162.7684634(-.592%),whole+.570%,prefill
+median+.964%/pooled+1.332%. All4ranks qualifiedactive BEFOREfirstmeasuredtrial;
+noineligiblepathissue.43distinctchecksPASS(31new+12regression),16actualallTPcases
+exactq/F32scales/BF16outputs/nativecallcounts,KV/battery4/4/Ruff. Completeprojection
+component+7.431%4096/+7.445%heldout4160 didnotpasspooleddecodeguard. Initial7fixture
+checks hadwrongscalerank[N,G]vs[1,N,G];26otherspassed,corrected7+10newprotocolPASS.
+No arithmeticfixneeded. Allsource/proofs/originalfive B06exp5-saved/exp5-* retained.
+Restoredonly3productionfiles/removedsnapshot-verifiednewtest;acceptedruntime
+rootd70e9b6/AITERba264unchanged. Bench85411/monitor10435/stop32759 exit0;
+alltoken/cap/source/harness gatesPASS,sampledpeak30.6185GiB. Noextra5. Possible
+nativePythonoptionalargoverheadunquantified;do notreplayunchangedE5payloaddesign.
+
+B06allFIVE complete, nonekept. NEXTB07 freshprofile4096/256C8 thenregisterFIVE
+fromnewprofile,latestacceptedoriginalB05E2five unchangedreference. CPUdraft
+batch07-prep/research.md holdsfive scopeideas,notyetregistered: page-outerattention
+actual4256(133tiles/page),isolatedprefillfactorIQ2quant(withoriginalnative/metadata/
+cachehits),prefillplainlinearfinalBF16store,nativeAITERnormGS128dualoutputfusion,
+groupingTWOexistinglargefallbackcollectives withoutconcatenating/changingmath.
+E5rejected,soanynewnormpayload mustpreservenativelegacyop/callpath,notrepeatE5
+wholeAPI. Verifyall4actualpath BEFOREmeasuredfive. No future runtimeedits until
+profileandnewplan. E4ledger/refinementd428145177 pushed/remoteverified.
 
 E4unchangedpublicsourcecredits verifiedagainstofficialrawGithub; ignoredreview/
 snapshot/hash retained. Securityhelper optional--public-attribution-review only
