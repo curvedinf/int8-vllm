@@ -1,150 +1,144 @@
 # Bolt continuous optimization
 
-Continue indefinitely until the user manually stops. Each batch profiles frozen
-4096 input /256 output /C8, registers FIVE experiments across scopes including
-architectural fusion, then executes sequentially. EXACTLY FIVE measured runs
-per final candidate define the verdict. No extensions, additional controls, or
-new baselines. Reuse the latest accepted original five. One untimed full warmup
-per boot is established; component tests and bounded profiles are separate.
-Keep positive end-to-end gain AND median+pooled aggregate prefill/decode no
-worse; otherwise restore only owned changes and move on. Do not relax the gate
-after seeing results. Commit/push winners, then renew the batch automatically.
-No subagents. Report aggregate prefill AND separately timed aggregate decode
-regularly; never per-request or whole-run output rate as decode. Keep updates
-within60seconds (shorten reasoning/use time tools rather than long silent work).
+Continue until the user manually stops. Each batch profiles frozen4096 input /
+256 output /C8, registers FIVE experiments across scopes including architectural
+fusion, and executes sequentially. EXACTLY FIVE measured runs per final candidate
+are the entire metric budget. No extensions, extra controls, or new baselines;
+reuse the latest accepted original five. One untimed warmup per boot is established.
+Component tests and bounded profiles are separate from the five-run metric.
+Keep positive end-to-end gain with median AND pooled aggregate prefill/decode no
+worse; otherwise restore only owned changes. Commit/push winners, renew batches
+automatically. Agent-added3% whole-run floor was explicitly removed atB05E2 to
+honor user criterion; that correction and originalfloor miss are in its ledger
+row. Earlier negative pooled-phase verdicts remain unchanged. No subagents.
+Report aggregate prefill AND separately timed aggregate decode regularly; never
+per-request rates or whole-run output rate as decode. Commentary within60seconds:
+check clock, shorten reasoning, keep waits below30seconds.
 
-Frozen manifest:263da19de5a5bc8823fe38d7113553c08f00fa453127dbbd523c74622d0bcda1,
-eight technical prompts4096 each/256 actual output token IDs,seed0/temp0/ignoreEOS.
-ResetGPU+CPU prefixes everyrun; assert8success/32768input/2048output/256IDs each.
-Decodev2 counts shared-clock token events strictlyAFTER latestfirsttoken until
-lastgenerationevent; prefill32768/latestfirsttoken includes admission/interleaved
-decode. Accepted cohort keepsall8 in decode tail. Public calculator
-vllm/benchmarks/streaming_phases.py andscripts/report_bolt_phases.py:9CPUtests,
-23recordedv2trialsexact. No GPU micro/profile/benchmark overlap.
+## Current state and next action
 
-Accepted incumbent NOW: B05E2 routeweight/reduce/outputcastfusion on top of
-B02E5shortcohort+B03E1route64. AITERba264db0b19c6b058c981533bf424332659ed5fe committed;
-rootintegration/ledger/notes arecurrentstagedcandidate(nextrootcommit). Original
-source/harnesshashesB05exp2-sources.json;sourceparentroot2bbe3aa625/AITER3f8045a90.
-Currentreference B05exp2-{0..4}.json ORIGINALFIVE, medians2081.5140315 aggregate
-prefill/162.7157729 aggregatedecode, pooleddecode163.7370051,pooledwhole74.6502256.
-Use exp2 asreferenceforE3-E5; B05incumbent-* preservesolderB03E1fiveforcumulative
-comparisons. DO NOTrestoreold3f8045a90whileremovinglatercandidates; keepnewcombine
-API/rootexport+call paired. Route64M>64/routes>=actualExperts*64;matchingUP/DOWN
-plan. Native/sparse16. Cohortshared4256prefill/8512total, offcadenceeligibleinitial
-text/output+pending<=64;long/mature/MM/LoRA/preempt/staleretain16-roundcadence.
+Accepted incumbent: rootd70e9b6ed8694e77abbdccbcf5de97e9fcaf0146 and
+AITERba264db0b19c6b058c981533bf424332659ed5fe, bothmain/pushed/remoteverified.
+B05E2 exact routeweight/reduce/outputcast fusion atop B02E5shortcohort and
+B03E1route64. Reference B05exp2-{0..4}.json ORIGINALFIVE: median2081.5140315
+aggregate prefill/162.7157729aggregate decode; pooleddecode163.7370051,
+pooledwhole74.6502256. Use exp2 forE4/E5, no newbaseline.
 
-Protocolcorrection: agent-added3%overallfloor wasextra toexplicituserfive-run/
-nondegradingphasecriterion. RemovedexplicitlyatB05E2adoption, withplannedfloor
-miss documentedinledger. Positiveend-to-end ANDmedian+pooledphaseguardsremain.
-Noextra runs. Earliernegativepooledphaseverdictsunchanged; do notrelabeltheir
-plannedgates. Userinstructionwins overskill-inferredmaterialfloor.
+B05E3 COMPLETE/reverted afterfive: median2152.7672311prefill/165.0328814decode,
+pooleddecode162.2629241(-0.900%), whole+1.843%.142component/regression checks,
+41finalquantizer checks,64realcheckpoint cases andKV/battery4/4 pass; exact
+arithmetic preserved. BM16 selectedfrom4/8/16/32 beforefive, weighted kernel
+92.360->26.343ms. This component win didnotpass pooleddecode guard. All source,
+originalfive andchecks inB05exp3-* /exp3-saved. AITER restored exactly toba264;
+newquantizer test removed onlyafter snapshot verification. No E3code retained.
 
-Fixed user configuration: staticdense3GiB ceiling,277projections,
-2,387,607,552INT8values/2.224GiB perGPU,originalpacked GPU tensors/codecmetadata
-released(1.389GiB freed). Expertcache5GiB/slotsauto/refresh128, originalIQ2packed
-experts retained:4565pairs,114-119slots/layer,5,368,184,832payload+175,944metadata
-bytes (348,344unused). GPUKV14e9/rank,CPU24GiB/ranklocal6GiBpin,context262144,
-TP4/C8/NS7,INT8GS128compute/KV,BF16residual,FP32Mamba,customAR/largefallback.
-All4GPUcaps105W. Thermalcontroller stoppedANDdisabled; installeddependencydropin
-renamed thermal-controller.conf.disabled-static-cache-test. nginx muststaydown,
-productionvllm-bolt stopped. Neverrunproduction alongsideisolatedbolt-opt-loop.
-Fullfidelity/256kvalidation deferredbyuser; do notclaimpassed orresumeoldconfig
-testing. Existing1500/400legacyprobe useddifferentC1cold8192/1prefill vsC8random
-32/1000decode/acceptance; incomparable, neverrerunlegacybaseline.
+ACTIVE B05E4 immutable denseFP32scale layout. Server stopped afterE3;monitor9324
+andbench46849 exited0. Pre-implementationmicro session73092 compares original
+versus N-contiguous groups usingexisting stride-aware GEMM; logB05exp4-scale-
+layout-micro.log. No production E4code yet. Prepared scale-layout-micro.py and
+check-layout-real.py ignored. Then implement transpose-copy-transpose ONLY at
+staticpromotion AFTER expansion; replace resident entry and freeoldlayout.
+Keep expert/lazy groups raw row-major. Exactvalues, sameFP32metadata bytes,
+cacheceilings/ownership unchanged. Test ownership/graph/allcodecs/realprojections,
+KV/battery; freeze sources then exactlyfive exp4 versus exp2 originalfive.
+B05exp4-dense-shapes.json:277 runtime projections,2387607552INT8values,14shapes;
+checkpointmerges8QKV and5draft gate/up explain298raw->277runtime.
 
-B05E1 originalfiveCOMPLETE/inconclusive/reverted: median2253.4939aggregateprefill/
-162.8682aggregatedecode;pooledwhole+6.663%,medianprefill+12.700%/decode+0.827%,
-butpooleddecode-0.400% ->predeclaredbothmedianANDpooledphasegate unmet. Notcausal
-proof ofslowdown;no extra runs/gaterelaxation. RestoreONLY3trackedAITerfiles/
-removeONLY2backed-upnewtests;AITERclean3f8045a90. Allcode/proofs/rawfive retained
-B05exp1-saved/exp1-sources.json/exp1-*. CPU149323776signedcases/GPU130023424values
-zero;100component/32realchecksPASS;48completeMLPtimings+53.963%/53.602% exact.
-KV/battery4/4/Ruff/fivegatesPASS;peakVRAM31.222GiB. No E1code retained. Native
-andallsettingsunchanged. B05firstverdictledger/notes pendingsecurity/commit/push.
+B05E5 planned Mamba normalization producer fusion; inspect ignored
+B05exp5-seam-design.json. BoltusesMambaMixer2,notQwenGDN. Groups8/TP4/localI2048,
+group1024,eps1e-5,use_biasFalse. Preserve existingFP32SiLU/gate/pow/mean/rsqrt
+reduction body. Fuse final FP32->BF16 round, BF16normweightmultiply/secondBF16
+round andGS128INT8quant; remove BF16temps. Add prequantizedRowParallel seam that
+shares original rank0bias/cast/reduce/skip_reduce/return_bias semantics. Guard
+residentGS128/parallelinput/BF16/localdivisiblegroups; unsupportedfallback.
+Do not rewrite fullnormtree without separate bitwise evidence. No E5source yet.
 
-B05E2 originalfiveCOMPLETE/ACCEPTED: median2081.5140prefill/162.7158decode,
-+4.099%/+0.733%;pooledprefill+3.840%/decode+1.105%,whole+2.672%. All5gatesPASS,
-source/harnessfrozen;peakVRAM30.718GiB. 97initial+4geometrychecks,34finaloperator,
-64realallTP casesPASS;KV/battery4/4/Ruff. B256/W4 M<=64,B512/W4prefill selected
-beforefive. FullFP32ATentreeandBF16roundexact. AITERcommitba264db0b19c
-created/pushpending88374; rootcode2files+ledger/notes needfinalsecurity/commit/
-push NOW. ServerrunningacceptedE2,monitor1406,bench70350exit0. StopunitbeforeGPU
-E3work. Gate/outputB05. Sourceexp2-saved/exp2-sources.json. No E1code retained.
+## Fixed serving contract
 
-NEXT B05E3 multirowprefillactivationquant. Designinexperiments-plan.json;
-implementnewmultirowkernel onlyM>64, preserveFP32max/div_rn/RTE androwmajorQ/scales,
-native/decodeoriginal. BoundedBM4/8/16/32 choicebeforefive; validateallinputdtypes/
-Ktails/boundaries/graphs/dense+expertconsumers/realweights. CompareEXACTLYfive
-againstB05exp2 ORIGINALFIVE;no newbaseline/extensions. E4/E5plannedonly.
+Allfour MI100 caps105W. mi100-thermal-controller.service stopped AND disabled;
+installeddependency dropin renamed thermal-controller.conf.disabled-static-cache-test.
+nginx must stay down; productionvllm-bolt.service stopped. Never run production
+alongside isolatedbolt-opt-loop.service. Staticdense3GiBceiling;277projections,
+2387607552INT8values/2.224GiB perGPU; originalpackedGPUweights/codecmeta released
+(1.389GiB freed). Expertcache5GiB/slotsauto/refresh128, originalIQ2packed experts
+retained:4565pairs/114-119slots perlayer,5368184832payload+175944metadata bytes,
+348344unused. GPUKV14e9/rank; CPU24GiB total/ranklocal6GiBpin;context262144;
+TP4/C8/NS7;INT8GS128compute/KV,BF16residual,FP32Mamba,customAR/largefallback.
+KVcapacity3283288tokens/12.52fullcontexts. User deferred fullfidelity/256k checks;
+do not claim passed or resume accepted-memory-config testing. Legacy1500/400
+probes used differentC1cold8192/1prefill vsC8random32/1000decode; incomparable.
 
-B05 profile COMPLETE:299185kernels/alllaunchcorrelated,rank0prefill/mixed15.6339
-kernel-seconds;dense4.4773s/28.64%,packed3.7889s/24.23%,collectives3.2782s/20.97%
-(includeswaiting),attention1.5148s/9.69%,quant0.5707s,copy0.5029s. Threechunks
-rank0pid1569371 underB05host/gpu, CSV/analysis/opportunities adjacent. Profiletime
-excludedfrommetric;no newbaseline. B05experiments-plan.json registeredFIVE before
-implementation:1currentcache/codeccomposition;2exactMoEweightedreduce/BF16fusion;
-3multirowprefillactivationquant;4staticdenseFP32scaleN-contiguouslayout;
-5partialMambaoutputround/weight/quantproducerfusion. E2-E5 plannedonly.
+Acceptedroute64: M>64/routes>=actualExperts*64 withmatchingUP/DOWN plan;
+native/sparse16. Shortcohort shared4256prefill/8512total, eligibleinitialtext/
+output+pending<=64 may enter offcadence;long/mature/MM/LoRA/preempt/stale retain
+16roundcadence. Combine uses exactATen4accumulator9waysum withFPfusionOFF;
+B256/W4 M<=64,B512/W4 otherwise. Preserve this API/rootexport when reverting.
 
-Laterexperiment caveats: E2mustrecoverATen9-wayFP32reductionorder beforeclaiming
-exactTLsum; preserveBF16round beforeexistingdownstreamquant. E3currentquantone
-128element/4waveCTAperrow/group; multirowprefillrewrite retainsrowmajorQ/scales
-andnative decode. E4onlystaticdenseFP32groups logical[1,N,ng] stridedphysical
-N-contiguous; freeoldlayout, preservetotalbytes. Expertrawgroups/activations
-muststayrowmajor. E5BoltusesMambaMixer2,groups8/TP4,localI2048/group1024,
-eps1e-5,use_biasFalse. forward_cuda delegatesnativewhengroups!=1. Preserve
-FP32gate/pow/mean/norm reductions exactly, thenfusefinalFP32->BF16round,
-BF16weightmultiply/secondBF16round andGS128quant. PreserveRowParallelbias/rank0/
-AR/SPsemantics. No fullnormreductionrewritewithoutATentreeparity.
+## Evidence, infrastructure and rejected directions
 
-History compacted: ledgerdocs/recipes/surface_experiments_ledger.jsonl plus
-ignoredB01-B04artifacts retainalloriginalfive/source/verdicts. B03E1onlyretained
-B03change (+25.708%whole,medianprefill+40.954%/decode+3.126% vsB02E5). B03E2
-8wayheader micro+35.8%,whole+2.642%/decode-1.271% ->reverted. B03E3nativeUProwleader
-fusionwhole-1.415%;E4full/groupMLPfusion-12.354%;E5temporaryINT8staging-4.291% all
-reverted. B04allFIVEreverted:two-pagecohort,route128,singlelaunchcacheprefill,
-denseepiloguefusion,ROCmsharedoverlap. E3whole+4.116%/medianprefill+8.444% but
-pooleddecode-0.502%;E4whole+3.015% butpooleddecode-0.181% ->strictgate unmet, no
-extra runs. Those small negativesarenotcausalproof. E5whole+.393%/decode-.392%,
-peakVRAM31.845GiB (~159MiBheadroom);incumbent~31.22GiB. E1compositionnewalgebra
-andcachemissintegrationaddressespriorindividuallysmallgains. B02E1UNREQUESTED
-extra5 exp1-repeat-* areEXCLUDED; usercorrectedcount twice, fiveiscompletebudget.
-IntegerIQ2priorproof37,329,768positivecases/all31743positivehalf isdistinctfrom
-newalpha149Mproof. B01cacheprefill0d8WITHDRAWNin15a3; do notreintroduceit.
+Canonical ledger docs/recipes/surface_experiments_ledger.jsonl. Ignored raw/source
+artifacts agents/tmp/bolt-opt/loop/batch01..batch05; preserve originalfive.
+B05profile rank0pid1569371/299185kernels all launch-correlated. Prefill/mixed
+rank0kernel sum15.6339s (notTP4wall): dense/otherGEMM28.639%,packed24.235%,
+collectives20.968%(includeswaiting),attention9.689%,quant0.5707s. RawKineto grid
+is a LIST; quant grid[0]=M/grid[1]=ceil(K/128). Activation widths1024/2048/4096/
+24576 with88/40/128/1calls perprefill step. B05experiments-plan.json preregistered
+allfive; E1 reverted,E2 accepted,E3 reverted,E4active,E5planned.
 
-Infrastructure ignoredagents/tmp/bolt-opt/loop: frozenrun.py/compare.py/
-phase_metrics.py/manifest-4k.json. bench NAME --batchbatchNN --repeat5; compare
-BASE CAND --batchbatchNN. Profileonewarmup+boundedrank0capture32steps/chunk;
-removeactivegatefinally. benchmark.lock preventsGPUoverlap. Monitor2s sysfs/no
-GPUcontext. HotreloadcanOOMduplicating~0.5GBscales; freshboot~7-8min. Isolated
-bolt-opt-loop.service port8021,Usercurved,MemoryMax56GiB/Swap8GiB. Lifecycle
-runtime dropinB05. Stopreturns143/failednormally; DO NOTreset-failed (wouldGC
-transientunit). IfGC occurs, regenerateidenticalunitproperties/envfile privately;
-neverprintcredentials. NativeHIP loader hashes sources/compiler/flags.
+B05E1 newfactorizedIQ2/cache-hit/header composition: whole+6.663%,medianprefill
++12.700%/decode+.827%, pooleddecode-.400% =>reverted. CPU149323776signedcases/
+GPU130023424values zero;100components/32realchecks,48completeMLPtimings+53.963%.
+Proof is distinctfromprior integer-IQ2proof; artifacts exp1-saved/exp1-*.
+B04allfive reverted: two-pagecohort,route128,singlelaunchcacheprefill,denseUP-
+quant/directBF16epilogue,ROCmsharedoverlap. E3whole+4.116% butpooleddecode-.502%;
+E4whole+3.015% butpooleddecode-.181%; E5whole+.393%/decode-.392%,peak31.845GiB
+(~159MiBheadroom). Do not shrink caches/KV tofit workspace. Currentpeak30.718GiB.
+B03E1route64 retained; E2header8way,E3nativeUProwleader,E4full/groupMLPfusion,
+E5temporaryINT8staging reverted. B02E5shortcohort retained. B02E1 UNREQUESTED
+extra5 exp1-repeat-* are excluded; neverrepeat this mistake. B01cacheprefill0d8
+WITHDRAWN in15a3 undercorrectphasegate; do notrestore.
 
-Gitmutations/push AS curved, bothmain; rootremoteorigin,AITERremotecurved.
-BeforeEVERYcommit scanfinalstagedblobs/diff/metadata withsecurity-hygiene-check
-underagents/scratch/security-policy.md; helperloop/security-gate.py. No disclosure
-exceptions. EstablishedintentionalpublicGitattribution accepted. Offloadflagpath
-changedtocheckout-relativebyexplicituserchoice; nohistoryrewrite/disclosuregrant.
-Protectunrelatedroot edits/services/startupwatch/AGENTS/Qwenfiles, neverbroad
-restore/stage/stash. Verifyloop/protected-worktree-hashes.json(bytes+mtime).
-AllPython root.venv/bin/python, no pip/venv/runtimechanges. GPUwork ascurved,
-PYTHONPATHroot:siblingaiter,105Wfixed. ImportedautousefixturesneedexplicitnoqaF401;
-lintremovedone inB03E4,caughtbeforeperf/restored. llvm-objdump--offloading extracts
-sidefiles; useignoredcopy. Actualexpertcounts240-496,never512. PartialTPgroupscan
-span256codecblocks; no commonDhoist there. PreserveFP32grouporder/double-rounding
-RTE(F32_RTE(v/scale)). CompiledunsortedtopKcanreorderexperts; compareexpertsets/
-tightweights ratherthanexacteagerorder. Maintain-scratchchecked/notdueOct15.
-Self-improvement enabled; currentusercorrections alreadycoveredbyexistingrules.
+Loop harness: frozenrun.py/compare.py/phase_metrics.py/manifest-4k.json inloop/.
+bench NAME --batchbatchNN --repeat5; compare BASE CAND --batchbatchNN. Frozen
+manifest263da19de5a5bc8823fe38d7113553c08f00fa453127dbbd523c74622d0bcda1:
+eighttechnicalprompts4096 each/256actualtokenIDs,seed0,temp0,ignoreEOS. ResetGPU+
+CPU prefixes eachrun; assert8success/32768input/2048output. Decodev2 counts token
+events strictlyAFTER latestfirsttoken until lastgenerationevent. Prefill32768/
+latestfirsttoken includes admission/interleaveddecode. Cohort keepsall8 intail.
+Public streaming_phases.py/report_bolt_phases.py:9CPUtests/23recordedtrialsexact.
+No GPUmicro/profile/benchmark overlap. benchmark.lock guards fullruns.
+Profileonewarmup+boundedrank0capture32steps/chunk, activegate removedfinally;
+profiletimes excludedfrommetric. monitor.py samples sysfs2s/noGPUcontext.
 
-LaterMamba research lead ONLY (notimplemented): fastest-dimFP32mean1024 uses
-Reduce.cuh inputvectorization4,64lanes/row,4sequential256-valuechunks withfour
-accumulators thenwarpDown32/16/8/4/2/1; verifyinput_vectorized_thread_reduce_impl
-beforeassumingorder. A nativeHIPfullgate/norm/weight/quantfusioncouldmatchthat
-exacttree andTorchOCMLexp/div/rsqrt semantics, retainbothBF16rounds. Existing
-AITERctypesHIPloader avoidsfullvLLMbuild. Mustproveallmath bitwise; originalB05E5
-partialepilogueplan staysuntil evidence supportsnewfullfusion. Group128quant
-max associative exact, butSiLU exp/div andvariance tree requirecare. No future
-sourcechangeswhileE2runs. Currentprotectedrootbytes/mtimes verified05:31.
+Isolatedbolt-opt-loop.service port8021,Usercurved,MemoryMax56GiB/Swap8GiB;
+7-8minfreshboot. Runtime lifecycle dropinB05; activegate must beabsent before
+bench. HotreloadcanOOM byduplicating~0.5GBscales. Stop143/failed is normal;
+DO NOTreset-failed (GCs transientunit). If unit disappears,recreate identical
+properties/envfile privately. Never print APIkey/fullenv; runner reads private
+liveAPIchild environment. GPUwork AScurved, root.venv/bin/python only;
+ROCM_PATH/LD_LIBRARY_PATH=/opt/rocm[/lib],gfx908,GPU_ARCHS,gfx908,VLLM_TARGET_DEVICE
+rocm,PYTHONPATHroot:siblingaiter. No pip/venv/runtime changes. Servingtorch2.11
+runtime deliberately patchedHIP/HSA7.2; never reinstall unreviewed.
+
+## Preservation and publication
+
+All Git mutations/push AScurved, bothmain. Rootremoteorigin/AITERremotecurved.
+Stage only experiment-owned code andledger/thisnote; preserve unrelated root
+AGENTS/services/Qwen/startupwatch work. Verify loop/protected-worktree-hashes.json
+(10paths bytes+mtime), plus protecteddeletions; no broadrestore/stage/stash.
+Before EVERY commit, afterallfinaledits/staging, run security-hygiene-check under
+agents/scratch/security-policy.md; helper loop/security-gate.py. Fullstagedblobs/
+diff/metadata; no disclosureexceptions. ExistingintentionalpublicGitattribution
+accepted. Offloadflagpath changedtocheckout-relative byexplicituserchoice;
+nohistoryrewrite/disclosuregrant. Re-read finalcandidate beforecommit.
+
+Known pitfalls: importedautousefixtures neednoqaF401 (Ruffremovedone, caught
+beforeperf/restored). Formattermayrewrite unrelatedoldcode; preserveoldblocks.
+PartialTP128windows maycross256codecblocks; no commonDhoist acrossboundaries.
+Keep FP32group order anddouble-rounding RTE(F32_RTE(v/scale)). Compiledunsorted
+TopK mayreorderexperts: compareexpertsets/tightweights. Initialize serving's
+producerstream before GPUstreamtests; current_stream createsit onfirstcall.
+llvm-objdump --offloading extractssidefiles; useignoredcopies. NativeMT>1 must
+match16*MTplan/COUNT. Actualexpertcounts240-496,never512. Maintain-scratch checked/
+notdueOct15. Existing skill criteria alreadycover usercorrections; no duplicate
+refinement added.
