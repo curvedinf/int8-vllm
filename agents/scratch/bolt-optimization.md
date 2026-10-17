@@ -119,16 +119,28 @@ Allruntime arm hooks were reverted withE5; diagnostic harness enhancement remain
 ignored run.pySHA d05ada8f44803882596a4cd1eb6db12fe459ea5cbe826bd220e95d99f7182802;
 oldrun savedrun-before-sparse-arm.py. Workload/timing/hardware/runloop ASTunchanged;
 otherharnesshashesunchanged. Futureoriginalstack profiles use default armFalse.
-B08 ALLFIVE complete, nonekept. NEXT B09 freshbounded4k/256/C8 profile,EXCLUDEDfrom
-performance. Unitstopped/allGPUjobsclosed. Copy ORIGINALB07exp4five asB09incumbent,
-freeze currentaccepted runtime andnewharness. Keep same105W/static3/dynamic5/KV
-contract. Research drafts B08/next-batch-opportunities.md (NOTregisteredexperiments):
-GEMM BF16-roundedF32 wire stores removeintermediatecasts withoutwire/orderchange;
-nativeMoEnorm directlystores BF16-roundedgate-readyF32,originalBF16dtype metadata;
-LDS narrowN wholeKweightstrip reuse acrosssuccessive64-rowtiles;L2tiletraversal.
-Reassessafterfreshprofile and register ALLFIVE before code. Do not repeat rejected
-variants unchanged. Currentoriginalreference median2300.424995/168.283886,pooled
-aggregate decode170.745656/whole80.575790. No new baseline or extra controls.
+B08 ALLFIVE complete, nonekept. ACTIVE B09 profileCOMPLETE,ALLFIVE registered
+beforecode inB09/experiments-plan.json/canonicalledger. Unitstopped/allGPUjobsclosed.
+Profile21560/monitor27713/stop7273/converter85651/analyzer50310exit0. Rank0PID1868713,
+281348kernelsALLlaunch-correlated,3chunks. KernelSUM13.866725s(notTP4wall):dense32.341%,
+packed27.285%,collectives20.494%(waitincluded),copies3.530%,quant2.194%,normquant1.515%.
+24runtimefiles/harness/protectedbytes+mtimes/all4path/105W/tokencountersPASS.
+ORIGINALB07exp4five exactbytecopiesB09incumbent, no newbaseline/profileEXCLUDEDmetric.
+run.pySHA d05ada8f44803882596a4cd1eb6db12fe459ea5cbe826bd220e95d99f7182802;
+profile usesdefaultarmFalse andacceptedMoEnorm marker;E5hooksallreverted.
+ALLFIVE:1denseL2traversalGROUP_M4or8only(fixed128tile/stage1);2native register-fed
+GS128denseprefillMFMA(two64x128/128x128macrotiles,keepincumbenttraversal);
+3BF16-roundedF32GEMMwirestore +sameUNGROUPEDF32AR/finalBF16cast (truthySTRING0
+behaviorpreserved);4nativeMoEnorm BF16-roundedgate-readyF32store,keeporiginalBF16
+latent/sharedmetadata/casts;5prefilldraftreplicatedFC output-rowsharding1024/rank
++bitwisecolumnallgather,fulloriginalweights retained. Adaptiveupdatesonlywhenan
+acceptedearlierexperimentinvalidateslaterimplementation;noextraE2E budget.
+NEXT B09E1 implementation NOTstarted yet. ReuseB08denseoperatorplan/oracles but
+CORRECT actualAIS TP Mamba5groups/replicatedKV,includingprobe-range gathering if
+needed. Discovery4160/heldout4096+4256/BF16-F32/unchangedepilogues. Exactly5finalvalid
+candidate runs against ORIGINALB07exp4five; no morecontrols/newbaseline. Profiler
+unitdropinpointsB09host/active. Keep105W/static3/dynamic5/KV/precision unchanged.
+Researchdrafts B08/next-batch-opportunities.md;B09plan isauthoritativefornextbatch.
 E4design exp4-design.md: exactnativeMamba in_proj sourceNVFP4,quant_method is
 ModelOptNvFp4W4A16LinearMethod(packed_g128=True),notPackedG128LinearMethod;
 staticresident INT8+weight_gs128 directint8_gemm/F32->normal.dtype isoldapplymath.
