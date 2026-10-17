@@ -59,25 +59,23 @@ ANDdisabled. nginx stopped; no80/443listeners. Installed Bolt thermal dependency
 renamed thermal-controller.conf.disabled-static-cache-test; do not reintroduce.
 Production vllm-bolt stopped; never start alongside isolated diagnostic unit.
 
-Diagnostic bolt-opt-loop.service is BOOTING E3integer-quant candidate
-(2026-10-17 00:03UTC), monitor exp3 and run.py bench exp3 --batchbatch02
---repeat5 active. E2native original FIVE complete: median947.7065prefill/
-93.4250aggregatedecode; pooled93.1794decode/48.6152whole. Whole+2.016% below3%
-andmedian decode-3.392%; INCONCLUSIVE/notadopted, fullyrestored15a3. Exact
-sources/diff/results exp2-*; verdict appendedledger. No E2runtime code retained.
+Diagnostic bolt-opt-loop.service BOOTING E4fusednativeUP at00:24UTC;
+monitor exp4 and run.py bench exp4 --batchbatch02 --repeat5 active. Final36
+component/32realcheckpoint checks exact; KVmicroPASS,battery4/4. Fusionuses
+NW8/whole128-columnCTA, subgroup16max/LDSmaxima/onebarrier, preciseRTEscale
+andINT8output. Mainwrapper avoidsFP32partial andreducer fornativeUP. DOWNand
+prefills remain15a3; E2hoisting/E3integerprefill code remainreverted. NewCAPI
+launch_routed_quantized andoptionalnativequant_scales. Source/harnesshashes
+exp4-sources.json, fullbackup/diffexp4-saved. PerformanceNOTadoptedyet; compare
+originalfive pre-e2-control vs EXACTLYfiveexp4, thenkeep/revertwithoutrepeats.
 
-E3candidate: new_quant_iq2_common_base inTritionpackedkernel; only M>64 with
-routingplan/128-alignedstart usesinteger common-factor quantization. Existing
-FP32groupscales andallnative/crossing-blockpaths unchanged. No cachebudget or
-allocation/admissionchanges.9GPUchecks pass: hardware reciprocalerror<=1e-6,
-all63488positive/negativefinitehalfbasemultipliers includingzeros/subnormals
-vsoriginalexpand (16,252,928integerweights),7fullGEMM/epilogue cases upthrough
-M4096.32realcheckpoint comparisons allTPoffsets/4widths/m65,256 exact;
-KVmicroPASS,battery4/4,ruffPASS. Source/harness exp3-sources.json andbackup
-exp3-saved; nativeCsrc HEAD15a3 unchanged. Compare pre-e2-control vs exp3
-using originalcompare.py after EXACTLYfive. No extensions for uncertainty.
-Unit8021isolated, productionstopped; profilegateabsent. Need verdict, restore
-onlyE3ifnotadopted, thenE4native UP/ReLU2/GS128fusion, E5boundedadmission.
+E3originalfive inconclusive/reverted: median950.385prefill/96.587aggregatedecode,
+pooled97.976decode/48.904whole. Whole+2.621%below3%, mediandecode-0.122%.
+E2alsoinconclusive/reverted: whole+2.016%, decodemedian-3.392%. Ledgerrows and
+allartifacts retained. Currentincumbent remains925.793prefill/96.705decode.
+AfterE4, implementE5boundedinitialshortcohortadmission perdesignfile. Production
+staysstopped; isolatedunit8021/lifecyclebatch02/host/gateoff. NoGPUoverlap or
+baseline/perf extensionsfornoise. No performancechanges adoptedthisbatchyet.
 
 Batch02 reference profile:590501kernels/alllaunchcorrelated; prefill+mixed
 23.3892rank0kernel-seconds, packedrouted10.3514s/44.257%;collectives3.8049s
@@ -163,3 +161,12 @@ negativeDsignfold; crossing256-blockwindows retainoriginaldecoder. No extra
 metadata/capacity changes. Not GPUvalidated oradopted. RevisedplannedE3 to
 this arithmetic mechanism beforeimplementation; savedpriorplan. RouteAPI/
 32-64rowreuse deferred to nextbatch. NativeE2sourceunchanged while it runs.
+
+E3compiler correction before any measured trial: ordinaryTrition division
+still emitted2precise sequences. Initialboot stopped whileloading (no warmup/
+measuredtrials), savedexp3-initial-precise-div andexp3-startup-before-explicit-
+rcp.log. Finalhelper uses explicitv_rcp_f32 inlineASM; actualGPUerror bound
+<=1e-6andallintegeroutputcases stillpass. Codegen2RCP/0divscale/0divfixup.
+Final9componentchecks,32realchecks,KVmicroPASS,battery4/4. Finalsourceidentity
+exp3-sources.json/backupexp3-saved. Allpreviousvariant/failure evidence retained.
+Finalfive-run client/session isactive after00:08boot; do not launch a duplicate.
