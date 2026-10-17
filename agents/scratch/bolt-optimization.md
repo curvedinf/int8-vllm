@@ -153,10 +153,29 @@ prefillkernel. Restoredonlyrootmarker/AITERwrapper,removedtwohash-verifiednewfil
 acceptedE1attention/roota079 andAITERba264 retained. Bench45545/monitor13251/stop31285
 exit0;serverstopped. Allsource/proofs/originalfive exp2-saved/exp2-* retained.
 
-ACTIVEB07E3: isolateplainbiasfreeBF16prefill finalGEMMstore,avoidF32output+cast;
-noUPquant/relu2composition. ImplementseparateAITERprefillwrapper/rootdispatchfor
-residentPackedG128andNVFP4; keeporiginalnative/defaultF32/biaspaths unchanged.
-UseoriginalB07exp1five asreference,NOToldincumbent,no newbaseline or extensions.
+B07E3 COMPLETE/inconclusive/reverted afterEXACTLY5: median2314.4960458aggregate
+prefill/166.4745794decode;pooleddecode163.8616413(-1.771%),medianprefill+3.527%/
+decode+.537%,whole+.916%. ALL4qualifiedbeforefirsttrial;alltoken/cap/source/harness/
+coherentpreviewgatesPASS,sampledpeak30.555286GiB.68components/130actualcheckpoint
+cases(10surfaces/all4TP)PASS;196608BF16roundboundary/nonfinitebitchecks exact.
+Initial63PASS/3FAIL caughtTritonNaN0x7fffvsPyTorch0x7fc0;correctedONLYnewprefill
+store,66rechecks+2narrowfallbackPASS. ONEfixedperformancevariant:12pairedcomplete
+projectionchecks/24timings +8.344%4096/+8.294%4160;sharedfusedUP/DOWNunchanged.
+Originalnativehelper/JITbyteidentical,accum/traversal/signatureASTidentical except
+newstore;KV/battery4/4/RuffPASS. Waitingclient24555terminated143 BEFOREANYwarmup/
+requestwhilecheckingunprefixedstartupmarkers;all4Packedmarkersalreadyrank-prefixed,
+no harness/runtimechange. Replacement85801 ONEwarmup/EXACT5,monitor36691/stop19805
+all0. Source/proofs/originalfive exp3-saved/exp3-* preserved. RestoredONLY3rootprod
+files/removenewroottest+3AITERnewfilesafterhashcheck;acceptedE1attention retained.
+
+ACTIVEB07E4: nativeMoERMSNorm+GS128dualoutputfusion,explicitforwardq/scales to
+latent/sharedconsumers. CPUdesign exp4-design.md; E5groupedcollectivedesign
+exp5-design.md. E3wasREJECTED,soNOdirectBF16store helper exists/useoriginalF32cast.
+Implementseparateprefillentry/opaqueop,keeplegacyMoE/runner/sharednativeAPIs/source
+unchanged;onlyearlyM>=256guardinMoEDecoder.forward. NoTensorattr/globalqstash.
+SupportactualF32/BF16input/residual dtypes,copyactualAITERnormmath/defaultFPfusion,
+originalGS128max/div_rn/nearbyint. Boundtwoepiloguelayouts asregistered. NoE4runtime
+editsyet. ReferenceORIGINALB07exp1five,NOToldincumbent,no newbaseline/extensions.
 
 E1precommitpubliccredits: originalanddedicatedsource retain4upstreamauthorlines
 EACH. Securityhelper nowacceptsmultiple --public-attribution-review flags, checks
@@ -230,7 +249,7 @@ Profileonewarmup+boundedrank0capture32steps/chunk, activegate removedfinally;
 profiletimes excludedfrommetric. monitor.py samples sysfs2s/noGPUcontext.
 
 Isolatedbolt-opt-loop.service port8021,Usercurved,MemoryMax56GiB/Swap8GiB;
-7-8minfreshboot. Runtime lifecycle dropinB06; activegate must beabsent before
+7-8minfreshboot. Runtime lifecycle dropinB07; activegate must beabsent before
 bench. HotreloadcanOOM byduplicating~0.5GBscales. Stop143/failed is normal;
 DO NOTreset-failed (GCs transientunit). If unit disappears,recreate identical
 properties/envfile privately. Never print APIkey/fullenv; runner reads private
