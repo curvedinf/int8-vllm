@@ -6,9 +6,9 @@ load-bearing for the int8-native doctrine and were each gated by KLD/bench
 measurements. Historical experiments live in git history; they are not
 alternative production recipes.
 
-The [Nemotron Bolt + LiLiCorr peer recipe](nemotron_bolt.md) retains official
-packed weights and converts tiles to INT8 GS128 in AITER kernels. Its model
-geometry, speculative block and serving settings are documented separately;
+The [Nemotron Bolt + LiLiCorr peer recipe](nemotron_bolt.md) uses cached INT8
+GS128 dense weights and retains packed experts with a bounded INT8 cache.
+Its geometry, speculative block and serving settings are documented separately;
 the Qwen baseline below remains available unchanged.
 
 Separate Qwen3.8 and Bolt systemd units are available; see

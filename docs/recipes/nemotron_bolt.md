@@ -16,9 +16,86 @@ image, streaming, API authentication and disabled-development-endpoint checks.
 The root-managed `vllm-bolt.service` serves this recipe on port 8020.
 The Qwen recipe remains independently available.
 
-The [2026-10-15 performance profile](bolt_profile_20261015.md) identifies the
-packed matrix kernels as the dominant bottleneck and documents the remaining
-fidelity-validation gap.
+## Standard optimized combination (2026-10-17)
+
+`scripts/serve_recipe_bolt.sh` selects the accepted combination: the initial
+short-prefill cohort, 64-row packed expert prefill, weighted expert reduction,
+the dedicated HD128/GQA8 4,256-token page attention kernel, and native MoE
+RMSNorm/residual plus GS128 activation quantization. Each specialized path
+checks its supported geometry and retains its ordinary fallback. The legacy
+`VLLM_GFX908_FUSED_NORM_QUANT` producer stays off. The matching sibling AITER
+revision is `3c74adc198e55aeb5bcd41516bddfb3ccadf6725`; the accepted vLLM
+runtime revision is `4711913204533dfe702bd7e9ed7d23d07a08503b`.
+
+The final accepted five-run 4,096-input/256-output C8 sample at **105 W per
+GPU** measured median **2,300.42 aggregate prefill tok/s** and **168.28
+aggregate decode tok/s**. Decode is timed separately, from the latest first
+token until the final token, counting only tokens emitted during that window.
+The same eight prompts, seed, cache resets and five repetitions define this
+measurement; it is not comparable to the older short-prompt results below.
+Subsequent experiments failed the retention gates and are excluded. Raw phase
+rates, source identities and decisions are in the experiment ledger.
+
+The standard memory settings remain 3 GiB/GPU for static dense INT8 weights
+with their original packed GPU tensors released, 5 GiB/GPU for dynamic expert
+INT8 copies with packed expert originals retained, 14 GB/GPU for KV, and
+24 GiB total for CPU prefix offload. TP4/C8, LiLiCorr NS=7, BF16 residuals,
+INT8-G128 target/draft KV, FP32 Mamba state and custom all-reduce remain fixed.
+The thermal power controller is stopped and disabled for this 105 W setup.
+
+## Routine validation (2026-10-17)
+
+The final combination passes INT8 KV micro, the gfx908 battery **4/4**, and
+**339 focused checks** covering packed loading, static and dynamic
+caches, norm/quantization parity, page attention, LiLiCorr, FP32 Mamba state
+and scheduling, plus ten checker regressions. The standard launcher boots all
+four ranks from eight AIS cache hits with development endpoints disabled. Live arithmetic, exact-format
+output, reasoning with a final answer, tool calls, image/video and streaming
+pass. The C8 answer smoke has acceptance length **4.55**. A 28,067-token
+retrieval returns the identical correct phrase cold and on prefix replay.
+
+The short-answer soak passes **500/500 coherence checks** with the original
+case indices, seeds and output budgets: 52 completed serially, then the
+remaining 448 at C8 without repeating completed cases. The harness explicitly
+disables reasoning for its 64–256-token final-answer budgets; reasoning is
+tested separately. It checks final content, so reasoning-only responses cannot
+mask an empty answer. To reproduce a complete C8 soak against the standard
+server, set `API_KEY_FILE` to your existing credential file and run:
+
+```bash
+.venv/bin/python scripts/ua_live_soak.py --model nemotron-bolt \
+  --api-key-file "$API_KEY_FILE" --concurrency 8 -n 500
+```
+
+The standard 52-prompt logprob corpus also passes **52/52** through Bolt's
+chat template, with finite top-token logprobs and readable final answers.
+The ten strict-format responses match their requested formats. The original
+raw-completion capture is retained as a numerical artifact; its continuation
+format is unsuitable as a Bolt chat-quality gate. The Bolt adapter is:
+
+```bash
+.venv/bin/python scripts/probe_bolt_quality.py \
+  --api-key-file "$API_KEY_FILE" --output logs/bolt-quality.json
+```
+
+The checker now accepts code-alignment whitespace and Markdown table dividers,
+while retaining empty-answer, repeated-visible-character and repeated-prose
+checks. The same captured 52 and 500 replies were checked again after this
+repair without new generation runs. No matched official-reference KLD
+comparison was performed.
+
+These are implementation and coherence gates, not a task-accuracy certificate.
+Code spot checks still found invented `Math.clamp` availability claims,
+including in greedy answers; the tested Node.js 22 runtime has no such API.
+The origin has not been isolated to the model or additional quantization, and
+no optimizer regression is established. Official-reference full-model fidelity
+and full 256k-context validation remain unverified.
+
+The historical [2026-10-15 performance profile](bolt_profile_20261015.md)
+describes the stack before this campaign and the remaining official-reference
+fidelity gap.
+
+## Earlier measurements and validation
 
 The user accepted the static dense / 5 GiB expert-cache configuration on
 2026-10-16. Five quick probes across two boots at 105 W power caps measured
@@ -245,7 +322,8 @@ stale requests retain the ordinary admission cadence. Set
 `VLLM_BOLT_SHORT_PREFILL_COHORT=0` to disable this addition. Filling the cohort
 improves aggregate throughput but can delay early responses while their peers
 prefill. Qwen's specialized HD256/GQA6 attention kernels do not apply
-to Bolt's HD128/GQA8 layout; Bolt uses the generic unified attention path with
+to Bolt's HD128/GQA8 layout. Bolt uses AITER unified attention with its
+dedicated page-outer prefill kernel for eligible shapes, generic fallback,
 INT8-G128 KV and split-K speculative verification. Its larger Mamba state also
 requires a different page alignment. The Qwen-specific draft convolution
 calibration is disabled for the official LiLiCorr draft.

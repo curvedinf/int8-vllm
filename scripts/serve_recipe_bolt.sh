@@ -36,6 +36,12 @@ serve() {
   export VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1
   export VLLM_ROCM_USE_AITER_CUSTOM_AR=0 VLLM_GFX908_ACT_QUANT=round
   export VLLM_TP_SAMPLE_SYNC=1
+  # Standard combination: native MoE norm+GS128 quantization, page-outer
+  # attention, route64 expert prefill and weighted expert reduction. These
+  # dispatch automatically for supported shapes; keep the legacy quantizer off.
+  export VLLM_GFX908_FUSED_NORM_QUANT=0
+  export VLLM_SERVER_DEV_MODE="${VLLM_SERVER_DEV_MODE:-0}"
+  export VLLM_BOLT_KERNEL_TUNING="${VLLM_BOLT_KERNEL_TUNING:-0}"
   export VLLM_BOLT_DENSE_CACHE_GIB="${VLLM_BOLT_DENSE_CACHE_GIB:-3}"
   export VLLM_BOLT_DENSE_CACHE_DROP_PACKED="${VLLM_BOLT_DENSE_CACHE_DROP_PACKED:-1}"
   export VLLM_BOLT_EXPERT_CACHE_GIB="${VLLM_BOLT_EXPERT_CACHE_GIB:-5}"
@@ -47,8 +53,8 @@ serve() {
   export VLLM_GFX908_MIXED_PREFILL_INTERVAL="${VLLM_GFX908_MIXED_PREFILL_INTERVAL:-16}"
   export VLLM_GFX908_PREFIX_FAIR_ADMISSION="${VLLM_GFX908_PREFIX_FAIR_ADMISSION:-1}"
   export VLLM_BOLT_SHORT_PREFILL_COHORT="${VLLM_BOLT_SHORT_PREFILL_COHORT:-1}"
-  # Qwen's specialized HD256/GQA6 attention switches do not cover Bolt's
-  # HD128/GQA8 layout. Use the already validated generic unified path.
+  # AITER unified attention selects Bolt's HD128/GQA8, 4256-token page
+  # prefill specialization automatically, with the generic path as fallback.
   export NCCL_ALGO=Ring NCCL_PROTO=Simple NCCL_P2P_DISABLE=0 NCCL_DMABUF_ENABLE=0
   export HSA_ENABLE_IPC_MODE_LEGACY=0
   # First-cache construction has thousands of small expert writes. Buffer
