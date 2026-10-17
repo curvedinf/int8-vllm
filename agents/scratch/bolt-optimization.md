@@ -86,16 +86,25 @@ ISA/micro underB04exp2-* andexp2-saved. Initialreset-failed transientGC caused
 zerorequest startupfailure; regeneratedidenticalunit, retainedfailurelogs. Do
 notreset-failed transientunit beforestart (wouldunloadit).
 
-CURRENT B04E3 designready, nocodeyet: cache-awareprefill viaSINGLElaunchuniform
-hit/missbranch inpackedGEMM, hitloadsresidentINT8/missoriginalpackeddecoder.
-AvoidB02two-launchcost whileusingaccepted64-rowtile/cohort. Read-onlylookupof
-alreadyallocatedcache; prefilldoesnotallocate,learn,admit,orrefresh. Cache5GiB/
-refresh128/originalspreserved. Nextimplementwrapper/kernel/find_projection and
-exactmixedhit/miss/graph/no-unwrittenreadschecks, KV/battery/realweights; select
-onefinalvariant thenEXACTLYfive. ReferenceB03E1originalfive/B04incumbent,
-retainedmetric1999.5434aggregateprefill/161.5316aggregatedecode. Diagnosticunit
-STOPPED afterE2 (session35470); runtimegate/outputB04. E2ledger/notes pending
-security/commit/push. LaterE4-E5 plannedonly.
+B04E3 originalfiveCOMPLETE/inconclusive/reverted: median2168.3832prefill /
+162.7739decode, pooledwhole+4.116%, medianprefill+8.444%/decode+0.769%, but
+pooleddecode-0.502% ->violatespredeclaredbothmedianANDpooledphasegate. No extra
+runs. 83component/32realchecksPASS,48completeMLPtimings +21.889%/21.796%
+discovery/heldout. Source/harnessfrozen, all5token/counter/caps gatesPASS.
+Restored3AITerfiles/removedonlybacked-upnewtest; AITERclean3f8045a90. Allcode/
+rawfive/micro underB04exp3-* andexp3-saved. PeakVRAM31.222GiB. Negativepooled
+0.50%isnotcausalproof, fivearenotextended. Keepaccepted64-rowincumbent.
+
+CURRENT B04E4 denseepiloguefusion DESIGNREADY, nocodeyet. FuseUP/ReLU2/GS128
+quantoutputforM>64 anddirectBF16residualstoreswhenbiasabsent; retainFP32biasadd
+beforecast. Freshdense28.27%/copy0.5035s sharejustifiesoneupdatedcomparison;
+oldB01whole39.5svs28.3snow. ExistingB01patchesapply--checkCLEAN inbothrepos:
+batch01/exp3-{aiter,vllm}.patch; applyonlyafterE3verdictpublication. Preserveall
+acceptedcacheownership/route64. Addproduction/heldout/tail/graph/roundingexact
+checks,KV/battery/realweights, thenEXACTLYfive. DiagnosticunitSTOPPING75603;
+monitor2093 willend;E3bench77324exit0. Gate/outputB04. RootE3ledger/notes pending
+security/commit/push. ReferenceB03E1originalfive/B04incumbent,retained1999.5434
+aggregateprefill/161.5316aggregatedecode. E5sharedoverlapplannedonly.
 
 Campaign artifacts under agents/tmp/bolt-opt/loop/ (ignored): frozenrun.py,
 compare.py,phase_metrics.py,manifest-4k.json. benchmark.lock prevents overlap;
