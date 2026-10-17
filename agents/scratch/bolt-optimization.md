@@ -95,16 +95,25 @@ Restored3AITerfiles/removedonlybacked-upnewtest; AITERclean3f8045a90. Allcode/
 rawfive/micro underB04exp3-* andexp3-saved. PeakVRAM31.222GiB. Negativepooled
 0.50%isnotcausalproof, fivearenotextended. Keepaccepted64-rowincumbent.
 
-CURRENT B04E4 denseepiloguefusion DESIGNREADY, nocodeyet. FuseUP/ReLU2/GS128
-quantoutputforM>64 anddirectBF16residualstoreswhenbiasabsent; retainFP32biasadd
-beforecast. Freshdense28.27%/copy0.5035s sharejustifiesoneupdatedcomparison;
-oldB01whole39.5svs28.3snow. ExistingB01patchesapply--checkCLEAN inbothrepos:
-batch01/exp3-{aiter,vllm}.patch; applyonlyafterE3verdictpublication. Preserveall
-acceptedcacheownership/route64. Addproduction/heldout/tail/graph/roundingexact
-checks,KV/battery/realweights, thenEXACTLYfive. DiagnosticunitSTOPPING75603;
-monitor2093 willend;E3bench77324exit0. Gate/outputB04. RootE3ledger/notes pending
-security/commit/push. ReferenceB03E1originalfive/B04incumbent,retained1999.5434
-aggregateprefill/161.5316aggregatedecode. E5sharedoverlapplannedonly.
+B04E4 originalfiveCOMPLETE/inconclusive/reverted: median2107.6386prefill /
+161.5416decode;pooledwhole+3.015%,medianprefill+5.406%/decode+0.006%,but
+pooleddecode-0.181% ->strictbothmedianANDpooledphasegate unmet. No extensions.
+82component/78realchecksPASS (6surfaces/allTPoffsets, m8/65/4096/4160);
+24completeprojectiontimings+11.574%/12.406% discovery/heldout. All5gatesPASS,
+source/harnessfrozen;peakVRAM30.948GiB. RestoredONLY4root/2AITerfiles; AITERclean
+3f8045a90. Rawfive/source/micro underB04exp4-*/exp4-saved. Negativepooled0.18%
+isnotcausalproof; keepaccepted64-rowincumbent.
+
+CURRENT B04E5 shared-expert-overlap DESIGNREADY, nocodeyet. Existingaux_stream
+isCUDA-alike, butSharedExperts._determine_shared_experts_order CUDA-only.
+ChangecapabilitychecktoCUDA-alike; Boltlauncherthreshold8512 (currentdefault256),
+retainsallEPLB/sequenceparallel/internalMK/disablestreamguards andexistingfork/
+join/record_streamprotocol. Sharedexpertreduce_resultsFalse; routedinput1024
+versusshared4096, noactivationquantreuse. ValidateCPUplatform/order/guard/limit
+checks andrealGPUstream/lifetime/graph/coherence,KV/battery thenEXACTLYfive.
+DiagnosticunitSTOPPING19550; monitor94941willend;E4bench4013exit0. Gate/outputB04.
+RootE4ledger/notes pendingsecurity/commit/push. ReferenceB03E1originalfive/
+B04incumbent,retained1999.5434aggregateprefill/161.5316aggregatedecode.
 
 Campaign artifacts under agents/tmp/bolt-opt/loop/ (ignored): frozenrun.py,
 compare.py,phase_metrics.py,manifest-4k.json. benchmark.lock prevents overlap;
