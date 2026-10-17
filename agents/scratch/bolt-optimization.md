@@ -59,12 +59,25 @@ ANDdisabled. nginx stopped; no80/443listeners. Installed Bolt thermal dependency
 renamed thermal-controller.conf.disabled-static-cache-test; do not reintroduce.
 Production vllm-bolt stopped; never start alongside isolated diagnostic unit.
 
-Diagnostic bolt-opt-loop.service is STOPPED (23:38UTC). E1candidate source
-fully archived and restored; AITER clean15a3. Next implement E2native invariant
-work elimination, component/micro/battery gates, fresh serve boot and EXACTLY
-FIVE full workloads. No GPU micro/profile/benchmark overlap. Production stays
-off. Diagnostic8021/logdirloop/runtime, lifecyclebatch02/host/gateactive,
-chunk32steps/devRPCisolated. Do not perform another reference extension.
+Diagnostic bolt-opt-loop.service is BOOTING E3integer-quant candidate
+(2026-10-17 00:03UTC), monitor exp3 and run.py bench exp3 --batchbatch02
+--repeat5 active. E2native original FIVE complete: median947.7065prefill/
+93.4250aggregatedecode; pooled93.1794decode/48.6152whole. Whole+2.016% below3%
+andmedian decode-3.392%; INCONCLUSIVE/notadopted, fullyrestored15a3. Exact
+sources/diff/results exp2-*; verdict appendedledger. No E2runtime code retained.
+
+E3candidate: new_quant_iq2_common_base inTritionpackedkernel; only M>64 with
+routingplan/128-alignedstart usesinteger common-factor quantization. Existing
+FP32groupscales andallnative/crossing-blockpaths unchanged. No cachebudget or
+allocation/admissionchanges.9GPUchecks pass: hardware reciprocalerror<=1e-6,
+all63488positive/negativefinitehalfbasemultipliers includingzeros/subnormals
+vsoriginalexpand (16,252,928integerweights),7fullGEMM/epilogue cases upthrough
+M4096.32realcheckpoint comparisons allTPoffsets/4widths/m65,256 exact;
+KVmicroPASS,battery4/4,ruffPASS. Source/harness exp3-sources.json andbackup
+exp3-saved; nativeCsrc HEAD15a3 unchanged. Compare pre-e2-control vs exp3
+using originalcompare.py after EXACTLYfive. No extensions for uncertainty.
+Unit8021isolated, productionstopped; profilegateabsent. Need verdict, restore
+onlyE3ifnotadopted, thenE4native UP/ReLU2/GS128fusion, E5boundedadmission.
 
 Batch02 reference profile:590501kernels/alllaunchcorrelated; prefill+mixed
 23.3892rank0kernel-seconds, packedrouted10.3514s/44.257%;collectives3.8049s
@@ -73,7 +86,7 @@ retained-sources.json} andhost/gpu/reference-retained-*. Profile timings exclude
 Preregistered experiments-plan.json against15a3 reference:
 1Separate cached-only INT8 Triton prefills and guarded packed misses: DONE,
 INCONCLUSIVE/reverted.2Native invariant reciprocal/base-scale elimination.
-3Route-plan API/32-64row decoded-weight reuse.4Native UP/ReLU2/GS128 output
+3Integer IQ2 quantization by common-base cancellation.4Native UP/ReLU2/GS128 output
 fusion.5Bounded initial single-page short-prefill admission; preserve long/mature
 decoder cadence. Design exp5-admission-design.json. Implement sequentially.
 
@@ -139,3 +152,14 @@ prefill andC8random32/1000decode (2warmups); incomparable to4k/256. Do not rerun
 legacy baseline. Prior rejected dynamic32expert cache (1531/351vs1545/362),
 singletonSDOT,quanttables,densepreshuffle,FP32routersplit8,IQ2padding66->68:
 see priorledger/artifacts before repeating. Actual experts240-496, never512.
+
+Newpre-E3 research: actualIQ2magnitudes8/25/43, integertermsgrid*(2s+1),
+48terms/nohalf127-scaledratios/minimumroundingmargin0.0026087. CPUproof
+next-integer-quant-{research,cpu}.json covers31743positivefinitehalfbasevalues
+and37,329,768validratios; +/-1e-6reciprocalerror preservesfactorrecovery and
+quantization. ExistingFP32groupscales remainunchanged; recovermaxfactor as
+round(sw*1016/absD), thenquantizeintegerterm*127/maxfactor. ZeroDneedszeroout;
+negativeDsignfold; crossing256-blockwindows retainoriginaldecoder. No extra
+metadata/capacity changes. Not GPUvalidated oradopted. RevisedplannedE3 to
+this arithmetic mechanism beforeimplementation; savedpriorplan. RouteAPI/
+32-64rowreuse deferred to nextbatch. NativeE2sourceunchanged while it runs.
