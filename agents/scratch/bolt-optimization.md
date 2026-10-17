@@ -84,9 +84,24 @@ InitialstrictIDgate failed156/400,butORIGINALrepeat IDsdiffer10/12;calibratedSAM
 beforeANYperformanceusinglegalTopKchoices+conditionaloriginalmathwithsameIDs.
 FixtureONLYinjectsfinalk9IDs;groupk2/k1stillrun,assert[2,1,9]. No productioninjection/
 tolerances/architecture/performance/trialbudgetchange. Fullfidelity/256kdeferred.
-DO NOTreplayE3unchanged. NextB08E4ordinarynorm+GS128producer toMamba/attention,
-usingACCURATErank-cacheTPweights;readexp4-design.md/exp4-sharding-audit.json.
-NoE4code/GPUworkyet. E5design exp5-design.md;nativeDOTcontenthashloader notedbelow.
+B08E4 COMPLETE/REVERTED after EXACT5. Median2321.7277prefill/166.8472decode:
++0.926%/-0.854%;pooledprefill+0.736%/decode-2.410%/whole-0.569% =>reject.
+OriginalB07exp4five remainsreference. Bench93036/monitor99719/stop91976 exit0;
+ALLsource/proof/harness/counter/token/cap/protectedbytes+mtime gatesPASS;ALL4both
+consumer paths qualified before firstmeasurement. Coherentpreviews/twofullsamples
+reviewed. Peak30.587349GiB. RestoredONLYtrackednemotron_h.py/removed2hash-verified
+newfiles; acceptedMoEnorm/attention retained. AITER3c74 clean. Rawfive/frozen26sources/
+25proofs underexp4-* /exp4-saved;canonicalledger. Noextra runs.
+Firstboot failed outsideinitVllmConfig context BEFOREANYwarmup/measurement. Fixed
+ONLYimmutablepolicy bool indecoderconstructors; final104tests includeBOTHexpired
+contextactualforwardsPASS,KV/battery4/4/Ruff/formatPASS. GPUmath/consumerASTsameas
+192actualTPcase/96timing candidate;32AISbytegates/all4TP exact. Firstfailedboot/
+setupfailures retained inproofchain; no numericalchanges or weakenedchecks.
+ACTIVE NEXT B08E5 sparse expert DOT4; runtime notimplemented yet. CPUcompilerprobe
+7446exit0 emitsgfx908 v_dot4c_i32_i8_e32 from__builtin_amdgcn_sdot4; capabilityONLY,
+noGPU/perfclaim. exp5-dot4-capability.json and exp5-validation-plan.json register
+12actualE/widthprofiles(total40layers), allTP/M8/64,thresholds1/2 onlybeforefive.
+Unitstopped/allGPUjobsclosed; preservefixedcache/static/dynamic/power settings.
 E4design exp4-design.md: exactnativeMamba in_proj sourceNVFP4,quant_method is
 ModelOptNvFp4W4A16LinearMethod(packed_g128=True),notPackedG128LinearMethod;
 staticresident INT8+weight_gs128 directint8_gemm/F32->normal.dtype isoldapplymath.
@@ -107,7 +122,7 @@ all dependencies. NativeMT1/NW2,wave64,n=wave16+lane%16;8DOT4perlane plusinteger
 xor16/xor32 givesexact128dot;occupancyfromSORT valid16bitballot,threshold1or2.
 Preserveoriginaldecoder/cache/sw/inv/F32order/nativeMFMAfallback source/ISA. Verify
 localcompilerDOT4ISA first;liveALL4qualificationmust proveactualsparseeligibility,
-notjustmixedkernel invocation. NoE4/E5implementationorGPUworkyet.
+notjustmixedkernel invocation. E4complete/reverted;E5readyforimplementation.
 
 Converter: scripts/kineto_to_agent_csv.py --output CSV_DIR GPU_JSON_GZ...
 Analyzer: scripts/analyze_agent_profile.py --gpu-csv CSV_DIRECTORY --host HOST_DIR
