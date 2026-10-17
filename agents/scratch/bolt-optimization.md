@@ -40,17 +40,31 @@ exp4-saved/exp4-* preserved. Restored onlypacked_dense_cache.py/removednewtest;
 AITERcleanba264. Server stopped, bench24441/monitor22433 exited0. B05E3 ledger/
 notes e2686252a9 pushed/remoteverified. Acceptedreference stays exp2 originalfive.
 
-ACTIVE B05E5 prototype component selection session89510, inactiveignored
-mamba_quant_prototype.py/mamba-quant-micro.py. No runtime E5source yet.
+B05E5 COMPLETE/reverted: exactlyfive median2096.9516635prefill/167.2895145decode;
+pooleddecode163.2031650(-0.326%),whole+0.538%.113component/regressionchecks,
+20actualcheckpointcases allTPoffsets,KV/battery4/4/Ruff pass. NativeFP32norm/
+bothBF16rounds/INT8/F32scaleoutputs exact. Startupconfirmed fusion selected.
+Prototype4.07xproducer didnot yield a phase-nondegrading stack. Restored only
+5rootproductionfiles/2AITERfiles andremoved2snapshot-verifiednewtests. Allsource,
+proofs/originalfive inB05exp5-saved/exp5-*; no E5code retained. AcceptedE2 stays.
 
-B05E5 planned Mamba normalization producer fusion; inspect ignored
-B05exp5-seam-design.json. BoltusesMambaMixer2,notQwenGDN. Groups8/TP4/localI2048,
-group1024,eps1e-5,use_biasFalse. Preserve existingFP32SiLU/gate/pow/mean/rsqrt
-reduction body. Fuse final FP32->BF16 round, BF16normweightmultiply/secondBF16
-round andGS128INT8quant; remove BF16temps. Add prequantizedRowParallel seam that
-shares original rank0bias/cast/reduce/skip_reduce/return_bias semantics. Guard
-residentGS128/parallelinput/BF16/localdivisiblegroups; unsupportedfallback.
-Do not rewrite fullnormtree without separate bitwise evidence. No E5source yet.
+ACTIVE B06 profiling: isolated unit boot06:51:59UTC withlifecycle dropinB06;
+profile session81066(run.py profile incumbent --batch batch06),monitor9831.
+Profile includesonewarmup+oneboundedcapture, excludedfromfive-run metric.
+Reference B06incumbent-{0..4}.json arebyte-identicalcopies ofB05exp2 originalfive;
+no newmeasured baseline. Profileconversion/analysis notstarted; no B06experiments
+registered orimplemented yet. Aftercapture exits0, stopunit, convertKinetoCSV/
+analyzehost+GPU, identifybottlenecks andregisterFIVE experiments beforecoding.
+Then execute sequentially/exactlyfive each, compareB06incumbent untilnewwinner.
+B05negativeverdictsE3e2686252a9/E46c7c7b2426 pushed/remoteverified; E5ledger/notes
+nowpendingcommit. Root/AITERruntime backtoacceptedE2; preservecombine export.
+
+ResearchleadONLY inignored B05nextbatch-research-leads.json: exactinteger IQ2
+quantlookup (48termclasses, inversemaxmap+48x48table3638bytes, potentiallyfits
+348344unusedbudget withoutslotloss) andaligneduint16 headerloads. Requiresfresh
+profilejustification andNEW maxterm-recovery/finitehalf/zeros/sign/tail proofs;
+prioralpha proofalone insufficient. No sourcecode or newbatchplan yet. Do not
+repeatfailedheader/factorizedcomposition unchangedforanotherchanceatfive.
 
 ## Fixed serving contract
 
@@ -82,7 +96,7 @@ rank0kernel sum15.6339s (notTP4wall): dense/otherGEMM28.639%,packed24.235%,
 collectives20.968%(includeswaiting),attention9.689%,quant0.5707s. RawKineto grid
 is a LIST; quant grid[0]=M/grid[1]=ceil(K/128). Activation widths1024/2048/4096/
 24576 with88/40/128/1calls perprefill step. B05experiments-plan.json preregistered
-allfive; E1 reverted,E2 accepted,E3 reverted,E4active,E5planned.
+allfive; E2 accepted, E1/E3/E4/E5 reverted; allcomplete.
 
 B05E1 newfactorizedIQ2/cache-hit/header composition: whole+6.663%,medianprefill
 +12.700%/decode+.827%, pooleddecode-.400% =>reverted. CPU149323776signedcases/
