@@ -135,10 +135,32 @@ behaviorpreserved);4nativeMoEnorm BF16-roundedgate-readyF32store,keeporiginalBF1
 latent/sharedmetadata/casts;5prefilldraftreplicatedFC output-rowsharding1024/rank
 +bitwisecolumnallgather,fulloriginalweights retained. Adaptiveupdatesonlywhenan
 acceptedearlierexperimentinvalidateslaterimplementation;noextraE2E budget.
-NEXT B09E1 implementation NOTstarted yet. ReuseB08denseoperatorplan/oracles but
-CORRECT actualAIS TP Mamba5groups/replicatedKV,includingprobe-range gathering if
-needed. Discovery4160/heldout4096+4256/BF16-F32/unchangedepilogues. Exactly5finalvalid
-candidate runs against ORIGINALB07exp4five; no morecontrols/newbaseline. Profiler
+B09E1 COMPLETE/REVERTED after EXACT5. Median2303.9888prefill/165.6931decode:
++0.1549%/-1.5395%;pooledprefill-0.1240%/decode-3.3757%/whole-1.7877% =>reject.
+Bench99180/monitor24756/stop99622exit0;all4explicitrankqual BEFOREfirsttrial,
+ALLsource/proof/harness/counter/token/cap/protectedbytes+mtimegatesPASS;coherent
+previews/twofullsamplesreviewed. Peak30.587746GiB. RestoredONLYAITertrackedcache/
+removed2hash-verifiednewfiles,acceptedattention/normfusion retained. AITER3c74clean.
+OriginalB07exp4five remainsreference;noextra controls/runs or traversalvariants.
+Rawfive/frozen26sources/18proofs underB09exp1-* /exp1-saved;canonicalledger.
+Prototype165rawbits/162timingsPASS,g8selectedversusg4thoughcomponentnearneutral.
+68checkpoint/AISbytegates all9projections/all4TP correctMamba5groups/replicatedKV/
+rowwindows/fullreplicateddraftFC/probe-rangegather;GPU432projectionbits/72graphs
+PASS. KV/battery4/4/107focused+4finaldispatchsmokePASS;originaloracle/helperAST
+preserved. No GPU kernel/native arithmetic/cache/dtype/budget changes.
+ACTIVE NEXT B09E2 native register-fed denseMFMA; NOTimplemented yet. Design
+B09exp2-design.md. E1rejected so inheritGROUP_M1;onlyMT4(64x128)andMT8(128x128),
+8waves/GS128/singleKpartition/FPcontractoff. RawresidentINT8X/W,oldnativeverified
+laneMFMA mapping;originalsequential((float(dot)*sx)*sw) F32groups/output epilogues.
+NativeM<=64 unchanged;K%4==0 loads,otherKgenericfallback. Newseparatenative
+content-addressedsource/binding;originalTriton/native asindependentreference.
+ReuseB09dense_case_plan.py/dense_rank_support.py/exp1-rank-cache-proof.json(68)
+forEXACT9AIS TPmatrix surfaces(all4ranks),notnaiveMamba/KVslices. Currenthelper
+check-dense-traversal-real.py importsdeletednewAITertest;extract independent
+_original_int8_gemm fromexp1-saved test intoignoredcommon/reference ornewE2test.
+Completeweightedprojection4160discovery/4096+4256heldout/BF16-F32,onlytwo macrotiles
+before EXACT5 finalcandidate. Fullfidelity/256kuser-deferred;keepallprecision/
+memory/cache settings. Unitstopped/allGPUjobsclosed. Profiler
 unitdropinpointsB09host/active. Keep105W/static3/dynamic5/KV/precision unchanged.
 Researchdrafts B08/next-batch-opportunities.md;B09plan isauthoritativefornextbatch.
 E4design exp4-design.md: exactnativeMamba in_proj sourceNVFP4,quant_method is
