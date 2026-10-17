@@ -17,12 +17,12 @@ check clock, shorten reasoning, keep waits below30seconds.
 
 ## Current state and next action
 
-Accepted incumbent: rootd70e9b6ed8694e77abbdccbcf5de97e9fcaf0146 and
-AITERba264db0b19c6b058c981533bf424332659ed5fe, bothmain/pushed/remoteverified.
-B05E2 exact routeweight/reduce/outputcast fusion atop B02E5shortcohort and
-B03E1route64. Reference B05exp2-{0..4}.json ORIGINALFIVE: median2081.5140315
-aggregate prefill/162.7157729aggregate decode; pooleddecode163.7370051,
-pooledwhole74.6502256. Use originalfive forB06E4/E5, no newbaseline.
+Accepted incumbent: B07E1 dedicated4256-pageG128prefill,nowinrootworkingtree
+forpublication to main; AITERba264db0b19c6b058c981533bf424332659ed5fe unchanged.
+B07exp1-{0..4}.json ORIGINALFIVE isreferenceforE2..E5: median2235.6512733aggregate
+prefill/165.5856116aggregate decode;pooleddecode166.8156138,pooledwhole78.4761416.
+Do notoverwriteB07incumbent-{0..4} (oldB05E2five) orrerunbaseline. ExistingB05E2
+weightedcombine/rootd70e9b6, B03route64 andB02shortcohort retained underneath.
 
 B05E3 COMPLETE/reverted afterfive: median2152.7672311prefill/165.0328814decode,
 pooleddecode162.2629241(-0.900%), whole+1.843%.142component/regression checks,
@@ -111,15 +111,51 @@ rootd70e9b6/AITERba264unchanged. Bench85411/monitor10435/stop32759 exit0;
 alltoken/cap/source/harness gatesPASS,sampledpeak30.6185GiB. Noextra5. Possible
 nativePythonoptionalargoverheadunquantified;do notreplayunchangedE5payloaddesign.
 
-B06allFIVE complete, nonekept. NEXTB07 freshprofile4096/256C8 thenregisterFIVE
-fromnewprofile,latestacceptedoriginalB05E2five unchangedreference. CPUdraft
-batch07-prep/research.md holdsfive scopeideas,notyetregistered: page-outerattention
-actual4256(133tiles/page),isolatedprefillfactorIQ2quant(withoriginalnative/metadata/
-cachehits),prefillplainlinearfinalBF16store,nativeAITERnormGS128dualoutputfusion,
-groupingTWOexistinglargefallbackcollectives withoutconcatenating/changingmath.
-E5rejected,soanynewnormpayload mustpreservenativelegacyop/callpath,notrepeatE5
-wholeAPI. Verifyall4actualpath BEFOREmeasuredfive. No future runtimeedits until
-profileandnewplan. E4ledger/refinementd428145177 pushed/remoteverified.
+B06allFIVE complete, nonekept. ACTIVEB07 profileCOMPLETE;profile28048,
+monitor44496/stop33812/converter5763/analyzer72000 exit0. Serverstopped/GPUidle.
+Rank0pid1705452,312403kernels ALLlaunch-correlated,3chunks. Prefill/mixedrank0
+kernelsum15.25728s(NOTTP4wall):dense29.561%,packed24.798%,collectives19.505%
+(waitincluded),attention9.944%,quant.57984s,norm.12764s,copy.49604s. Profile
+excludedfrommetric. B07incumbent-{0..4} exactORIGINALB05E2five;nonewbaseline.
+Sources14files frozenincumbent-saved/incumbent-sources.json,rootc462b85448 /
+AITERba264 acceptedruntime;E5ledgerc462pushed/remoteverified.
+
+B07experiments-plan.json REGISTEREDFIVE beforecode:1dedicated4256page-outer
+attention(BM16/64bounded,Ktile32/MFMA16,originalnativeJITunchanged);2factorIQ2
+quantONLY,originalbyte/native/cachehit unchanged;3plainprefillbiasfreeBF16final
+GEMMstore,native/defaultF32 unchanged;4nativeAITERnorm+GS128dualoutputfusion
+withprefill-onlyexplicitpayload/nativelegacyop preserved;5groupTWOexisting
+largefallbackPyNcclcollectives,separatebuffers/samedtypes/counts/noconcat.
+All4livepathqualification requiredBEFOREeachfive. CPUresearch/details in
+batch07-prep/research.md;actualKVpages4256/133tiles confirmed,notinitial64log.
+SelectednumericenvAR_FP32unset->0,FUSED_NORM_QUANTunset->False;preserveactual
+inputdtypes,do notinferfromcustom<float>name. NoB07runtimecodeyet. B07E1 COMPLETE/KEPT afterEXACTLY5: median2235.6512733prefill/165.5856116decode,
+pooleddecode166.8156138(+1.880%),prefillmedian+7.405%/pooled+7.698%,whole+5.125%.
+All4qualifiedactiveBEFOREfirsttrial;counter/token/cap/source/harness/coherencegates
+PASS,sampledpeak30.7190GiB. Bench43199/monitor98559/stop43751 exit0,serverstopped.
+KeeporiginalgenericJITsource andall6native/genericISAidentical.35productiontests,
+26prototypebitchecks,14finalsourcebitchecks,KV/battery4/4/newRuffPASS. OnlyBM16/64
+choices:actual4256-pageoriginal4096 11.88739ms->64 4.50232;heldout4160 12.26406->
+4.64174. Frozen3source/testfiles exp1-saved/exp1-sources.json. Accepted3files+
+ledger/note needfinalstagedsecurity/commit/push;usebothpubliccreditreviewflagsbelow.
+
+NEXTB07E2 isolatedfactorIQ2. Inactivefactor_isolated_prototype.py/factor-original.py/
+check-factor-isolated-gpu.py ready,NOTRUN. factorhelper usesincumbent128-lanebyte
+metadata,no8wayloads/nocachehit/nativechanges; finitecommon256base usesintegerterm
+andalpha=(D*.125)*DIVRN(1,originalF32sw). Crossing256/nonfiniteD tile explicitold
+_decoder fallback. CPU149323776signed-case proofreusedconditions/hash recorded
+exp2-reused-cpu-proof.json;independentGPU65536halfpatterns/allunaligned/tails/
+crosscasesstillREQUIRED. Expandedoffset1commonblockneedsGPUproof. AfterE1publish,
+runthisoraclethenactualcompleteMLP/micro/constraints;newprefill-onlykernelcopy
+keepsoriginalgeneric/native/cachefillfunctionsunchanged. No E2runtimeeditsyet.
+Referenceexp1originalfive,notoldincumbent. Sourcegroups/cachebudgetsunchanged.
+
+E1precommitpubliccredits: originalanddedicatedsource retain4upstreamauthorlines
+EACH. Securityhelper nowacceptsmultiple --public-attribution-review flags, checks
+exactlabeledcredithashesagainstupstreamsnapshot+HEADorigin (fornewderivativefile,
+original_attribution_file). B07exp1-{generic,dedicated}-public-attribution-review.json
+andpublic-attribution-upstream.txt. No policyexception/permissionforothercontacts.
+UsebothreviewflagsatFINALSTAGEDgatebeforepublishingwinner. No sourcechangesforprivacy.
 
 E4unchangedpublicsourcecredits verifiedagainstofficialrawGithub; ignoredreview/
 snapshot/hash retained. Securityhelper optional--public-attribution-review only

@@ -1923,6 +1923,58 @@ def unified_attention(
             )
         return
 
+    # Large causal G128 prefills reuse one physical-page lookup for all
+    # 133 key tiles in a hybrid-aligned page. Keep the generic JIT unchanged.
+    if (
+        max_seqlen_q > 64
+        and not use_3d
+        and not is_batch_invariant
+        and current_platform.is_rocm()
+        and kv_quant_mode == KVQuantMode.INT8_BLOCK_G128
+        and use_g8
+        and g8_k_scale.shape[-1] == 1
+        and g8_k_scale.dtype == torch.float16
+        and g8_v_scale.dtype == torch.float16
+        and g8_k_scale.stride() == g8_v_scale.stride()
+        and q.dtype == out.dtype == torch.bfloat16
+        and k.dtype == v.dtype == torch.int8
+        and head_size == 128
+        and num_queries_per_kv == 8
+        and block_size == 4256
+        and TILE_SIZE_PREFILL == 32
+        and use_causal
+        and not use_per_seq_causal
+        and sliding_window_val == 0
+        and not use_td
+        and alibi_slopes is None
+        and qq_bias is None
+        and sinks is None
+        and output_scale is None
+        and mm_prefix_range is None
+        and rswa_prefix_lens is None
+        and not softcap
+        and not any(
+            os.environ.get(name)
+            for name in (
+                "VLLM_UA_PREFILL_BLOCKM",
+                "VLLM_UA_PREFILL_WARPS",
+                "VLLM_UA_PREFILL_STAGES",
+                "VLLM_UA_PREFILL_TILE",
+            )
+        )
+    ):
+        from vllm.platforms.rocm import on_gfx908
+
+        if on_gfx908():
+            from vllm.v1.attention.ops.gfx908_g128_page_prefill import page_prefill
+
+            logger.info_once("gfx908 G128 page-outer prefill active", scope="process")
+            page_prefill(
+                q, k, v, g8_k_scale, g8_v_scale, out, cu_seqlens_q, seqused_k,
+                block_table, softmax_scale, block_m=64,
+            )
+            return
+
     kernel_unified_attention[grid](
         output_ptr=out,
         segm_output_ptr=segm_output_ptr,
