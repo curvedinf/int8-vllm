@@ -577,6 +577,21 @@ archives. Design study dispatched (agent-1); implementation next.
   Three-boot spread: prefill +38.3/+34.3/+36.3, decode
   +11.9/+13.2/+11.4 - STABLE. 52/52 quality re-verified. Totals
   stand at prefill ~+36%, decode ~+12%.
+
+## Campaign-2 roll-up (2026-10-18, ~6h elapsed)
+
+36 campaign-2 ledger rows: 4 accepted changes (E1 cached-INT8
+prefill, E2 memory reallocation, B13-E5 composite superseded by
+B14-E1 memory-only, B17-E2 tiered tiles), 12 rejected with
+mechanisms, 7 audited-closed, 5 inconclusive-reverted, 1
+investigation (skew), 2 measurements (censuses), 1 replication
+correction, 1 research pass, 1 abandoned, plus 3 validation rows.
+Upstream watch: 1 new commit since last sweep (nothing relevant).
+Standing: prefill ~+36% / decode ~+12%, three-boot stable,
+generalized at holdout, all gates green. Dispositions pending:
+NCCL wire policy (~18% prefill), unequal-TP scope (~6.6% decode).
+Next pass: continue watch + validation cadence; dispositions
+execute on user ruling.
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
