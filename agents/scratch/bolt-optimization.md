@@ -459,6 +459,20 @@ archives. Design study dispatched (agent-1); implementation next.
   shape-specific dense table entries via offline autotune of the
   Triton config table for OUR shape population only; expert-cache
   slot policy refinement; draft attention backend).
+
+## B17 (2026-10-18)
+
+- E1 DONE/INCONCLUSIVE (efcfab8b3e): CENSUS (major finding): serving
+  prefill m = {1024, 1064, 4104, 8512, 72, 1032, 4112} - all prior
+  dense experiments assumed 6144/4256; that wrong-m assumption WAS
+  the micro-vs-e2e gap. Per-shape autotune of 45 true shapes:
+  43 win +7..+128% kernel (s3g8 family; m=72 wants 64x64x4w). E2E
+  STILL FLAT (prefill -0.8%, decode +1.3%, CIs span 0). LAW (4th,
+  cleanest): dense blockscale is not the serving prefill constraint
+  at any config - time sits in grouped _gemm (23%), NCCL (18%,
+  fenced), attention. Table reverted; census+tuner retained.
+  Prefill constraint list now precise: E1-hit-optimized grouped
+  _gemm, NCCL (fenced), page attention (1%), chunk_scan (1.4%).
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
