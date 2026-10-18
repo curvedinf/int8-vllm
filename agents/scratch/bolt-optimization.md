@@ -553,6 +553,13 @@ archives. Design study dispatched (agent-1); implementation next.
   mechanism the 4256 budget prevents). The mixed-prefill knob
   family (budget, interval, cohort) is now FULLY swept. Campaign
   totals unchanged: prefill ~+36%, decode ~+12.5%, replicated.
+- E4 RESEARCH (1f0abbd846): first vLLM-upstream sweep (100 commits
+  since 10-10, 33 hits triaged) - NEGATIVE: fusions are kimi_k3-
+  specific; per-tensor quant is numerics-incompatible with GS128;
+  sampler items sub-noise per draft audit; arch-specific items
+  excluded. Both upstream repos now covered by the research
+  cadence. Loop continues: next passes watch for new upstream
+  mechanisms; dispositions remain the decisive upside.
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
