@@ -53,9 +53,10 @@ serve() {
   export VLLM_BOLT_EXPERT_CACHE_GIB="${VLLM_BOLT_EXPERT_CACHE_GIB:-11}"
   export VLLM_BOLT_EXPERT_CACHE_SLOTS="${VLLM_BOLT_EXPERT_CACHE_SLOTS:-auto}"
   export VLLM_BOLT_EXPERT_CACHE_REFRESH="${VLLM_BOLT_EXPERT_CACHE_REFRESH:-128}"
-  # Prefill-informed expert admission: a 64-token subsample re-ranks the
-  # resident expert cache during prefill so hits converge immediately.
-  export VLLM_BOLT_PREFILL_ADMIT="${VLLM_BOLT_PREFILL_ADMIT:-1}"
+  # Prefill-informed expert admission is a decode-priority lever: it lifts
+  # decode ~+3% but costs ~4% prefill via per-forward rerank churn. Off by
+  # default under the prefill-focus directive; set 1 to trade the other way.
+  export VLLM_BOLT_PREFILL_ADMIT="${VLLM_BOLT_PREFILL_ADMIT:-0}"
   export VLLM_ROCM_PIN_LOCAL_OFFLOAD=1
   # Reuse the Qwen mixed-load policy with Bolt's resolved hybrid page size.
   export VLLM_GFX908_MIXED_PREFILL_TOKENS="${VLLM_GFX908_MIXED_PREFILL_TOKENS:-4256}"

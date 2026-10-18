@@ -43,8 +43,8 @@ INT8 copies (10,024 pairs, 240-259 slots/layer) with packed expert originals
 retained, 7 GB/GPU for KV (1,641,644 tokens, 6.26x full 262,144-token
 requests), and
 24 GiB total for CPU prefix offload. Prefill-informed expert admission
-(`VLLM_BOLT_PREFILL_ADMIT=1`) re-ranks the expert cache from a 64-token
-prefill subsample each forward so resident hits converge immediately. TP4/C8, LiLiCorr NS=7, BF16 residuals,
+(`VLLM_BOLT_PREFILL_ADMIT`, default 0) is a decode-priority lever: it
+adds ~3% decode but costs ~4% prefill through per-forward rerank churn. TP4/C8, LiLiCorr NS=7, BF16 residuals,
 INT8-G128 target/draft KV, FP32 Mamba state and custom all-reduce remain fixed.
 The 105 W results above are fixed-power benchmark measurements. Production
 runs with nginx and the thermal power controller enabled; its live caps vary.
