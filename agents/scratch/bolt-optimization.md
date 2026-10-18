@@ -392,6 +392,25 @@ regression (replaced the shared path at all m). FIX: dispatch the
 new path m>64 ONLY (prefill), leaving decode (m<=64) on the current
 path. Saved sources: loop/batch09/exp2-saved/ + *before-launch-bound.*
 archives. Design study dispatched (agent-1); implementation next.
+- DESIGN STUDY COMPLETE (spec in agents/tmp session log; key facts):
+  B09_E2 failed on SCALAR direct loads (1/8-1/4 sector efficiency,
+  no LDS sharing), not the MFMA math (bitwise-exact 70/70 + 432
+  projections). Decode loss was likely unpaired-run confounder, not
+  causal. v2 spec: coalesced LDS staging (16B/lane), swizzled
+  fragment layout, manual 2-stage prefetch pipeline, 16x16x16i8
+  v1 / 32x32x16i8 v2 knob, launch_bounds(512), ScratchSize==0 gate,
+  bitwise oracle test_native_dense_g128_gfx908.py resurrectable,
+  component-bench MUST beat Triton before any serving run (E2 -65%
+  was visible there). Latency-bound diagnosis: num_stages=1 exposes
+  600-800ns per K-block.
+- E3 DONE/REJECTED (f99db2558b): dense config-table dispatch
+  (micro +13-18% at big shapes) - settled e2e prefill -1.4% decode
+  -4.8%. THIRD micro-vs-e2e gap instance on this family: serving
+  dense population is many shapes across mixed phases; the table
+  loses elsewhere what it gains on the big three. LESSON for E2:
+  the kernel rewrite must beat Triton per-shape ACROSS the serving
+  shape population (component gate on ALL production shapes), not
+  only the big three.
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
