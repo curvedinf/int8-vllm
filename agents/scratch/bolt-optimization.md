@@ -484,6 +484,13 @@ archives. Design study dispatched (agent-1); implementation next.
   Next: B17-E3+ (BM=48 or occupancy-adaptive tiers; expert-slot
   policy; the same census re-check on the grouped kernel via a
   shapes logger for packed_experts).
+- E3 CENSUS DONE (grouped-census.json retained): tiers confirmed
+  engaging live - BM=64 at m=4104/1064 and <=368-expert layers at
+  1024; BM=32 on 432/496-expert layers at m=1024; cache hits flow
+  during prefill (per-call hit-rate needs finer logging - deferred).
+  1600 grouped calls per bench; tiles 381-1003; no tier anomaly -
+  the E2 tier map matches micro winners in production. B17
+  remaining: E4 (expert-slot policy audit), E5 reserved.
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
