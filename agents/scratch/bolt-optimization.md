@@ -703,3 +703,87 @@ chown; b19car layout is flat <name>-<i>.json under the batch dir
   deletions) - never broad restore/stage/stash.
 - Battery 4/4 + INT8 KV micro after accepted runtime changes; acceptance gate
   for draft-surface changes.
+
+## B21 five-experiment batch (2026-10-18) — in flight
+
+Registered pre-code (db3adcea42); prof7 prefill window: dense .833 /
+grouped .503 / NCCL .473 / other .29 / router .089 / mamba .083 /
+custom_AR .072 / quant .059 / bf16 .056 (sum 2.465s). Working tree
+carries default-off E1/E4 flag code (envs.py +
+nemotron_h_prefill.py), benched via boot-env in b21e1/; only
+gate-passing survivors get committed.
+- E3 NCCL env (b21e3/, 7 boots x5): CLOSED null. All 6 variants
+  prefill <= base (best -0.0%), CIs span zero; ch32 decode -3.7%,
+  sim16 -4.6%. Ring is env-insensitive, consistent with B19
+  bandwidth-bound verdict. Ledger row appended.
+- E2 two-microbatch overlap: CLOSED micro-gate failed 1.04x (gate
+  1.5x; serial 4.33 vs overlap 4.16 ms/it). Module deleted unhooked.
+  Ledger row appended. Third overlap-family failure (B01-E5, B08-E1).
+- E1 AR restructure (b21e1/, driver running): e1probe (facts only),
+  e1rsi8ag (RS + shard G128 i8 quant + i8 AG replacing final fp32
+  AR; ~4x wire-byte cut ceiling on the .473s NCCL leg). Compare vs
+  e3base same-tree.
+- e4gatei8 (in E1 driver, 3rd boot): router gate logits via
+  a8w8-blockscale GEMM reusing block-input quant (router family
+  .089s; ceiling ~1.8%).
+- e3base retry watcher: fresh same-tree baseline after E1 driver
+  (original e3base boot raced a mid-boot envs.py edit once).
+- E4 GDN chunk sweep (b21e4-gdn-driver.sh, launched, gated on retry
+  marker): env-only VLLM_FLA_CHUNK_SIZE 32/128. Verified live path:
+  ROCm GDN prefill falls back to triton/FLA
+  (qwen_gdn_linear_attn.py:281), chunk_size=FLA_CHUNK_SIZE
+  (ops/utils.py:31, default 64); warmup tracks it. Mamba family
+  .083s => ~3.4% ceiling.
+- After batch: E1/e4gatei8/E4 verdicts + ledger rows, commit/push
+  survivors (revert rejected code), restore production at B19
+  verdict defaults (CAR cap 8MiB incumbent), controller/nginx/
+  vllm-bolt up. Next loop then re-profiles.
+- E1 PROBE FACTS (e1probe boot, first-call seam): x/shared/routed
+  (8512,4096) bf16, reduced=True. Code truth: Bolt has
+  routed_output_transform -> _maybe_reduce_routed_output_before_transform
+  (moe_runner.py:460) all-reduces the LATENT [M,1024] output and sets
+  reduced=True -> _maybe_reduce_final_output SKIPS the final full-hidden
+  AR. Registration's "final fp32 100.7MB MoE AR at the seam" was a
+  mis-read (that wire traffic = latent AR + dense-path ARs under the
+  fork's _tp_ar_fp32_mode, which standing constraints fence). The
+  `not reduced` guard means RS_I8AG/BF16_WIRE never engage -> e1rsi8ag
+  bench expected no-op ~= base; treat as empirical confirmation only.
+  e1probe control: 2430.9/167.8 vs e3base 2459.5/168.7 (in noise).
+- e4gatei8 FIRST BENCH: prefill med 2543.9 (+3.43%) decode 163.4
+  (in noise band), accept 3.32-3.55 unchanged. BUT pooled -0.94%:
+  run0 2086 outlier. ROOT CAUSE: warmup run was 258 tok/s / 33.3s
+  wall (others ~2450 / 11.7s) = lazy per-layer gate-weight quantize
+  (quantize() on first use per MoE layer) + Triton JIT of
+  gemm_a8w8_blockscale; run0 is the residual tail. Steady state
+  (runs 1-4, avg ~2530) all >= base median. Confirm pair (b21e5:
+  fresh gatei8 + fresh base, post-E4) decides: if outlier recurs,
+  add eager gate-weight prep at init and re-bench once. Boot-time
+  one-time cost is production-irrelevant (startup warmup).
+- CONFIRM DECISION RULE (b21e5, mechanical): accept gate-i8 iff
+  e5gatei8b vs e5base2 prefill median AND pooled improve, AND
+  vs pooled 15-run base (e3base+e3base-retry+e5base2); decode
+  pooled CI spans zero vs base pool; acceptance +-1pt. If the
+  run0-style dip recurs: eager-prep gate weights at init, one
+  re-bench. Then winner persists via VLLM_GFX908_GATE_I8_PREFILL=1
+  in serve_recipe_bolt.sh.
+
+## B21 CLOSED (2026-10-18 ~21:10) — gate-i8 ACCEPTED
+
+- E5 confirm: prefill 10-run median +3.82% / pooled +2.34%,
+  bootstrap95 +0.89..+6.10 (excludes 0); same-window pair +4.03/
+  +4.75. Decode pooled -1.53% CI -3.66..+0.72 (spans 0; no-op band
+  precedent +-5%). Acceptance unchanged. ACCEPT per rule.
+- PERSISTED: VLLM_GFX908_GATE_I8_PREFILL=1 default in
+  serve_recipe_bolt.sh (with ledger pointer comment).
+- Tree surgery done: E1 AR flags (BF16_WIRE/PROBE/RS_I8AG) reverted
+  from envs.py + nemotron_h_prefill.py; _gate_logits_i8 kept.
+  Run0-outlier root cause: lazy weight-quant + Triton JIT at first
+  boot (warmup 33s); JIT disk-cached afterwards, second boot clean.
+- B21 totals: 5 registered experiments -> 1 accepted (gate-i8
+  +3.8% prefill), 4 closed with corrected-geometry/ceiling records.
+  Campaign totals now prefill +36.6% / decode +13.3% over loop start.
+- REMAINING for close-out: commit+push (envs.py, prefill.py, serve
+  script incl. stop-hardening, ledger 6 rows, scratch notes) after
+  security-hygiene-check; then production restore (power controller
+  ON, nginx, vllm-bolt via serve script) + 52/52 quality gate +
+  battery 4/4 + INT8 KV micro on the winner; then loop re-profile.

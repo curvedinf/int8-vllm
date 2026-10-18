@@ -165,6 +165,7 @@ if TYPE_CHECKING:
     VLLM_GFX908_ACT_QUANT: str = "round"
     VLLM_GFX908_TINY_BA: bool = False
     VLLM_MLP_CAR_INT8_GS32: bool = False
+    VLLM_GFX908_GATE_I8_PREFILL: bool = False
     VLLM_DECODE_INT8_INTERMEDIATES: bool = False
     VLLM_DECODE_INT8_RETAIN_GS128: bool = False
     # FS->GPU direct IO via AMD Infinity Storage (hipFile). See the
@@ -1405,6 +1406,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_GFX908_TINY_BA": lambda: os.getenv("VLLM_GFX908_TINY_BA") == "1",
     # MLP-only experimental transport changes the graph; hash it for AOT safety.
     "VLLM_MLP_CAR_INT8_GS32": lambda: os.getenv("VLLM_MLP_CAR_INT8_GS32") == "1",
+    # Prefill-only router gate GEMM on int8, reusing the fused-op activation
+    # quant (q/scales) — no extra quant kernel. Decode keeps the bf16 gate
+    # (small-M int8 loses per B15-E1).
+    "VLLM_GFX908_GATE_I8_PREFILL": lambda: (
+        os.getenv("VLLM_GFX908_GATE_I8_PREFILL", "False").lower() in ("true", "1")
+    ),
     "VLLM_DECODE_INT8_INTERMEDIATES": lambda: (
         os.getenv("VLLM_DECODE_INT8_INTERMEDIATES") == "1"
     ),

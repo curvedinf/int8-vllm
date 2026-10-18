@@ -87,3 +87,45 @@ for authenticated checks without printing credentials. Verify active+enabled,
 port8020, nemotron-bolt, no dev mode, actual generation and startup contract.
 Then update active-service selection in recipe README, commit/push final state,
 and remove this obsolete active note. Diagnostic8021 is not final deployment.
+
+## B21 batch chain (2026-10-18, loop 3)
+
+Registration row `BOLT_LOOP2_B21_PROFILE_AND_REGISTERED_PLAN_20261018`
+(vllm `db3adcea42`). prof7 = incumbent confirmed (families match profile6).
+
+Pipeline (self-driving background tasks):
+1. `b21e3-driver.sh` — 7 NCCL env boots x5 runs -> `b21e3/`; e3base is the
+   same-tree baseline for ALL B21 comparisons.
+2. `b21-post-e3-chain.sh` — on E3 completion: `b21e2-micro.py` (4-rank
+   AR-vs-GEMM overlap gate, >=1.5x builds the executor interleave, else E2
+   closes), then `b21e1-driver.sh` (3 boots: probe / RS+int8-AG / gate-i8).
+3. `b21-select.sh` — splits run jsons into `.d/` dirs, compares vs e3base.
+
+Code staged (env-gated default-off, in tree at db3adcea42+):
+`VLLM_GFX908_AR_RS_I8AG` (RS + shard GS128 quant + int8 AG at
+nemotron_h_prefill.try_prefill), `VLLM_GFX908_GATE_I8_PREFILL` (router gate
+via gemm_a8w8_blockscale, weight quantized once), `VLLM_GFX908_AR_PROBE`
+(operand dtype/shape log). Static dtype chain says final AR already bf16
+(v0 fp32->bf16 expected dead; probe confirms).
+
+105W lesson: power1_cap drifts to 106W after controller stop; both drivers
+re-pin per boot. Profiling boots need VLLM_LIFECYCLE_KINETO=1 +
+VLLM_LIFECYCLE_DIR + VLLM_LIFECYCLE_GATE. Traces land in
+`host/gpu/gpu/` (nested), family regexes in `b21-family-sum.py`.
+
+OPERATIONAL LESSON (B21): never edit the tree while a driver is cycling
+boots — the e3base boot raced the E1a envs.py edit (workers imported
+pre-edit vllm.envs at spawn, lazy-imported the patched prefill module at
+warmup -> AttributeError, boot died). All post-edit boots are consistent;
+e3base baseline re-runs via b21e3base-retry.sh after the E1 driver.
+
+E2 design refinement (pre-micro): the interleave does NOT need executor/TBO
+surgery — split the chunk INSIDE try_prefill into halves/quarters; launch
+sub-chunk k's final AR on a side stream, run sub-chunk k+1's
+norm+gate+experts on the compute stream (independent of k's AR), event-join
+before returning the layer output. Only the last sub-chunk's AR stays
+exposed: ceiling ~3/4 of the 0.47s NCCL family (~14% prefill kernel time),
+minus GEMM-efficiency loss at M=1536..3072 (per-shape table already covers
+those M). Risks: stateful expert cache .step() ordering across sub-chunks;
+stream semantics of gfx908_moe_prefill_quant on a non-default stream.
+Gated on b21e2-micro >=1.5x overlap efficiency.

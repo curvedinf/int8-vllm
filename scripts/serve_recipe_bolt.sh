@@ -42,6 +42,10 @@ serve() {
   export VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1
   export VLLM_ROCM_USE_AITER_CUSTOM_AR=0 VLLM_GFX908_ACT_QUANT=round
   export VLLM_TP_SAMPLE_SYNC=1
+  # Prefill router-gate GEMM on int8 (reuses the fused-op activation quant);
+  # +3.8% prefill median, decode CI spans zero, acceptance unchanged
+  # (ledger BOLT_LOOP2_B21_E5_GATE_I8_CONFIRM_20261018).
+  export VLLM_GFX908_GATE_I8_PREFILL="${VLLM_GFX908_GATE_I8_PREFILL:-1}"
   # Standard combination: native MoE norm+GS128 quantization, page-outer
   # attention, route64 expert prefill and weighted expert reduction. These
   # dispatch automatically for supported shapes; keep the legacy quantizer off.
@@ -140,7 +144,12 @@ case "${1:-status}" in
       else
         kill -TERM "$pid"
       fi
-      for _ in $(seq 1 60); do alive || break; sleep 1; done
+      for _ in $(seq 1 180); do alive || break; sleep 1; done
+      if alive; then
+        # Post-bench teardown (large KV/IPC unmaps) can outrun TERM grace.
+        kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+        for _ in $(seq 1 30); do alive || break; sleep 1; done
+      fi
       if alive; then echo 'Supervisor has not exited' >&2; exit 1; fi
     fi
     ;;

@@ -204,6 +204,46 @@ def can_use_prefill(decoder, x, residual):
     return not any(v._forward_hooks or v._forward_pre_hooks for v in modules)
 
 
+_GATE_I8_CACHE: dict[int, tuple] = {}
+
+
+def _gate_logits_i8(mixer, q, scales):
+    """Router logits from the block-input INT8 quant, weight quantized once."""
+    gate = mixer.gate
+    ent = _GATE_I8_CACHE.get(id(gate))
+    if ent is None:
+        from aiter.ops.triton.gemm.basic.gemm_a8w8_blockscale import (
+            gemm_a8w8_blockscale,
+        )
+        from vllm.model_executor.layers.quantization.utils.packed_g128_int8 import (
+            quantize,
+        )
+
+        wq, ws = quantize(gate.weight.data.to(torch.float32))
+        ent = _GATE_I8_CACHE[id(gate)] = (wq, ws, gemm_a8w8_blockscale)
+        logger.info_once("gfx908 gate i8 prefill weight prepared", scope="process")
+    wq, ws, gemm = ent
+    m = q.shape[0]
+    bm, bn, warps = (
+        (16, 64, 4) if m <= 16 else (64, 64, 4) if m <= 64 else (128, 128, 8)
+    )
+    config = {
+        "BLOCK_SIZE_M": bm,
+        "BLOCK_SIZE_N": bn,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "num_warps": warps,
+        "num_stages": 1,
+        "cache_modifier": ".cg",
+        "NUM_KSPLIT": 1,
+        "SPLITK_BLOCK_SIZE": 2048,
+        "enable_fp_fusion": False,
+    }
+    return gemm(q, wq, scales, ws, dtype=torch.float32, config=config).to(
+        torch.bfloat16
+    )
+
+
 def try_prefill(decoder, hidden_states, residual):
     if not can_use_prefill(decoder, hidden_states, residual):
         return None
@@ -214,7 +254,10 @@ def try_prefill(decoder, hidden_states, residual):
     normal, residual_out, q, scales = rms_norm_g128(
         hidden_states, decoder.norm.weight.data, decoder.norm.variance_epsilon, residual
     )
-    logits, _ = mixer.gate(normal)
+    if envs.VLLM_GFX908_GATE_I8_PREFILL:
+        logits = _gate_logits_i8(mixer, q, scales)
+    else:
+        logits, _ = mixer.gate(normal)
     shared, routed = torch.ops.vllm.gfx908_moe_prefill_quant(
         normal, q, scales, logits, runner._encode_layer_name(), 1024
     )
@@ -225,6 +268,7 @@ def try_prefill(decoder, hidden_states, residual):
     shared = runner._maybe_reduce_shared_expert_output(shared, reduced)
     shared, routed = runner._maybe_apply_routed_scale_to_output(shared, routed)
     routed = runner.apply_routed_output_transform(routed)
-    result = runner._maybe_reduce_final_output(shared + routed, 4096, reduced)
+    combined = shared + routed
+    result = runner._maybe_reduce_final_output(combined, 4096, reduced)
     logger.info_once("gfx908 native norm GS128 MoE prefill active", scope="process")
     return runner._maybe_add_zero_expert_output(result), residual_out
