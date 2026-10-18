@@ -787,3 +787,49 @@ gate-passing survivors get committed.
   security-hygiene-check; then production restore (power controller
   ON, nginx, vllm-bolt via serve script) + 52/52 quality gate +
   battery 4/4 + INT8 KV micro on the winner; then loop re-profile.
+
+## Gate-i8 winner validation (2026-10-18 ~21:30) — ALL GREEN
+
+- 52/52 chat corpus coherence + finite logprobs on production 8020
+  with VLLM_GFX908_GATE_I8_PREFILL=1 live in serving env
+  (scripts/probe_bolt_quality.py, b21-gatei8-corpus.json).
+- INT8 KV micro OVERALL PASS; battery 4/4 PASS (run during brief
+  production stop per ladder order; services restarted after).
+- Production stack: rocm-downclock active (90W policy), nginx
+  active, vllm-bolt active on 8020.
+- NEXT LOOP (B22): re-profile incumbent with gate-i8 on
+  (VLLM_LIFECYCLE_KINETO=1 boot on 8021, production cycle down),
+  router family expected shrunk; target dense_gs128 (.833s, 34%)
+  and grouped_expert (.503s, 20%) kernel work; 'other' .29s needs
+  breakdown before targeting.
+
+## B22 loop opened (2026-10-18 ~21:55)
+
+prof8 on gate-i8 incumbent (warmup 2716 tok/s; profiled 2477 under
+Kineto). Families: dense .82 / grouped .499 / NCCL .47 / other .287
+/ router .088 / mamba .082 / cAR .07 / quant .058 / bf16 .055.
+KINETO lesson: boot needs LIFECYCLE_DIR + LIFECYCLE_GATE too.
+Registered F1 (fused MoE-output glue kernel), F2 (dense tile
+config), F3 (MIXED_PREFILL_TOKENS env sweep), F4 (grouped tile
+sweep), F5 (copy elimination). Batch dir b22/; dev boot (full
+lifecycle env) still up on 8021 for seam reading; F1/F2/F5 need
+code study next. 105W pins active; nginx+vllm-bolt down for batch.
+
+## CAMPAIGN END (2026-10-18 22:40, user instruction)
+
+User: "finish your testing after this experiment completes and you
+make a decision on it. Set the recipe and server launch script
+appropriately and then end." F2 was the final experiment.
+- B22 final: F1 reverted (measured-neutral), F2 rejected at server
+  (+0.6% noise despite 1.8-2.5x micro; tables reverted in aiter,
+  tree clean), F3 2048 dead / 6144 +2.4% unconfirmed (leading
+  candidate if campaign resumes), F4/F5 closed with evidence.
+  Rows 584-586. vllm tree returns to 8411434b86 + ledger/scratch.
+- FINAL RECIPE (unchanged from B21 close): gate-i8 ON
+  (VLLM_GFX908_GATE_I8_PREFILL=1 default in serve_recipe_bolt.sh),
+  MIXED_PREFILL_TOKENS default 4256, incumbent tables everywhere.
+- Campaign totals across loops: prefill +36.6% then gate-i8 +3.8%
+  (~+42% cumulative), decode +13.3% over campaign start; every
+  accepted change has a ledger row, validation ladder, and commit.
+- Production restore procedure: rocm-downclock restart (undoes
+  105W pins), nginx start, vllm-bolt start, 52/52 corpus probe.
