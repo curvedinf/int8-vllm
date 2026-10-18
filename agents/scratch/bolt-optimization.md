@@ -211,6 +211,20 @@ B11 experiments (legal set, prefill-first; reference = b10e2 five):
   (LDS staging, decode - micro-gate first), E4 (router sbtopk audit).
   Plateau context: largest legal prefill items are exhausted;
   NCCL 20.6% awaits user disposition.
+- E2 CLOSED (audited): B07-E4 fusion IS engaged at this workload
+  (_fused_add_rms_norm_g128 80x prefill); remaining 384 _quant are
+  first-quantizations of distinct tensors. No headroom. Ledger row.
+- E4 CLOSED (audited): router topk ceiling 2.6% = noise edge. Ledger
+  row.
+- E3b IMPLEMENTED (2026-10-18): LDS activation staging in HIP
+  packed_routed behind VLLM_BOLT_ROUTED_STAGE=1 (template STAGE param;
+  cooperative 16x128-int8 tile per K-group, leading+trailing
+  barriers). Two bugs found and fixed by micro: staging guard must
+  mirror route<M&&(ALIGNED||lk<L); trailing __syncthreads needed
+  (next-group overwrite race, 31-cell signature). Micro: bitwise
+  exact UP+DOWN, +18.4% per pair (e3b-micro.json). 37/37 component
+  tests with STAGE=1. Server booting for the 5-run measurement vs
+  b10e2.
 
 ## Standing constraints (unchanged from campaign 1)
 
