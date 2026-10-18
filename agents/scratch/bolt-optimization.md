@@ -473,6 +473,17 @@ archives. Design study dispatched (agent-1); implementation next.
   fenced), attention. Table reverted; census+tuner retained.
   Prefill constraint list now precise: E1-hit-optimized grouped
   _gemm, NCCL (fenced), page attention (1%), chunk_scan (1.4%).
+- E2 DONE/ACCEPTED (7ef3352a09): tiered route tiles (BM=64 at
+  routes>=experts*24, BM=32 at *8; prior rule left serving m=1024/
+  1064 chunks on BM=16 forever). Micro: bm32 +46..74% at true
+  shapes; tiers match winners in all 15 cells. E2E: prefill +4.20%
+  median +3.62% pooled (largest since B14), decode pooled +0.54%,
+  decode median -1.27% (noise band). C8 4.53, 52/52, battery 4/4.
+  LANDED (vllm MO change only). CAMPAIGN TOTALS: prefill +38.2%,
+  decode +11.9% vs baseline. New incumbent; reference = loop2/b17e2.
+  Next: B17-E3+ (BM=48 or occupancy-adaptive tiers; expert-slot
+  policy; the same census re-check on the grouped kernel via a
+  shapes logger for packed_experts).
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
