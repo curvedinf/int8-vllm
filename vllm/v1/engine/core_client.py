@@ -56,6 +56,7 @@ from vllm.v1.engine.utils import (
     CoreEngineProcManager,
     get_engine_zmq_addresses,
     launch_core_engines,
+    poll_engine_ready,
 )
 from vllm.v1.executor import Executor
 from vllm.v1.fault_tolerance.engine_core_sentinel import FT_UTILITY_METHOD
@@ -655,7 +656,9 @@ class MPClient(EngineCoreClient):
             identities = set(self.core_engines)
             sync_input_socket = zmq.Socket.shadow(self.input_socket)
             while identities:
-                if not sync_input_socket.poll(
+                if not poll_engine_ready(
+                    sync_input_socket,
+                    self.resources.engine_manager,
                     timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
                 ):
                     raise TimeoutError(

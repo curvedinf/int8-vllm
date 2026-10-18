@@ -1247,6 +1247,30 @@ def launch_core_engines(
         )
 
 
+def poll_engine_ready(
+    socket: zmq.Socket,
+    engine_manager: CoreEngineProcManager | CoreEngineActorManager | None,
+    timeout: int,
+) -> bool:
+    """Wait for a ready message, failing promptly if a local engine exits."""
+    if not isinstance(engine_manager, CoreEngineProcManager):
+        return bool(socket.poll(timeout=timeout))
+
+    poller = zmq.Poller()
+    poller.register(socket, zmq.POLLIN)
+    sentinels = engine_manager.sentinels()
+    for sentinel in sentinels:
+        poller.register(sentinel, zmq.POLLIN)
+    events = dict(poller.poll(timeout))
+    # Prefer failure even when readiness and process exit arrive together.
+    if any(sentinel in events for sentinel in sentinels):
+        raise RuntimeError(
+            "Engine core exited while waiting for readiness. "
+            f"Failed core proc(s): {engine_manager.finished_procs()}"
+        )
+    return bool(events.get(socket, 0) & zmq.POLLIN)
+
+
 def wait_for_engine_startup(
     handshake_socket: zmq.Socket,
     core_engines: list[CoreEngine],

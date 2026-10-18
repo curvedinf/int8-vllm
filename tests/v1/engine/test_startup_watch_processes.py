@@ -195,3 +195,53 @@ def test_wait_for_engine_startup_reports_watched_process_exit():
         exc_info.value
     )
     assert "Failed frontend proc(s): {'RustFrontend': 1}" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("exitcode", [0, 1])
+@pytest.mark.parametrize("ready", [False, True])
+def test_ready_wait_detects_engine_exit(exitcode, ready):
+    import multiprocessing
+    import sys
+
+    # An actual process sentinel reproduces a dead engine with a live API.
+    ctx = multiprocessing.get_context("fork")
+    proc = ctx.Process(target=sys.exit, args=(exitcode,), name="EngineCore")
+    proc.start()
+    proc.join(timeout=5)
+    assert not proc.is_alive()
+    manager = object.__new__(CoreEngineProcManager)
+    manager.processes = [proc]
+    try:
+        with (
+            zmq.Context() as context,
+            context.socket(zmq.PAIR) as receiver,
+            context.socket(zmq.PAIR) as sender,
+        ):
+            receiver.bind("inproc://ready-exit")
+            sender.connect("inproc://ready-exit")
+            if ready:
+                sender.send(b"ready")
+                assert receiver.poll(1000)
+            with pytest.raises(RuntimeError, match="EngineCore"):
+                engine_utils.poll_engine_ready(receiver, manager, timeout=1000)
+    finally:
+        proc.close()
+
+
+@pytest.mark.parametrize("local", [False, True])
+def test_ready_wait_success_and_timeout(local):
+    manager = None
+    if local:
+        manager = object.__new__(CoreEngineProcManager)
+        manager.processes = []
+    with (
+        zmq.Context() as context,
+        context.socket(zmq.PAIR) as receiver,
+        context.socket(zmq.PAIR) as sender,
+    ):
+        receiver.bind("inproc://ready-success")
+        sender.connect("inproc://ready-success")
+        assert not engine_utils.poll_engine_ready(receiver, manager, timeout=1)
+        sender.send_multipart([b"identity", b"ready"])
+        assert engine_utils.poll_engine_ready(receiver, manager, timeout=1000)
+        assert receiver.recv_multipart() == [b"identity", b"ready"]
