@@ -355,6 +355,15 @@ exhaustion; several B11 closures were estimates, not measurements)
   simplify the accepted config.
 - E2 QUEUED: chunk4256 x dense-s3g8 interaction (admission off).
 - E3-E5: from E1 verdict + prof4 deltas.
+- E1 DONE/ACCEPTED 2026-10-18 (2a31797a1c): memory-only (admission
+  off) vs composite: prefill +3.73% median CI +0.58..+6.40 EXCLUDES
+  ZERO; decode -2.75% (CI spans 0) but +1.7% above the B10 E2 level -
+  no regression to any accepted state. Launcher/docs now default
+  VLLM_BOLT_PREFILL_ADMIT=0 (lever documented decode-priority).
+  CUMULATIVE: prefill +32.8%, decode +13.3% vs baseline. New
+  incumbent = memory-only; reference = loop2/b14e1 five runs.
+  Next: E2 (chunk x dense-s3g8, admission off) and further prof4-
+  driven candidates.
 
 ## Standing constraints (unchanged from campaign 1)
 
