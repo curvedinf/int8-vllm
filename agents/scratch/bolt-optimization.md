@@ -610,6 +610,10 @@ execute on user ruling.
   To reduce checkpoint churn, watch passes now batch into the
   scratch note only when upstreams MOVE or a validation re-run
   occurs; standing remains prefill ~+36% / decode ~+12%.
+- Watch pass 20 (batched; passes 8-19 all unchanged): vLLM moved
+  953fa442fa -> 3c13653738 - 1 new commit (sentence-transformers
+  crossencoder frontend; not applicable). AITER unchanged
+  throughout. No batch triggered.
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
