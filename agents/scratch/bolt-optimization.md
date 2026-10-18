@@ -105,6 +105,16 @@ Order: E1 -> E2 -> E3 -> E5 -> E4 (cheap first after the high-confidence
 port; E4 last, biggest scope). Each vs latest accepted incumbent; ledger row
 per experiment; commit+push accepted changes (security gate first).
 
+## B10 progress
+
+- E1 DONE/ACCEPTED 2026-10-18: B04_E3 port onto AITER main dc13c3d18
+  (pushed). 5 runs vs campaign baseline: prefill median +14.42% pooled
+  +14.20% (boot95 +10.7..+16.6), decode median +2.61% pooled +2.63%.
+  16/16 component, 32/32 real-checkpoint exact, battery 4/4, KV micro PASS.
+  vLLM ledger row BOLT_LOOP2_B10_E1_..., vllm main 6d401447d8 (pushed).
+  New incumbent: AITER dc13c3d18 + vLLM 4711913204. Next reference for
+  E2/E3/E5/E4 = loop2/b10e1/ five runs.
+
 ## Standing constraints (unchanged from campaign 1)
 
 - No hot kernel reloads; restart server per experiment.
