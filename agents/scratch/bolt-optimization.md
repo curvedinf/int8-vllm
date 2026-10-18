@@ -340,6 +340,22 @@ exhaustion; several B11 closures were estimates, not measurements)
   attribution). B14 ideas: composite replication for CI strength,
   chunk-size x dense-config interaction, draft prefill overlap.
 
+## B14 (opened 2026-10-18)
+
+- B13 closed: E3 chunk4256 rejected (prefill flat, decode -2.6%;
+  interaction queued), E4 draft attribution sub-noise (orchestration
+  kernels ~0ms). eec0cfcc76 pushed.
+- Step-1 profile of composite incumbent (prof4): dense blockscale
+  32.1%, grouped _gemm 20.7%, NCCL 17.9%; FOUND admission churn -
+  _refresh_weights 0.118s/window (forced rerank every forward flips
+  rankings via counts//2 decay). ~4.7% prefill cost for marginal
+  decode contribution.
+- E1 RUNNING: memory-only (11 GiB + KV 7, VLLM_BOLT_PREFILL_ADMIT=0)
+  vs b13e5 - if decode holds ~177 and prefill recovers the churn,
+  simplify the accepted config.
+- E2 QUEUED: chunk4256 x dense-s3g8 interaction (admission off).
+- E3-E5: from E1 verdict + prof4 deltas.
+
 ## Standing constraints (unchanged from campaign 1)
 
 - No hot kernel reloads; restart server per experiment.
