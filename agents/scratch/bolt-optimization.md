@@ -491,6 +491,18 @@ archives. Design study dispatched (agent-1); implementation next.
   1600 grouped calls per bench; tiles 381-1003; no tier anomaly -
   the E2 tier map matches micro winners in production. B17
   remaining: E4 (expert-slot policy audit), E5 reserved.
+- E4 CLOSED (fb81bcf27c): offline coverage model - equal+smallest
+  16.4% mean vs proportional 15.5%; ~2pp redistribution. A full 2x
+  cache doubling measured only +2-4% pooled decode (B13-E5), so a
+  2pp shift is an order below the noise floor. No measurement
+  spent. B17 CLOSED: E1 inconclusive (4th law), E2 ACCEPTED
+  (+4.2% prefill - campaign's biggest single prefill win since
+  B14), E3 census (tiers confirmed live), E4 audited. Environment
+  re-verified this turn: 105W x4, controller inactive, nginx down,
+  trees clean at 7c293f1e8d / a154bc169. Campaign: prefill +38.2%,
+  decode +11.9%. B18 next: fresh pass (remaining: NCCL fence and
+  unequal-TP scope decisions with user; new angles from census
+  artifacts).
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
