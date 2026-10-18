@@ -161,20 +161,38 @@ per experiment; commit+push accepted changes (security gate first).
   NOTE: server on 8021 still runs E4 in-memory; tree is clean -
   restart before any B11 measurement.
 
-## B10 closed; B11 sketch (design next loop pass from prof2)
+## B10 closed; B11 design final (2026-10-18)
 
 Accepted: E1 + E2 (cumulative prefill +27.2%, decode +11.4% vs
 campaign baseline). Negatives documented: E3 (dense config - kernel
 gain sub-noise end-to-end), E5 (cohort load-bearing, default kept),
-E4 (tile growth sub-noise). B11 candidates:
-1. NCCL SP-MoE all-gather 20.6% of prefill (nemotron_h.py:285) -
-   BLOCKED on user disposition re wire policy (no collective
-   backend/precision/order changes).
-2. Router sbtopk 2.6% + _quant 2.4% prefill fusion candidates.
-3. Expert cache >10 GiB needs KV below the 7.15x floor - NOT
-   available under the six-stream authorization.
-4. Strata EXPDEC-style activation staging for native packed_routed
-   decode path (25.6% of decode) - decode protection/gain.
+E4 (tile growth sub-noise).
+
+NCCL identification COMPLETE: SP-MoE is OFF (requires DP>1;
+parallel.py:697). The 226 prefill NCCL launches are the per-layer TP
+all-reduce of MoE outputs (fp32 wire, 6144x4096x4B = 100.7 MB/layer)
+exceeding the gfx908 TP4 custom-AR cap of 32 MiB
+(all_reduce_utils.py:31-37) -> NCCL Ring fallback at prefill; decode
+(0.79 MB) uses custom AR. Structural: page 4256 forces chunks
+>= 4256 tokens = 69.7 MB > cap; wire dtype fenced by the
+_tp_ar_fp32_mode do-not-fix policy; backend/precision/order barred.
+=> NCCL 20.6% of prefill is POLICY/STRUCTURALLY FENCED; user
+disposition requested (options: allow bf16 wire for oversized ARs,
+restructure, or accept plateau). NOT a B11 experiment.
+
+B11 experiments (legal set, prefill-first; reference = b10e2 five):
+- E1: bf16 copy elimination (831 prefill launches 2.3%, 34725 decode
+  2.1%) - audit non-contiguous sources (MO apply x.contiguous()
+  modelopt_gfx908.py:262, draft cat/slices), remove bit-exact.
+- E2: _quant coverage extension - why 384 _quant launches remain at
+  prefill despite B07 E4 norm+quant fusion; extend to remaining
+  projections bit-exact.
+- E3: Strata EXPDEC activation staging for native packed_routed
+  (25.6% of decode; their -11..-23% bitwise) - decode gain, prefill
+  must not regress.
+- E4: router sbtopk (2.6% prefill / 3.2% decode) - only if a bounded
+  mechanism exists.
+- E5: reserved for the first B11 profile delta.
 
 ## Standing constraints (unchanged from campaign 1)
 
