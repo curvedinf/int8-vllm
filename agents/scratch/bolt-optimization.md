@@ -572,6 +572,11 @@ archives. Design study dispatched (agent-1); implementation next.
   (cleaned; 31G free). Power re-verified 105W x4, controller
   inactive. Campaign totals unchanged: prefill ~+36%, decode
   ~+12.5% (replicated, generalized).
+- E2 THIRD-BOOT VALIDATION (c5ccef308d): prefill +36.30% CI
+  [33.8,40.8], decode +11.38% CI [5.9,16.2] - both exclude zero.
+  Three-boot spread: prefill +38.3/+34.3/+36.3, decode
+  +11.9/+13.2/+11.4 - STABLE. 52/52 quality re-verified. Totals
+  stand at prefill ~+36%, decode ~+12%.
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
