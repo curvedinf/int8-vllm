@@ -597,6 +597,8 @@ execute on user ruling.
   105W x4, controller inactive, nginx down, trees at
   3f3bc376f1/a154bc169, launcher free of experimental overrides
   (grep=0 hits). State fully conformant; no drift.
+- Watch pass 3 (11:20 UTC): both upstream heads unchanged;
+  no new mechanisms. Standing unchanged.
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
