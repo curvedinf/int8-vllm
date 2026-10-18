@@ -592,6 +592,11 @@ generalized at holdout, all gates green. Dispositions pending:
 NCCL wire policy (~18% prefill), unequal-TP scope (~6.6% decode).
 Next pass: continue watch + validation cadence; dispositions
 execute on user ruling.
+- Watch pass 2 (post-rollup): AITER head unchanged (285579b621);
+  vLLM upstream 1 irrelevant commit. Conformance check: caps
+  105W x4, controller inactive, nginx down, trees at
+  3f3bc376f1/a154bc169, launcher free of experimental overrides
+  (grep=0 hits). State fully conformant; no drift.
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
