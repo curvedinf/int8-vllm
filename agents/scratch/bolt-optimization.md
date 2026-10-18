@@ -655,6 +655,41 @@ execute on user ruling.
   next: draft dense INT8 (acceptance-gated, +7.8% decode ceiling);
   implementation in the draft model path next turn.
 
+## B19 CAR cap ablations (2026-10-18, USER-AUTHORIZED) — CLOSED
+
+User ruling received: custom-AR disposition UNFENCED (up to 8
+ablations, select best, leave server running on it; unequal-TP
+explicitly deferred). Code reading first corrected the lever: on
+this ROCm fork CUSTOM_ALL_REDUCE_MAX_SIZES is is_cuda()-gated
+(all_reduce_utils.py:165) and the live cap is the fork env var
+VLLM_TP_CAR_MAX_BYTES (custom_all_reduce.py:96, default 8 MiB);
+serve_recipe_bolt.sh never sets it -> bolt has been running at
+8 MiB, so the 100.7MB prefill MoE ARs ride NCCL Ring (~18% of
+prefill). Registered before execution (env-only, no code edits):
+- Fresh incumbent baseline (env unset = 8 MiB), 5 runs.
+- 8 ablations of VLLM_TP_CAR_MAX_BYTES: 16/32/64/96/112/128/176/
+  256 MiB (112 first covers the 100.7MB MoE AR; 176 covers the
+  8512-chunk dense ~174MB). Each: stop, clean shm, boot
+  (PORT=8021 DEV_MODE API_KEY_FILE), health-gate, 5-run bench
+  1024/256 C6 into b19car/.
+- Gates: prefill median AND pooled improve vs fresh baseline;
+  decode non-regressing; VRAM floor must keep 6x256k streams
+  (IPC legacy buffer grows with cap). Winner: quality probe 52/52
+  + battery 4/4 + KV micro, then persist winner as
+  VLLM_TP_CAR_MAX_BYTES default in serve_recipe_bolt.sh, ledger
+  rows, commit+push, then services up (controller/nginx/vllm-bolt)
+  per user instruction.
+
+RESULT: all 8 caps + fresh carbase measured; no cap passes the
+gate (best point car32 +1.76% median -> +0.05% pooled, CI spans
+zero; full band 2.1% = boot noise). The 100.7MB MoE AR is XGMI
+bandwidth-bound on either backend; the ~18% NCCL profile share
+was time-share, not recoverable. INCUMBENT STANDS; disposition
+#1 closed as measured-dead. Perms-bug note: driver mkdir as root
+broke the first carbase bench (curved-user writes); fixed with
+chown; b19car layout is flat <name>-<i>.json under the batch dir
+(run.py --batch semantics), selector splits by prefix.
+
 ## Standing constraints (unchanged from campaign 1)
 
 - No hot kernel reloads; restart server per experiment.
