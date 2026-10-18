@@ -614,6 +614,9 @@ execute on user ruling.
   953fa442fa -> 3c13653738 - 1 new commit (sentence-transformers
   crossencoder frontend; not applicable). AITER unchanged
   throughout. No batch triggered.
+- Watch pass 38 (batched; 21-37 unchanged): vLLM moved
+  3c13653738 -> 494663940b - 1 new commit (qwen4exp hc/ple
+  cleanup; not applicable to Bolt). AITER unchanged. No batch.
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
