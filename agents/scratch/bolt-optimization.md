@@ -528,6 +528,24 @@ archives. Design study dispatched (agent-1); implementation next.
   2-3x; acceptance rows with CI-spanning-zero gains get a
   replication before headline claims. B18 CLOSED (E1 reject, E2
   audit, E3 correction). B19 next.
+
+## B19 (2026-10-18)
+
+- FULL-STACK VALIDATION (a1a2a95388, no code changes): (1)
+  Replication from existing samples - both incumbent boots vs the
+  original baseline: prefill +38.32/+34.33 (CIs [30.4,42.0] and
+  [32.1,39.5]), decode +11.85/+13.16 (CIs exclude zero) - ALL FOUR
+  CIs exclude zero; totals CONFIRMED prefill ~+36%, decode ~+12.5%.
+  (2) 4096/C8 holdout at the tier-enabled incumbent (fresh 5 runs):
+  prefill 2694.9 (+17.2% vs pre-E1 reference; +9.8% vs the B13-era
+  holdout), decode 183.8 (+9.2%/+9.8%) - the tier change GENERALIZES
+  to the held-out workload, both phases.
+- State: everything unfenced is closed and now cross-validated.
+  Remaining upside sits behind the two user dispositions (NCCL wire
+  policy ~18% prefill; unequal-TP scope ~6.6% decode). B19
+  continues: sustained-value validation cadence + upstream watch;
+  new experiment batches require new mechanisms (research) or the
+  dispositions.
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
