@@ -381,6 +381,12 @@ exhaustion; several B11 closures were estimates, not measurements)
   sensitivity; PTQR precedent shows int8 drafts can hold). Prefill
   untouched (draft prefill negligible per B13-E4).
 - prof5 of the accepted incumbent booting for the B14 close-out mix.
+- prof5 DONE (churn-free confirmed, cache refresh 0.000s): dense
+  32.5% / grouped 23.0% / NCCL 18.1% / other 12.6%. B14 CLOSED:
+  E1 accepted (+3.7% prefill CI-demonstrated), E2/E3 measured-dead,
+  E4 sized B15-E1. Campaign: prefill +32.8%, decode +13.3%. B15-E1
+  next: draft dense INT8 (acceptance-gated, +7.8% decode ceiling);
+  implementation in the draft model path next turn.
 
 ## Standing constraints (unchanged from campaign 1)
 
