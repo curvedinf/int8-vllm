@@ -318,6 +318,28 @@ exhaustion; several B11 closures were estimates, not measurements)
   6.26x >= 6.0 floor; legal under the authorization).
 - E5 QUEUED: draft-prefill attribution from prof3 rank traces.
 
+## B13 progress (continued)
+
+- E2 iterated twice: full-topk step collapsed prefill (65k-wide
+  1-CTA histogram + 128-call rerank cadence; post-convergence runs
+  hit 2461/2448); refined 64-token subsample + forced rerank
+  (AITER cache.step rerank arg) eliminated the transient; alone
+  sub-noise (prefill +0.5%/+1.1%).
+- E5 COMPOSITE ACCEPTED 2026-10-18: admit + cache 11 GiB (10,024
+  pairs; 240-expert layers fully resident) + KV 7 GB (6.26x floor
+  verified). Vs incumbent: decode median +4.54% pooled +2.90%
+  (acceptance-neutral), prefill +0.56%/+1.22%, wall +4.63% median.
+  n=5 CIs span zero - caveat recorded; accepted under the
+  pre-declared gate with slope + per-run evidence. Battery 4/4, KV
+  micro, 37/37, C8 4.44, 52/52. LANDED: AITER a154bc169 (rerank
+  arg), vLLM 18de73827a (MO lever + launcher 11GiB/7GB/admit +
+  docs + ledger). CUMULATIVE CAMPAIGN TOTALS: prefill +27.9%,
+  decode +16.5% vs baseline. New incumbent = composite; reference
+  for next legs = loop2/b13e5 five runs.
+- REMAINING B13: E3 (MAX_BATCHED_TOKENS 4256 leg), E4 (draft
+  attribution). B14 ideas: composite replication for CI strength,
+  chunk-size x dense-config interaction, draft prefill overlap.
+
 ## Standing constraints (unchanged from campaign 1)
 
 - No hot kernel reloads; restart server per experiment.
