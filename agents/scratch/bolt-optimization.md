@@ -290,6 +290,14 @@ re-validation and resumes experiments on disposition.
   raise (128 MiB TP4) with full measurement plan; Branch 2 scoped
   B13 unequal-TP project plan (fractional column widths first,
   bitwise oracle). Execute on user ruling only.
+- RESEARCH PASS 2026-10-18 (plateau renewal): web search backend
+  unavailable (subscription 403); upstream sweep instead. aiter
+  upstream (through 285579b621): all recent packed/MoE work targets
+  gfx950/942/1250 (Kimi-K3, MLA, sparse, flydsl). The one adjacent
+  item - IQ2R packed 2-bit MoE for GLM-5.3 (a3158e4800) - requires
+  MXFP8 (gfx908 has none) and device re-encoding of weights,
+  banned by the official-checkpoint-bytes constraint. No applicable
+  new technique found; hold state is search-backed.
 
 ## Standing constraints (unchanged from campaign 1)
 
