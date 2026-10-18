@@ -448,6 +448,17 @@ archives. Design study dispatched (agent-1); implementation next.
   call CPU timing misleads in this serving stack - only profiled GPU
   time x e2e validation counts. AITER route confirmed dead (stub +
   skipped ASM module). Kernel reverted.
+- E1 DONE/REJECTED (17e87f86e1): torch.compile mode 1 (boot
+  succeeded; watcher false-death was a port-8020 status artifact).
+  Prefill -13.37% median CI EXCLUDES ZERO, decode -5.54%. The fork
+  mode=0 is now measurement-validated. Launcher reverted.
+- B16 CLOSED: E1 + E2 both rejected with mechanisms (compile
+  replaces tuned paths/graph-breaks; router micro was CPU-bound).
+  Server stopped; tree at incumbent. B17 next: fresh research pass
+  for mechanisms not yet in the ledger (candidate angles: serving-
+  shape-specific dense table entries via offline autotune of the
+  Triton config table for OUR shape population only; expert-cache
+  slot policy refinement; draft attention backend).
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
