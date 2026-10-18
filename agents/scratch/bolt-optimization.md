@@ -140,6 +140,18 @@ per experiment; commit+push accepted changes (security gate first).
   cohort carries admission). Ledger row written. E4 remaining; design
   from a fresh profile of the incumbent (boot in progress, then
   profile mode + analysis).
+- Fresh incumbent profile (prof2, loop2/profile2/): prefill window
+  1.997s (-38.5% vs baseline). _gemm 23.0% (was 38.8); NCCL 20.6% =
+  SP MoE per-layer all-gather (nemotron_h.py:285) + draft collectives
+  (226 launches, absolute time barely moved 0.449->0.411s) - top B11
+  investigation, but collective backend/precision/order changes are
+  barred by the standing wire policy; needs user disposition before
+  any B11 collective work. Dense blockscale ~27.5% (explains E3 flat:
+  5-8% kernel gain ~= 1.9% end-to-end, sub-noise). E4 = BM=128
+  grouped prefill tiles (B04_E2 retry at current state): MO
+  block_size 128 tier in modelopt_gfx908.py + wrapper assert + 8
+  warps; kernel BM constexpr already generic. Qualify then 5 runs vs
+  b10e2 reference.
 
 ## Standing constraints (unchanged from campaign 1)
 
