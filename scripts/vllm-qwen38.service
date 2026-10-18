@@ -2,20 +2,20 @@
 Description=Qwen3.8 + DFlash2 INT8 GS128 API (TP4)
 Wants=network-online.target
 After=network-online.target vllm.service
-Before=vllm-bolt@%i.service
-Conflicts=vllm.service vllm-bolt@%i.service llama-api-4x64k.service vllm-openai-gfx908.service
+Before=vllm-bolt.service
+Conflicts=vllm.service vllm-bolt.service llama-api-4x64k.service vllm-openai-gfx908.service
 
 [Service]
 Type=simple
-User=%i
-Group=%i
+User=curved
+Group=curved
 SupplementaryGroups=video render
-WorkingDirectory=/home/%i/int8-vllm
+WorkingDirectory=/home/curved/int8-vllm
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=/etc/llama/llama-api.env
-ExecStartPre=/home/%i/int8-vllm/scripts/serve_recipe_qwen38.sh stop
-ExecStart=/home/%i/int8-vllm/scripts/serve_recipe_qwen38.sh supervise
-ExecStop=/home/%i/int8-vllm/scripts/serve_recipe_qwen38.sh stop
+ExecStartPre=/home/curved/int8-vllm/scripts/serve_recipe_qwen38.sh stop
+ExecStart=/home/curved/int8-vllm/scripts/serve_recipe_qwen38.sh supervise
+ExecStop=/home/curved/int8-vllm/scripts/serve_recipe_qwen38.sh stop
 Restart=always
 RestartSec=10
 KillSignal=SIGTERM

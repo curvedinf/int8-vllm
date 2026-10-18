@@ -69,17 +69,17 @@ pass. No new numerical kernel changes have occurred since the prior gates.
 
 ## Required OS access
 
-Prepared scripts/vllm-bolt@.service uses existing /etc/llama/llama-api.env.
+Prepared scripts/vllm-bolt.service uses existing /etc/llama/llama-api.env.
 That directory is root0700; credentials are inaccessible here. No production
 API key is in the current environment. sudo -n true fails; sudo -n -l permits
 only an obsolete Qwen unit that is not installed, not the required operations.
 The user deferred this concrete OS step; do not request it again during
 the service-file preparation task. For later activation from the serving account:
 
-    sudo install -m0644 scripts/vllm-bolt@.service /etc/systemd/system/
+    sudo install -m0644 scripts/vllm-bolt.service /etc/systemd/system/
     sudo systemctl daemon-reload
     sudo systemctl disable --now vllm.service
-    sudo systemctl enable --now "vllm-bolt@$USER.service"
+    sudo systemctl enable --now "vllm-bolt.service"
 
 The unit's ExecStartPre stops the diagnostic Bolt supervisor automatically.
 Once production runs as the same account, privately use its API-key environment

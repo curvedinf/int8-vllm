@@ -17,6 +17,12 @@ CGSIZES="${CGSIZES:-[1,2,4,8,16,24,32,40,48,56,64,72,80,128,256,512,1024,2048]}"
 STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-2400}"
 STOP_TIMEOUT=20
 CPUSET="0-47"
+# Orphaned kv_tier pruning (see prune_kv_tier): daily wall-clock prune time
+# and its timezone (the machine itself runs UTC), plus the grace window
+# (hours) protecting freshly written trees.
+KV_TIER_PRUNE_AT="${KV_TIER_PRUNE_AT:-07:00}"
+KV_TIER_PRUNE_TZ="${KV_TIER_PRUNE_TZ:-America/Chicago}"
+KV_TIER_PRUNE_GRACE_HOURS="${KV_TIER_PRUNE_GRACE_HOURS:-24}"
 
 # UA flag file (diagnostic lever for systemd-driven boots: UA=0 selects the
 # Triton unified-attention path instead of AITER's). Must resolve BEFORE
@@ -572,7 +578,7 @@ if [[ "${AR}" != "1" ]]; then
 fi
 
 usage() {
-  printf 'usage: %s {start|stop|restart|status|supervise}\n' "$0"
+  printf 'usage: %s {start|stop|restart|status|supervise|prune}\n' "$0"
 }
 
 is_pid_running() {
@@ -616,6 +622,50 @@ rotate_log() {
   fi
 }
 
+# Orphaned KV disk-tier pruning. The fs tier manager enforces its max_bytes
+# budget only inside the configured root_dir and never scans foreign
+# directories, so every DISKROOT or kv-config-hash change strands the
+# previous tree forever (2026-10: 82 GiB of dead roots beside the live
+# tier). Delete any top-level kv_tier directory outside the live root's
+# family with no file written within KV_TIER_PRUNE_GRACE_HOURS; the grace
+# window keeps an active side/bench session on an overridden DISKROOT
+# untouched, and the live root is kept by name even when idle.
+prune_kv_tier() {
+  local root tier_root keep grace cutoff freed name fam d
+  root="${DISKROOT:-${HOME}/.cache/vllm/kv_tier/mamba-align-v2}"
+  tier_root="$(dirname "${root}")"
+  keep="$(basename "${root}")"
+  if [[ "${keep}" =~ ^(.+)_r[0-9]+$ ]]; then
+    keep="${BASH_REMATCH[1]}"
+  fi
+  if [[ ! -d "${tier_root}" ]]; then
+    return 0
+  fi
+  grace="${KV_TIER_PRUNE_GRACE_HOURS:-24}"
+  cutoff="$(( $(date +%s) - grace * 3600 ))"
+  freed=0
+  while IFS= read -r d; do
+    name="$(basename "${d}")"
+    fam="${name}"
+    if [[ "${name}" =~ ^(.+)_r[0-9]+$ ]]; then
+      fam="${BASH_REMATCH[1]}"
+    fi
+    if [[ "${fam}" == "${keep}" ]]; then
+      continue
+    fi
+    if [[ -n "$(find "${d}" -type f -newermt "@${cutoff}" -print -quit 2>/dev/null)" ]]; then
+      continue
+    fi
+    printf 'kv_tier prune: %s (%s)\n' "${d}" "$(du -sh "${d}" 2>/dev/null | cut -f1)"
+    freed="$(( freed + $(du -sb "${d}" 2>/dev/null | cut -f1) ))"
+    rm -rf -- "${d}" || printf 'kv_tier prune: failed to fully remove %s\n' "${d}" >&2
+  done < <(find "${tier_root}" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
+  if (( freed > 0 )); then
+    printf 'kv_tier prune: reclaimed %s total\n' "$(numfmt --to=iec "${freed}")"
+  fi
+  return 0
+}
+
 start_server() {
   [[ -x "${VENV}/bin/vllm" ]] || { printf 'missing vLLM executable: %s\n' "${VENV}/bin/vllm" >&2; exit 1; }
   [[ -d "${MODEL_DIR}" ]] || { printf 'missing model directory: %s\n' "${MODEL_DIR}" >&2; exit 1; }
@@ -630,6 +680,10 @@ start_server() {
   # server is running: status and stop must never unlink a live tier's files.
   find /dev/shm -maxdepth 1 -user "$(id -un)" \
     \( -name 'vllm_offload_*.mmap' -o -name 'psm_*' \) -delete 2>/dev/null || true
+
+  # Orphaned disk-tier roots from previous DISKROOT/config-hash eras; the fs
+  # tier manager never reclaims directories outside the configured root.
+  prune_kv_tier || true
 
   mkdir -p "${LOG_DIR}"
   rm -f "${PID_FILE}"
@@ -828,11 +882,31 @@ supervise_server() {
   trap 'stop_server; exit 0' INT TERM
   start_server
   wait_ready
+  # Daily wall-clock prune at KV_TIER_PRUNE_AT in KV_TIER_PRUNE_TZ (the
+  # machine itself runs UTC). A boot after the daily time already got its
+  # pass from start_server, so count today as done in that case.
+  local last_prune_day now target today
+  now="$(date +%s)"
+  target="$(TZ="${KV_TIER_PRUNE_TZ}" date -d "today ${KV_TIER_PRUNE_AT}" +%s)"
+  if (( now >= target )); then
+    last_prune_day="$(TZ="${KV_TIER_PRUNE_TZ}" date +%Y%m%d)"
+  else
+    last_prune_day=""
+  fi
   while true; do
     if ! is_running; then
       printf 'server exited\n' >&2
       stop_server
       exit 1
+    fi
+    # The server runs for weeks; orphaned tier roots from side runs and
+    # config changes must not wait for the next boot to be reclaimed.
+    now="$(date +%s)"
+    today="$(TZ="${KV_TIER_PRUNE_TZ}" date +%Y%m%d)"
+    target="$(TZ="${KV_TIER_PRUNE_TZ}" date -d "today ${KV_TIER_PRUNE_AT}" +%s)"
+    if (( now >= target )) && [[ "${last_prune_day}" != "${today}" ]]; then
+      prune_kv_tier || true
+      last_prune_day="${today}"
     fi
     sleep 5
   done
@@ -856,6 +930,9 @@ case "${1:-}" in
     ;;
   supervise)
     supervise_server
+    ;;
+  prune)
+    prune_kv_tier
     ;;
   *)
     usage >&2

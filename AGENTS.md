@@ -101,13 +101,16 @@ do not derive an alternate production configuration from archival material.
   ~one IO per process (threads/handles/async make no difference — probed),
   hence the cache's windowed sequential reads. Byte gate for the uncached
   path: `scripts/fs_gpu_weightcheck.py`.
-- KV prefix-cache hierarchy: the recipe enables the stock
-  `TieringOffloadingSpec` (VRAM -> 12 GiB pinned RAM LRU -> NVMe fs tier)
-  via the serve-script `DISKTIER` lever (default 50 GiB, 0=off; root
-  `~/.cache/vllm/kv_tier`). All tiering policy is the existing manager's
-  (write-through cascade, staged promotion, CPU LRU); the only fork
-  addition is `FileSystemTierManager.max_bytes` — oldest-file disk-budget
-  reclamation, no scheduling.
+- KV prefix-cache hierarchy: the recipe runs the stock
+  `TieringOffloadingSpec` with the CPU tier only (VRAM -> pinned RAM LRU;
+  default 8 GiB since 2026-10-02). The NVMe fs tier is OFF since 2026-10-14
+  by user directive (consumer-SSD endurance: tier churn measured at ~1.6
+  TB/day of SSD writes). The serve-script `DISKTIER` lever is unchanged
+  (script default 50 GiB, 0=off); the flag file
+  `logs/serve_recipe_qwen38/DISKTIER` pins 0. All tiering policy is the
+  existing manager's (write-through cascade, staged promotion, CPU LRU);
+  the only fork addition is `FileSystemTierManager.max_bytes` —
+  oldest-file disk-budget reclamation, no scheduling.
 
 ## Build
 
@@ -134,8 +137,16 @@ changes move the stale `.so` aside once.
 ## Serving
 
 ```bash
-scripts/serve_recipe_qwen38.sh {start|stop|restart|status|supervise}   # Qwen3.8 + DFlash2 (target config)
+scripts/serve_recipe_qwen38.sh {start|stop|restart|status|supervise|prune}   # Qwen3.8 + DFlash2 (target config)
 ```
+
+The supervise loop also prunes orphaned `~/.cache/vllm/kv_tier` roots daily
+at `KV_TIER_PRUNE_AT` (default 07:00) in `KV_TIER_PRUNE_TZ` (default
+America/Chicago; the machine itself runs UTC) — anything outside the live
+`mamba-align-v2` family untouched for `KV_TIER_PRUNE_GRACE_HOURS` (default
+24h) is deleted (the fs tier manager only reclaims inside its configured
+root, so DISKROOT/config-hash changes strand old trees). `prune` runs it on
+demand.
 
 Non-negotiable settings in the qwen38 script:
 `VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1
