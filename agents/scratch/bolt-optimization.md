@@ -269,6 +269,18 @@ validation-green hold; no bounded legal experiments remain above the
 +-2.6% noise floor pending (1) NCCL fence disposition and (2)
 unequal-TP scope decision. Loop continues with periodic
 re-validation and resumes experiments on disposition.
+- FULL SOAK 2026-10-18: 500/500 coherent, 0 failures at C8 in 249s
+  (ua_live_soak, accepted config, port 8021). Recipe-standard
+  validation now COMPLETE at the accepted state.
+- OPERATIONAL NOTE (E2 consequence): at C8 with concurrent long
+  contexts the 8 GB KV arena occasionally queues requests on
+  capacity (seen during soak: 4 waiting, reason=capacity). Within
+  the six-stream authorization (7.15x); production C8 long-context
+  concurrency is softer than at 14 GB. Report to user; KVMEM is a
+  launcher lever if they prefer trading expert-cache size back.
+- Integrity audit: 547 ledger rows parse; vllm main == origin/main
+  (947bbabb84); aiter main == curved/main (dc13c3d18); caps 105W x4,
+  controller inactive, nginx down.
 
 ## Standing constraints (unchanged from campaign 1)
 
