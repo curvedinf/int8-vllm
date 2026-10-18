@@ -438,6 +438,16 @@ archives. Design study dispatched (agent-1); implementation next.
   context).
 - E1 QUEUED: prefill torch.compile probe (mode=0 is fork default;
   diagnostic boot first - custom ops likely graph-break, cheap fail).
+- E2 DONE/REJECTED (a55f692740): Triton biased top-9 kernel built,
+  parity-proven (id SETS exact incl. tie test - reference is
+  sorted=False arbitrary order; weights ULP-equal paired by id),
+  micro 2.8-8.7x per-call - but the micro was CPU-DISPATCH-bound.
+  E2E flat-to-negative (prefill -0.7%, decode -2.0%, CIs span 0):
+  serving hides router Python overhead behind GPU work; true ceiling
+  was sbtopk 3.3% of decode. LESSON (matches E3b/E3a pattern): per-
+  call CPU timing misleads in this serving stack - only profiled GPU
+  time x e2e validation counts. AITER route confirmed dead (stub +
+  skipped ASM module). Kernel reverted.
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
