@@ -50,9 +50,12 @@ serve() {
   export VLLM_BOLT_KERNEL_TUNING="${VLLM_BOLT_KERNEL_TUNING:-0}"
   export VLLM_BOLT_DENSE_CACHE_GIB="${VLLM_BOLT_DENSE_CACHE_GIB:-3}"
   export VLLM_BOLT_DENSE_CACHE_DROP_PACKED="${VLLM_BOLT_DENSE_CACHE_DROP_PACKED:-1}"
-  export VLLM_BOLT_EXPERT_CACHE_GIB="${VLLM_BOLT_EXPERT_CACHE_GIB:-10}"
+  export VLLM_BOLT_EXPERT_CACHE_GIB="${VLLM_BOLT_EXPERT_CACHE_GIB:-11}"
   export VLLM_BOLT_EXPERT_CACHE_SLOTS="${VLLM_BOLT_EXPERT_CACHE_SLOTS:-auto}"
   export VLLM_BOLT_EXPERT_CACHE_REFRESH="${VLLM_BOLT_EXPERT_CACHE_REFRESH:-128}"
+  # Prefill-informed expert admission: a 64-token subsample re-ranks the
+  # resident expert cache during prefill so hits converge immediately.
+  export VLLM_BOLT_PREFILL_ADMIT="${VLLM_BOLT_PREFILL_ADMIT:-1}"
   export VLLM_ROCM_PIN_LOCAL_OFFLOAD=1
   # Reuse the Qwen mixed-load policy with Bolt's resolved hybrid page size.
   export VLLM_GFX908_MIXED_PREFILL_TOKENS="${VLLM_GFX908_MIXED_PREFILL_TOKENS:-4256}"
@@ -88,8 +91,8 @@ serve() {
     --max-num-batched-tokens "${MAX_BATCHED_TOKENS:-8512}"
     --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.90}"
     # Fixed arena follows the Qwen recipe; leave space for resident INT8 copies.
-    # 8 GB keeps 7.15x full 262,144-token requests resident (six-stream floor).
-    --kv-cache-memory "${KVMEM:-8000000000}"
+    # 7 GB keeps 6.26x full 262,144-token requests resident (six-stream floor).
+    --kv-cache-memory "${KVMEM:-7000000000}"
     --kv-cache-dtype int8_block_g128 --mamba-ssm-cache-dtype float32
     --speculative-config "$spec"
     --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":25769803776}}'

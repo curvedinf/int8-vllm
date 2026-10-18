@@ -36,12 +36,15 @@ measurement; it is not comparable to the older short-prompt results below.
 Subsequent experiments failed the retention gates and are excluded. Raw phase
 rates, source identities and decisions are in the experiment ledger.
 
-The standard memory settings (since campaign-2 B10 E2, 2026-10-18) are
+The standard memory settings (since campaign-2 B13, 2026-10-18) are
 3 GiB/GPU for static dense INT8 weights
-with their original packed GPU tensors released, 10 GiB/GPU for dynamic expert
-INT8 copies with packed expert originals retained, 8 GB/GPU for KV (1,875,238
-tokens, 7.15x full 262,144-token requests), and
-24 GiB total for CPU prefix offload. TP4/C8, LiLiCorr NS=7, BF16 residuals,
+with their original packed GPU tensors released, 11 GiB/GPU for dynamic expert
+INT8 copies (10,024 pairs, 240-259 slots/layer) with packed expert originals
+retained, 7 GB/GPU for KV (1,641,644 tokens, 6.26x full 262,144-token
+requests), and
+24 GiB total for CPU prefix offload. Prefill-informed expert admission
+(`VLLM_BOLT_PREFILL_ADMIT=1`) re-ranks the expert cache from a 64-token
+prefill subsample each forward so resident hits converge immediately. TP4/C8, LiLiCorr NS=7, BF16 residuals,
 INT8-G128 target/draft KV, FP32 Mamba state and custom all-reduce remain fixed.
 The 105 W results above are fixed-power benchmark measurements. Production
 runs with nginx and the thermal power controller enabled; its live caps vary.
@@ -341,13 +344,13 @@ The launcher reads `VLLM_API_KEY`, `LLAMA_API_KEY`, or `API_KEY_FILE` (default
 `/etc/llama/llama-api.key`). It serves `nemotron-bolt` on localhost port 8020.
 It fixes TP4/C8 and seven speculative tokens, matching the draft's trained
 eight-token block including the anchor. Defaults are 262,144 context tokens,
-8,512 batched tokens, 8,000,000,000 bytes of GPU KV per GPU (`KVMEM`), separate
-3 GiB dense and 10 GiB routed-expert cache ceilings, and a 24 GiB CPU prefix tier. Explicit GPU
+8,512 batched tokens, 7,000,000,000 bytes of GPU KV per GPU (`KVMEM`), separate
+3 GiB dense and 11 GiB routed-expert cache ceilings, and a 24 GiB CPU prefix tier. Explicit GPU
 KV bytes override the GPU memory-utilization setting, as in the Qwen recipe.
 There is no disk prefix tier. `EAGER=1` disables graphs for diagnostics.
 The 256k ceiling and 24 GiB CPU tier pass the short C8 serving gate; validation
-at the full context length is pending. The 8 GB GPU KV arena reports
-1,875,238 effective shared tokens (7.15 full-length requests). CPU offload
+at the full context length is pending. The 7 GB GPU KV arena reports
+1,641,644 effective shared tokens (6.26 full-length requests). CPU offload
 pins each rank's own slots with `VLLM_ROCM_PIN_LOCAL_OFFLOAD=1`, avoiding
 four registrations of the entire 24 GiB region and AMD's host-memory limit.
 

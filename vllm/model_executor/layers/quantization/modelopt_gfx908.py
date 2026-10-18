@@ -247,7 +247,10 @@ class PackedG128MoEMethod(FusedMoEMethodBase):
             topk_ids, block_size, layer.w13_weight.shape[0], pad_sorted_ids=True
         )
         cache = None
-        if x.shape[0] <= 64:
+        prefill_admit = x.shape[0] > 64 and os.environ.get(
+            "VLLM_BOLT_PREFILL_ADMIT", "0"
+        ) == "1"
+        if x.shape[0] <= 64 or prefill_admit:
             from aiter.ops.triton.gemm.basic.packed_expert_cache import get_cache
 
             cache = get_cache(
@@ -258,7 +261,13 @@ class PackedG128MoEMethod(FusedMoEMethodBase):
                 self.start,
             )
             if cache is not None:
-                cache.step(topk_ids)
+                if prefill_admit:
+                    # Prefill-informed admission: a 64-token subsample keeps
+                    # the single-CTA route histogram cheap, and the forced
+                    # rerank lands convergence inside this forward.
+                    cache.step(topk_ids[: min(64, x.shape[0])], rerank=True)
+                else:
+                    cache.step(topk_ids)
         q, s = ops.quantize(x.contiguous())
         mid, ms = ops.packed_experts(
             q,
