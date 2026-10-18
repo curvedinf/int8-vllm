@@ -503,6 +503,20 @@ archives. Design study dispatched (agent-1); implementation next.
   decode +11.9%. B18 next: fresh pass (remaining: NCCL fence and
   unequal-TP scope decisions with user; new angles from census
   artifacts).
+
+## B18 (2026-10-18)
+
+- Step-1 profile (prof6): prefill kernel-sum 2.525 -> 2.439s;
+  grouped fell 0.580 -> 0.486s (-16%) from the tier win. Mix: dense
+  33.7% (proven non-constraint x4), grouped 19.9%, NCCL 18.8%
+  (fenced), other 8.4%.
+- E1 DONE/REJECTED (1311345804): admission retest at new tiers -
+  prefill -5.14% median CI -7.4..+0.6. Churn GREW at BM=32/64
+  (refresh storms over 381-1003-tile plans); hits were already
+  flowing from decode-warmed ranking. B14-E1 verdict confirmed at
+  the new geometry; no flip. Admission stays default-off. The re-
+  open hypothesis is answered and closed.
+- B18 remaining: 'other' 0.205s breakdown; next census angle.
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
