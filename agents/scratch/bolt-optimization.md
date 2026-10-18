@@ -631,6 +631,14 @@ execute on user ruling.
   systemd unit consolidation, qwen38 kv_tier pruning) and cannot
   contaminate serving A/B. Validation re-run on idle GPU 0:
   INT8 KV micro OVERALL PASS, battery 4/4 PASS. Stack healthy.
+- Watch pass 389 (batched; 98-388 all unchanged): vLLM moved
+  072c0886d5 -> 371745ebd6 - 1 new commit, docs-only ([Doc][RL]
+  routed experts return for MoE routing replay, #62302); no
+  gfx908/ROCm/Bolt code surface. AITER unchanged (285579b621
+  throughout). No batch. Also this session: GPU/fabric health
+  spot-check nominal (xgmi_wafl burst at 11:16 was the last
+  server teardown, same benign class as Oct 17); bench manifest
+  manifest-1k.json sha still matches frozen 47d824dd.
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
