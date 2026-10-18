@@ -380,6 +380,18 @@ exhaustion; several B11 closures were estimates, not measurements)
   is speed-optimal as-is, not a quality question. Reverted clean.
   LESSON: draft GEMM surfaces are tiny-M - int8 conversion cannot
   win there by construction.
+
+## B15-E2 design (2026-10-18): dense blockscale prefill-only MFMA
+
+ROOFLINE CASE: dense blockscale at (4640x4096, m=6144) = 6.46ms =
+36 TFLOPS ~ 5% of gfx908 int8 MFMA peak (728 TFLOPS theoretical);
+even 30-40% achievable = 3-6x kernel headroom on the family owning
+32.5% of prefill (prof5). Potential +10-25% prefill.
+PRIOR ART: B09_E2 register-fed MFMA dense path - REJECTED on decode
+regression (replaced the shared path at all m). FIX: dispatch the
+new path m>64 ONLY (prefill), leaving decode (m<=64) on the current
+path. Saved sources: loop/batch09/exp2-saved/ + *before-launch-bound.*
+archives. Design study dispatched (agent-1); implementation next.
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
