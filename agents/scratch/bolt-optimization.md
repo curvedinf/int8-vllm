@@ -372,6 +372,15 @@ exhaustion; several B11 closures were estimates, not measurements)
 - E3 DONE/REJECTED (micro): dense split-K strictly worse on every
   prefill shape (ks2 +24..70%) - CUs already saturated; no oracle
   needed. Ledger row written.
+- E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
+  the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
+  Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
+  candidate: route draft dense linears (Q8/U8 source weights) through
+  the target's INT8 dense-cache path; ACCEPTANCE GATE mandatory
+  (draft surface, +-1pt acceptance; fp16-KV history shows draft
+  sensitivity; PTQR precedent shows int8 drafts can hold). Prefill
+  untouched (draft prefill negligible per B13-E4).
+- prof5 of the accepted incumbent booting for the B14 close-out mix.
 
 ## Standing constraints (unchanged from campaign 1)
 
