@@ -517,6 +517,17 @@ archives. Design study dispatched (agent-1); implementation next.
   the new geometry; no flip. Admission stays default-off. The re-
   open hypothesis is answered and closed.
 - B18 remaining: 'other' 0.205s breakdown; next census angle.
+- E2 CLOSED (ledger): 'other' family = long tail, max item 0.5%.
+  Unfenced prefill surface fully measured to closure.
+- E3 REPLICATION DONE (df7d1e3b8a): fresh-boot replication of the
+  B17-E2 incumbent vs b14e1: prefill +1.20% (vs original +4.20%).
+  Two-boot mean ~+2.6%. ACCEPTANCE STANDS (both samples positive,
+  kernel mechanism proven, decode unharmed); LEDGER CORRECTED.
+  CAMPAIGN TOTALS (honest): prefill ~+36%, decode ~+12.5% vs
+  baseline. LESSON: single-boot medians at n=5 can overstate by
+  2-3x; acceptance rows with CI-spanning-zero gains get a
+  replication before headline claims. B18 CLOSED (E1 reject, E2
+  audit, E3 correction). B19 next.
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
