@@ -216,15 +216,29 @@ B11 experiments (legal set, prefill-first; reference = b10e2 five):
   first-quantizations of distinct tensors. No headroom. Ledger row.
 - E4 CLOSED (audited): router topk ceiling 2.6% = noise edge. Ledger
   row.
-- E3b IMPLEMENTED (2026-10-18): LDS activation staging in HIP
-  packed_routed behind VLLM_BOLT_ROUTED_STAGE=1 (template STAGE param;
-  cooperative 16x128-int8 tile per K-group, leading+trailing
-  barriers). Two bugs found and fixed by micro: staging guard must
-  mirror route<M&&(ALIGNED||lk<L); trailing __syncthreads needed
-  (next-group overwrite race, 31-cell signature). Micro: bitwise
-  exact UP+DOWN, +18.4% per pair (e3b-micro.json). 37/37 component
-  tests with STAGE=1. Server booting for the 5-run measurement vs
-  b10e2.
+- E3b DONE/INCONCLUSIVE 2026-10-18 (reverted): micro bitwise-exact
+  +18.4% per expert pair, but end-to-end null (prefill -1.0% noise,
+  decode -1.1% CI spans zero). 18% kernel win does not translate:
+  TP4 decode critical path is sync/latency-bound (custom AR +
+  scheduler cadence), not throughput-bound on packed_routed. AITER
+  reverted to dc13c3d18. Server STOPPED (clean state).
+
+## B11 closed (2026-10-18): 0 accepted, 5 documented
+
+E1/E2/E4 audited-closed (sub-noise ceilings), E3a rejected (decode
+CI regression), E3b inconclusive-reverted (kernel win, e2e null).
+Legal surface above the noise floor is exhausted at this workload:
+- Prefill: NCCL AR-size fallback 20.6% (FENCED - user disposition
+  requested: bf16 wire for oversized ARs / restructure / accept);
+  grouped _gemm 23% (E1-optimized, tile growth dead x2); dense
+  blockscale 27.5% (config dead; register-MFMA rewrite rejected in
+  campaign 1); all remaining items <= 2.6% individually.
+- Decode: packed_routed 25.6% (staging win not on critical path;
+  waves regression), custom AR 8.5%, Cijk 8.9%.
+Campaign totals stand at prefill +27.2% / decode +11.4% (E1+E2).
+B12 requires either the NCCL disposition or genuinely new mechanisms;
+next pass: research pass (fresh eyes on prof2 + Strata repo re-read
+for unexplored techniques) before proposing B12.
 
 ## Standing constraints (unchanged from campaign 1)
 
