@@ -299,6 +299,25 @@ re-validation and resumes experiments on disposition.
   banned by the official-checkpoint-bytes constraint. No applicable
   new technique found; hold state is search-backed.
 
+## B13 (2026-10-18, user-directed restart: NEVER stop, never claim
+exhaustion; several B11 closures were estimates, not measurements)
+
+- E1 DONE/REJECTED (measured): grouped _gemm launch-config sweep
+  (never swept before - B10 E3 covered only the dense kernel). Pinned
+  w4/s1 IS optimal: all alternatives 3.4-21.6% slower, bitwise exact.
+  Ledger row written.
+- E2 RUNNING: prefill-informed expert-cache admission
+  (VLLM_BOLT_PREFILL_ADMIT=1): MO apply steps the cache with prefill
+  topk_ids too (m>64), so admission ranking reflects prefill traffic
+  and later prefill forwards hit INT8 slots instead of decoding IQ2.
+  Cache registered at load (no prefill alloc); step completes before
+  GEMM on the same stream. Server booting.
+- E3 QUEUED: MAX_BATCHED_TOKENS 8512 -> 4256 (chunk-size effects on
+  kernel shapes + AR count; never measured).
+- E4 QUEUED: expert cache 11 GiB + KV 7 GB (1,640,833 tokens =
+  6.26x >= 6.0 floor; legal under the authorization).
+- E5 QUEUED: draft-prefill attribution from prof3 rank traces.
+
 ## Standing constraints (unchanged from campaign 1)
 
 - No hot kernel reloads; restart server per experiment.
