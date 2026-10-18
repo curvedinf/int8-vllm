@@ -152,6 +152,29 @@ per experiment; commit+push accepted changes (security gate first).
   block_size 128 tier in modelopt_gfx908.py + wrapper assert + 8
   warps; kernel BM constexpr already generic. Qualify then 5 runs vs
   b10e2 reference.
+- E4 DONE/INCONCLUSIVE 2026-10-18 (reverted): 128-row grouped prefill
+  tiles. 16/16 component + 32/32 real-checkpoint exact at block 128;
+  measurement prefill median +1.90% pooled +1.64%, bootstrap CI
+  -2.6..+5.5 (spans zero, below noise) - not a demonstrated win.
+  Both files reverted (aiter at dc13c3d18, vllm clean of E4). Matches
+  B04_E2's verdict at 4096/C8: tile growth lands inside the noise gap.
+  NOTE: server on 8021 still runs E4 in-memory; tree is clean -
+  restart before any B11 measurement.
+
+## B10 closed; B11 sketch (design next loop pass from prof2)
+
+Accepted: E1 + E2 (cumulative prefill +27.2%, decode +11.4% vs
+campaign baseline). Negatives documented: E3 (dense config - kernel
+gain sub-noise end-to-end), E5 (cohort load-bearing, default kept),
+E4 (tile growth sub-noise). B11 candidates:
+1. NCCL SP-MoE all-gather 20.6% of prefill (nemotron_h.py:285) -
+   BLOCKED on user disposition re wire policy (no collective
+   backend/precision/order changes).
+2. Router sbtopk 2.6% + _quant 2.4% prefill fusion candidates.
+3. Expert cache >10 GiB needs KV below the 7.15x floor - NOT
+   available under the six-stream authorization.
+4. Strata EXPDEC-style activation staging for native packed_routed
+   decode path (25.6% of decode) - decode protection/gain.
 
 ## Standing constraints (unchanged from campaign 1)
 
