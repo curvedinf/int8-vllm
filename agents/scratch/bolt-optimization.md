@@ -372,6 +372,14 @@ exhaustion; several B11 closures were estimates, not measurements)
 - E3 DONE/REJECTED (micro): dense split-K strictly worse on every
   prefill shape (ks2 +24..70%) - CUs already saturated; no oracle
   needed. Ledger row written.
+- B15-E1 DONE/REJECTED (a861019331): draft-linear int8 (W8A8-GS128
+  via post-load conversion, 3 implementation iterations to clean
+  boot). Decode -2.96% median, prefill -2.23% - tiny-M bf16 Cijk
+  GEMMs already optimal; quantize+blockscale overhead exceeds
+  savings. ACCEPTANCE HELD (3.26-3.49 within gate) - the Cijk family
+  is speed-optimal as-is, not a quality question. Reverted clean.
+  LESSON: draft GEMM surfaces are tiny-M - int8 conversion cannot
+  win there by construction.
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
