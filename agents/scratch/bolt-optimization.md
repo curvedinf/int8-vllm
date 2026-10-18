@@ -621,6 +621,16 @@ execute on user ruling.
   494663940b -> 6b24947628 - 2 new commits (cuda arch build fix;
   deepep sm103 docker build) - neither touches gfx908/ROCm/Bolt
   surfaces. AITER unchanged throughout. No batch.
+- Watch pass 97 (batched; 90-96 unchanged): heads still
+  072c0886d5 / 285579b621. Periodic conformance re-check: 4x
+  power1_cap=105000000, thermal controller + nginx inactive, no
+  psm_* shm leaks, server down, local heads 30ba6dc0b6 /
+  a154bc169. Protected foreign worktree (10 paths + 3 deletions,
+  per protected-worktree-hashes.json) re-identified and left
+  untouched; it is boot-path only (startup-watch engine patch,
+  systemd unit consolidation, qwen38 kv_tier pruning) and cannot
+  contaminate serving A/B. Validation re-run on idle GPU 0:
+  INT8 KV micro OVERALL PASS, battery 4/4 PASS. Stack healthy.
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
