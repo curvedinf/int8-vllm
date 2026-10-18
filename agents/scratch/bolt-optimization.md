@@ -134,6 +134,12 @@ per experiment; commit+push accepted changes (security gate first).
   at 99.9% VRAM (32.18/32.21 GB with 10 GiB expert cache) + JIT of new
   variants; re-measure on settled server when run 0 staggers (TTFT
   waves 0.5/4.7/9.3s is the signature).
+- E5 DONE/REJECTED 2026-10-18 (default kept): cohort=0 collapses
+  prefill -43.8% (1351 vs 2405 tok/s) - the short-prefill cohort is
+  LOAD-BEARING at C6/1024; interval leg skipped (inert neighborhood;
+  cohort carries admission). Ledger row written. E4 remaining; design
+  from a fresh profile of the incumbent (boot in progress, then
+  profile mode + analysis).
 
 ## Standing constraints (unchanged from campaign 1)
 
