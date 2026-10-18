@@ -560,6 +560,18 @@ archives. Design study dispatched (agent-1); implementation next.
   excluded. Both upstream repos now covered by the research
   cadence. Loop continues: next passes watch for new upstream
   mechanisms; dispositions remain the decisive upside.
+
+## B20 (2026-10-18)
+
+- E1 ABANDONED (81560798de): native decode census - 3 boots failed
+  (GPU work inside graph capture; then /dev/shm exhaustion from
+  leaked psm_* segments of the crashed boot; then warmup RPC
+  conflict despite the capture guard). Family already closed by
+  E3a/E3b + skew bound - census was completeness only. Tree clean.
+  OPERATIONAL: crashed boots leak /dev/shm/psm_*; rm before reboot
+  (cleaned; 31G free). Power re-verified 105W x4, controller
+  inactive. Campaign totals unchanged: prefill ~+36%, decode
+  ~+12.5% (replicated, generalized).
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
