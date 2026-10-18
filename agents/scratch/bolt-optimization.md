@@ -403,14 +403,20 @@ archives. Design study dispatched (agent-1); implementation next.
   component-bench MUST beat Triton before any serving run (E2 -65%
   was visible there). Latency-bound diagnosis: num_stages=1 exposes
   600-800ns per K-block.
-- E3 DONE/REJECTED (f99db2558b): dense config-table dispatch
-  (micro +13-18% at big shapes) - settled e2e prefill -1.4% decode
-  -4.8%. THIRD micro-vs-e2e gap instance on this family: serving
-  dense population is many shapes across mixed phases; the table
-  loses elsewhere what it gains on the big three. LESSON for E2:
-  the kernel rewrite must beat Triton per-shape ACROSS the serving
-  shape population (component gate on ALL production shapes), not
-  only the big three.
+- E2 CLOSED AT COMPONENT GATE (f3e5a1b785): v2a (coalesced LDS
+  staging + XOR swizzle, fixing E2's scalar-load failure) = 0.56-
+  0.67x Triton; v2b (+ ping-pong prefetch pipeline) = 0.57-0.64x;
+  NW wave templating 2/4 = WORSE (0.47-0.56x, occupancy loss beats
+  LDS-traffic gain - falsified the LDS-bound theory). Bitwise oracle
+  held on every variant/shape. Never beat Triton at production
+  shapes; only tiny launch-bound shapes win. Verdict: Triton codegen
+  (36-41 TFLOPS + tuned table + full shape coverage) is genuinely
+  strong on this family; native route closed. Tree reverted clean.
+  B15 tally: E1 rejected (tiny-M), E2 closed (component gate), E3
+  rejected (settled regression). Dense-family routes now exhausted
+  at: config (3x), split-K, chunking (2x), kernel rewrite (2
+  campaigns). Remaining prefill upside: NCCL 18.1% (FENCED, user
+  disposition) and unequal-TP scope decision (decode skew 6.6%).
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
