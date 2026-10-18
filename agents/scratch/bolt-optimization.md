@@ -603,6 +603,8 @@ execute on user ruling.
   commits triaged: CI/docs/video/rl-protocol/sm80-90 build fix -
   NONE applicable (no gfx908/rocm/mamba/moe surfaces). AITER
   unchanged. No batch triggered.
+- Watch pass 5: both heads unchanged (953fa442fa / 285579b621).
+  Standing unchanged.
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
