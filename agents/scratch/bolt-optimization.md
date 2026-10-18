@@ -417,6 +417,27 @@ archives. Design study dispatched (agent-1); implementation next.
   at: config (3x), split-K, chunking (2x), kernel rewrite (2
   campaigns). Remaining prefill upside: NCCL 18.1% (FENCED, user
   disposition) and unequal-TP scope decision (decode skew 6.6%).
+
+## B16 (2026-10-18)
+
+- E2 ROUTER TOPK investigation: decode sbtopk = 0.291s (3.2%) from
+  the Python grouped-topk fallback (torch.topk x3-4 per layer-step;
+  forward_hip gated on VLLM_ROCM_USE_AITER_MOE which the packed
+  stack never sets). AITER dispatch-fix premise DEAD:
+  biased_grouped_topk_hip is an undecorated no-op stub in this
+  checkout; the real impl needs module_moe_asm (CK-dependent,
+  deliberately skipped by the fork's shim build; core.py:1125).
+  Bolt config: n_group=1/topk_group=1/9-of-240..496 sigmoid+bias -
+  degenerate plain biased top-9. VIABLE ROUTE: custom Triton kernel
+  (select by biased scores, ties by smaller index = torch.topk
+  convention; gather unbiased sigmoid weights; renorm same-op -
+  bitwise ids + weights parity achievable; torch.sigmoid stays
+  torch for ULP-exact scores). Expected: replace 3-4 launches +
+  elementwise per layer-step -> est +2-3% decode, ~+0.5-1% prefill.
+  Kernel implementation next turn (correctness-critical, fresh
+  context).
+- E1 QUEUED: prefill torch.compile probe (mode=0 is fork default;
+  diagnostic boot first - custom ops likely graph-break, cheap fail).
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
