@@ -194,6 +194,24 @@ B11 experiments (legal set, prefill-first; reference = b10e2 five):
   mechanism exists.
 - E5: reserved for the first B11 profile delta.
 
+## B11 progress
+
+- E1 CLOSED (audited, no measurement): bf16 copy family 2.3% prefill
+  is small scattered copies; sources are numerics-required casts
+  (mamba SwiGLU fp32), draft cats, and necessary contiguity guards.
+  No bit-exact removable subset above noise. Ledger row written.
+- E3a DONE/REJECTED 2026-10-18: VLLM_BOLT_ROUTED_WAVES=4 decode
+  median -3.65% pooled -2.49% CI excludes zero (occupancy loss from
+  256-thread blocks dominates read-duplication savings). Default 2
+  stands. E3b (LDS staging at NW=2) prior downgraded - duplication
+  is not the binding constraint; consider only if a kernel-level
+  micro first shows a win. NOTE: server on 8021 runs waves=4
+  (rejected) in-memory; next boot uses launcher defaults (waves=2).
+- REMAINING B11: E2 (_quant coverage extension, prefill 2.4%), E3b
+  (LDS staging, decode - micro-gate first), E4 (router sbtopk audit).
+  Plateau context: largest legal prefill items are exhausted;
+  NCCL 20.6% awaits user disposition.
+
 ## Standing constraints (unchanged from campaign 1)
 
 - No hot kernel reloads; restart server per experiment.
