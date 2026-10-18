@@ -605,6 +605,7 @@ execute on user ruling.
   unchanged. No batch triggered.
 - Watch pass 5: both heads unchanged (953fa442fa / 285579b621).
   Standing unchanged.
+- Watch pass 6: both heads unchanged. Cadence continues.
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
