@@ -364,6 +364,14 @@ exhaustion; several B11 closures were estimates, not measurements)
   incumbent = memory-only; reference = loop2/b14e1 five runs.
   Next: E2 (chunk x dense-s3g8, admission off) and further prof4-
   driven candidates.
+- E2 DONE/INCONCLUSIVE (a39ab04584): chunk4256 x dense-s3g8 - all
+  point estimates positive (prefill +0.3/+1.0, decode +0.9/+2.3,
+  wall +0.6/+2.0) but every CI spans zero; chunk orchestration
+  overhead keeps consuming the kernel gains. Both reverted; chunking
+  neighborhood closed (two legs). Deeper 2128 skipped.
+- E3 DONE/REJECTED (micro): dense split-K strictly worse on every
+  prefill shape (ks2 +24..70%) - CUs already saturated; no oracle
+  needed. Ledger row written.
 
 ## Standing constraints (unchanged from campaign 1)
 
