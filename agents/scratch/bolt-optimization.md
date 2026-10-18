@@ -281,6 +281,15 @@ re-validation and resumes experiments on disposition.
 - Integrity audit: 547 ledger rows parse; vllm main == origin/main
   (947bbabb84); aiter main == curved/main (dc13c3d18); caps 105W x4,
   controller inactive, nginx down.
+- LONG-CONTEXT GATES 2026-10-18 (accepted 8 GB KV config): 28k
+  retrieval identical cold (13.06s) and replay (3.70s); GPU-prefix
+  reset CPU-restore path works (5.73s, restored not recomputed).
+  All recipe-standard gates now green at the accepted state.
+- Disposition branches PREPARED (not applied):
+  loop2/disposition-branches.md - Branch 1 one-line custom-AR cap
+  raise (128 MiB TP4) with full measurement plan; Branch 2 scoped
+  B13 unequal-TP project plan (fractional column widths first,
+  bitwise oracle). Execute on user ruling only.
 
 ## Standing constraints (unchanged from campaign 1)
 
