@@ -114,6 +114,15 @@ per experiment; commit+push accepted changes (security gate first).
   vLLM ledger row BOLT_LOOP2_B10_E1_..., vllm main 6d401447d8 (pushed).
   New incumbent: AITER dc13c3d18 + vLLM 4711913204. Next reference for
   E2/E3/E5/E4 = loop2/b10e1/ five runs.
+- E2 DONE/ACCEPTED 2026-10-18: KVMEM 14 GB -> 8 GB (7.15x 256k streams,
+  >= 6 floor verified at boot), expert cache 5 -> 10 GiB (9131 pairs,
+  228-239 slots/layer). Config-only. Vs E1: prefill median +11.22%
+  pooled +11.06%; decode median +8.60% pooled +7.59% (CI excludes 0).
+  Cumulative vs campaign baseline: prefill +27.2%, decode +11.4%.
+  Launcher defaults + recipe doc updated; ledger row
+  BOLT_LOOP2_B10_E2_MEMORY_REALLOCATION. New incumbent = E2 config;
+  next reference = loop2/b10e2/ five runs. REMAINING: E3 (blockscale
+  config sweep), E5 (scheduler sweep), E4 (Strata decode-once kernel).
 
 ## Standing constraints (unchanged from campaign 1)
 

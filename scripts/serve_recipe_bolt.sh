@@ -50,7 +50,7 @@ serve() {
   export VLLM_BOLT_KERNEL_TUNING="${VLLM_BOLT_KERNEL_TUNING:-0}"
   export VLLM_BOLT_DENSE_CACHE_GIB="${VLLM_BOLT_DENSE_CACHE_GIB:-3}"
   export VLLM_BOLT_DENSE_CACHE_DROP_PACKED="${VLLM_BOLT_DENSE_CACHE_DROP_PACKED:-1}"
-  export VLLM_BOLT_EXPERT_CACHE_GIB="${VLLM_BOLT_EXPERT_CACHE_GIB:-5}"
+  export VLLM_BOLT_EXPERT_CACHE_GIB="${VLLM_BOLT_EXPERT_CACHE_GIB:-10}"
   export VLLM_BOLT_EXPERT_CACHE_SLOTS="${VLLM_BOLT_EXPERT_CACHE_SLOTS:-auto}"
   export VLLM_BOLT_EXPERT_CACHE_REFRESH="${VLLM_BOLT_EXPERT_CACHE_REFRESH:-128}"
   export VLLM_ROCM_PIN_LOCAL_OFFLOAD=1
@@ -88,7 +88,8 @@ serve() {
     --max-num-batched-tokens "${MAX_BATCHED_TOKENS:-8512}"
     --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.90}"
     # Fixed arena follows the Qwen recipe; leave space for resident INT8 copies.
-    --kv-cache-memory "${KVMEM:-14000000000}"
+    # 8 GB keeps 7.15x full 262,144-token requests resident (six-stream floor).
+    --kv-cache-memory "${KVMEM:-8000000000}"
     --kv-cache-dtype int8_block_g128 --mamba-ssm-cache-dtype float32
     --speculative-config "$spec"
     --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":25769803776}}'
