@@ -546,6 +546,13 @@ archives. Design study dispatched (agent-1); implementation next.
   continues: sustained-value validation cadence + upstream watch;
   new experiment batches require new mechanisms (research) or the
   dispositions.
+- E1 DONE/REJECTED (732487c4b7): MIXED_PREFILL_TOKENS 4256->8512 -
+  prefill exactly flat (-0.15/+0.15%; continuation chunks are
+  per-request 1024-token, request-bound not budget-bound), decode
+  -1.67% (bigger prefill batches steal decode rounds - the exact
+  mechanism the 4256 budget prevents). The mixed-prefill knob
+  family (budget, interval, cohort) is now FULLY swept. Campaign
+  totals unchanged: prefill ~+36%, decode ~+12.5%, replicated.
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
