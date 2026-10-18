@@ -240,6 +240,22 @@ B12 requires either the NCCL disposition or genuinely new mechanisms;
 next pass: research pass (fresh eyes on prof2 + Strata repo re-read
 for unexplored techniques) before proposing B12.
 
+## B12 skew investigation (2026-10-18, ledger 0da340b7fb)
+
+4-rank bounded capture (prof3) + live hwmon sampling: rank 2 (card2)
+runs ~7-8% slower on EVERY kernel family - 785 MHz avg sclk vs
+885/934/866 at identical 105W caps, 59-61C (silicon variance, not
+thermal). Other ranks spin up to 0.597s waiting (6.6% of decode);
+rank2 also arrives last in prefill NCCL (0.266 vs ~0.46s in
+collectives). Mechanism for a fix: unequal TP column sharding
+(numerics-safe for column-parallel sums) - but integer head splits
+(Q32, KV replicated pairs 0/1+2/3) and vLLM equal-split TP
+infrastructure make it a fork-wide architecture project. PENDING USER
+DECISIONS (both presented): (1) NCCL fence disposition (custom-AR cap
+raise / bf16 wire / accept); (2) unequal-TP scope authorization.
+Loop continues with maintenance validation (battery + soak at the
+accepted incumbent) while dispositions pend.
+
 ## Standing constraints (unchanged from campaign 1)
 
 - No hot kernel reloads; restart server per experiment.
