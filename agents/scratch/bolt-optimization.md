@@ -1,114 +1,120 @@
-# Paused Bolt optimization
+# Bolt optimization campaign 2 (active)
 
-The user stopped the continuous loop on 2026-10-17 and requested the best
-combination as the standard Bolt recipe/launcher, with standard quality gates.
-Do not restart optimization automatically. The registered B09 E5 draft FC
-sharding experiment was never implemented. Resume it only under a new request.
+User restarted indefinite optimization on 2026-10-18 under a new request; the
+2026-10-17 pause note is superseded. Loop until the user says stop: profile at
+the campaign workload, identify 5 experiments (mixed scope: kernels, fusion,
+config), run each with 5 measured runs, commit/push wins, repeat. Focus:
+prefill. Gate: prefill improves, decode does not regress (median + pooled,
+same discipline as before). Memory reallocation authorized while >= 6 full
+256k-token streams fit (6 x 262144 = 1,572,864 tokens; current 14 GB/GPU KV
+arena reports 3,283,288 effective tokens, so reductions must keep >= that
+effective-token floor).
 
-## Accepted state and operations
+## Environment (fixed for all measurements)
 
-Runtime sources: vLLM `4711913204533dfe702bd7e9ed7d23d07a08503b`, AITER
-`3c74adc198e55aeb5bcd41516bddfb3ccadf6725`. B07 E1 page attention + B07 E4
-native MoE norm/GS128 fusion remain accepted, above weighted9 reduction,
-B03 route64 and B02 short-prefill cohort. Canonical settings and routine-gate
-results live in docs/recipes/nemotron_bolt.md and the experiment ledger.
+- 105 W cap all 4 MI100s, set via sysfs power1_cap=105000000; thermal
+  controller STOPPED (mi100-thermal-controller.service), nginx and
+  vllm-bolt production service stopped. Harness asserts all of these per run.
+- Diagnostic server: serve_recipe_bolt.sh with PORT=8021
+  VLLM_SERVER_DEV_MODE=1 (dev RPCs for lifecycle profiling + prefix reset),
+  API key agents/tmp/bolt-eval/regression.key (0600, never print/commit).
+  Run server + all GPU/bench work as the checkout owner, never root.
+- Harness: agents/tmp/bolt-opt/loop2/run.py, manifest-1k.json
+  (sha256 47d824dd59fd74baf7c384ff1211d5aed0b43163cc11b06a06d1b147cc364b4b,
+  6 prompts x 1024 in / 256 out, temp 0 seed 0 ignore_eos, stream token
+  events; phase metric aggregate_decode_only_after_all_prefills_v2).
+  Modes: bench (warmup + N runs), profile (lifecycle rank-0 capture),
+  --require-marker for rank qualification from server.log byte offset.
+  Results land in loop2/<batch>/. Boot from AIS cache hits ~6 min.
 
-The standard vllm-bolt.service serves on localhost8020. Its actual
-process argv/env was checked against TP4/C8/NS7, graphs, INT8 KV, BF16 model,
-FP32 state and 3GiB dense/5GiB expert cache settings. Production nginx and the
-thermal controller are enabled; live caps vary. The controller must NEVER stop
-Bolt: core >90C / memory >89C reduces 1W per five minutes; core >95C / memory
->90C cuts 20%, repeating after ten seconds while hot, bounded by the minimum.
-Faults only lower power. Its canonical source and deployment instructions are
-in the Bolt recipe. Fixed105W below describes benchmark conditions only.
-The isolated optimization
-unit and its owned profiler drop-in were retired; no automatic optimizer runs.
-Keep existing production credentials private. Do not hot-reload kernels: it
-can duplicate scale caches and bias cache/memory state.
+## Campaign-2 baseline (2026-10-18, loop2/baseline/)
 
-Reference metric remains ORIGINAL B07 exp4-{0..4}, bytecopies B09 incumbent:
-median2300.4249954 aggregate prefill/168.2838861 separately timed aggregate
-decode tok/s. Exactly five frozen4096-input/256-output/C8 trials, same eight
-prompts, seed0/cache resets/105W; one untimed warmup. No new performance
-baseline, extensions or extra controls. Retention requires positive pooled
-whole-run gain and BOTH median/pooled phase rates nondegrading. Report only
-aggregate prefill and separate aggregate decode, never whole-output as decode.
-Earlier1500/400 reports used different workloads and are not comparable.
+Reference incumbent = accepted standard recipe (vLLM 4711913204, AITER
+3c74adc19). 5 runs after 1 warmup: median prefill 1889.59 tok/s (range
+1854.4-1904.3), median aggregate decode 152.53 tok/s (range 147.8-158.4),
+pooled decode 153.11, pooled whole-run output 117.17, acceptance 3.28-3.52.
+Decode noise ~7% (acceptance-driven); prefill noise ~2.6%. NOT comparable to
+the 4096/C8 campaign numbers (2300.42/168.28).
 
-## Costly evidence and remaining uncertainty
+## Experiment ideas (mined, ranked)
 
-Canonical decisions: docs/recipes/surface_experiments_ledger.jsonl. Raw
-source snapshots/proofs/five-run results: ignored agents/tmp/bolt-opt/loop/
-batch01..batch09. All B08 experiments and B09 E1..E4 rejected/reverted; no
-runtime change from those batches is accepted. B09 E4 completed five before
-wrap-up:2266.8257/158.5371 median rates; pooled prefill-1.4120%,decode-7.3924%,
-whole-4.1829%. Frozen33sources/22proofs and all-four qualification/caps/counters
-verified, then only its six hash-verified owned paths restored/removed.
+1. Dense packed prefill kernel: decode/INT8-convert weight once per
+   (N-tile,K-group) and apply across all M rows (profile 2026-10-15: 512
+   M-tiles at 8k prefill redo conversion; Strata does decode-once per block,
+   their #1 technique). NVFP4 Mamba projections first (36% of kernel time).
+2. Strata EXPDEC analog for routed experts: stage group activations
+   (INT8) in shared memory, R rows per lane, rows-per-block tuning,
+   shared-memory IQ2 codebooks (their kernel -11..-23%, bitwise identical).
+3. Expert-cache growth via KV reallocation (5 -> ~8-10 GiB expert cache,
+   KV down toward the 6-stream floor) -> more INT8 expert hits in prefill.
+4. Mixed-prefill scheduling retune for C6/1024 (page budget, interval,
+   cohort policy interactions at the new shape).
+5. NVFP4 dense conversion widening (VLLM_BOLT_KERNEL_TUNING lever exists,
+   default 0 - check what it gates before using).
 
-Finalization artifacts: agents/tmp/bolt-final/. Keep failure observations and
-subsequent corrected checks. The original short-answer soak exhausted64tokens
-in reasoning and returned no final answer; fixture now disables reasoning,
-checks final content, and retains a separate reasoning functional gate. Cases
-0..51 completed serially; remaining52..499 ran atC8 without repeating completed
-cases. Same prompts/seeds/budgets verified. One interrupted in-flight response
-was excluded. New CLI count/concurrency validation and authenticated entrypoint
-were checked. These are quality gates, not additional performance repetitions.
+Reference: github.com/Niko1221/Strata (MIT; llama.cpp-derived kernels, MIT).
+Their tree has no Bolt/Nemotron path; applicable ideas are the kernel
+techniques (decode-once Split<TG> load/apply split in
+src/kernels/cuda/iq_kernels.cu, EXPDEC staging in docs/EXPERTDEC.md,
+calibrated dense GEMM in docs/AMD_HIP_PERFORMANCE.md). Attribute if code is
+copied; prefer reimplementation in AITER Triton idiom.
 
-Code-answer spot checks still invent Math.clamp availability (localNode22 has
-no API); this also appears in greedy reasoning/nonreasoning diagnostics. Origin
-unisolated; no optimizer regression established. Coherence is not task accuracy.
-Official-reference full-model fidelity and full256k remain unverified; do not
-claim passed. The recipe/ledger record the limited numerical-corpus evidence. The raw
-52-prompt completions capture is not a chat-quality gate; the Bolt adapter
-captured the same52 through the actual chat template. Same52 plus500 replies
-were rechecked after fixing whitespace/Markdown false positives; ten focused
-checker regressions cover readable layouts, genuine garble and empty answers.
+## Loop-1 profile (2026-10-18, loop2/profile/, rank-0 GPU-only Kineto)
 
-Critical wire policy: _tp_ar_fp32_mode() returns STRING"0" whenunset; it is
-truthy, so BF16 partials already promote to F32 wire and cast back. Do not fix
-that flag or change collective precision/order/backend. Legacy perrow/trunc
-FUSED_NORM_QUANT stays off; the accepted native producer preserves the original
-Triton BF16 norm (including NaN payload), residual and exact GS128 q/scales.
+1024/256 C6, kernel busy 0.998. Prefill window 3.248 s: grouped packed `_gemm`
+(IQ2 experts, Triton) 38.8%; blockscale dense INT8 GEMMs ~18.9%; NCCL
+Ring/Simple collectives 13.8% (out of scope - standing collective constraint);
+custom AR 3%; router topk 2.2%; misc elementwise/quant/norm/mamba ~9%.
+Decode window 9.696 s: packed_routed native HIP 27.8%; dense decode (Cijk +
+blockscale BM64/16) 20.8%; custom AR 9.5%; unified attention 4.3%. Full
+summary: loop2/profile/prof1-summary.json. NVFP4 Mamba projections are already
+INT8-resident via campaign-1 dense cache (served by blockscale kernel); packed
+decode at prefill is routed IQ2 experts only.
 
-B09 E2 launch_bounds512 removed scratch but the new dense MFMA still regressed;
-no unchanged reruns. E3 TP4 fixtures require ps.graph_capture lifecycle. E4
-synthetic32-expert logits were nonrepeatable even on the original; deployed
-counts240/304/368/432/496 were repeatable. Component proofs do not establish
-full-model fidelity. E5 research only: exp5-design.md, draft replicated FC
-row-sharding with bitwise gather; no implementation/testing authorized now.
+## Batch B10 design (locked 2026-10-18)
 
-## Actual fixtures and retained pitfalls
+Gate: prefill median AND pooled improve; decode median non-degrading AND
+pooled decode regression <= 2% (noise band; campaign-1 gate was both-median-
+and-pooled strictly, which reverted B04_E3 on a -0.5% pooled decode dip).
 
-B09dense_case_plan.py/dense_rank_support.py/exp1-rank-cache-proof.json reuse68
-originalcheckpoint/AISbytegates,exact9projectiontypes/all4TP,includingextra probe
-spans. AISmeta.shapeGLOBAL butruns/compactpayloadLOCAL; gatherlogicalbytewindows,
-nevernaivequarterorwholecompactreshape. Mambafivegroups8192/8192/1024/1024/128 ->
-local2048/2048/256/256/32=4640. AttentionQ32/KV2/head128 ->localQ1024+K128+V128=1280,
-KVreplicatedpairs0/1&2/3. RowK1344 partial256codecwindows maycrossblocks.
-NVFP4global_scale2 scalar expandedperrow; mergedQKV cat originals. Draftsingle
-model.safetensors(noindex),fcsourceU8[4096,12288],scalesF8[4096,1536].
-prepare(rank,key) usescurrentCUDAdevice; set_device/current_stream BEFORE tensors.
-Fixturesisolateddensecache1GiB ONLY; production3unchanged. Independent oldhelper
-B09dense_reference.py AST-identicaloriginaldensecache. E2source/proofs archived
-exp2-saved and *before-launch-bound.*; no oldnative/genericbinary replacement.
+- E1 (kernel, medium): resurrect B04_E3 cached-INT8 prefill hit branch.
+  Prior run: median prefill +8.44%, median decode +0.77%, pooled whole
+  +4.12%, pooled decode -0.50% (reverted on strict gate only). Saved sources
+  loop/batch04/exp3-saved/aiter (built on 3f8045a90; port onto current main
+  3c74adc19; output layout unchanged so combine_experts unaffected).
+  Prefill `_gemm` is 38.8% of prefill window here. Qualify with
+  --require-marker + component checks before the 5-run spend.
+- E2 (config/memory): reallocate KV 14 GB -> ~8 GB (assert boot effective
+  tokens >= 1,572,864 = 6 x 262144), expert cache 5 -> 10 GiB, dense 3 -> 4.
+  Decode/verify protection (packed_routed 27.8% of decode); raises E1 hit
+  fraction. Run standalone first, then stacked if E1 accepted.
+- E3 (kernel-config sweep): blockscale dense GEMM pinned configs for prefill
+  shapes (num_stages 2/3, GROUP_SIZE_M, KSPLIT, BM variants; all pinned
+  stages=1 today). Micro-bench offline with real shapes first; ~18.9% of
+  prefill window.
+- E4 (kernel rewrite, large): Strata-style decode-amortized W-tile staging in
+  grouped Triton `_gemm` miss path - decode/INT8-convert (BN=128 x BK=128) W
+  tile once per K-group per CTA, reuse across inner M loop (inverted loop
+  order vs per-M-tile redone decode; distinct from rejected B04_E2 tile
+  growth and B09_E2 register-dense MFMA). Accelerates the path E1 leaves.
+- E5 (scheduler config): mixed-prefill tokens/interval + short-prefill
+  cohort at C6/1024 (6144-token single-chunk prefill; admission effects).
+  Bounded 3-leg sweep.
 
-## Resumption and ownership
+Order: E1 -> E2 -> E3 -> E5 -> E4 (cheap first after the high-confidence
+port; E4 last, biggest scope). Each vs latest accepted incumbent; ledger row
+per experiment; commit+push accepted changes (security gate first).
 
-All Python uses the serving .venv; GPU work runs as checkout owner with HOME
-and ROCm/gfx908 env, PYTHONPATH repo:siblingAITER. No venv/runtime changes:
-torch2.11rocm7.1 wheel deliberately carries patched HIP/HSA7.2. All Git writes
-and pushes as checkout owner, both main; AITER remote curved, root remote origin.
+## Standing constraints (unchanged from campaign 1)
 
-The frozen benchmark harness and manifest hashes are in B09 incumbent-sources.
-Its decode metric counts only events AFTER the latest first-token event until
-the final generation event; prefill includes admission/interleaved decode.
-verify-frozen-result.py verifies artifacts without new GPU work. Future branches
-need actual all-rank runtime qualification before spending a five-run budget.
-For data-dependent branches, initialization/capture markers are insufficient.
-
-Unrelated working changes remain protected by agents/tmp/bolt-opt/loop/
-protected-worktree-hashes.json:10paths bytes+mtime, plus3deletions. Never broad
-restore/stage/stash. Preserve those pending changes; the final recipe commit is
-scoped to this task. Follow AGENTS.md/security-policy before every commit and
-verify remote refs. Maintain-scratch was checked/notdue Oct15; compaction and
-ordinary task updates do not retrigger it.
+- No hot kernel reloads; restart server per experiment.
+- Do not modify collectives/AR precision; _tp_ar_fp32_mode quirk stays.
+- Legacy FUSED_NORM_QUANT stays off. Official checkpoint bytes unchanged.
+- Git as checkout owner (curved), both forks main; run security-hygiene-check
+  before every commit; ledger rows in docs/recipes/surface_experiments_ledger.jsonl
+  for every experiment; A/B row before any perf claim.
+- Protected unrelated worktree paths:
+  agents/tmp/bolt-opt/loop/protected-worktree-hashes.json (10 paths + 3
+  deletions) - never broad restore/stage/stash.
+- Battery 4/4 + INT8 KV micro after accepted runtime changes; acceptance gate
+  for draft-surface changes.
