@@ -123,6 +123,17 @@ per experiment; commit+push accepted changes (security gate first).
   BOLT_LOOP2_B10_E2_MEMORY_REALLOCATION. New incumbent = E2 config;
   next reference = loop2/b10e2/ five runs. REMAINING: E3 (blockscale
   config sweep), E5 (scheduler sweep), E4 (Strata decode-once kernel).
+- E3 DONE/REJECTED 2026-10-18: blockscale num_stages=3/GROUP_SIZE_M=8
+  for m>64. Micro: -11..-35% kernel ms at m=1024 shapes, all bitwise
+  exact; but end-to-end prefill flat (+0.13%) - the workload prefills
+  as one 6144-token chunk where gain was only 5-8% of a 19% share.
+  AITER change reverted (clean tree at dc13c3d18). Negative result in
+  ledger. LEARNED: dense GEMM config is NOT the remaining prefill
+  bottleneck; grouped packed _gemm (38.8%) and NCCL (13.8%) dominate
+  post-E1/E2. ALSO: first post-warmup run after a fresh boot can stall
+  at 99.9% VRAM (32.18/32.21 GB with 10 GiB expert cache) + JIT of new
+  variants; re-measure on settled server when run 0 staggers (TTFT
+  waves 0.5/4.7/9.3s is the signature).
 
 ## Standing constraints (unchanged from campaign 1)
 
