@@ -256,6 +256,20 @@ raise / bf16 wire / accept); (2) unequal-TP scope authorization.
 Loop continues with maintenance validation (battery + soak at the
 accepted incumbent) while dispositions pend.
 
+## Accepted-incumbent validation (2026-10-18, post-B12-skew)
+
+Tree = AITER dc13c3d18 + vLLM main (docs-only since 6d401447d8).
+Offline: battery 4/4, INT8 KV micro PASS, 37/37 packed component
+suites. Live (8021, default launcher env): C8 answer smoke
+acceptance 4.51 (reference band ~4.55); 52/52 chat corpus coherence
+with finite logprobs (probe_bolt_quality). Server left running idle
+at the accepted config. Full 500-case soak deferred (bounded gates
+green; soak is available on request). Campaign posture:
+validation-green hold; no bounded legal experiments remain above the
++-2.6% noise floor pending (1) NCCL fence disposition and (2)
+unequal-TP scope decision. Loop continues with periodic
+re-validation and resumes experiments on disposition.
+
 ## Standing constraints (unchanged from campaign 1)
 
 - No hot kernel reloads; restart server per experiment.
