@@ -599,6 +599,10 @@ execute on user ruling.
   (grep=0 hits). State fully conformant; no drift.
 - Watch pass 3 (11:20 UTC): both upstream heads unchanged;
   no new mechanisms. Standing unchanged.
+- Watch pass 4: vLLM moved (7c9042c05a -> 953fa442fa) - 6 new
+  commits triaged: CI/docs/video/rl-protocol/sm80-90 build fix -
+  NONE applicable (no gfx908/rocm/mamba/moe surfaces). AITER
+  unchanged. No batch triggered.
 - E4 ANALYSIS (prof4): decode Cijk (draft GEMMs) = 1.159s, 12.9% of
   the decode window, 6287 launches ~14/draft-step, 0.18ms avg.
   Int8-GS128 swap ceiling ~+7.8% decode (kernel ~2.5x). B15-E1
