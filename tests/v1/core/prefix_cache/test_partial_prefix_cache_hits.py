@@ -1487,7 +1487,7 @@ def test_hybrid_partial_hit_with_eagle_stays_within_group_blocks():
     assert manager.allocate_slots(req1, 4, num_computed, computed_blocks) is not None
 
 
-def test_hybrid_sliding_window_group_disables_partial_hash_hits():
+def test_hybrid_sliding_window_group_supports_partial_hash_hits():
     hash_block_size = 2
     sliding_window_block_size = 2 * hash_block_size
     mamba_block_size = 2 * sliding_window_block_size
@@ -1537,7 +1537,7 @@ def test_hybrid_sliding_window_group_disables_partial_hash_hits():
     tokens = list(range(3 * sliding_window_block_size))
     request = make_request("0", tokens, hash_block_size, sha256)
     computed_blocks, num_computed, _ = manager.get_computed_blocks(request)
-    assert not manager.coordinator.enable_partial_hash_hits
+    assert manager.coordinator.enable_partial_hash_hits
     assert (
         manager.allocate_slots(request, mamba_block_size, num_computed, computed_blocks)
         is not None

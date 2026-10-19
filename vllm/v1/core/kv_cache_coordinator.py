@@ -660,6 +660,21 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     ", ".join(sorted(unsupported_partial_hit_managers)),
                 )
         self.verify_and_split_kv_cache_groups()
+        checkpoints = tuple(sorted(set(kv_cache_config.prefix_cache_checkpoint_tokens)))
+        if checkpoints:
+            if not self.enable_partial_hash_hits:
+                raise ValueError("Early prefix checkpoints require partial hybrid hits")
+            min_block = min(m.block_size for m in self.single_type_managers)
+            if any(
+                t <= 0 or t % hash_block_size or t + hash_block_size >= min_block
+                for t in checkpoints
+            ):
+                raise ValueError(
+                    "Early prefix checkpoints must be positive hash-unit multiples "
+                    "with room for draft lookahead inside the first cache block"
+                )
+            for manager in self.single_type_managers:
+                manager.prefix_checkpoint_tokens = checkpoints
 
     @property
     def _cache_hit_alignment_tokens(self) -> int:
@@ -817,6 +832,15 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 # effective block size may exceed the spec's.
                 group_block_size = self.single_type_managers[first_group_id].block_size
                 cached_blocks = hit_blocks_by_group[first_group_id]
+                if (
+                    isinstance(spec, SlidingWindowSpec)
+                    and cached_blocks is not None
+                    and curr_hit_length == hit_length_by_group[first_group_id]
+                ):
+                    # The previous pass already proved this exact window,
+                    # including its draft lookahead. Its partial alias may
+                    # name the proof boundary rather than the post-drop hit.
+                    continue
                 if isinstance(spec, FullAttentionSpec) and cached_blocks is not None:
                     # Full attention is downward-closed: we only need to look
                     # up cached blocks once; on subsequent iterations just trim

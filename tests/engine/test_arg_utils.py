@@ -492,6 +492,13 @@ def test_prefix_cache_default():
     engine_args = EngineArgs.from_cli_args(args=args)
     assert engine_args.prefix_cache_retention_interval == 64
 
+    args = parser.parse_args(
+        ["--prefix-match-unit", "8", "--prefix-cache-checkpoint-tokens", "128", "232"]
+    )
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert engine_args.prefix_match_unit == 8
+    assert engine_args.prefix_cache_checkpoint_tokens == [128, 232]
+
 
 def test_prefix_cache_retention_interval_from_deprecated_env(
     monkeypatch, caplog, disable_log_dedup

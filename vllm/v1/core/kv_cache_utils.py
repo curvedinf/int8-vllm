@@ -1406,6 +1406,9 @@ def get_kv_cache_config_from_groups(
             prefix_cache_retention_interval=(
                 vllm_config.cache_config.prefix_cache_retention_interval
             ),
+            prefix_cache_checkpoint_tokens=tuple(
+                vllm_config.cache_config.prefix_cache_checkpoint_tokens
+            ),
         )
 
     # Determine how model runners should initialize the KV cache tensors.
@@ -1467,6 +1470,9 @@ def get_kv_cache_config_from_groups(
         kv_cache_groups=kv_cache_groups,
         prefix_cache_retention_interval=(
             vllm_config.cache_config.prefix_cache_retention_interval
+        ),
+        prefix_cache_checkpoint_tokens=tuple(
+            vllm_config.cache_config.prefix_cache_checkpoint_tokens
         ),
     )
 

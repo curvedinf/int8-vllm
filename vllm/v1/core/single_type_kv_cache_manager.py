@@ -7,6 +7,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from typing import ClassVar
 
+from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
@@ -32,6 +33,8 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
+
+logger = init_logger(__name__)
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -111,6 +114,7 @@ class SingleTypeKVCacheManager(ABC):
         # Hybrid groups must retain a common replay point after a draft group
         # drops its volatile lookahead block. Set by the coordinator.
         self.prefix_replay_offset = 0
+        self.prefix_checkpoint_tokens: tuple[int, ...] = ()
 
         # Partial-hit copy-on-write bookkeeping. Populated only by fine-grained
         # managers (full attention, mamba "align"); harmlessly empty elsewhere.
@@ -797,6 +801,28 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         if self.block_size == hash_block_size:
             return
         self._cache_partial_tail_block(request, num_tokens)
+        self._cache_early_attention_checkpoints(request, num_tokens)
+
+    def _cache_early_attention_checkpoints(
+        self, request: Request, num_tokens: int
+    ) -> None:
+        # Attention is append-only within a page. Re-register these aliases
+        # after partial/full promotion (which removes the old primary hash).
+        # Descending order leaves the longest available prefix as primary.
+        blocks = self.req_to_blocks[request.request_id]
+        if not blocks or blocks[0].is_null:
+            return
+        margin = self.block_pool.hash_block_size if self.use_eagle else 0
+        for checkpoint in reversed(self.prefix_checkpoint_tokens):
+            boundary = checkpoint + margin
+            if boundary <= min(num_tokens, request.num_prompt_tokens):
+                self.block_pool.cache_partial_block(
+                    request,
+                    blocks[0],
+                    boundary,
+                    self.kv_cache_group_id,
+                    self.block_size,
+                )
 
     def _cache_partial_tail_block(
         self,
@@ -886,6 +912,81 @@ class RSWAManager(FullAttentionManager):
 
 
 class SlidingWindowManager(SingleTypeKVCacheManager):
+    supports_fine_grained_hash_lookup: ClassVar[bool] = True
+
+    def cache_blocks(
+        self,
+        request: Request,
+        num_tokens: int,
+        retention_interval: int | None = None,
+    ) -> None:
+        super().cache_blocks(request, num_tokens, retention_interval)
+        unit = self.block_pool.hash_block_size
+        if unit == self.block_size:
+            return
+        FullAttentionManager._cache_partial_tail_block(self, request, num_tokens)
+        # A recurrent checkpoint at a physical boundary needs the draft's
+        # first finalized hash unit in the next page as lookahead proof.
+        blocks = self.req_to_blocks[request.request_id]
+        if self.use_eagle:
+            for i, block in enumerate(blocks):
+                boundary = i * self.block_size + unit
+                if not block.is_null and boundary <= num_tokens:
+                    self.block_pool.cache_partial_block(
+                        request,
+                        block,
+                        boundary,
+                        self.kv_cache_group_id,
+                        self.block_size,
+                    )
+        FullAttentionManager._cache_early_attention_checkpoints(
+            self, request, num_tokens
+        )
+
+    @classmethod
+    def _find_fine_grained_cache_hit(
+        cls,
+        block_hashes: BlockHashList,
+        max_length: int,
+        kv_cache_group_ids: list[int],
+        block_pool: BlockPool,
+        kv_cache_spec: SlidingWindowSpec,
+        drop_eagle_block: bool,
+        alignment_tokens: int,
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+        """Match the complete visible window, including speculative lookahead.
+
+        Partial-page aliases name immutable KV prefixes. A consumer copies its
+        shared tail before appending, just as full attention does. Missing any
+        page in the visible window invalidates the candidate.
+        """
+        size = kv_cache_spec.block_size
+        unit = alignment_tokens
+        margin = unit if drop_eagle_block else 0
+        for end in range(
+            min(max_length // unit, len(block_hashes)) * unit, margin, -unit
+        ):
+            hit = end - margin
+            first = max(0, hit - kv_cache_spec.sliding_window + 1) // size
+            last = cdiv(end, size)
+            found: tuple[list[KVCacheBlock], ...] = tuple(
+                [block_pool.null_block] * first for _ in kv_cache_group_ids
+            )
+            for i in range(first, last):
+                boundary = min((i + 1) * size, end)
+                cached = block_pool.get_cached_block(
+                    block_hashes[boundary // unit - 1], kv_cache_group_ids
+                )
+                if cached is None:
+                    break
+                for group_blocks, block in zip(found, cached):
+                    group_blocks.append(block)
+            else:
+                for group_blocks in found:
+                    del group_blocks[cdiv(hit, size) :]
+                return found, hit
+        return tuple([] for _ in kv_cache_group_ids), 0
+
     def __init__(self, kv_cache_spec: SlidingWindowSpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
         self.sliding_window = kv_cache_spec.sliding_window
@@ -925,7 +1026,16 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         )
         assert dcp_world_size == 1, "DCP not support sliding window attn now."
         assert pcp_world_size == 1, "PCP not support sliding window attn now."
-        # Fine-grained partial hits are not supported for sliding window now
+        if alignment_tokens < kv_cache_spec.block_size:
+            return cls._find_fine_grained_cache_hit(
+                block_hashes,
+                max_length,
+                kv_cache_group_ids,
+                block_pool,
+                kv_cache_spec,
+                drop_eagle_block,
+                alignment_tokens,
+            )
         assert alignment_tokens % kv_cache_spec.block_size == 0, (
             "SlidingWindowManager does not support fine-grained (partial) cache hits"
         )
@@ -1766,7 +1876,11 @@ class MambaManager(SingleTypeKVCacheManager):
         latest_prompt_hash_boundary = (
             request.num_prompt_tokens // hash_block_size
         ) * hash_block_size
-        if num_tokens != latest_prompt_hash_boundary:
+        boundaries = {latest_prompt_hash_boundary}
+        if self.prefix_replay_offset:
+            boundaries.add(latest_prompt_hash_boundary - hash_block_size)
+        boundaries.update(self.prefix_checkpoint_tokens)
+        if num_tokens not in boundaries or num_tokens > request.num_prompt_tokens:
             return None
 
         block_idx = num_tokens // self.block_size

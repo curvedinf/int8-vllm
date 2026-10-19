@@ -349,6 +349,9 @@ class Scheduler(SchedulerInterface):
             and self.hash_block_size < self.block_size
             and self.kv_cache_manager.coordinator.enable_partial_hash_hits
         )
+        self.prefix_checkpoint_tokens = tuple(
+            sorted(set(kv_cache_config.prefix_cache_checkpoint_tokens))
+        )
         if self.cache_config.enable_prefix_caching:
             logger.info(
                 "Prefix cache geometry: scheduler block=%d, configured block=%d, "
@@ -530,6 +533,28 @@ class Scheduler(SchedulerInterface):
             last_cache_position = max(last_cache_position - block_size, 0)
 
         end = start + num_new_tokens
+        if self.mamba_partial_cache_hit:
+            tail = (
+                request.num_prompt_tokens // self.hash_block_size * self.hash_block_size
+            )
+            checkpoints = [tail]
+            if self.use_eagle:
+                checkpoints.append(tail - self.hash_block_size)
+            checkpoints.extend(getattr(self, "prefix_checkpoint_tokens", ()))
+            # These exact recurrent states must be materialized before a
+            # larger prefill chunk runs past them. The next step preserves
+            # each snapshot with the existing partial-tail copy-on-write.
+            stop = min(
+                (t for t in checkpoints if start < t < min(end, prefill_end)),
+                default=None,
+            )
+            if stop is not None:
+                if start < last_cache_position < stop:
+                    stop = last_cache_position
+                # Do not bypass a physical boundary when resuming mid-page.
+                if start % block_size:
+                    stop = min(stop, (start // block_size + 1) * block_size)
+                return stop - start
         # Invariant: slot p holds the state after exactly (p + 1) * block_size
         # tokens. State is written at chunk ends, so chunk ends must be block
         # aligned. Exempt: the prompt's last chunk, whose slot decode advances

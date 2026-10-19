@@ -717,6 +717,9 @@ class EngineArgs:
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     prefix_match_unit: int | None = get_field(CacheConfig, "prefix_match_unit")
+    prefix_cache_checkpoint_tokens: list[int] = get_field(
+        CacheConfig, "prefix_cache_checkpoint_tokens"
+    )
     mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
     replayssm_buffer_len: int = CacheConfig.replayssm_buffer_len
     use_replayssm: bool = CacheConfig.use_replayssm
@@ -1260,6 +1263,10 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--prefix-match-unit", **cache_kwargs["prefix_match_unit"]
+        )
+        cache_group.add_argument(
+            "--prefix-cache-checkpoint-tokens",
+            **cache_kwargs["prefix_cache_checkpoint_tokens"],
         )
         cache_group.add_argument(
             "--mamba-cache-mode", **cache_kwargs["mamba_cache_mode"]
@@ -2033,6 +2040,7 @@ class EngineArgs:
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
             mamba_block_size=self.mamba_block_size,
             prefix_match_unit=self.prefix_match_unit,
+            prefix_cache_checkpoint_tokens=self.prefix_cache_checkpoint_tokens,
             mamba_cache_mode=self.mamba_cache_mode,
             replayssm_buffer_len=self.replayssm_buffer_len,
             use_replayssm=self.use_replayssm,

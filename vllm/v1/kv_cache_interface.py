@@ -1031,6 +1031,8 @@ class KVCacheConfig:
     """
     prefix_cache_retention_interval: int | None = None
     """Resolved retention policy for local prefix-cache checkpoints."""
+    prefix_cache_checkpoint_tokens: tuple[int, ...] = ()
+    """Bounded early hybrid checkpoints, in token positions."""
 
     @property
     def has_mamba_layers(self) -> bool:

@@ -83,6 +83,7 @@ serve() {
   local args=(
     -m vllm.entrypoints.openai.api_server
     --model "$MODEL_DIR" --served-model-name nemotron-bolt
+    --enable-prompt-tokens-details
     --override-generation-config '{"temperature":1.0,"top_p":0.95,"max_new_tokens":32768}'
     --host "$HOST" --port "$PORT" --trust-remote-code
     --enable-auto-tool-choice --tool-call-parser qwen3_coder
@@ -96,12 +97,22 @@ serve() {
     --max-num-batched-tokens "${MAX_BATCHED_TOKENS:-8512}"
     --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.90}"
     # Fixed arena follows the Qwen recipe; leave space for resident INT8 copies.
-    # 7 GB keeps 6.26x full 262,144-token requests resident (six-stream floor).
-    --kv-cache-memory "${KVMEM:-7000000000}"
+    # 8 GB increases prefix capacity while leaving prefill workspace.
+    # The 8.9 GB candidate boots but exhausts workspace under C8 load.
+    --kv-cache-memory "${KVMEM:-8000000000}"
     --kv-cache-dtype int8_block_g128 --mamba-ssm-cache-dtype float32
     --speculative-config "$spec"
     --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":25769803776}}'
   )
+  # The pipeline shares ~247 tokens before its per-page URL/HTML. Physical
+  # 4256-token pages cannot match that prefix. Keep bounded early states and
+  # the normal replay tail; 8-token hashes include the draft lookahead proof.
+  # Set PREFIX_CHECKPOINTS=0 to restore whole-page matching for an A/B boot.
+  if [[ "${PREFIX_CHECKPOINTS:-64 128 232}" != 0 ]]; then
+    local -a checkpoints
+    read -r -a checkpoints <<< "${PREFIX_CHECKPOINTS:-64 128 232}"
+    args+=(--prefix-match-unit 8 --prefix-cache-checkpoint-tokens "${checkpoints[@]}")
+  fi
   if [[ "${EAGER:-0}" == 1 ]]; then
     args+=(--enforce-eager)
   else

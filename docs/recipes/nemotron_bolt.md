@@ -40,8 +40,8 @@ The standard memory settings (since campaign-2 B13, 2026-10-18) are
 3 GiB/GPU for static dense INT8 weights
 with their original packed GPU tensors released, 11 GiB/GPU for dynamic expert
 INT8 copies (10,024 pairs, 240-259 slots/layer) with packed expert originals
-retained, 7 GB/GPU for KV (1,641,644 tokens, 6.26x full 262,144-token
-requests), and
+retained, 8 GB/GPU for KV since 2026-10-19 (1,875,238 tokens, 7.15x full
+262,144-token requests), and
 24 GiB total for CPU prefix offload. Prefill-informed expert admission
 (`VLLM_BOLT_PREFILL_ADMIT`, default 0) is a decode-priority lever: it
 adds ~3% decode but costs ~4% prefill through per-forward rerank churn. TP4/C8, LiLiCorr NS=7, BF16 residuals,
@@ -344,15 +344,47 @@ The launcher reads `VLLM_API_KEY`, `LLAMA_API_KEY`, or `API_KEY_FILE` (default
 `/etc/llama/llama-api.key`). It serves `nemotron-bolt` on localhost port 8020.
 It fixes TP4/C8 and seven speculative tokens, matching the draft's trained
 eight-token block including the anchor. Defaults are 262,144 context tokens,
-8,512 batched tokens, 7,000,000,000 bytes of GPU KV per GPU (`KVMEM`), separate
+8,512 batched tokens, 8,000,000,000 bytes of GPU KV per GPU (`KVMEM`), separate
 3 GiB dense and 11 GiB routed-expert cache ceilings, and a 24 GiB CPU prefix tier. Explicit GPU
 KV bytes override the GPU memory-utilization setting, as in the Qwen recipe.
 There is no disk prefix tier. `EAGER=1` disables graphs for diagnostics.
 The 256k ceiling and 24 GiB CPU tier pass the short C8 serving gate; validation
-at the full context length is pending. The 7 GB GPU KV arena reports
-1,641,644 effective shared tokens (6.26 full-length requests). CPU offload
+at the full context length is pending. The 8 GB GPU KV arena reports
+1,875,238 effective shared tokens (7.15 full-length requests). An 8.9 GB
+candidate booted but failed the concurrent pipeline replay on a 284 MiB
+expert-workspace allocation. Idle free VRAM did not establish enough peak
+workspace; the installed PyTorch build does not support expandable segments. CPU offload
 pins each rank's own slots with `VLLM_ROCM_PIN_LOCAL_OFFLOAD=1`, avoiding
 four registrations of the entire 24 GiB region and AMD's host-memory limit.
+
+Short shared instructions use 8-token prefix hashes with recurrent checkpoints
+at tokens 64, 128 and 232 (`PREFIX_CHECKPOINTS`). Physical cache pages remain
+4,256 tokens. The draft's sliding-window cache must prove the visible window
+and its speculative lookahead; recurrent snapshots are copied before their
+producer advances. Existing prompt-tail and shared-junction retention remains
+in place. This keeps a bounded set of early states without retaining every
+intermediate recurrent state. Set `PREFIX_CHECKPOINTS=0` for the original
+whole-page matching behavior, or provide a space-separated list of positive
+8-token multiples inside the first page, leaving room for draft lookahead.
+
+The API includes `usage.prompt_tokens_details.cached_tokens`; streamed clients
+must request `stream_options.include_usage` to receive the usage record.
+The measured pipeline shared 247 instruction tokens before each document's
+changing URL/HTML, with 4,432–6,631 total prompt tokens. Reusing 232 tokens
+therefore means roughly 5% of input tokens, even when every warmed request
+hits. More cache capacity cannot make unrelated document tokens reusable.
+The isolated replay changed four serial requests from 0/19,862 cached input
+tokens to 928/19,862, and eight concurrent requests from 0/39,749 to
+1,856/39,749. Every measured warmed request reused 232 tokens. Mean serial
+time to first token was 3.15 s before and 2.68 s after; concurrent mean time
+to first token rose from 16.05 s to 18.17 s, while the longest request fell
+from 27.82 s to 24.15 s. These are single small samples with 32-token output
+budgets and the production thermal controller, not a general speedup claim.
+A separate 28,067-token retrieval returned the same correct answer cold and
+on repeat, with 28,056 cached tokens on the repeat. See the experiment ledger
+for source identities, rejected memory settings and validation limits.
+The final 8 GB boot also passed the 52-prompt coherence/finite-logprob corpus
+and C8 replay without an OOM; peak observed VRAM occupancy was 99.6%.
 
 The Qwen mixed-load scheduler policy is adapted to Bolt's 4,256-token hybrid
 page: normally at most one page of prefill is admitted every 16 rounds while

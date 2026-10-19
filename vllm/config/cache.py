@@ -83,6 +83,14 @@ class CacheConfig:
 
     This equals to the `hash_block_size` used throughout the KV cache code.
     """
+    prefix_cache_checkpoint_tokens: list[int] = Field(default_factory=list)
+    """Optional early token positions at which to preserve hybrid prefix states.
+
+    Positions must be positive multiples of prefix_match_unit and lie inside
+    the first physical cache block. These bounded checkpoints allow short
+    shared instructions to be reused before request-specific content, without
+    shrinking physical pages or checkpointing the entire prompt densely.
+    """
     gpu_memory_utilization: float = Field(default=0.92, gt=0, le=1)
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
@@ -247,6 +255,7 @@ class CacheConfig:
             "prefix_cache_retention_interval",
             # Prefix-caching implementation detail (doesn't affect compiled graph).
             "prefix_match_unit",
+            "prefix_cache_checkpoint_tokens",
             "mamba_page_size_padded",
             "skip_page_size_padded",
             "user_specified_block_size",
