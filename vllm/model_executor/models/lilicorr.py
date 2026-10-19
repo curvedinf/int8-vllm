@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from vllm import envs
 from vllm.compilation.backends import set_model_tag
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -23,6 +24,14 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptNvFp4LinearMethod,
     ModelOptNvFp4W4A16LinearMethod,
+)
+from vllm.model_executor.layers.residual_int8 import (
+    add_residual,
+    final_norm,
+    materialize,
+)
+from vllm.model_executor.layers.residual_int8 import (
+    decoder_norm as residual_norm,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
@@ -68,7 +77,9 @@ class LiLiCorrLatticeAttention(nn.Module):
         self, hidden_states: torch.Tensor, attention_bias: torch.Tensor
     ) -> torch.Tensor:
         bsz, seq_len, _ = hidden_states.shape
-        qkv = F.linear(hidden_states, self.in_proj_weight, self.in_proj_bias)
+        qkv = F.linear(
+            materialize(hidden_states), self.in_proj_weight, self.in_proj_bias
+        )
         q, k, v = qkv.chunk(3, dim=-1)
         shape = (bsz, seq_len, self.num_heads, self.head_dim)
         q = q.view(shape).transpose(1, 2)
@@ -82,9 +93,12 @@ class LiLiCorrLatticeAttention(nn.Module):
             v,
             attn_mask=attention_bias,
         )
-        return self.out_proj(
-            out.transpose(1, 2).reshape(bsz, seq_len, self.hidden_size)
-        )
+        out = out.transpose(1, 2).reshape(bsz, seq_len, self.hidden_size)
+        if envs.VLLM_GFX908_RESIDUAL_INT8:
+            from vllm.model_executor.layers.decoder_int8 import projection
+
+            return projection(self.out_proj, out, attention=True)
+        return self.out_proj(out)
 
 
 class LiLiCorrLayer(nn.Module):
@@ -117,6 +131,11 @@ class LiLiCorrLayer(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor, attention_bias: torch.Tensor
     ) -> torch.Tensor:
+        if envs.VLLM_GFX908_RESIDUAL_INT8:
+            normal, residual = residual_norm(self.attn_norm, hidden_states)
+            branch = self.attn(normal, attention_bias)
+            normal, residual = residual_norm(self.mlp_norm, branch, residual)
+            return add_residual(self.mlp(normal), residual)
         hidden_states = hidden_states + self.attn(
             self.attn_norm(hidden_states), attention_bias
         )
@@ -380,7 +399,7 @@ class LiLiCorrHead(nn.Module):
         attention_bias = self._attn_bias[None, :, :lattice, :lattice]
         for layer in self.layers:
             hidden_states = layer(hidden_states, attention_bias)
-        hidden_states = self.output_norm(hidden_states).reshape(
+        hidden_states = final_norm(self.output_norm, hidden_states).reshape(
             bsz, n_slots, topk, self.hidden_size
         )
         anchor_state = self.anchor_norm(anchor_state)

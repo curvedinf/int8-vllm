@@ -1,9 +1,7 @@
 # Project disclosure policy
 
-No disclosure permissions have been approved and recorded for this project
-yet. Until one is recorded, the pre-commit security gate pauses on every
-uncovered finding for an explicit user disposition; existing occurrence is not
-consent.
+The pre-commit security gate pauses on uncovered findings for an explicit
+user disposition; existing occurrence is not consent.
 
 Record user-approved permissions by information type, purpose, and conditions,
 not by exempting files, paths, globs, or scanner rules; every file remains
@@ -18,3 +16,9 @@ On 2026-10-16, the user directed replacing the existing account-specific
 offload flag-directory path with a checkout-relative path. This is a removal
 decision, not permission to disclose account paths. Existing Git history is
 unchanged.
+
+On 2026-10-19, the user explicitly approved using their configured Git name
+and email as author and committer attribution for the decoder INT8 changes
+being committed and pushed in int8-vllm and the sibling int8-aiter repository.
+This approval covers these commits only, not contact details in file content
+or other disclosures. No identifying values are recorded here.

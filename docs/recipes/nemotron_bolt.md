@@ -226,6 +226,61 @@ checkpoint. The Qwen DFlash2 draft cannot be reused.
 | MoE routers | FP32 weights and computation |
 | Tensor parallel communication | vLLM custom all-reduce; Ring/Simple for other collectives |
 
+### Floating-point surfaces
+
+The packed-weight recipe does not quantize every layer. The deployed
+checkpoint exclusions and runtime consumers retain these surfaces:
+
+| Component | Floating-point weights or computation |
+| --- | --- |
+| Bolt text backbone | BF16 token embedding, normalization weights, Mamba convolution and state parameters; FP32 recurrent state |
+| Bolt routing | FP32 router weights and routing arithmetic; the accepted prefill path additionally caches INT8 router weights and uses an INT8 GEMM |
+| Bolt vision path | BF16 vision encoder and multimodal projector; unused for text-only requests |
+| LiLiCorr backbone | BF16 attention Q/K/V/output projections, fused context-KV projection, grouped convolutions and normalization |
+| LiLiCorr scoring head | BF16 lattice QKV, feature MLP, factor-input, anchor-output, incoming/outgoing scoring projections, embeddings, biases and normalization |
+
+Attention softmax, normalization reductions, quantization scales and scoring
+probabilities also use floating-point arithmetic. These are distinct from
+the representation of the running residual. The NVFP4 draft projections
+outside the exclusion list use the permanent INT8 conversion described above;
+the draft has no routed-expert cache.
+
+### INT8 decoder stream
+
+`VLLM_GFX908_RESIDUAL_INT8=1` selects explicit INT8 codes and FP32 GS128
+scales for normalized decoder inputs, residuals and branch outputs. The
+Bolt launcher default is **on**. Attention and Mamba
+internals retain their reference compute dtypes, including FP32 Mamba state.
+Their output projections emit INT8 in the GEMM epilogue. Feed-forward
+projections consume the payloads directly; up projections, activations,
+expert combination, draft convolution and custom TP reductions emit INT8.
+Partial final groups are supported for the shared and routed expert widths.
+
+Routing logits, convolution coefficients, normalization reductions and scales
+remain floating-point control/computation surfaces. Auxiliary target taps and
+final model API outputs materialize for their existing consumers. The carrier
+does not retain a floating-point activation copy.
+
+Build the custom TP4 collective with `scripts/build_residual_g128.sh` before
+enabling the switch. The launcher resolves `VLLM_RESIDUAL_G128_LIBRARY` to that
+script's default output unless explicitly overridden. Validate on idle GPUs:
+the KV microtest and battery first, then `RESIDUAL_TEST_DEVICE=cuda` with
+`tests/model_executor/test_residual_int8.py`,
+`tests/model_executor/test_decoder_int8.py` and the existing MoE prefill suite.
+Run `tests/distributed/test_residual_g128_collective.py` with four torchrun
+processes and the switch/library environment enabled. Component success does
+not replace the live C8 acceptance, coherence and long-prefix gates.
+
+The V2 decoder stream was adopted on 2026-10-19 with explicit user approval
+of the acceptance change: 35.65% to 34.22%, overriding the one-point gate for
+this candidate. KV micro, battery 4/4, 83 GPU checks, TP4 collective tests,
+52 coherence checks and 28k retrieval/prefix replay passed. In two matched
+C8 runs (4096 input / 256 output tokens), pooled output throughput was
+46.95 versus 43.76 tok/s, mean TPOT 59.26 versus 67.70 ms, and mean TTFT
+22.13 versus 21.09 s. The thermal controller remained active; these are
+observations, not a controlled speedup certification. See ledger row
+`BOLT_DECODER_INT8_G128_V2_20261019`. Set the switch to 0 for rollback.
+
 AITER's sibling checkout owns the packed kernels. INT32 group partials are
 scaled and accumulated in FP32. The dense cache holds at most 3 GiB of INT8
 weights per GPU (`VLLM_BOLT_DENSE_CACHE_GIB`, 0 disables it), using AITER

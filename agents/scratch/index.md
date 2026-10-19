@@ -1,5 +1,7 @@
 # Scratch index
 
+- [Bolt INT8 residuals](bolt-residual-int8.md): requested text-path conversion and live gates.
+
 - [Short prefix cache repair](prefix-cache.md): active Bolt validation and proxy restoration.
 
 - [Shared timers](timers.json): periodic maintenance state.

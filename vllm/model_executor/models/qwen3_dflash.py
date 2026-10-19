@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import io
-import re
 import os
+import re
 from collections.abc import Iterable
 
 import torch
@@ -35,6 +35,13 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.residual_int8 import (
+    decoder_norm as residual_norm,
+)
+from vllm.model_executor.layers.residual_int8 import (
+    final_norm,
+    materialize,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -311,7 +318,7 @@ class DFlashQwen3Attention(nn.Module):
         with the context K/V from the target model's hidden states. This forward op
         computes attention for the query tokens only.
         See also: precompute_and_store_context_kv"""
-        qkv, _ = self.qkv_proj(hidden_states)
+        qkv, _ = self.qkv_proj(materialize(hidden_states))
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         # Per-head RMSNorm
@@ -328,6 +335,7 @@ class DFlashQwen3Attention(nn.Module):
         _rd = os.environ.get("VLLM_SPEC_DEBUG_TENSORS")
         if _rd and not torch.cuda.is_current_stream_capturing():
             import pathlib as _pl
+
             from .qwen3_dflash import spec_round as _sr  # noqa: PLC0415
             _pl.Path(_rd).mkdir(parents=True, exist_ok=True)
             torch.save(q.detach().float().cpu(),
@@ -352,6 +360,12 @@ class DFlashQwen3Attention(nn.Module):
                 f"{attn_output.abs().max().item():.6f}",
                 flush=True,
             )
+        from vllm import envs
+
+        if envs.VLLM_GFX908_RESIDUAL_INT8:
+            from vllm.model_executor.layers.decoder_int8 import projection
+
+            return projection(self.o_proj, attn_output, attention=True)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -427,18 +441,18 @@ class DFlashQwen3DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if residual is not None:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        else:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
+        hidden_states, residual = residual_norm(
+            self.input_layernorm, hidden_states, residual
+        )
 
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
 
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states, residual = residual_norm(
+            self.post_attention_layernorm, hidden_states, residual
+        )
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
@@ -946,7 +960,7 @@ class DFlashQwen3Model(nn.Module):
                 _qa.record_dflash_stage(
                     f"layer{layer_idx}_output",
                     hidden=hidden_states,
-                    residual=residual,
+                    residual=materialize(residual),
                 )
             if os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not (
                 torch.cuda.is_current_stream_capturing()
@@ -959,7 +973,7 @@ class DFlashQwen3Model(nn.Module):
                     f"row1[:4]={hs8[1, :4].cpu().tolist()}",
                     flush=True,
                 )
-        hidden_states, _ = self.norm(hidden_states, residual)
+        hidden_states = final_norm(self.norm, hidden_states, residual)
         if os.environ.get("VLLM_DFLASH_AUDIT"):
             from vllm import quant_audit_recorder as _qa
 

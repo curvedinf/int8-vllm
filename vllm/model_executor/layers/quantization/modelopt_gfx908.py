@@ -114,7 +114,9 @@ class PackedG128LinearMethod(LinearMethodBase):
         )
         prepare_static_dense_weight(layer, self.k, codec=self.codec, start=self.start)
 
-    def apply_quantized(self, layer, q, scales, *, relu2=False, quant_out=False):
+    def apply_quantized(
+        self, layer, q, scales, *, relu2=False, quant_out=False, fused_quant_out=False
+    ):
         if hasattr(layer, "weight_gs128"):
             return ops.int8_gemm(
                 q,
@@ -123,7 +125,10 @@ class PackedG128LinearMethod(LinearMethodBase):
                 layer.weight_gs128,
                 relu2=relu2,
                 quant_out=quant_out,
+                fused_quant_out=fused_quant_out,
             )
+        if fused_quant_out:
+            raise ValueError("Direct INT8 output requires resident GS128 weights")
         return ops.packed_gemm(
             q,
             scales,
@@ -136,12 +141,19 @@ class PackedG128LinearMethod(LinearMethodBase):
         )
 
     def apply(self, layer, x, bias=None):
+        from vllm.model_executor.layers.residual_int8 import ResidualInt8
+
         shape = x.shape
-        q, s = ops.quantize(x.reshape(-1, shape[-1]).contiguous())
+        if isinstance(x, ResidualInt8):
+            q, s = x.flatten_rows()
+            dtype = x.compute_dtype
+        else:
+            q, s = ops.quantize(x.reshape(-1, shape[-1]).contiguous())
+            dtype = x.dtype
         y = self.apply_quantized(layer, q, s)
         if bias is not None:
             y += bias
-        return y.to(x.dtype).view(*shape[:-1], layer.weight.shape[0])
+        return y.to(dtype).view(*shape[:-1], layer.weight.shape[0])
 
     def embedding(self, layer, input_):
         return ops.packed_embedding(layer.weight, input_, self.k, self.dtype)
@@ -229,6 +241,9 @@ class PackedG128MoEMethod(FusedMoEMethodBase):
     def apply(
         self, layer, x, topk_weights, topk_ids, shared_experts, shared_experts_input
     ):
+        from vllm.model_executor.layers.residual_int8 import ResidualInt8
+
+        direct_int8 = isinstance(x, ResidualInt8)
         if layer.apply_router_weight_on_input:
             raise ValueError("Packed IQ2 experts require output router weighting")
         from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
@@ -250,13 +265,11 @@ class PackedG128MoEMethod(FusedMoEMethodBase):
             if x.shape[0] > 64 and routes >= experts * 8
             else 16
         )
-        plan = moe_align_block_size(
-            topk_ids, block_size, experts, pad_sorted_ids=True
-        )
+        plan = moe_align_block_size(topk_ids, block_size, experts, pad_sorted_ids=True)
         cache = None
-        prefill_admit = x.shape[0] > 64 and os.environ.get(
-            "VLLM_BOLT_PREFILL_ADMIT", "0"
-        ) == "1"
+        prefill_admit = (
+            x.shape[0] > 64 and os.environ.get("VLLM_BOLT_PREFILL_ADMIT", "0") == "1"
+        )
         if x.shape[0] <= 64 or prefill_admit:
             from aiter.ops.triton.gemm.basic.packed_expert_cache import get_cache
 
@@ -275,7 +288,7 @@ class PackedG128MoEMethod(FusedMoEMethodBase):
                     cache.step(topk_ids[: min(64, x.shape[0])], rerank=True)
                 else:
                     cache.step(topk_ids)
-        q, s = ops.quantize(x.contiguous())
+        q, s = x.flatten_rows() if direct_int8 else ops.quantize(x.contiguous())
         mid, ms = ops.packed_experts(
             q,
             s,
@@ -285,6 +298,7 @@ class PackedG128MoEMethod(FusedMoEMethodBase):
             plan=plan,
             cache=cache.up if cache is not None else None,
             block_size=block_size,
+            direct_int8=direct_int8,
         )
         y = ops.packed_experts(
             mid,
@@ -297,7 +311,12 @@ class PackedG128MoEMethod(FusedMoEMethodBase):
             plan=plan,
             cache=cache.down if cache is not None else None,
             block_size=block_size,
+            direct_int8=direct_int8,
         )
+        if direct_int8:
+            from vllm.model_executor.layers.decoder_int8 import combine_experts
+
+            return combine_experts(*y, topk_weights, x.compute_dtype)
         return ops.combine_experts(y, topk_weights, x.dtype)
 
 

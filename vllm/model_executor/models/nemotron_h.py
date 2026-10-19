@@ -57,6 +57,13 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.residual_int8 import (
+    decoder_norm as residual_norm,
+)
+from vllm.model_executor.layers.residual_int8 import (
+    final_norm,
+    materialize,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -121,6 +128,7 @@ class NemotronHMLP(nn.Module):
             prefix=f"{prefix}.down_proj",
         )
         self.act_fn = get_act_fn(hidden_act)
+        self.int8_activation = hidden_act
         from vllm.model_executor.layers.quantization.modelopt_gfx908 import (
             PackedG128LinearMethod,
         )
@@ -133,6 +141,20 @@ class NemotronHMLP(nn.Module):
         )
 
     def forward(self, x: torch.Tensor):
+        from vllm.model_executor.layers.residual_int8 import ResidualInt8
+
+        if isinstance(x, ResidualInt8):
+            from vllm.model_executor.layers.decoder_int8 import projection
+
+            if self.int8_activation not in ("relu2", "silu"):
+                raise ValueError("Unsupported direct INT8 MLP activation")
+            mid = projection(
+                self.up_proj,
+                x,
+                relu2=self.int8_activation == "relu2",
+                activation="silu" if self.int8_activation == "silu" else None,
+            )
+            return projection(self.down_proj, mid)
         if self.packed_relu2:
             from vllm.model_executor.layers.quantization.utils.packed_g128_int8 import (
                 quantize,
@@ -268,6 +290,12 @@ class NemotronHMoE(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        from vllm.model_executor.layers.residual_int8 import ResidualInt8
+
+        if isinstance(hidden_states, ResidualInt8):
+            from vllm.model_executor.models.nemotron_h_int8 import moe
+
+            return moe(self, hidden_states)
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
@@ -336,11 +364,7 @@ class NemotronHMLPDecoderLayer(nn.Module):
         residual: torch.Tensor | None,
         **kwargs,
     ):
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.norm(hidden_states)
-        else:
-            hidden_states, residual = self.norm(hidden_states, residual)
+        hidden_states, residual = residual_norm(self.norm, hidden_states, residual)
 
         hidden_states = self.mixer(hidden_states)
         return hidden_states, residual
@@ -379,17 +403,15 @@ class NemotronHMoEDecoderLayer(nn.Module):
         residual: torch.Tensor | None,
         **kwargs,
     ):
-        if hidden_states.shape[0] >= 256:
+        from vllm import envs
+
+        if hidden_states.shape[0] >= 256 and not envs.VLLM_GFX908_RESIDUAL_INT8:
             from vllm.model_executor.models.nemotron_h_prefill import try_prefill
 
             result = try_prefill(self, hidden_states, residual)
             if result is not None:
                 return result
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.norm(hidden_states)
-        else:
-            hidden_states, residual = self.norm(hidden_states, residual)
+        hidden_states, residual = residual_norm(self.norm, hidden_states, residual)
 
         hidden_states = self.mixer(hidden_states)
         return hidden_states, residual
@@ -434,11 +456,7 @@ class NemotronHMambaDecoderLayer(nn.Module):
         residual: torch.Tensor | None,
         **kwargs,
     ):
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.norm(hidden_states)
-        else:
-            hidden_states, residual = self.norm(hidden_states, residual)
+        hidden_states, residual = residual_norm(self.norm, hidden_states, residual)
 
         output = self.mixer(hidden_states)
         return output, residual
@@ -517,6 +535,12 @@ class NemotronHAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         attn_output = self.attn(q, k, v)
+        from vllm import envs
+
+        if envs.VLLM_GFX908_RESIDUAL_INT8:
+            from vllm.model_executor.layers.decoder_int8 import projection
+
+            return projection(self.o_proj, attn_output, attention=True)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -556,11 +580,7 @@ class NemotronHAttentionDecoderLayer(nn.Module):
         residual: torch.Tensor | None,
         **kwargs,
     ):
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.norm(hidden_states)
-        else:
-            hidden_states, residual = self.norm(hidden_states, residual)
+        hidden_states, residual = residual_norm(self.norm, hidden_states, residual)
 
         hidden_states = self.mixer(hidden_states=hidden_states)
         return hidden_states, residual
@@ -669,14 +689,21 @@ class NemotronHModel(nn.Module, EagleModelMixin):
                 residual=residual,
             )
             self._maybe_add_hidden_state(
-                aux_hidden_states, idx + 1, hidden_states, residual
+                aux_hidden_states,
+                idx + 1,
+                materialize(hidden_states)
+                if idx + 1 in self.aux_hidden_state_layers
+                else hidden_states,
+                materialize(residual)
+                if idx + 1 in self.aux_hidden_state_layers
+                else None,
             )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
-        hidden_states, _ = self.norm_f(hidden_states, residual)
+        hidden_states = final_norm(self.norm_f, hidden_states, residual)
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states

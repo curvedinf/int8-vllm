@@ -580,6 +580,12 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # SiLU is applied internally before normalization, unlike standard
         # norm usage
         gate = projected_states[..., : self.tped_intermediate_size]
+        from vllm.model_executor.layers.residual_int8 import ResidualInt8
+
+        if isinstance(hidden_states, ResidualInt8):
+            from vllm.model_executor.layers.decoder_int8 import gated_norm, projection
+
+            return projection(self.out_proj, gated_norm(self.norm, ssm_output, gate))
         hidden_states = self.norm(ssm_output, gate)
 
         # 5. Final linear projection

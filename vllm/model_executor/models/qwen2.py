@@ -108,6 +108,13 @@ class Qwen2MLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
+        from vllm.model_executor.layers.residual_int8 import ResidualInt8
+
+        if isinstance(x, ResidualInt8):
+            from vllm.model_executor.layers.decoder_int8 import projection
+
+            mid = projection(self.gate_up_proj, x, activation="silu_mul")
+            return projection(self.down_proj, mid)
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)

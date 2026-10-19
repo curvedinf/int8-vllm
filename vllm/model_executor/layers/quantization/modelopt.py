@@ -1418,10 +1418,17 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.packed_g128:
+            from vllm.model_executor.layers.residual_int8 import ResidualInt8
+
             from .utils.packed_g128_int8 import packed_gemm, quantize
 
             shape = x.shape
-            q, scales = quantize(x.reshape(-1, shape[-1]).contiguous())
+            if isinstance(x, ResidualInt8):
+                q, scales = x.flatten_rows()
+                dtype = x.compute_dtype
+            else:
+                q, scales = quantize(x.reshape(-1, shape[-1]).contiguous())
+                dtype = x.dtype
             if hasattr(layer, "weight_gs128"):
                 from .utils.packed_g128_int8 import int8_gemm
 
@@ -1438,7 +1445,7 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
                 )
             if bias is not None:
                 y += bias
-            return y.to(x.dtype).view(*shape[:-1], layer.weight.shape[0])
+            return y.to(dtype).view(*shape[:-1], layer.weight.shape[0])
         return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
 
 

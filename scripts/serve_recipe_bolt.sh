@@ -50,6 +50,15 @@ serve() {
   # attention, route64 expert prefill and weighted expert reduction. These
   # dispatch automatically for supported shapes; keep the legacy quantizer off.
   export VLLM_GFX908_FUSED_NORM_QUANT=0
+  # Direct GS128 decoder path; validated separately from KV.
+  export VLLM_GFX908_RESIDUAL_INT8="${VLLM_GFX908_RESIDUAL_INT8:-1}"
+  if [[ "$VLLM_GFX908_RESIDUAL_INT8" == 1 ]]; then
+    export VLLM_RESIDUAL_G128_LIBRARY="${VLLM_RESIDUAL_G128_LIBRARY:-$ROOT_DIR/vllm/_residual_g128.so}"
+    if [[ ! -f "$VLLM_RESIDUAL_G128_LIBRARY" ]]; then
+      printf '%s\n' 'Build the decoder collective with scripts/build_residual_g128.sh first.' >&2
+      return 1
+    fi
+  fi
   export VLLM_SERVER_DEV_MODE="${VLLM_SERVER_DEV_MODE:-0}"
   export VLLM_BOLT_KERNEL_TUNING="${VLLM_BOLT_KERNEL_TUNING:-0}"
   export VLLM_BOLT_DENSE_CACHE_GIB="${VLLM_BOLT_DENSE_CACHE_GIB:-3}"

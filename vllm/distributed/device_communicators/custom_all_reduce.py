@@ -101,6 +101,7 @@ class CustomAllreduce:
         self._ptr = 0
         self.int8_gs32 = None
         self.decode_int8 = None
+        self.residual_g128 = None
         self.disabled = True
         self.mnnvl_buffer = None
         self.mnnvl_handle = None
@@ -273,6 +274,11 @@ class CustomAllreduce:
             self.meta_ptrs, self.rank_data, rank, self.fully_connected
         )
         ops.register_buffer(self._ptr, self.buffer_ptrs)
+        if envs.VLLM_GFX908_RESIDUAL_INT8:
+            from .residual_g128_all_reduce import ResidualG128Allreduce
+
+            self.residual_g128 = ResidualG128Allreduce(self)
+            logger.info("Decoder GS128 custom AR: INT8 input/output, FP32 scales")
         if (envs.VLLM_DECODE_INT8_INTERMEDIATES
                 or envs.VLLM_DECODE_INT8_RETAIN_GS128):
             from .decode_int8_all_reduce import DecodeInt8Allreduce
@@ -570,6 +576,9 @@ class CustomAllreduce:
         if self.decode_int8 is not None:
             self.decode_int8.close()
             self.decode_int8 = None
+        if self.residual_g128 is not None:
+            self.residual_g128.close()
+            self.residual_g128 = None
         if self.int8_gs32 is not None:
             self.int8_gs32.close()
             self.int8_gs32 = None

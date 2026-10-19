@@ -166,6 +166,7 @@ if TYPE_CHECKING:
     VLLM_GFX908_TINY_BA: bool = False
     VLLM_MLP_CAR_INT8_GS32: bool = False
     VLLM_GFX908_GATE_I8_PREFILL: bool = False
+    VLLM_GFX908_RESIDUAL_INT8: bool = False
     VLLM_DECODE_INT8_INTERMEDIATES: bool = False
     VLLM_DECODE_INT8_RETAIN_GS128: bool = False
     # FS->GPU direct IO via AMD Infinity Storage (hipFile). See the
@@ -1411,6 +1412,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (small-M int8 loses per B15-E1).
     "VLLM_GFX908_GATE_I8_PREFILL": lambda: (
         os.getenv("VLLM_GFX908_GATE_I8_PREFILL", "False").lower() in ("true", "1")
+    ),
+    "VLLM_GFX908_RESIDUAL_INT8": lambda: (
+        os.getenv("VLLM_GFX908_RESIDUAL_INT8") == "1"
     ),
     "VLLM_DECODE_INT8_INTERMEDIATES": lambda: (
         os.getenv("VLLM_DECODE_INT8_INTERMEDIATES") == "1"

@@ -14,6 +14,12 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.residual_int8 import (
+    decoder_norm as residual_norm,
+)
+from vllm.model_executor.layers.residual_int8 import (
+    materialize,
+)
 
 from .qwen3_dflash import (
     DFlashQwen3DecoderLayer,
@@ -88,7 +94,6 @@ class DFlashGroupedConv(nn.Module):
         """
         if os.environ.get("VLLM_GFX908_DF2_W8A8", "1") != "1":
             return
-        from vllm.model_executor.layers.quantization.utils import replace_parameter
 
         w = self.kernel_projection.weight.data.float()
         wmax = w.abs().amax(dim=1, keepdim=True).clamp(min=1e-12)
@@ -138,6 +143,9 @@ class DFlashGroupedConv(nn.Module):
         return loaded
 
     def _project(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # Coefficients are a reference-dtype control surface. The activation
+        # convolution itself consumes and produces explicit GS128 payloads.
+        hidden_states = materialize(hidden_states)
         if hasattr(self, "_kp_q"):
             flat = hidden_states.reshape(-1, hidden_states.shape[-1]).to(
                 torch.float16
@@ -155,6 +163,13 @@ class DFlashGroupedConv(nn.Module):
         self, hidden_states: torch.Tensor, delta: torch.Tensor, side: int
     ) -> torch.Tensor:
         base = self.base_kernel[side]
+        from vllm.model_executor.layers.residual_int8 import ResidualInt8
+
+        if isinstance(hidden_states, ResidualInt8):
+            from vllm.model_executor.layers.decoder_int8 import grouped_conv
+
+            return grouped_conv(hidden_states, delta, base, self.block_size,
+                                self.group_size)
         if getattr(self, "_bk_q", None) is not None:
             # E4 dequant-on-add: rebuild this side's plane from per-[side,tap]
             # int8 + fp32 scales instead of reading a bf16 base weight.
@@ -240,17 +255,17 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        hidden_states, residual = residual_norm(
+            self.input_layernorm, hidden_states, residual
+        )
 
         dbg = os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not (
             torch.cuda.is_current_stream_capturing()
         )
 
         def _dbg(tag, t):
+            if dbg or os.environ.get("VLLM_DFLASH_AUDIT"):
+                t = materialize(t)
             if dbg:
                 print(
                     f"[SPEC-DBGA] {id(self) % 1000} {tag} "
@@ -265,6 +280,7 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
                 ):
                     # one file per (layer, stage, call); training-fidelity work
                     import pathlib as _pl
+
                     from .qwen3_dflash import spec_round as _sr
                     _pl.Path(_dump_dir).mkdir(parents=True, exist_ok=True)
                     torch.save(
@@ -286,7 +302,9 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
         hidden_states = self.attention_conv.finish(hidden_states, coefficients)
         _dbg("attn_conv_fin", hidden_states)
 
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states, residual = residual_norm(
+            self.post_attention_layernorm, hidden_states, residual
+        )
         hidden_states, coefficients = self.mlp_conv.prepare(hidden_states)
         _dbg("mlp_conv_prep", hidden_states)
         hidden_states = self.mlp(hidden_states)
