@@ -187,6 +187,65 @@ def test_failsafe_discovery_failure_never_controls_workload(monkeypatch, capsys)
     assert "failsafe_discovery_failed" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("cap_w", [60, 145])
+def test_successful_service_stop_sets_every_card_to_105_w(tmp_path, monkeypatch, cap_w):
+    root = tmp_path / "pci"
+    caps = []
+    for index in range(4):
+        dev = root / str(index)
+        hw = dev / "hwmon" / "hwmon0"
+        hw.mkdir(parents=True)
+        (dev / "vendor").write_text("0x1002")
+        (dev / "device").write_text("0x738c")
+        (hw / "power1_cap_min").write_text("1000000")
+        (hw / "power1_cap_max").write_text("290000000")
+        cap = hw / "power1_cap"
+        cap.write_text(str(cap_w * 1_000_000))
+        caps.append(cap)
+
+    # A clean stop must work without sensors or a valid runtime configuration.
+    config_path = tmp_path / "config"
+    config_path.write_text("MI100_THERMAL_MAX_W=invalid\n")
+    monkeypatch.setenv("SERVICE_RESULT", "success")
+    monkeypatch.setenv("MI100_THERMAL_MAX_W", "90")
+    monkeypatch.setattr(
+        thermal.sys,
+        "argv",
+        ["controller", "--failsafe", "--config", str(config_path)],
+    )
+    hardware_class = thermal.Hardware
+    monkeypatch.setattr(thermal, "Hardware", lambda cfg: hardware_class(cfg, root=root))
+
+    assert thermal.main() == 0
+    assert [int(cap.read_text()) for cap in caps] == [105_000_000] * 4
+
+
+def test_service_stop_reports_power_write_failure(monkeypatch, capsys):
+    def fail_discovery(*args, **kwargs):
+        raise OSError("driver unavailable")
+
+    monkeypatch.setenv("SERVICE_RESULT", "success")
+    monkeypatch.setattr(thermal.sys, "argv", ["controller", "--failsafe"])
+    monkeypatch.setattr(thermal, "Hardware", fail_discovery)
+    assert thermal.main() == 1
+    assert "stop_cap_failed" in capsys.readouterr().out
+
+
+def test_service_failure_keeps_power_only_failsafe(tmp_path, monkeypatch):
+    config_path = tmp_path / "config"
+    config_path.write_text("")
+    calls = []
+    monkeypatch.setenv("SERVICE_RESULT", "watchdog")
+    monkeypatch.setattr(
+        thermal.sys,
+        "argv",
+        ["controller", "--failsafe", "--config", str(config_path)],
+    )
+    monkeypatch.setattr(thermal, "failsafe", lambda cfg, reason: calls.append(reason))
+    assert thermal.main() == 0
+    assert calls == ["watchdog"]
+
+
 def test_run_fault_invokes_power_only_failsafe(tmp_path, monkeypatch):
     config_path = tmp_path / "config"
     config_path.write_text("")

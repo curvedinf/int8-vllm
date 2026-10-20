@@ -3,8 +3,9 @@
 """MI100 power-only thermal control. See --help; --check reports the policy.
 
 The boot script owns the fixed 90 W boot setting. This daemon only changes live
-caps. A daemon restart preserves the live cap and restarts the five-minute
-warmup; it never restores a learned cap across a reboot. Power increases require
+caps. A clean stop, including a restart, sets every card to 105 W. Starting the
+daemon preserves the live cap and restarts the five-minute warmup; it never
+restores a learned cap across a reboot. Power increases require
 every card's current GFX utilization to exceed 95%. Thermal reductions do not
 depend on load: above 90 C core / 89 C memory reduces the cap by 1 W per five
 minutes; above 95 C core / 90 C memory cuts it by 20% immediately, repeating
@@ -33,6 +34,7 @@ from pathlib import Path
 CONFIG_FILE = Path("/etc/default/rocm-downclock")
 RUNTIME_DIR = Path("/run/mi100-thermal-controller")
 STATUS_FILE = RUNTIME_DIR / "status.json"
+STOP_POWER_W = 105
 
 
 class SafetyFault(RuntimeError):
@@ -581,7 +583,7 @@ def main():
     modes.add_argument(
         "--failsafe",
         action="store_true",
-        help="Systemd failure handler: lower caps only",
+        help="Systemd stop handler: set 105 W on success; lower caps on failure",
     )
     parser.add_argument("--config", type=Path, default=CONFIG_FILE)
     args = parser.parse_args()
@@ -589,7 +591,16 @@ def main():
         print(json.dumps(json.loads(STATUS_FILE.read_text()), indent=2))
         return 0
     if args.failsafe and os.getenv("SERVICE_RESULT") == "success":
-        return 0
+        try:
+            # The fixed stop policy is independent of live exploration bounds
+            # and must still work if the configuration file has become invalid.
+            hardware = Hardware(Config(minimum_w=STOP_POWER_W, maximum_w=STOP_POWER_W))
+            hardware.apply(STOP_POWER_W)
+            log("stop_cap", power_w=STOP_POWER_W, cards=list(hardware.cards))
+            return 0
+        except Exception as exc:
+            log("stop_cap_failed", error=str(exc))
+            return 1
     try:
         cfg = Config.load(args.config)
     except Exception as exc:

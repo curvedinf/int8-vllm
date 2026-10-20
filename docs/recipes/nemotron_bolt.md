@@ -67,10 +67,11 @@ regardless of utilization. Increases remain 1 W per five minutes, after warmup,
 with cool averages/peaks and every card above 95% GFX utilization.
 
 The boot cap remains 90 W and the configured range remains 60–145 W in
-`/etc/default/rocm-downclock`. Restarting the controller preserves the live
-cap. Its failsafe lowers caps to the minimum without stopping workloads. Bolt
-has no required dependency on the controller, so controller failure or restart
-does not stop the server.
+`/etc/default/rocm-downclock`. A clean controller stop, including the stop phase
+of a restart, sets every card to 105 W. Starting the controller preserves the
+live cap. Its failure handler lowers caps to the minimum without stopping
+workloads. Bolt has no required dependency on the controller, so controller
+failure or restart does not stop the server.
 
 The canonical source is `scripts/mi100_thermal_controller.py`, deployed to
 `/usr/local/sbin/mi100-thermal-controller.py` for the existing
