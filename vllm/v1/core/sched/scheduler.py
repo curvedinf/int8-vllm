@@ -221,6 +221,11 @@ class Scheduler(SchedulerInterface):
         # IDs of requests preempted since the last call to schedule().
         self.reset_preempted_req_ids: set[str] = set()
 
+        # Accepted draft-token count per request from the last step; the
+        # adaptive spec-length schedule (VLLM_DFLASH_ADAPTIVE_NS) trims the
+        # next draft block to this plus a margin.
+        self._last_accepted: dict[str, int] = {}
+
         # Counter for requests waiting for streaming input. Used to calculate
         # number of unfinished requests
         self.num_waiting_for_streaming_input: int = 0
@@ -2118,6 +2123,7 @@ class Scheduler(SchedulerInterface):
                         request.num_computed_tokens -= num_rejected
                     if request.num_output_placeholders > 0:
                         request.num_output_placeholders -= num_rejected
+                    self._last_accepted[req_id] = num_accepted
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
                     num_draft_tokens=num_draft_tokens,
@@ -2549,6 +2555,20 @@ class Scheduler(SchedulerInterface):
                 if request.spec_token_ids:
                     request.spec_token_ids = []
                 continue
+
+            margin = int(os.environ.get("VLLM_DFLASH_ADAPTIVE_NS", "0"))
+            if margin > 0 and spec_token_ids:
+                # Verify one margin beyond the last step's accepted count.
+                last = self._last_accepted.get(req_id, len(spec_token_ids))
+                kept = min(len(spec_token_ids), max(1, last + margin))
+                if kept < len(spec_token_ids):
+                    logger.info_once(
+                        "Adaptive DFlash spec trim active: last=%d kept=%d of %d",
+                        last,
+                        kept,
+                        len(spec_token_ids),
+                    )
+                spec_token_ids = spec_token_ids[:kept]
 
             # Add newly generated spec token ids to the request.
             if self.structured_output_manager.should_advance(request):

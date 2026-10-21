@@ -32,17 +32,24 @@ def _align_up(x: int) -> int:
 
 
 class RegisteredFile:
-    """An O_DIRECT-opened file registered for AIS IO."""
+    """A file registered for AIS IO.
 
-    def __init__(self, path: str, write: bool = False):
+    Reads are buffered by default: O_DIRECT bypasses the bcache/page cache on
+    this host and drops cache-hit loads to HDD speed (~60 MiB/s). Writes keep
+    O_DIRECT in RepackWriter. Pass ``direct=True`` only for a diagnostic.
+    """
+
+    def __init__(self, path: str, write: bool = False, direct: bool = False):
         self.path = path
         self.ais = get_ais()
-        flags = os.O_DIRECT | (os.O_RDWR if write else os.O_RDONLY)
+        flags = (os.O_DIRECT if direct else 0) | (
+            os.O_RDWR if write else os.O_RDONLY
+        )
         try:
             self.fd = os.open(path, flags)
         except OSError as e:
             # e.g. tmpfs or a fs without O_DIRECT support
-            raise FsGpuError(f"open({path!r}, O_DIRECT)", 0, e.errno) from e
+            raise FsGpuError(f"open({path!r})", 0, e.errno) from e
         self.size = os.fstat(self.fd).st_size
         self.fh = self.ais.handle_register(self.fd)
 

@@ -1966,7 +1966,9 @@ def unified_attention(
         from vllm.platforms.rocm import on_gfx908
 
         if on_gfx908():
-            from vllm.v1.attention.ops.gfx908_g128_page_prefill import page_prefill
+            from vllm.v1.attention.ops.gfx908_g128_page_prefill_fp16 import (
+                page_prefill,
+            )
 
             logger.info_once("gfx908 G128 page-outer prefill active", scope="process")
             page_prefill(

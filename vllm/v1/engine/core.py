@@ -1385,6 +1385,12 @@ class EngineCoreProc(EngineCore):
     def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
         """Launch EngineCore busy loop in background process."""
 
+        from vllm.utils.bolt_runtime_env import apply_bolt_runtime_env
+
+        applied = apply_bolt_runtime_env()
+        if applied:
+            logger.info_once("Applied %d launcher runtime env vars", applied)
+
         # Ensure we can serialize transformer config after spawning
         maybe_register_config_serialize_by_value()
 

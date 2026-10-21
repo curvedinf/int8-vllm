@@ -26,7 +26,7 @@ class ResidualG128Allreduce:
             self.chunk_values * 33 // 32, group=native.group, uncached=True
         )
         self.signals = native.create_shared_buffer(
-            4096, group=native.group, uncached=True
+            16384, group=native.group, uncached=True
         )
         self.bp = (ctypes.c_void_p * 4)(*self.buffers)
         self.sp = (ctypes.c_void_p * 4)(*self.signals)
@@ -94,3 +94,43 @@ def all_reduce(value):
     if native is None or native.residual_g128 is None:
         raise RuntimeError("Decoder GS128 collective was not initialized")
     return native.residual_g128.all_reduce(value)
+
+
+def all_reduce_pair(a, b):
+    """Reduce two payloads in one collective, then split them back.
+
+    The routed latent and shared-expert branches are adjacent in the MoE
+    layer; concatenating their codes and scales keeps the one-scale-per-128
+    mapping and removes one TP collective plus one signal round-trip.
+    """
+    from vllm.model_executor.layers.residual_int8 import ResidualInt8
+
+    width_a = a.shape[-1]
+    width_b = b.shape[-1]
+    if (
+        a.shape[:-1] != b.shape[:-1]
+        or a.compute_dtype != b.compute_dtype
+        or width_a % 128
+        or width_b % 128
+    ):
+        a = all_reduce(a)
+        return a, all_reduce(b)
+    merged = ResidualInt8(
+        torch.cat((a.codes, b.codes), dim=-1).contiguous(),
+        torch.cat((a.scales, b.scales), dim=-1).contiguous(),
+        a.compute_dtype,
+    )
+    out = all_reduce(merged)
+    groups_a = width_a // 128
+    return (
+        ResidualInt8(
+            out.codes[..., :width_a].contiguous(),
+            out.scales[..., :groups_a].contiguous(),
+            a.compute_dtype,
+        ),
+        ResidualInt8(
+            out.codes[..., width_a:].contiguous(),
+            out.scales[..., groups_a:].contiguous(),
+            b.compute_dtype,
+        ),
+    )

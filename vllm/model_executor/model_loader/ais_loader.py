@@ -28,6 +28,7 @@ sources fall back to the stock loader under ``VLLM_FS_GPU_ALLOW_COMPAT``
 
 from __future__ import annotations
 
+import math
 import os
 import time
 from collections.abc import Generator
@@ -36,6 +37,8 @@ from concurrent.futures import ThreadPoolExecutor
 import torch
 from tqdm import tqdm
 from torch import nn
+
+from vllm.triton_utils import tl, triton
 
 from vllm.config import ModelConfig
 from vllm.envs import (
@@ -103,16 +106,77 @@ def _iter_checkpoint_tensors(
             yield source.prefix + spec.name, st_file, index, spec
 
 
+@triton.jit
+def _scatter_bytes(
+    src, dst, total, row_bytes, dst_period, dst_first, BLOCK: tl.constexpr
+):
+    idx = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = idx < total
+    row = idx // row_bytes
+    col = idx - row * row_bytes
+    value = tl.load(src + idx, mask=mask, other=0)
+    tl.store(dst + dst_first + row * dst_period + col, value, mask=mask)
+
+
+_READ_CHUNK = 2 << 20
+
+
+def _wait_for_prefetch() -> None:
+    """Wait for the launcher's page-cache prefetcher, when enabled."""
+    if os.environ.get("VLLM_BOLT_WAIT_PREFETCH") != "1":
+        return
+    done = os.environ.get("VLLM_BOLT_PREFETCH_DONE", "/dev/shm/vllm_bolt_prefetch.done")
+    timeout = float(os.environ.get("VLLM_BOLT_PREFETCH_TIMEOUT", "360"))
+    started = time.monotonic()
+    while not os.path.exists(done):
+        if time.monotonic() - started > timeout:
+            logger.warning(
+                "Timed out after %.0fs waiting for the weight prefetch", timeout
+            )
+            return
+        time.sleep(0.5)
+    logger.info_once(
+        "Weight prefetch ready after %.1fs", time.monotonic() - started
+    )
+
+
+def _read_chunked(rf, base: int, n: int, off: int) -> None:
+    """Read ``n`` bytes in sub-cutoff pieces.
+
+    bcache's ``sequential_cutoff`` is 4 MiB here: a single larger read is
+    served straight from the HDD at ~60 MiB/s instead of the NVMe cache.
+    """
+    pos = 0
+    while pos < n:
+        cnt = min(_READ_CHUNK, n - pos)
+        rf.ais.read(rf.fh, base + pos, cnt, off + pos, 0)
+        pos += cnt
+
+
 def _scatter_from_compact(
     tensor: torch.Tensor, compact: torch.Tensor, runs: list[tuple[int, int]]
 ) -> None:
-    """Place a compact uint8 block into the full-shaped tensor (one copy per group)."""
+    """Place a compact uint8 block into the full-shaped tensor.
+
+    A Triton byte copy avoids the very slow strided uint8 ``copy_`` path on
+    gfx908 (the boot load is dominated by these scatters).
+    """
     es = tensor.element_size()
+    dst = tensor.reshape(-1).view(torch.uint8)
     off = 0
     for first, length, period, count in run_groups(runs, es):
         n = length * count * es
-        src = compact[off : off + n].view(tensor.dtype).view(count, length)
-        tensor.as_strided((count, length), (period, 1), first).copy_(src)
+        if n:
+            _scatter_bytes[(triton.cdiv(n, 4096),)](
+                compact[off : off + n],
+                dst,
+                n,
+                length * es,
+                period * es,
+                first * es,
+                BLOCK=4096,
+                num_warps=4,
+            )
         off += n
 
 
@@ -133,22 +197,40 @@ def ais_repacked_weights_iterator(
     cache: RepackCache,
     use_tqdm_on_load: bool,
     device: str = "cuda",
+    *,
+    skip_experts: bool = False,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Cache-hit path: windowed sequential reads + strided scatter per tensor.
 
     Blocks are laid out contiguously in iteration order, so consecutive
     tensors are coalesced into ~``VLLM_AIS_REPACK_WINDOW_MB`` reads. Four
     concurrent 1-block-at-a-time streams thrash this DRAM-less NVMe down to
-    ~0.5 GiB/s aggregate; 32 MiB chunks sustained ~1.75 GiB/s in the v1
-    boots (ledger AIS_W1/W2).
+    ~0.5 GiB/s aggregate. This host puts the NVMe behind bcache with a 4 MiB
+    ``sequential_cutoff``, so reads must stay below that to hit the SSD;
+    larger windows (32 MiB in the v1 boots) stream from the HDD.
     """
     specs = cache.tensors
     assert specs is not None
     max_block = max(t.block_len for t in specs) if specs else 0
+    # One reusable destination arena: per-tensor torch.empty on this stack
+    # costs ~5 ms (28,885 tensors = >2 min). Consumer copies are stream-
+    # ordered before the next scatter, so the same bytes can be reused.
+    # The draft's LiLiCorr loader retains its head tensors across the backbone
+    # load, so small caches keep the old one-allocation-per-tensor behavior.
+    reuse_temp = len(specs) >= 1024
+    max_full = (
+        max(math.prod(t.shape) * t.dtype.itemsize for t in specs)
+        if reuse_temp and specs
+        else 0
+    )
+    temp_arena = (
+        torch.empty(max_full, dtype=torch.uint8, device=device) if max_full else None
+    )
     window = VLLM_AIS_REPACK_WINDOW_MB << 20
     pool = GpuStagingPool(max(VLLM_AIS_STAGING_MB << 20, max_block, window), device=device)
     if max(max_block, window) > pool.capacity:
         pool.grow(max(max_block, window))
+    _wait_for_prefetch()
     bin_size = os.path.getsize(cache.bin_path)
     try:
         with RegisteredFile(cache.bin_path) as rf:
@@ -158,12 +240,27 @@ def ais_repacked_weights_iterator(
                 desc="Loading repacked AIS rank cache",
                 disable=not enable_tqdm(use_tqdm_on_load),
                 bar_format=_BAR_FORMAT,
+                mininterval=1.0,
             )
+            needs_sync = False
             while i < len(specs):
+                # The staging pool is overwritten by the next raw AIS read.
+                # Consumer copies are stream-ordered; only pool reuse needs a
+                # device sync, so sync once per window rather than per tensor.
+                if needs_sync:
+                    torch.cuda.current_stream().synchronize()
                 t = specs[i]
+                if skip_experts and ".mixer.experts." in t.name:
+                    pbar.update(1)
+                    i += 1
+                    continue
                 if t.block_len >= window:
-                    tensor = torch.empty(t.shape, dtype=t.dtype, device=device)
-                    rf.ais.read(rf.fh, pool.base, t.block_len, t.block_off, 0)
+                    nbytes = math.prod(t.shape) * t.dtype.itemsize
+                    if temp_arena is not None:
+                        tensor = temp_arena[:nbytes].view(t.dtype).view(t.shape)
+                    else:
+                        tensor = torch.empty(t.shape, dtype=t.dtype, device=device)
+                    _read_chunked(rf, pool.base, t.block_len, t.block_off)
                     fs_gpu_stats.reads += 1
                     fs_gpu_stats.bytes_read += t.block_len
                     if t.block_len:
@@ -171,7 +268,7 @@ def ais_repacked_weights_iterator(
                     pbar.update(1)
                     yield t.name, tensor
                     del tensor
-                    torch.cuda.current_stream().synchronize()
+                    needs_sync = True
                     i += 1
                     continue
                 # coalesce following blocks into one window read
@@ -179,13 +276,20 @@ def ais_repacked_weights_iterator(
                 j = i
                 while j < len(specs) and specs[j].block_off + specs[j].block_len <= t.block_off + n:
                     j += 1
-                rf.ais.read(rf.fh, pool.base, n, t.block_off, 0)
+                _read_chunked(rf, pool.base, n, t.block_off)
                 fs_gpu_stats.reads += 1
                 fs_gpu_stats.bytes_read += n
                 for k in range(i, j):
                     s = specs[k]
+                    if skip_experts and ".mixer.experts." in s.name:
+                        pbar.update(1)
+                        continue
                     rel = s.block_off - t.block_off
-                    tensor = torch.empty(s.shape, dtype=s.dtype, device=device)
+                    nbytes = math.prod(s.shape) * s.dtype.itemsize
+                    if temp_arena is not None:
+                        tensor = temp_arena[:nbytes].view(s.dtype).view(s.shape)
+                    else:
+                        tensor = torch.empty(s.shape, dtype=s.dtype, device=device)
                     if s.block_len:
                         _scatter_from_compact(
                             tensor, pool.view(rel, s.block_len), s.runs
@@ -193,11 +297,10 @@ def ais_repacked_weights_iterator(
                     pbar.update(1)
                     yield s.name, tensor
                     del tensor
-                    # Consumer copy_ kernels reading the yielded tensor may
-                    # still be queued; raw DMA for the next allocation must
-                    # not preempt them (caching-allocator reuse).
-                    torch.cuda.current_stream().synchronize()
+                needs_sync = True
                 i = j
+            if needs_sync:
+                torch.cuda.current_stream().synchronize()
             pbar.close()
     finally:
         pool.close()
@@ -222,6 +325,7 @@ def ais_safetensors_weights_iterator(
             desc="Loading safetensors checkpoint shards (AIS direct-to-GPU)",
             disable=not enable_tqdm(use_tqdm_on_load),
             bar_format=_BAR_FORMAT,
+            mininterval=1.0,
         ):
             index = SafetensorFile(st_file)
             with RegisteredFile(st_file) as rf:
@@ -318,6 +422,7 @@ class AisModelLoader(DefaultModelLoader):
         self._repack_hit: RepackCache | None = None
         self._repack_write: bool = False
         self._repack_model: str | None = None
+        self._fused_experts = None
 
     # -- repack cache resolution ---------------------------------------------
 
@@ -355,6 +460,16 @@ class AisModelLoader(DefaultModelLoader):
                 cache.bin_path,
                 len(cache.tensors or []),
             )
+            from vllm.fs_gpu.fused_experts import FusedExpertCache
+
+            fused = FusedExpertCache(
+                default_repack_root(model_dir), tp_size, tp_rank
+            )
+            if fused.validate(RepackCache.fingerprint(files)):
+                self._fused_experts = fused
+                logger.info("fs_gpu fused expert cache HIT: %s", fused.bin_path)
+            else:
+                self._fused_experts = None
         else:
             self._repack_write = True
             self._repack_model = model_dir
@@ -395,12 +510,14 @@ class AisModelLoader(DefaultModelLoader):
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         self._read_plan = None
+        self._fused_experts = None
         try:
             self._resolve_repack(model_config)
         except Exception as e:  # noqa: BLE001
             logger.warning("fs_gpu repack resolve failed (%s); ignoring cache", e)
             self._repack_hit = None
             self._repack_write = False
+            self._fused_experts = None
         if self._repack_hit is None and VLLM_AIS_PER_RANK:
             try:
                 self._read_plan = self._build_read_plan(model, model_config)
@@ -412,7 +529,11 @@ class AisModelLoader(DefaultModelLoader):
                     e,
                 )
                 self._read_plan = None
-        return super().load_weights(model, model_config)
+        result = super().load_weights(model, model_config)
+        if self._fused_experts is not None:
+            loaded = self._fused_experts.load_into(model)
+            logger.info("fs_gpu fused expert load: %d layers", loaded)
+        return result
 
     # -- iterator ----------------------------------------------------------------
 
@@ -427,7 +548,9 @@ class AisModelLoader(DefaultModelLoader):
                 and source.model_or_path == self._repack_model
             ):
                 weights_iterator = ais_repacked_weights_iterator(
-                    self._repack_hit, self.load_config.use_tqdm_on_load
+                    self._repack_hit,
+                    self.load_config.use_tqdm_on_load,
+                    skip_experts=self._fused_experts is not None,
                 )
             if weights_iterator is None:
                 hf_folder, hf_weights_files, use_safetensors = self._prepare_weights(

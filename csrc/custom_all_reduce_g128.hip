@@ -4,12 +4,15 @@
 #include <hip/hip_runtime.h>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 
 namespace {
+// Up to 64 CTAs; the Python side allocates 16 KiB, enough for sizeof(Signal).
+constexpr int kMaxBlocks = 64;
 struct Signal {
-  alignas(128) uint32_t start[16][16];
-  alignas(128) uint32_t end[16][16];
-  alignas(128) uint32_t epoch[16];
+  alignas(128) uint32_t start[kMaxBlocks][16];
+  alignas(128) uint32_t end[kMaxBlocks][16];
+  alignas(128) uint32_t epoch[kMaxBlocks];
 };
 struct Peers { char* data[4]; Signal* signals[4]; };
 __device__ __forceinline__ void barrier(Peers p, int rank, bool end) {
@@ -75,7 +78,15 @@ extern "C" int residual_g128_reduce(
   rc = hipMemcpyAsync(p.data[rank] + n, s, n / 128 * sizeof(float),
                       hipMemcpyDeviceToDevice, st);
   if (rc != hipSuccess) return int(rc);
-  reduce<<<min(16, (n / 128 + 3) / 4), 256, 0, st>>>(
+  static const int env_blocks = [] {
+    const char* b = std::getenv("VLLM_GFX908_G128_AR_BLOCKS");
+    return b ? std::atoi(b) : 0;
+  }();
+  int cap = env_blocks > 0 ? env_blocks : 16;
+  cap = cap > kMaxBlocks ? kMaxBlocks : cap;
+  int blocks = (n / 128 + 3) / 4;
+  if (blocks > cap) blocks = cap;
+  reduce<<<blocks, 256, 0, st>>>(
       p, static_cast<int8_t*>(out), static_cast<float*>(scales), n, rank);
   return int(hipGetLastError());
 }

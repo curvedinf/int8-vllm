@@ -33,7 +33,7 @@ def read_into_tensor(
     pool: GpuStagingPool,
     tensor: torch.Tensor,
     file_offset: int,
-    chunk_hint: int = 32 << 20,
+    chunk_hint: int = 2 << 20,
 ) -> int:
     """Read ``tensor.nbytes`` from ``file_offset`` into the device tensor.
 

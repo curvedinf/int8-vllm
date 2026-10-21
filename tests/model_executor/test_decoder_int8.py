@@ -67,6 +67,31 @@ def test_direct_gemm(m, n, k, relu2):
     assert actual.codes.dtype == torch.int8
 
 
+@pytest.mark.parametrize("n", [1024, 1344, 4096])
+@pytest.mark.parametrize("relu2", [False, True])
+def test_direct_gemm_splitk_no_bias(n, relu2):
+    """M<=16 without bias takes the split-K + GS128 reduce path."""
+    torch.manual_seed(13)
+    m, k = 8, 4096
+    x = _pack(torch.randn(m, k, device="cuda", dtype=torch.bfloat16))
+    w = torch.randint(-127, 128, (n, k), device="cuda", dtype=torch.int8)
+    ws = torch.rand((1, n, (k + 127) // 128), device="cuda") * 0.001 + 0.0001
+    layer = SimpleNamespace(weight=w, weight_gs128=ws, bias=None, tp_size=1)
+    actual = projection(layer, x, relu2=relu2)
+    expected = torch.zeros((m, n), device="cuda")
+    for group in range((k + 127) // 128):
+        sl = slice(group * 128, min(k, (group + 1) * 128))
+        expected += (
+            (x.codes[:, sl].float() @ w[:, sl].float().T)
+            * x.scales[:, group, None]
+            * ws[0, None, :, group]
+        )
+    if relu2:
+        expected = expected.relu().square()
+    _check(actual, expected)
+    assert actual.codes.dtype == torch.int8
+
+
 def test_reference_attention_projection():
     torch.manual_seed(17)
     x = torch.randn(8, 1024, device="cuda", dtype=torch.bfloat16)

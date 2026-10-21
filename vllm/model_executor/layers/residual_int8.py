@@ -46,6 +46,35 @@ class ResidualInt8(NamedTuple):
         return self.codes.view(-1, k), self.scales.view(-1, (k + 127) // 128)
 
 
+class ResidualPair(NamedTuple):
+    """Two branch payloads the next norm consumes directly.
+
+    The MoE returns the shared and routed branches without pre-adding them;
+    the following norm fuses both dequantizations, the skip add, and the
+    output quantizations, saving one quantization round-trip per layer.
+    """
+
+    shared: ResidualInt8
+    routed: ResidualInt8
+    compute_dtype: torch.dtype
+
+    @property
+    def shape(self):
+        return self.shared.shape
+
+    @property
+    def device(self):
+        return self.shared.device
+
+    @property
+    def dtype(self):
+        return self.compute_dtype
+
+    @property
+    def ndim(self):
+        return self.shared.ndim
+
+
 def _validate(value):
     q, s, dtype = value
     if (
@@ -65,6 +94,8 @@ def _validate(value):
 def _add_norm(
     X,
     XS,
+    X2,
+    XS2,
     R,
     RS,
     W,
@@ -76,6 +107,7 @@ def _add_norm(
     K: tl.constexpr,
     EPS: tl.constexpr,
     X_QUANT: tl.constexpr,
+    HAS_PAIR: tl.constexpr,
     HAS_RESIDUAL: tl.constexpr,
     NORMALIZE: tl.constexpr,
     EMIT_NORMAL_QUANT: tl.constexpr,
@@ -87,6 +119,11 @@ def _add_norm(
     value = tl.load(X + row * K + cols).to(tl.float32)
     if X_QUANT:
         value *= tl.load(XS + row * (K // 128) + cols // 128)
+    if HAS_PAIR:
+        other = tl.load(X2 + row * K + cols).to(tl.float32)
+        if X_QUANT:
+            other *= tl.load(XS2 + row * (K // 128) + cols // 128)
+        value += other
     if HAS_RESIDUAL:
         residual = tl.load(R + row * K + cols).to(tl.float32)
         residual *= tl.load(RS + row * (K // 128) + cols // 128)
@@ -130,6 +167,8 @@ def _materialize(Q, S, Y, N: tl.constexpr, K: tl.constexpr, BLOCK: tl.constexpr)
 
 def materialize(value):
     """Materialize only at a consumer requiring floating-point values."""
+    if isinstance(value, ResidualPair):
+        return materialize(value.shared) + materialize(value.routed)
     if not isinstance(value, ResidualInt8):
         return value
     _validate(value)
@@ -151,6 +190,7 @@ def _run(
     emit_quant=False,
     native=False,
     quantized=False,
+    x2=None,
 ):
     packed = isinstance(x, ResidualInt8)
     if packed:
@@ -160,6 +200,15 @@ def _run(
     k = data.shape[-1]
     if k not in (1024, 4096) or dtype not in (torch.bfloat16, torch.float32):
         raise ValueError("INT8 residuals require BF16/FP32 and hidden size 1024/4096")
+    if x2 is not None:
+        if (
+            not isinstance(x2, ResidualInt8)
+            or x2.shape != data.shape
+            or x2.codes.device != data.device
+            or x2.compute_dtype != dtype
+        ):
+            raise ValueError("Expected a matching second GS128 branch")
+        _validate(x2)
     if residual is not None and (
         not isinstance(residual, ResidualInt8)
         or residual.shape != data.shape
@@ -186,6 +235,8 @@ def _run(
         _add_norm[(data.numel() // k,)](
             data.contiguous(),
             x.scales if packed else s,
+            x2.codes if x2 is not None else q,
+            x2.scales if x2 is not None else s,
             residual.codes if residual is not None else q,
             residual.scales if residual is not None else s,
             weight if weight is not None else out,
@@ -197,6 +248,7 @@ def _run(
             k,
             epsilon,
             packed,
+            x2 is not None,
             residual is not None,
             weight is not None,
             emit_quant,
@@ -212,6 +264,10 @@ def _run(
             if packed
             else x.float()
         )
+        if x2 is not None:
+            value = value + (
+                x2.codes.float() * x2.scales.repeat_interleave(128, -1)
+            )
         if residual is not None:
             rg = residual.codes.unflatten(-1, (-1, 128)).float()
             value = value + (rg * residual.scales.unsqueeze(-1)).flatten(-2)
@@ -243,6 +299,8 @@ def _run(
 
 
 def add_residual(x, residual=None):
+    if isinstance(x, ResidualPair):
+        return _run(x.shared, residual, x2=x.routed)[1]
     return _run(x, residual)[1]
 
 
@@ -262,15 +320,29 @@ def residual_norm(norm, x, residual=None, *, emit_quant=False, quantized=False):
     epsilon = getattr(norm, "variance_epsilon", None)
     if epsilon is None:
         epsilon = norm.eps
+    x2 = None
+    if isinstance(x, ResidualPair):
+        x2 = x.routed
+        x = x.shared
     data = x.codes if isinstance(x, ResidualInt8) else x
     native = hasattr(norm, "variance_epsilon") and data.numel() // data.shape[-1] < 256
     return _run(
-        x, residual, norm.weight, epsilon, emit_quant or quantized, native, quantized
+        x,
+        residual,
+        norm.weight,
+        epsilon,
+        emit_quant or quantized,
+        native,
+        quantized,
+        x2=x2,
     )
 
 
 def final_norm(norm, x, residual=None):
-    if isinstance(x, ResidualInt8) or isinstance(residual, ResidualInt8):
+    if (
+        isinstance(x, (ResidualInt8, ResidualPair))
+        or isinstance(residual, ResidualInt8)
+    ):
         return residual_norm(norm, x, residual)[0]
     return norm(x) if residual is None else norm(x, residual)[0]
 

@@ -1250,6 +1250,16 @@ class VllmConfig:
             and self.parallel_config.all2all_backend == "deepep_high_throughput"
         )
 
+        # The adaptive spec-length schedule trims drafts in the scheduler's
+        # post-step path; async scheduling bypasses it (the worker owns the
+        # draft tokens). Force sync scheduling when the lever is enabled.
+        adaptive_ns = int(os.environ.get("VLLM_DFLASH_ADAPTIVE_NS", "0") or "0")
+        if adaptive_ns > 0 and self.scheduler_config.async_scheduling is not False:
+            logger.info(
+                "Adaptive DFlash spec length enabled; disabling async scheduling."
+            )
+            self.scheduler_config.async_scheduling = False
+
         if self.scheduler_config.async_scheduling:
             # Async scheduling explicitly enabled, hard fail any incompatibilities.
             # Currently, async scheduling only support eagle speculative

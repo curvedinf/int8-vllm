@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from abc import ABC, abstractmethod
 
 import torch
@@ -51,17 +52,25 @@ class BaseModelLoader(ABC):
         )
         target_device = torch.device(load_device)
         with set_default_torch_dtype(model_config.dtype):
+            started = time.perf_counter()
             with target_device:
                 model = initialize_model(
                     vllm_config=vllm_config,
                     model_config=model_config,
                     prefix=prefix,
                 )
+            logger.info(
+                "Model construction took %.2fs", time.perf_counter() - started
+            )
 
             log_model_inspection(model)
 
             logger.debug("Loading weights on %s ...", load_device)
+            started = time.perf_counter()
             self.load_weights(model, model_config)
+            logger.info(
+                "Weight loading took %.2fs", time.perf_counter() - started
+            )
 
             # Log peak GPU memory after loading weights. This is needed
             # to have test coverage on peak memory for online quantization.
@@ -77,7 +86,12 @@ class BaseModelLoader(ABC):
             if _has_online_quant(model):
                 finalize_layerwise_processing(model, model_config)
 
+            started = time.perf_counter()
             process_weights_after_loading(model, model_config, target_device)
+            logger.info(
+                "Post-load weight processing took %.2fs",
+                time.perf_counter() - started,
+            )
 
         return model.eval()
 

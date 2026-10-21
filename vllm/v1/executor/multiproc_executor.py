@@ -186,26 +186,47 @@ class MultiprocExecutor(Executor):
 
             # For CPU backend only, to setup OpenMP threads affinity
             cpu_omp_manager = OMPProcessManager(self.vllm_config)
-            for local_rank in range(self.local_world_size):
+
+            def _make(local_rank: int) -> UnreadyWorkerProcHandle:
                 global_rank = global_start_rank + local_rank
-                is_driver_worker = self._is_driver_worker(global_rank)
                 with cpu_omp_manager.configure_omp_envs(
                     rank=global_rank, local_rank=local_rank
                 ):
-                    unready_worker_handle = WorkerProc.make_worker_process(
+                    return WorkerProc.make_worker_process(
                         vllm_config=self.vllm_config,
                         local_rank=local_rank,
                         rank=global_rank,
                         distributed_init_method=distributed_init_method,
                         input_shm_handle=scheduler_output_handle,
                         shared_worker_lock=shared_worker_lock,
-                        is_driver_worker=is_driver_worker,
+                        is_driver_worker=self._is_driver_worker(global_rank),
                         inherited_fds=inherited_fds,
                     )
-                unready_workers.append(unready_worker_handle)
-                if inherited_fds is not None:
-                    inherited_fds.append(unready_worker_handle.death_writer.fileno())
-                    inherited_fds.append(unready_worker_handle.ready_pipe.fileno())
+
+            if inherited_fds is None and self.local_world_size > 1:
+                # With spawn, each ``Process.start()`` blocks until the child
+                # has re-imported the main module (~12 s here), so launching
+                # the ranks serially costs one import per rank. The children
+                # are independent; overlap their handshakes.
+                from concurrent.futures import ThreadPoolExecutor
+
+                with ThreadPoolExecutor(
+                    max_workers=self.local_world_size
+                ) as pool:
+                    unready_workers = list(
+                        pool.map(_make, range(self.local_world_size))
+                    )
+            else:
+                for local_rank in range(self.local_world_size):
+                    unready_worker_handle = _make(local_rank)
+                    unready_workers.append(unready_worker_handle)
+                    if inherited_fds is not None:
+                        inherited_fds.append(
+                            unready_worker_handle.death_writer.fileno()
+                        )
+                        inherited_fds.append(
+                            unready_worker_handle.ready_pipe.fileno()
+                        )
 
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
@@ -853,6 +874,12 @@ class WorkerProc:
     def worker_main(*args, **kwargs):
         """Worker initialization and execution loops.
         This runs a background process"""
+
+        from vllm.utils.bolt_runtime_env import apply_bolt_runtime_env
+
+        applied = apply_bolt_runtime_env()
+        if applied:
+            logger.info_once("Applied %d launcher runtime env vars", applied)
 
         # Signal handler used for graceful termination.
         # SystemExit exception is only raised once to allow this and worker

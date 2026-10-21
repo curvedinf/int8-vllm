@@ -54,11 +54,23 @@ serve() {
   export VLLM_GFX908_RESIDUAL_INT8="${VLLM_GFX908_RESIDUAL_INT8:-1}"
   if [[ "$VLLM_GFX908_RESIDUAL_INT8" == 1 ]]; then
     export VLLM_RESIDUAL_G128_LIBRARY="${VLLM_RESIDUAL_G128_LIBRARY:-$ROOT_DIR/vllm/_residual_g128.so}"
+    # 64 CTAs measured 42.1 vs 35.6 tok/s at C8 (2026-10-21); the kernel
+    # supports up to 64 and falls back to the payload-sized grid.
+    export VLLM_GFX908_G128_AR_BLOCKS="${VLLM_GFX908_G128_AR_BLOCKS:-64}"
     if [[ ! -f "$VLLM_RESIDUAL_G128_LIBRARY" ]]; then
       printf '%s\n' 'Build the decoder collective with scripts/build_residual_g128.sh first.' >&2
       return 1
     fi
   fi
+  # Decode-shape dense GEMM dispatch (split-K for M<=16, BM tiers), page
+  # prefill MMA. The earlier warmup crash was an unmasked scale load in the
+  # split-K K tail (K=1344); fixed 2026-10-21 and quality-gated 52/52.
+  export VLLM_GFX908_DENSE_DECODE_DISPATCH="${VLLM_GFX908_DENSE_DECODE_DISPATCH:-1}"
+  # The side-stream shared/routed fork is capture-safe after the split-K
+  # K-tail fix: healthy 8-size capture and 52/52 quality; C8 bench 45.4 vs
+  # 42.1 tok/s vs the serial fork (2026-10-21).
+  export VLLM_GFX908_SHARED_OVERLAP="${VLLM_GFX908_SHARED_OVERLAP:-1}"
+  export VLLM_G128_PAGE_MMA="${VLLM_G128_PAGE_MMA:-fp16}"
   export VLLM_SERVER_DEV_MODE="${VLLM_SERVER_DEV_MODE:-0}"
   export VLLM_BOLT_KERNEL_TUNING="${VLLM_BOLT_KERNEL_TUNING:-0}"
   export VLLM_BOLT_DENSE_CACHE_GIB="${VLLM_BOLT_DENSE_CACHE_GIB:-3}"
@@ -83,10 +95,25 @@ serve() {
   # First-cache construction has thousands of small expert writes. Buffer
   # those through the host; AIS weight reads and packed storage are unchanged.
   export VLLM_AIS_REPACK_CPU_WRITE=1
+  # bcache's sequential_cutoff is 4 MiB: 32 MiB loader windows bypass the SSD
+  # and stream from the HDD. Keep every read under the cutoff.
+  export VLLM_AIS_REPACK_WINDOW_MB="${VLLM_AIS_REPACK_WINDOW_MB:-2}"
   # Preserve the official excluded draft surfaces; the Qwen conv calibration
   # is not a calibration of this draft.
   export VLLM_GFX908_DF2_W8A8=0
   export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
+  # EngineCore/worker processes do not reliably inherit the fork-local
+  # VLLM_* switches; publish them for both entry points to apply.
+  "${ROOT_DIR}/.venv/bin/python" - <<'PY'
+import json, os
+data = {
+    k: v
+    for k, v in os.environ.items()
+    if k.startswith("VLLM_") and k != "VLLM_API_KEY"
+}
+with open("/dev/shm/vllm_bolt_runtime_env.json", "w") as fh:
+    json.dump(data, fh)
+PY
   local spec
   spec="$("${ROOT_DIR}/.venv/bin/python" -c 'import json,sys; print(json.dumps(dict(method="dflash",model=sys.argv[1],num_speculative_tokens=7,kv_cache_dtype="int8_block_g128")))' "$DRAFT_MODEL_DIR")"
   local args=(
@@ -111,7 +138,7 @@ serve() {
     --kv-cache-memory "${KVMEM:-8000000000}"
     --kv-cache-dtype int8_block_g128 --mamba-ssm-cache-dtype float32
     --speculative-config "$spec"
-    --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":25769803776}}'
+    --kv-transfer-config "{\"kv_connector\":\"OffloadingConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"cpu_bytes_to_use\":${KV_OFFLOAD_BYTES:-25769803776}}}"
   )
   # The pipeline shares ~247 tokens before its per-page URL/HTML. Physical
   # 4256-token pages cannot match that prefix. Keep bounded early states and
@@ -125,11 +152,36 @@ serve() {
   if [[ "${EAGER:-0}" == 1 ]]; then
     args+=(--enforce-eager)
   else
-    args+=(--compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[8,16,24,32,40,48,56,64]}')
+    # Capture only the sizes the C6/C8 recipes use; vLLM pads smaller
+    # batches up to the next captured size. Override with CUDAGRAPH_SIZES.
+    local cg_sizes="${CUDAGRAPH_SIZES:-16,32,48,64}"
+    args+=(--compilation-config "{\"mode\":0,\"cudagraph_mode\":\"FULL_DECODE_ONLY\",\"cudagraph_capture_sizes\":[${cg_sizes}]}")
+  fi
+  # Warm the page cache with the full ~30 GiB weight working set while the
+  # engine and four workers import. The loaders wait for the sentinel, so no
+  # byte is read twice; they then read from RAM (>1 GiB/s) instead of the HDD
+  # (~50 MiB/s). bcache does not retain enough of the set; see
+  # scripts/prefetch_bolt_cache.py.
+  local prefetch_pid=''
+  export VLLM_BOLT_PREFETCH_DONE="${VLLM_BOLT_PREFETCH_DONE:-/dev/shm/vllm_bolt_prefetch.done}"
+  if [[ "${PREFETCH:-1}" == 1 ]]; then
+    export VLLM_BOLT_WAIT_PREFETCH=1
+    "${ROOT_DIR}/.venv/bin/python" "${ROOT_DIR}/scripts/prefetch_bolt_cache.py" \
+      --model-dir "${MODEL_DIR}" --tp-size 4 \
+      --threads "${PREFETCH_THREADS:-8}" \
+      --seconds "${PREFETCH_SECONDS:-300}" \
+      --done-file "${VLLM_BOLT_PREFETCH_DONE}" >> "${LOG_DIR}/prefetch.log" 2>&1 &
+    prefetch_pid=$!
+  else
+    unset VLLM_BOLT_WAIT_PREFETCH
   fi
   "${ROOT_DIR}/.venv/bin/python" "${args[@]}" &
   child=$!
   wait "$child"
+  if [[ -n "${prefetch_pid}" ]]; then
+    kill "${prefetch_pid}" 2>/dev/null || true
+    wait "${prefetch_pid}" 2>/dev/null || true
+  fi
 }
 
 case "${1:-status}" in
@@ -143,6 +195,11 @@ case "${1:-status}" in
     ;;
   start)
     if alive; then echo 'Bolt supervisor is already running'; exit 0; fi
+    # A crashed worker leaves a multi-GiB /dev/shm offload mmap and psm
+    # segments behind. Clear them only when no supervisor is alive.
+    rm -f /dev/shm/vllm_offload_*.mmap /dev/shm/psm_* \
+      "${VLLM_BOLT_PREFETCH_DONE:-/dev/shm/vllm_bolt_prefetch.done}" \
+      /dev/shm/vllm_bolt_runtime_env.json 2>/dev/null || true
     nohup setsid bash "$0" supervise >> "${LOG_DIR}/server.log" 2>&1 < /dev/null &
     for _ in $(seq 1 100); do
       if alive; then
