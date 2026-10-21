@@ -133,9 +133,10 @@ PY
     --max-num-batched-tokens "${MAX_BATCHED_TOKENS:-8512}"
     --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.90}"
     # Fixed arena follows the Qwen recipe; leave space for resident INT8 copies.
-    # 8 GB increases prefix capacity while leaving prefill workspace.
-    # The 8.9 GB candidate boots but exhausts workspace under C8 load.
-    --kv-cache-memory "${KVMEM:-8000000000}"
+    # 8.5 GB reserves ~7.92 GiB (1,993,332 tokens = 7.60x 256k, 6x256k plus
+    # 1.6x GPU prefix) and passed C8 + prefill with ~0.8 GiB workspace.
+    # 8.9 GB previously exhausted workspace under C8; re-test before raising.
+    --kv-cache-memory "${KVMEM:-8500000000}"
     --kv-cache-dtype int8_block_g128 --mamba-ssm-cache-dtype float32
     --speculative-config "$spec"
     --kv-transfer-config "{\"kv_connector\":\"OffloadingConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"cpu_bytes_to_use\":${KV_OFFLOAD_BYTES:-25769803776}}}"

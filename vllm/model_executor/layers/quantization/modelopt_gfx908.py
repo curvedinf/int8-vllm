@@ -265,12 +265,25 @@ class PackedG128MoEMethod(FusedMoEMethodBase):
             if x.shape[0] > 64 and routes >= experts * 8
             else 16
         )
+        if x.shape[0] > 64:
+            forced = os.environ.get("VLLM_GFX908_EXPERT_BLOCK_SIZE")
+            if forced:
+                block_size = int(forced)
         plan = moe_align_block_size(topk_ids, block_size, experts, pad_sorted_ids=True)
         cache = None
         prefill_admit = (
             x.shape[0] > 64 and os.environ.get("VLLM_BOLT_PREFILL_ADMIT", "0") == "1"
         )
-        if x.shape[0] <= 64 or prefill_admit:
+        # Passive cache hits already apply to prefill through find_projection;
+        # this adds a cheap no-rerank admission update on a 64-route sample so
+        # prefill routes can improve the resident set without the per-forward
+        # rerank churn that cost 4% prefill.
+        prefill_step = (
+            x.shape[0] > 64
+            and not prefill_admit
+            and os.environ.get("VLLM_BOLT_PREFILL_CACHE_STEP", "0") == "1"
+        )
+        if x.shape[0] <= 64 or prefill_admit or prefill_step:
             from aiter.ops.triton.gemm.basic.packed_expert_cache import get_cache
 
             cache = get_cache(
@@ -286,6 +299,8 @@ class PackedG128MoEMethod(FusedMoEMethodBase):
                     # the single-CTA route histogram cheap, and the forced
                     # rerank lands convergence inside this forward.
                     cache.step(topk_ids[: min(64, x.shape[0])], rerank=True)
+                elif prefill_step:
+                    cache.step(topk_ids[: min(64, x.shape[0])])
                 else:
                     cache.step(topk_ids)
         q, s = x.flatten_rows() if direct_int8 else ops.quantize(x.contiguous())
