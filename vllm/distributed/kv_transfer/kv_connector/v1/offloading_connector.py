@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import socket
 from collections.abc import Iterable
 from typing import Any
 
@@ -12,7 +13,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorRole,
     SupportsHMA,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorHandshakeMetadata,
+    KVConnectorMetadata,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
     KVConnectorStats,
@@ -21,6 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
+    OffloadingHandshakeMetadata,
     OffloadingWorkerMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
@@ -37,6 +42,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
     OffloadingConnectorWorker,
 )
 from vllm.forward_context import ForwardContext
+from vllm.profiler.lifecycle import lifecycle
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -44,7 +50,6 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
-from vllm.profiler.lifecycle import lifecycle
 
 
 class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
@@ -68,6 +73,7 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         super().__init__(vllm_config, role, kv_cache_config)
 
         offloading_config = build_offloading_config(vllm_config, kv_cache_config)
+        self._offloading_config = offloading_config
         self._canonical_layout = offloading_config.canonical_layout
         spec = OffloadingSpecFactory.create_spec(offloading_config)
 
@@ -87,6 +93,62 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_worker.shutdown()
         if self.connector_scheduler is not None:
             self.connector_scheduler.shutdown()
+
+    def get_handshake_metadata(self) -> OffloadingHandshakeMetadata | None:
+        from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
+
+        # The engine's handshake keys identify PP/TP workers, not PCP ranks.
+        # Retain ordinary creator cleanup for that topology.
+        if self._offloading_config.parallel.pcp_size != 1:
+            return None
+        assert self.connector_worker is not None
+        worker = self.connector_worker.worker
+        if not isinstance(worker, CPUOffloadingWorker):
+            return None
+        region = worker._mmap_region
+        if region is None:
+            return None
+        return OffloadingHandshakeMetadata(
+            hostname=socket.gethostname(),
+            path=region.mmap_path,
+            device=region.file_identity[0],
+            inode=region.file_identity[1],
+            size=region.total_size_bytes,
+        )
+
+    def set_xfer_handshake_metadata_pp_aware(
+        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
+    ) -> None:
+        from vllm.v1.kv_offload.cpu.shared_offload_region import unlink_offload_file
+
+        assert self.connector_scheduler is not None
+        if not metadata:
+            # Zero-capacity, non-mmap backends and PCP return no region handles.
+            return
+        parallel = self._offloading_config.parallel
+        expected = {
+            (pp, tp) for pp in range(parallel.pp_size) for tp in range(parallel.tp_size)
+        }
+        if set(metadata) != expected:
+            raise RuntimeError("Incomplete CPU offload worker attachment handshake")
+        regions: list[OffloadingHandshakeMetadata] = []
+        for region in metadata.values():
+            if not isinstance(region, OffloadingHandshakeMetadata):
+                raise TypeError("Unexpected CPU offload handshake metadata")
+            regions.append(region)
+        # A local pathname cannot finalize a region on another host. Keep the
+        # existing creator cleanup for distributed deployments.
+        if any(r.hostname != socket.gethostname() for r in regions):
+            return
+        first = regions[0]
+        path = f"/dev/shm/vllm_offload_{self._offloading_config.engine_id}.mmap"
+        if first.path != path or any(r != first for r in regions):
+            raise RuntimeError("CPU offload workers attached different backing files")
+        # This RPC handshake runs after all worker KV registrations AND the
+        # scheduler's tier mappings exist. POSIX mappings survive unlink; the
+        # last process exit now frees the region even after SIGKILL. Startup
+        # failures before this point retain the launcher's guarded cleanup.
+        unlink_offload_file(first.path, first.device, first.inode)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None

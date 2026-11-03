@@ -3,12 +3,24 @@
 from dataclasses import dataclass, field
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorWorkerMetadata,
 )
 from vllm.v1.kv_offload.base import LoadStoreSpec
 
 ReqId = str
+
+
+@dataclass(frozen=True)
+class OffloadingHandshakeMetadata(KVConnectorHandshakeMetadata):
+    """Identity of a CPU region that a worker has finished mapping."""
+
+    hostname: str
+    path: str
+    device: int
+    inode: int
+    size: int
 
 
 @dataclass(slots=True)

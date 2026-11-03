@@ -269,7 +269,11 @@ def _canonical_block_sizes(
 
 
 def pin_mmap_region(region: SharedOffloadRegion) -> None:
-    """Register the entire mmap as CUDA pinned memory via cudaHostRegister."""
+    """Register DMA memory and explicitly keep ROCm CPU KV pages resident."""
+    if current_platform.is_rocm():
+        # HIP registration can use pageable HMM; it is not an mlock guarantee.
+        # Fail startup on lock failure instead of silently exposing KV to swap.
+        region.lock_worker_pages()
     if (
         current_platform.is_rocm()
         and os.environ.get("VLLM_ROCM_PIN_LOCAL_OFFLOAD") == "1"

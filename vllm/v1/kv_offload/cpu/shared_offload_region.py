@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import ctypes
 import errno
 import mmap
 import os
@@ -19,6 +20,28 @@ logger = init_logger(__name__)
 
 # MADV_POPULATE_WRITE was added in Linux 5.14 (value 23).
 _MADV_POPULATE_WRITE = getattr(mmap, "MADV_POPULATE_WRITE", 23)
+
+
+def _memory_lock(operation: str, address: int, length: int) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    function = getattr(libc, operation)
+    function.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    function.restype = ctypes.c_int
+    if function(address, length) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
+def unlink_offload_file(path: str, device: int, inode: int) -> None:
+    """Unlink only the inode opened by this engine; existing maps remain valid."""
+    try:
+        stat = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if (stat.st_dev, stat.st_ino) != (device, inode):
+        raise RuntimeError("CPU offload backing file changed before unlink")
+    os.unlink(path)
+    logger.info("Unlinked CPU offload backing file %s", path)
 
 
 def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> None:
@@ -93,6 +116,11 @@ class SharedOffloadRegion:
 
         self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
         self._creator = False  # set True only if this worker creates the file
+        self.mmap_obj: mmap.mmap | None = None
+        self._base: torch.Tensor | None = None
+        self._views: list[torch.Tensor] = []
+        self.is_pinned = False
+        self._locked_ranges: list[tuple[int, int]] = []
         self.rank = rank
         if rank is not None:
             # byte offset to this worker's first slot within each block row
@@ -132,7 +160,16 @@ class SharedOffloadRegion:
                 self.total_size_bytes / 1e9,
             )
 
-        self.mmap_obj: mmap.mmap | None = mmap.mmap(
+        stat = os.fstat(self.fd)
+        self.file_identity = (stat.st_dev, stat.st_ino)
+        try:
+            self._map_and_populate(cpu_page_size)
+        except BaseException:
+            self.cleanup()
+            raise
+
+    def _map_and_populate(self, cpu_page_size: int) -> None:
+        self.mmap_obj = mmap.mmap(
             self.fd,
             self.total_size_bytes,
             flags=mmap.MAP_SHARED,
@@ -141,12 +178,12 @@ class SharedOffloadRegion:
 
         populate_write_fn = _get_populate_write_fn(self.mmap_obj)
 
-        if rank is not None:
+        if self.rank is not None:
             # Populate only this worker's pages (one slot per block row).
-            worker_offset = rank * cpu_page_size
+            worker_offset = self.rank * cpu_page_size
             _t0 = time.perf_counter()
             page_size = self.page_size
-            for block in range(num_blocks):
+            for block in range(self.num_blocks):
                 raw_offset = block * self._row_stride + worker_offset
                 aligned_offset = (raw_offset // page_size) * page_size
                 end = raw_offset + cpu_page_size
@@ -154,7 +191,7 @@ class SharedOffloadRegion:
                 populate_write_fn(self.mmap_obj, aligned_offset, aligned_length)
             logger.debug(
                 "MADV_POPULATE_WRITE loop: %d blocks in %.3f s",
-                num_blocks,
+                self.num_blocks,
                 time.perf_counter() - _t0,
             )
         else:
@@ -166,9 +203,7 @@ class SharedOffloadRegion:
             )
 
         self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
-        self._views: list[torch.Tensor] = []
         self._canonical_offset = 0
-        self.is_pinned: bool = False
 
     def create_next_worker_view(self, tensor_page_size: int) -> torch.Tensor:
         """Allocate a strided int8 view for this worker, one canonical tensor.
@@ -267,11 +302,8 @@ class SharedOffloadRegion:
         )
         return memoryview(np_arr)
 
-    def pin_worker_pages(self) -> None:
-        """Pin only this rank's strided slots, avoiding TP-fold host accounting."""
-        if self.is_pinned:
-            return
-        base = self._base.data_ptr()
+    def _worker_page_ranges(self) -> list[tuple[int, int]]:
+        """Merged page-aligned byte ranges owned by this rank."""
         ranges = []
         if self.rank is None:
             ranges.append((0, self.total_size_bytes))
@@ -289,6 +321,50 @@ class SharedOffloadRegion:
                     ranges[-1] = (ranges[-1][0], max(end, ranges[-1][1]))
                 else:
                     ranges.append((start, end))
+        return ranges
+
+    def lock_worker_pages(self) -> None:
+        """Keep CPU KV resident even when HIP registration uses pageable HMM.
+
+        Lock only local slots: shared physical pages are not duplicated, and
+        each worker's memlock accounting covers only its own page ranges.
+        """
+        if self._locked_ranges:
+            return
+        assert self._base is not None
+        base = self._base.data_ptr()
+        try:
+            for start, end in self._worker_page_ranges():
+                _memory_lock("mlock", base + start, end - start)
+                self._locked_ranges.append((base + start, end - start))
+        except OSError as error:
+            self._unlock_worker_pages()
+            raise RuntimeError(
+                f"Cannot mlock CPU offload pages for rank={self.rank}: {error}. "
+                "CPU offload requires resident RAM on ROCm; check available "
+                "RAM and RLIMIT_MEMLOCK (systemd LimitMEMLOCK=infinity)."
+            ) from error
+        logger.info(
+            "Locked rank=%s CPU offload pages in RAM: %.2f GiB in %d spans",
+            self.rank,
+            sum(length for _, length in self._locked_ranges) / 2**30,
+            len(self._locked_ranges),
+        )
+
+    def _unlock_worker_pages(self) -> None:
+        for address, length in self._locked_ranges:
+            try:
+                _memory_lock("munlock", address, length)
+            except OSError:
+                logger.warning("Failed to munlock CPU offload pages", exc_info=True)
+        self._locked_ranges.clear()
+
+    def pin_worker_pages(self) -> None:
+        """Register only this rank's slots with HIP, separately from OS locking."""
+        if self.is_pinned:
+            return
+        base = self._base.data_ptr()
+        ranges = self._worker_page_ranges()
         runtime = torch.cuda.cudart()
         self._pinned_addresses = []
         for start, end in ranges:
@@ -322,6 +398,7 @@ class SharedOffloadRegion:
                             result,
                         )
             self.is_pinned = False
+        self._unlock_worker_pages()
         # Release views before _base: each view holds a _base reference and a
         # direct StorageImpl reference.  Freeing views first lets both refcounts
         # drop so the storage (which holds the mmap_obj buffer export) is freed
@@ -343,8 +420,7 @@ class SharedOffloadRegion:
             self.fd = None
         if self._creator and getattr(self, "mmap_path", None):
             try:
-                os.unlink(self.mmap_path)
-                logger.info("Removed mmap file %s", self.mmap_path)
+                unlink_offload_file(self.mmap_path, *self.file_identity)
             except Exception:
                 logger.warning(
                     "Failed to unlink path %s", self.mmap_path, exc_info=True

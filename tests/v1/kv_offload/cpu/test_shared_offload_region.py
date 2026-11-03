@@ -563,6 +563,7 @@ def test_madvise_unexpected_oserror_propagates(iid, monkeypatch):
     with pytest.raises(OSError) as exc_info:
         _make_region(iid)
     assert exc_info.value.errno == errno.EIO
+    assert not os.path.exists(f"/dev/shm/vllm_offload_{iid}.mmap")
 
 
 # ---------------------------------------------------------------------------
@@ -809,6 +810,86 @@ def test_insufficient_space_raises_clear_error(monkeypatch):
 
     mock_unlink.assert_called_once_with(mmap_path)
     mock_close.assert_called_once_with(9999)
+
+
+def _locked_bytes(path):
+    """Read actual OS locking, not HIP's registration flag."""
+    locked = 0
+    in_region = False
+    with open("/proc/self/smaps") as smaps:
+        for line in smaps:
+            if "-" in line.split()[0]:
+                in_region = path in line
+            elif in_region and line.startswith("Locked:"):
+                locked += int(line.split()[1]) * 1024
+    return locked
+
+
+def test_worker_slots_are_os_locked_and_cleanup_unlocks(iid):
+    region = _make_region(iid, num_blocks=4, num_workers=2, rank=1)
+    try:
+        assert _locked_bytes(region.mmap_path) == 0
+        region.lock_worker_pages()
+        assert _locked_bytes(region.mmap_path) == 4 * PAGE_SIZE
+        # Repeated registration must not lose the cleanup records.
+        region.lock_worker_pages()
+        assert _locked_bytes(region.mmap_path) == 4 * PAGE_SIZE
+        region._unlock_worker_pages()
+        assert _locked_bytes(region.mmap_path) == 0
+    finally:
+        region.cleanup()
+
+
+def test_partial_mlock_failure_releases_prior_locks(iid, monkeypatch):
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    real_lock = sor._memory_lock
+    calls = 0
+
+    def fail_second_lock(operation, address, length):
+        nonlocal calls
+        if operation == "mlock":
+            calls += 1
+            if calls == 2:
+                raise OSError(errno.ENOMEM, "memlock limit")
+        real_lock(operation, address, length)
+
+    with _region(iid, num_workers=2) as region:
+        monkeypatch.setattr(sor, "_memory_lock", fail_second_lock)
+        with pytest.raises(RuntimeError, match="RLIMIT_MEMLOCK"):
+            region.lock_worker_pages()
+        assert not region._locked_ranges
+        assert _locked_bytes(region.mmap_path) == 0
+
+
+def test_rocm_registration_fails_before_hip_if_mlock_fails(iid, monkeypatch):
+    from vllm.v1.kv_offload.cpu import gpu_worker, shared_offload_region
+
+    monkeypatch.setattr(gpu_worker.current_platform, "is_rocm", lambda: True)
+    register = MagicMock()
+    monkeypatch.setattr(gpu_worker.torch.cuda, "cudart", register)
+    monkeypatch.setattr(
+        shared_offload_region,
+        "_memory_lock",
+        MagicMock(side_effect=OSError(errno.ENOMEM, "memlock limit")),
+    )
+    with _region(iid) as region:
+        with pytest.raises(RuntimeError, match="Cannot mlock"):
+            gpu_worker.pin_mmap_region(region)
+        register.assert_not_called()
+
+
+def test_cleanup_does_not_unlink_replacement_file(iid):
+    region = _make_region(iid)
+    os.unlink(region.mmap_path)
+    with open(region.mmap_path, "wb") as replacement:
+        replacement.write(b"different engine")
+    try:
+        region.cleanup()
+        with open(region.mmap_path, "rb") as replacement:
+            assert replacement.read() == b"different engine"
+    finally:
+        _cleanup_file(region.mmap_path)
 
 
 def test_ftruncate_failure_cleans_up_creator(monkeypatch):
