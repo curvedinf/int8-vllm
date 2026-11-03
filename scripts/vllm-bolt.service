@@ -13,6 +13,7 @@ WorkingDirectory=/home/curved/int8-vllm
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=/etc/llama/llama-api.env
 ExecStartPre=/home/curved/int8-vllm/scripts/serve_recipe_bolt.sh stop
+ExecStartPre=/usr/bin/bash scripts/serve_recipe_bolt.sh cleanup
 ExecStart=/home/curved/int8-vllm/scripts/serve_recipe_bolt.sh supervise
 ExecStop=/home/curved/int8-vllm/scripts/serve_recipe_bolt.sh stop
 Restart=always

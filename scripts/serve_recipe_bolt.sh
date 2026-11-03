@@ -26,6 +26,35 @@ alive() {
   return 1
 }
 
+cleanup() {
+  if alive; then
+    echo 'Refusing cleanup while the Bolt supervisor is running' >&2
+    return 1
+  fi
+  command -v fuser >/dev/null || { echo 'Cleanup requires fuser' >&2; return 1; }
+  local shm_dir="${BOLT_SHM_DIR:-/dev/shm}" file users status
+  local -a stale=()
+  # Only reclaim this account's unused vLLM files. Generic psm_* segments
+  # can belong to other applications and must not be swept away.
+  for file in "$shm_dir"/vllm_offload_*.mmap \
+      "${VLLM_BOLT_PREFETCH_DONE:-$shm_dir/vllm_bolt_prefetch.done}" \
+      "$shm_dir/vllm_bolt_runtime_env.json"; do
+    [[ -f "$file" && ! -L "$file" && -O "$file" ]] || continue
+    if users="$(fuser "$file" 2>&1)"; then
+      echo "Refusing cleanup: $file is still in use" >&2
+      return 1
+    else
+      status=$?
+      if [[ "$status" != 1 || -n "$users" ]]; then
+        echo "Cannot establish whether $file is unused" >&2
+        return 1
+      fi
+    fi
+    stale+=("$file")
+  done
+  if ((${#stale[@]})); then rm -- "${stale[@]}"; fi
+}
+
 serve() {
   export VLLM_API_KEY="${VLLM_API_KEY:-${LLAMA_API_KEY:-}}"
   if [[ -z "${VLLM_API_KEY}" ]]; then
@@ -196,11 +225,7 @@ case "${1:-status}" in
     ;;
   start)
     if alive; then echo 'Bolt supervisor is already running'; exit 0; fi
-    # A crashed worker leaves a multi-GiB /dev/shm offload mmap and psm
-    # segments behind. Clear them only when no supervisor is alive.
-    rm -f /dev/shm/vllm_offload_*.mmap /dev/shm/psm_* \
-      "${VLLM_BOLT_PREFETCH_DONE:-/dev/shm/vllm_bolt_prefetch.done}" \
-      /dev/shm/vllm_bolt_runtime_env.json 2>/dev/null || true
+    cleanup
     nohup setsid bash "$0" supervise >> "${LOG_DIR}/server.log" 2>&1 < /dev/null &
     for _ in $(seq 1 100); do
       if alive; then
@@ -231,6 +256,7 @@ case "${1:-status}" in
       if alive; then echo 'Supervisor has not exited' >&2; exit 1; fi
     fi
     ;;
+  cleanup) cleanup ;;
   restart) bash "$0" stop; bash "$0" start ;;
   status)
     if alive; then
@@ -238,5 +264,5 @@ case "${1:-status}" in
       curl --fail --silent --show-error --max-time 3 "http://${HOST}:${PORT}/health"
     else echo 'Bolt stopped'; exit 1; fi
     ;;
-  *) echo "Usage: $0 {start|stop|restart|status|supervise}" >&2; exit 2 ;;
+  *) echo "Usage: $0 {start|stop|restart|status|supervise|cleanup}" >&2; exit 2 ;;
 esac
