@@ -138,6 +138,74 @@ stability alongside their speed and memory benefits.
 
 See the [recipe guides](docs/recipes/README.md) for configuration and validation details.
 
+## Kernels and features
+
+The fork and companion [int8-aiter](https://github.com/curvedinf/int8-aiter)
+provide these kernels and features to reduce memory traffic, accelerate
+generation and reuse context. They are available beyond the standard recipes;
+the second column identifies the models and architectures each path supports.
+
+### Quantization and matrix kernels
+
+| Kernel or feature | Applicable models |
+| --- | --- |
+| **AITER CK/Triton W8A8 and W8A16 GEMMs**, with tuned prefill/decode dispatch | Compatible symmetric GPTQ-8 models; W8A8 for GS128, W8A16 for other supported group sizes |
+| **Fused round-to-nearest INT8 activation quantization** | Models using the fork's W8A8 linear layers |
+| **INT8 embedding gathers and language-model heads** | Models using vLLM's vocabulary-parallel embedding/head layers on gfx908 |
+| **Packed IQ2_XXS, Q8_0 and NVFP4 execution through GS128 INT8** | Compatible ModelOpt packed checkpoints, including Nemotron Bolt |
+| **Static dense-weight and adaptive expert INT8 caches** | Packed dense/MoE models using the gfx908 ModelOpt loader |
+| **Native HIP packed-expert GEMMs, route-aware prefill tiles and weighted expert reduction** | Packed IQ2_XXS MoE models, including Nemotron Bolt |
+| **Shared/routed expert overlap, fused MoE norm/quantization and INT8 prefill routing** | Nemotron-H latent/shared-expert models, including Bolt |
+| **GS128 INT8 residual streams, activation epilogues and draft convolutions** | Nemotron Bolt and LiLiCorr |
+| **INT8 MLP intermediates with deferred reduction** | Compatible GS128 GPTQ MLP down-projections, including Qwen |
+
+### Attention and recurrent state
+
+| Kernel or feature | Applicable models |
+| --- | --- |
+| **INT8 KV cache:** per-token/head scales and grouped scales from G4 to G128 | Attention models using the fork's AITER/Triton backends |
+| **Gluon MFMA G128 decode/prefill attention**, including packed, split-K and segmented variants | Compatible 256-dimensional grouped-attention heads, including Qwen3.8-27B |
+| **Native INT8-MFMA QK decode/verification attention** | Qwen-style 256-dimensional heads with 6:1 grouped-query attention at TP4 |
+| **Gluon split-window draft attention** | DFlash2 drafts with 128-dimensional heads and a 2,048-token sliding window |
+| **Page-specialized G128 prefill attention** | Bolt-style 128-dimensional heads, 8:1 grouped-query attention and 4,256-token pages |
+| **FP32-WY GDN prefill, exact scans, fused gating and tiny b/a projections** | Qwen3-Next/3.5/3.8 Gated DeltaNet hybrids |
+| **Recurrent-state rollback, convolution-state handling and hybrid prefix restoration** | Supported GDN/Mamba hybrids, including Qwen and Nemotron Bolt |
+
+### Normalization and multi-GPU communication
+
+| Kernel or feature | Applicable models |
+| --- | --- |
+| **Fused residual/RMSNorm/INT8 quantization**, including a compiler fusion pass | Models using compatible RMSNorm and W8A8 layers |
+| **Small-batch fused Gemma RMSNorm** | Models using Gemma-style `1 + weight` normalization, including Qwen hybrids |
+| **Fused all-reduce + residual + RMSNorm + INT8 quantization** | Qwen3-Next-style decoder layers through the optional eager epilogue |
+| **Custom XGMI all-reduce**, FP32 accumulation and tunable launch geometry | Tensor-parallel models on supported MI100/XGMI topologies |
+| **GS32 INT8 MLP transport and GS128 INT8/deferred collectives** | TP4 MLP down-projections and the Qwen/Bolt INT8 intermediate paths |
+
+### Speculative decoding
+
+| Kernel or feature | Applicable models |
+| --- | --- |
+| **DFlash/DFlash2 and LiLiCorr speculative decoding**, including INT8 draft projections and optional INT8 convolution taps | Models with compatible draft checkpoints; Qwen3.8-27B and Nemotron Bolt |
+| **Adaptive speculative-token budgets and synchronized TP sampling** | Compatible speculative target/draft pairs |
+
+### Scheduling, caching and loading
+
+| Kernel or feature | Applicable models |
+| --- | --- |
+| **Decode-priority prefill budgets, fair prefix admission and short-prefill cohorts** | All models using the V1 scheduler |
+| **Early hybrid prefix checkpoints and short-prefix hashing** | Attention + recurrent-state models, including Qwen and Bolt |
+| **RAM and filesystem KV tiers**, bounded disk retention and rank-local pinned buffers | Models compatible with the KV OffloadingConnector |
+| **AIS direct-to-GPU loading, per-rank repack caches and startup prefetch** | Safetensors checkpoints through the AIS loader; Qwen and Bolt |
+
+### Runtime and tooling
+
+| Kernel or feature | Applicable models |
+| --- | --- |
+| **MI100 torch.compile and graph-replay integration** | Models using vLLM's supported compilation/graph paths |
+| **Chunked prompt-logprob computation** | Models exposing prompt log-probabilities through the GPU runner |
+| **PTQR target/draft retraining and quantized export tools** | Qwen3.8-27B and its DFlash2 draft |
+| **Thermal power control and service supervision** | All models served on the MI100 host |
+
 ## Documentation
 
 - [Qwen recipe](docs/recipes/README.md) and [Bolt recipe](docs/recipes/nemotron_bolt.md) — configuration, benchmarks and validation.
