@@ -195,7 +195,7 @@ the second column identifies the models and architectures each path supports.
 | **Decode-priority prefill budgets, fair prefix admission and short-prefill cohorts** | All models using the V1 scheduler |
 | **Early hybrid prefix checkpoints and short-prefix hashing** | Attention + recurrent-state models, including Qwen and Bolt |
 | **RAM and filesystem KV tiers**, bounded disk retention and rank-local pinned buffers | Models compatible with the KV OffloadingConnector |
-| **AIS direct-to-GPU loading, per-rank repack caches and startup prefetch** | Safetensors checkpoints through the AIS loader; Qwen and Bolt |
+| **AMD Infinity Storage (AIS) integration:** load weights directly from storage into GPU memory, with per-rank repack caches and startup prefetch for faster loading | Safetensors models on AIS-capable ROCm systems, including Qwen and Nemotron Bolt |
 
 ### Runtime and tooling
 
