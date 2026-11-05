@@ -26,10 +26,10 @@ Stock vLLM model support extends beyond this table. These are the model pairs
 with dedicated tuning and validation; each recipe uses a target model and its
 matching speculative draft.
 
-| Model | Checkpoints | Recipe |
-| --- | --- | --- |
-| Qwen3.8-27B | [INT8 PTQR target](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128-PTQR) + [DFlash2 draft](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128-PTQR) | [Qwen setup](docs/recipes/README.md) |
-| NVIDIA Nemotron 3.5 Bolt 74B-A9B-24GB | [Official packed target](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB) + [LiLiCorr draft](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr) | [Bolt setup](docs/recipes/nemotron_bolt.md) |
+| Model | Checkpoints | Default concurrency | Recipe |
+| --- | --- | --- | --- |
+| Qwen3.8-27B | [INT8 PTQR target](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128-PTQR) + [DFlash2 draft](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128-PTQR) | 6 simultaneous sequences (C6) | [Qwen setup](docs/recipes/README.md) |
+| NVIDIA Nemotron 3.5 Bolt 74B-A9B-24GB | [Official packed target](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB) + [LiLiCorr draft](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr) | 8 simultaneous sequences (C8) | [Bolt setup](docs/recipes/nemotron_bolt.md) |
 
 Qwen uses INT8 weights retrained against a BF16 reference. Bolt loads the
 official packed checkpoints, converts dense weights to INT8 and caches INT8
