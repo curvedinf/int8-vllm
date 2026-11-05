@@ -112,28 +112,30 @@ For persistent deployment, see [systemd setup](docs/recipes/services.md).
 
 ## Quality control
 
-The optimized recipes pair faster inference with explicit checks on model
-fidelity, response quality and serving reliability. Validation follows the
-whole path from checkpoint loading to complete answers, including long
-conversations and simultaneous requests.
+The optimized recipes are built for fast, dependable inference. **Rigorous
+quality control covers the entire serving path**, from quantized weights and
+GPU kernels to complete responses and sustained concurrent workloads.
+Optimizations are evaluated for model fidelity, response quality and service
+stability alongside their speed and memory benefits.
 
-| Check | What is tested | What it protects |
-| --- | --- | --- |
-| **Model fidelity** | Run the same **52 prompts** against the INT8 and BF16 recipes. Compare mean, median and p95 KLD from top-token probabilities, agreement on the first 40 output characters, and stop-token probability. | Measures how closely quantized predictions and responses follow the reference model. |
-| **Checkpoint integrity** | Byte-compare loaded and repacked weights with the source checkpoint; verify that exported quantized weights reproduce the trained quantization grid. | Loads the intended model correctly across every GPU. |
-| **INT8 arithmetic and fusion** | Packed-GEMM checks require relative L2 error below **0.002%**, quantized-epilogue error below **2%**, exact INT8 codes, scale relative tolerance **0.0002%**, and identical eager/graph outputs. Fused operations are compared with their separate reference operations. | Keeps accelerated matrix operations, quantization and fusion numerically faithful to their references. |
-| **Attention and KV cache** | Compare prefill, decode and mixed batches with reference attention. Basic INT8 KV tests require maximum absolute error below **0.1**, or **0.05** for noncausal attention. Additional checks cover grouped heads, sliding windows, variable lengths and page boundaries; the kernel/import battery requires **4/4 passes**. | Checks that compressed context is read correctly across the attention paths used during serving. |
-| **Recurrent state and multi-GPU execution** | Compare state updates and speculative rollback with sequential references across accepted-token counts, chunk seams, migrations and page boundaries. Exercise collectives with changing payloads and scales, interleaved operations and repeated graph replay. | Preserves conversation state and coordination between GPUs as requests advance. |
-| **Sampling and speculative decoding** | Check top-k/top-p ordering and seeded/unseeded sampling. Compare rejection-sampling frequencies with known probabilities over **20,000 trials**. Compare INT8 and BF16 draft predictions on identical target states; measure accepted tokens per round, acceptance fraction, rejection tails and decay over long contexts. | Checks token selection and the draft model's ability to accelerate generation faithfully. |
-| **Short answers and formatting** | A **500-request soak requires zero detected empty, repetitive or character-collapse responses**. The **52-prompt chat check requires nonempty answers and finite token log-probabilities**; strict-format prompts check the requested output format. | Produces usable final answers and checks the formats consumed by applications. |
-| **Long-context coherence** | Review complete responses from **eight 22k-token inputs with up to 4,096 output tokens each**, using two serial and six concurrent requests. Full-output gates reject structural garble, repetition walls, unintended restarts and progressive breakdown. | Tests whether long answers remain readable through their ending, including under concurrency. |
-| **Token-by-token consistency under load** | Replay exact generated token IDs through a clean reference and measure mean absolute log-probability drift and positions exceeding **1 nat**. The mixed-load gate runs **three 32k-context, 2,048-token decoders alongside three fresh 32k prefills**, requiring **zero generated tokens outside the reference's top 20**. | Detects changes in model behavior when generation crosses chunk boundaries or shares the server with new prompts. |
-| **Prefix reuse and offload restoration** | Compare retrieval answers and generated token IDs across cold/warm requests, GPU cache reset, RAM restoration, service restart and appended prompts; verify reused-token counters. | Checks that cached conversation history survives reuse and movement between memory tiers. |
-| **Application compatibility** | Exercise arithmetic, reasoning with a final answer, automatic tool calls, image/video input, streaming, authentication and disabled development endpoints. Recheck the other optimized recipe after shared changes. | Keeps application features working alongside the accelerated serving paths. |
-| **Memory and service stability** | Run sustained concurrent requests while checking all GPU workers, finite activations, memory growth, allocation failures, cache residency, startup/shutdown and unexpected restarts. | Tests the service's ability to keep answering requests throughout continued use. |
+- **Model fidelity:** compare 52 prompts with BF16 using KLD, output agreement and stop probability to measure quantization drift.
+- **Weight integrity:** byte-check loaded/repacked weights and verify exports against the trained quantization grid to catch loading errors.
+- **INT8 arithmetic:** require relative L2 error below **0.002%** for packed GEMMs and **2%** for quantized epilogues to bound numerical error.
+- **Quantization and fusion:** check exact INT8 codes, **0.0002%** scale tolerance and fused-operation reference agreement to preserve calculations.
+- **Attention and KV:** test masks, grouped heads, windows and page boundaries; basic reference checks limit maximum absolute error to **0.1**, or **0.05** for noncausal attention.
+- **Kernel compatibility:** require **4/4** attention, GEMM and import checks so production kernels and serving interfaces work together.
+- **Recurrent state:** compare updates and speculative rollback with sequential references across chunk boundaries, page boundaries and migrations to protect conversation state.
+- **Multi-GPU execution:** test interleaved collectives and repeated graph replay against reference outputs to catch synchronization and replay errors.
+- **Sampling correctness:** use **20,000 trials** against known probabilities, plus top-k/top-p and seeded/unseeded checks, to detect sampling bias.
+- **Draft quality:** compare predictions on identical target states and track acceptance, rejection tails and long-context decay to protect speculative decoding efficiency.
+- **Short answers:** require **zero detected empty or collapsed responses across 500 requests**, finite log-probabilities on 52 prompts and compliance with requested formats.
+- **Long answers:** review eight **22k-input/4,096-output-token** workloads, serially and concurrently, for structural garble, repetition and progressive breakdown.
+- **Token consistency:** replay exact generated tokens and measure log-probability drift, including deviations above **1 nat**, to detect inconsistent model state.
+- **Mixed-load quality:** run three **32k-context/2,048-output-token** decoders alongside three fresh 32k prefills; require **zero tokens outside the reference's top 20**.
+- **Cache continuity:** compare answers and token IDs after prefix reuse, RAM restoration, resets, restarts and appended prompts to verify preserved context.
+- **Application behavior:** exercise arithmetic, reasoning, tools, image/video input, streaming, authentication and cross-recipe regressions to protect application compatibility.
+- **Serving stability:** stress concurrent requests while checking finite activations, memory growth, allocation failures, startup/shutdown and unexpected restarts.
 
-Performance validation measures prefill throughput, decode throughput,
-time to first token and speculative acceptance on matched workloads.
 See the [recipe guides](docs/recipes/README.md) for configuration and validation details.
 
 ## Documentation
