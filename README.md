@@ -40,91 +40,6 @@ These recipes are tested on **4 × MI100 (gfx908), with XGMI full mesh**.
 Model-specific precision choices, validation results and limitations are
 documented in the linked recipes.
 
-## Quality control
-
-**Rigorous quality control is a core feature of int8-vllm.** The optimized
-recipes are backed by **18 categories of validation** covering numerical
-correctness, response quality and serving stability. This gives you measured
-evidence for the optimizations you enable, from reference comparisons of
-individual kernels to complete-output review under concurrent, long-context
-workloads.
-
-Recorded results include **500/500 Bolt coherence checks**, **96
-actual-checkpoint fusion cases with zero numerical mismatches**, and
-**0/6,144 Qwen greedy output tokens outside the reference target's top 20**
-during mixed-load testing. The detailed record below explains each check,
-its results and any accepted tradeoffs or remaining validation gaps.
-
-<details>
-<summary>All 18 quality gates and recorded results</summary>
-
-Each candidate is compared with its reference on fixed inputs, then checked
-in the actual serving recipe. Source revisions, model artifacts, sampling
-settings, cache state and benchmark conditions are recorded with the results.
-Checks also verify that the intended optimized path runs on all four ranks.
-
-### Correctness and numerical gates
-
-| Gate | Checks and recorded results |
-| --- | --- |
-| **Checkpoint loading and export** | Byte-compare loaded/repacked weights with the source checkpoint and verify PTQR export/dequantization equivalence. Bolt: **0 mismatches** across all eight target/draft rank caches; Qwen repack: **2,405 target + 186 draft entries** byte-identical. |
-| **INT8 KV and attention** | Prefill, decode, causal/noncausal, sliding-window, grouped-query, ragged and page-boundary cases against reference attention. KV microtests pass; basic KV max-absolute-error limits are **0.1**, or **0.05** for noncausal/interface checks. The bounded G128 prefill campaign measured maximum mean-relative error **0.00133**. |
-| **Kernel/import battery** | Production attention shapes, attention API compatibility, boot-critical imports and GEMM reference checks: **4/4 passed**. |
-| **Packed GEMM, quantization and fusion** | Independent checkpoint decoding, actual tensor-parallel slices, partial groups, scales, normalization/residual outputs and expert routing. Packed-G128 checks require **exact INT8 codes**, scale relative tolerance **2e-6**, GEMM relative L2 error **below 2e-5**, quantized-epilogue relative L2 error **below 0.02**, finite outputs and exact eager/graph replay. The accepted norm/quant fusion passed **96 actual-checkpoint cases with zero output/residual/code/scale mismatches**. |
-| **Recurrent state and speculative rollback** | Compare convolution/SSM updates with sequential references across accepted-token counts, chunk seams, migrations and page boundaries. Recorded checks include **500 protocol rounds**, convolution output difference **0**, GDN state difference **0** with output error about **1e-4**, and bit-identical convolution state at **11 chunk seams**. |
-| **Collectives and graph safety** | Test cross-rank visibility, varying payloads/scales, chunking, interleaved collectives and repeated graph replay. Bolt's INT8 decoder passed **83 GPU checks** plus TP4 collective tests; eager and graph serving boots also passed. |
-| **Distribution and greedy-output screen** | The fixed **52-prompt** corpus reports mean/median/p95 KLD, compared/skipped positions, nonempty outputs and first-40-character agreement. The PTQR target with BF16 draft recorded median **0.00694**, **42/52** agreement; the INT8 target+draft pair recorded **0.00798**, **42/52**, versus one-shot **0.0110**, **38/52**. |
-| **Stop probability and numerical health** | Monitor first-token stop probability, finite logits/activations and recurrent-state overflow. The historical Qwen serving gate recorded **0.38% stop probability vs 0.36% BF16**; failing FP16/INT8 recurrent-state variants were rejected and FP32 state retained. |
-| **Draft fidelity** | Compare quantized and BF16 drafts on the same captured target states, then verify the exported quantization grid. Both scored **0.042 next-token agreement over 120 probes**. This is agreement with held-out text, not a divergence metric or a general accuracy score. |
-| **Sampling correctness** | Check top-k/top-p ordering, seeded/unseeded paths, rejection-sampling marginals and conditional chains. The production greedy-proposal rejection test used **20,000 trials**, with maximum frequency error **0.0013**; proposed-token emission was **0.0200 vs 0.0195 expected**. |
-| **Decode/prefill consistency** | Replay the exact generated token IDs through a clean prefill reference and measure chosen-token logprob drift. A passing 20k-context seam gate recorded mean absolute difference **0.0339 nats**, with **0/256 positions above 1 nat**. |
-
-The legacy KLD tool compares truncated top-logprob distributions along
-independently generated continuations. Its reported values are a screening
-proxy, not aligned full-vocabulary KL or proof of BF16 equivalence. Exact-token
-replay and live-output gates provide separate checks.
-
-### Serving and regression gates
-
-| Gate | Checks and recorded results |
-| --- | --- |
-| **Speculative acceptance** | Compare accepted tokens per round, accepted/drafted fraction, rejection tails and acceptance decay under matched traffic. At 42k context, the INT8 Qwen draft recorded mean acceptance **3.825 vs 3.88** for the BF16 draft, above the original **3.67** reference. Bolt's C8 functional smoke recorded acceptance length **4.55**. These are workload-specific values, not interchangeable percentages. |
-| **Full-output long-context review** | Read complete outputs for structural garble, repeated walls, restarts, token splices and progressive drift. The harness includes **eight 22k-input/4,096-output legs** (two serial, six concurrent). Later Qwen zero-structural-garble gates passed seeds **301/307/305 plus an unseeded 4k-output leg**; a separate multi-boot stress check completed **24/24** greedy 20k/4k legs. Earlier eight-leg failures remain in the ledger. |
-| **Short-answer soak and format checks** | Require nonempty final answers, no repeated-character/prose collapse, finite top-token logprobs and requested formats. Bolt passed **500/500** soak cases, **52/52** chat-corpus cases and **10/10** strict-format responses. Reasoning is disabled for short-budget soak cases and tested separately. |
-| **Mixed-load token oracle** | Run three 32k/2,048-token decoders while three fresh 32k prompts prefill; score committed token IDs against the clean target. Greedy traces passed **0/6,144 tokens outside the target's top 20**. The sampled run had **1/6,144**, ranked 21, and did **not** pass the strict zero-miss gate. |
-| **Prefix and offload restoration** | Check cold/repeated retrieval, cached-token accounting, GPU reset with RAM restoration, service restart and appended prompts. Bolt returned the same correct phrase for a **28,067-token** prompt, with **28,056 tokens reused** on repeat; the earlier RAM-restoration gate reused **17,024 external tokens** with the same answer. Qwen's local repeat matched **16/16** greedy IDs; its restart check matched **15/16**, so cross-boot bitwise equality is not claimed. |
-| **API and cross-recipe regression** | Arithmetic, reasoning plus a final answer, automatic tool calls, image/video input, streaming, authentication and disabled development endpoints passed for Bolt. The shared loader changes also passed the unchanged Qwen launcher's **six concurrent greedy queries**. |
-| **Memory and service stability** | Check all ranks, health, allocation failures, leaks, cache residency, startup/teardown and unexpected restarts. The November Bolt offload gate passed **385 regressions**, **8/8 concurrent requests**, HTTP **200**, **zero KV swap bytes** across workers and **zero automatic service restarts**. Earlier campaigns passed **335 Qwen CPU checks** and **339 Bolt focused checks**. |
-
-Performance changes also run the complete workload gates: Qwen short C6
-(32 requests, 32 input/1,000 output), 32k C6 steady/long runs (800 and 2,048
-output), solo 32k time-to-first-token, mixed prefill/decode, greedy coherence
-and temperature-1 copy probes. Bolt campaigns use fixed C8 workloads,
-warmup-separated five-run comparisons, exact request/token counters,
-held-out shapes/workloads and independent-boot confirmation. Prefill,
-decode, whole-run throughput and acceptance are evaluated separately;
-a speed gain alone does not clear the quality gates.
-
-Results above come from different recorded campaigns, not one universal
-all-green certification. Bolt's INT8 decoder was adopted with an explicit
-exception to its one-percentage-point acceptance-loss limit:
-**35.65% to 34.22%**. Coherence is not task accuracy; Bolt's matched
-official-reference KLD and full 256k-context validation remain pending.
-
-Gate implementations include the [kernel battery](scripts/battery_gfx908.py),
-[packed-weight probe](scripts/probe_bolt_packed_int8.py),
-[distribution screen](scripts/kld_probe_v2.py),
-[draft probe](scripts/ptqr_draft_fidelity.py),
-[full-output battery](scripts/qat_battery.py),
-[soak](scripts/ua_live_soak.py) and
-[Bolt chat probe](scripts/probe_bolt_quality.py).
-The [Qwen recipe](docs/recipes/README.md),
-[Bolt recipe](docs/recipes/nemotron_bolt.md) and
-[experiment ledger](docs/recipes/surface_experiments_ledger.jsonl) retain
-the controls, individual outcomes, rejected candidates and reproduction details.
-
-</details>
-
 ## Getting started
 
 Use the setup below to run one of the optimized recipes on four MI100 GPUs.
@@ -194,6 +109,43 @@ Use `status`, `stop` or `restart` in place of `start` to manage the server.
 The API model names are `qwen3.8-27b-gptq8` and `nemotron-bolt`;
 logs are in `logs/serve_recipe_qwen38/` and `logs/serve_recipe_bolt/`.
 For persistent deployment, see [systemd setup](docs/recipes/services.md).
+
+## Quality control
+
+The optimized recipes are built for fast, dependable inference. **Rigorous
+quality control covers the entire serving path**, from quantized weights and
+GPU kernels to complete responses and sustained concurrent workloads.
+Optimizations are evaluated for model fidelity, response quality and service
+stability alongside their speed and memory benefits.
+
+- **Model fidelity.** Reference comparisons measure token-distribution drift
+  (KLD), greedy-output agreement, stop probability and draft fidelity.
+  Checkpoint and export checks verify that the intended weights are loaded
+  correctly.
+- **Accurate INT8 computation.** Attention, KV caching, matrix multiplication,
+  quantization and fused kernels are checked against reference calculations
+  using absolute and relative error, exact quantization codes and scales.
+  Coverage includes recurrent state, speculative rollback, multi-GPU
+  communication, graph replay and kernel compatibility.
+- **Coherent long conversations.** Complete responses are reviewed for
+  coherence, repetition and formatting. Exact-token replay measures
+  decode/prefill log-probability drift, while cache tests check that prefix
+  reuse and offload restoration preserve model behavior.
+- **Consistent generation under load.** Sampling tests check token-selection
+  probabilities; mixed-load tests compare generated tokens with a clean
+  reference while other requests prefill. Speculative acceptance and rejection
+  behavior are tracked across short and long contexts, alongside throughput
+  and time to first token.
+- **Application compatibility.** Regression tests exercise final answers,
+  reasoning, tool calls, image and video input, streaming and authentication.
+  Shared changes are also checked across the optimized recipes.
+- **Stable serving.** Sustained and concurrent request tests monitor numerical
+  health, memory growth, allocation failures, cache residency and unexpected
+  restarts, with startup, shutdown and recovery checks.
+
+The [Qwen](docs/recipes/README.md) and
+[Bolt](docs/recipes/nemotron_bolt.md) guides describe each recipe's precision
+choices, validation coverage and limitations.
 
 ## Documentation
 
