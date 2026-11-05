@@ -112,12 +112,17 @@ For persistent deployment, see [systemd setup](docs/recipes/services.md).
 
 ## Quality control
 
-Validation covers checkpoint bytes, kernel numerics, model behavior and live
-serving. An optimization is compared with its reference on fixed inputs,
-then checked in the actual recipe, including concurrent and long-running
-requests. Source revisions, model artifacts, sampling settings, cache state
-and benchmark conditions are recorded with the results. Checks also verify
-that the intended optimized path actually runs on all four ranks.
+These recipes pursue speed and memory savings through aggressive INT8
+quantization and kernel tuning. Preserving response quality is therefore a
+central part of optimization: small numerical or state-handling errors can
+grow into repetition, drift or corrupted output during long conversations.
+The gates below follow those risks from individual operations to complete
+responses, including concurrent requests and cache reuse.
+
+Each candidate is compared with its reference on fixed inputs, then checked
+in the actual serving recipe. Source revisions, model artifacts, sampling
+settings, cache state and benchmark conditions are recorded with the results.
+Checks also verify that the intended optimized path runs on all four ranks.
 
 ### Correctness and numerical gates
 
