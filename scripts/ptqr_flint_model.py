@@ -474,7 +474,9 @@ def shard_flint_tp(model: FlintRef, world: int, rank: int, group=None) -> None:
     """
     import torch.distributed as dist
 
-    model._tp_world, model._tp_rank, model._tp_group = world, rank, group
+    # group lives ONLY in _TP_STATE: a module-level ProcessGroup attr would
+    # break deepcopy(teacher) when building the student
+    model._tp_world, model._tp_rank = world, rank
     _TP_STATE.update(world=world, rank=rank, group=group)
     V, H = model.cfg.vocab_size, model.cfg.hidden_size
     v0, v1 = rank * V // world, (rank + 1) * V // world
