@@ -416,6 +416,56 @@ def load_flint_state(model: FlintRef, ckpt_dir: str, strict: bool = True) -> Non
 # _RowParallelSum pattern) and all-gathers vocab-parallel logits.
 # ---------------------------------------------------------------------------
 
+def _shard_linear_rows_cols(lin, world, rank, cols: bool, rows_gate_up: bool = False):
+    """Shard an nn.Linear OR a PTQRLinear in place.
+
+    cols=True: keep `rank` slice of the INPUT dim (row-parallel output
+    partial); cols=False: keep the rank slice of the OUTPUT dim. For fused
+    gate_up linears the output dim halves (gate|up) are sliced in lockstep
+    so chunk(2) stays aligned. PTQRLinear uses its own shard API so weight
+    and scale shards stay consistent.
+    """
+    P = lin.__class__.__name__ == "PTQRLinear"
+    if rows_gate_up:
+        if P:
+            # fused gate/up rows: PTQRLinear scales live [out, in//group];
+            # slice the gate and up halves in lockstep on weight and scale.
+            w, sc = lin.weight.data, lin.scale.data
+            g = w.shape[0] // 2
+            r0, r1 = rank * g // world, (rank + 1) * g // world
+            lin.weight = torch.nn.Parameter(
+                torch.cat([w[:g][r0:r1], w[g:][r0:r1]], dim=0).contiguous())
+            lin.scale = torch.nn.Parameter(
+                torch.cat([sc[:g][r0:r1], sc[g:][r0:r1]], dim=0).contiguous())
+            return
+        _shard_mlp_rows_cols_lin(lin, world, rank)
+        return
+    if cols:
+        n_in = lin.weight.shape[1]
+        c0, c1 = rank * n_in // world, (rank + 1) * n_in // world
+        if P:
+            lin.shard_cols((c0, c1))
+        else:
+            lin.weight = torch.nn.Parameter(
+                lin.weight.data[:, c0:c1].contiguous())
+    else:
+        n_out = lin.weight.shape[0]
+        r0, r1 = rank * n_out // world, (rank + 1) * n_out // world
+        if P:
+            lin.shard_rows([(r0, r1)])
+        else:
+            lin.weight = torch.nn.Parameter(
+                lin.weight.data[r0:r1].contiguous())
+
+
+def _shard_mlp_rows_cols_lin(lin, world, rank):
+    w = lin.weight.data
+    g = w.shape[0] // 2
+    r0, r1 = rank * g // world, (rank + 1) * g // world
+    lin.weight = torch.nn.Parameter(
+        torch.cat([w[:g][r0:r1], w[g:][r0:r1]], dim=0).contiguous())
+
+
 def shard_flint_tp(model: FlintRef, world: int, rank: int, group=None) -> None:
     """Shard a FlintRef in place for TP rank `rank` of `world`.
 
@@ -445,9 +495,28 @@ def shard_flint_tp(model: FlintRef, world: int, rank: int, group=None) -> None:
         assert nh % world == 0 and nkv % world == 0
         qh, kvh = nh // world, nkv // world
         h0 = rank * qh
-        # qkv rows: [q(h0..h0+qh) | k(rank*kvh..) | v(rank*kvh..)]
-        qkv_w = att.qkv.weight.data
-        q, k, v = qkv_w.split([att.q_size, att.kv_size, att.kv_size], dim=0)
+        if att.qkv.__class__.__name__ == "PTQRLinear":
+            # student path: qkv rows are fused per-head slices; PTQR scales
+            # are per-output-row groups -> slice weight+scale rows together
+            w, sc = att.qkv.weight.data, att.qkv.scale.data
+            q, k, v = w.split([att.q_size, att.kv_size, att.kv_size], dim=0)
+            sq, sk, sv = sc.split(
+                [att.q_size, att.kv_size, att.kv_size], dim=0)
+            att.qkv.weight = torch.nn.Parameter(torch.cat([
+                q[h0 * att.head_dim:(h0 + qh) * att.head_dim],
+                k[rank * kvh * att.head_dim:(rank + 1) * kvh * att.head_dim],
+                v[rank * kvh * att.head_dim:(rank + 1) * kvh * att.head_dim],
+            ], dim=0).contiguous())
+            att.qkv.scale = torch.nn.Parameter(torch.cat([
+                sq[h0 * att.head_dim:(h0 + qh) * att.head_dim],
+                sk[rank * kvh * att.head_dim:(rank + 1) * kvh * att.head_dim],
+                sv[rank * kvh * att.head_dim:(rank + 1) * kvh * att.head_dim],
+            ], dim=0).contiguous())
+        else:
+            # qkv rows: [q(h0..h0+qh) | k(rank*kvh..) | v(rank*kvh..)]
+            qkv_w = att.qkv.weight.data
+            q, k, v = qkv_w.split(
+                [att.q_size, att.kv_size, att.kv_size], dim=0)
         att.qkv.weight = nn.Parameter(torch.cat([
             q[h0 * att.head_dim:(h0 + qh) * att.head_dim],
             k[rank * kvh * att.head_dim:(rank + 1) * kvh * att.head_dim],
@@ -458,9 +527,14 @@ def shard_flint_tp(model: FlintRef, world: int, rank: int, group=None) -> None:
         att.sink = nn.Parameter(att.sink.data[h0:h0 + qh].clone())
         # o_proj: column slice over this rank's head outputs; its output is a
         # partial sum across ranks
-        att.o.weight = nn.Parameter(
-            att.o.weight.data[:, h0 * att.head_dim:(h0 + qh) * att.head_dim]
-            .contiguous())
+        if att.o.__class__.__name__ == "PTQRLinear":
+            att.o.shard_cols(
+                (h0 * att.head_dim, (h0 + qh) * att.head_dim))
+        else:
+            att.o.weight = nn.Parameter(
+                att.o.weight.data[
+                    :, h0 * att.head_dim:(h0 + qh) * att.head_dim
+                ].contiguous())
         att._partial_output = True
 
         mlp = layer.mlp
