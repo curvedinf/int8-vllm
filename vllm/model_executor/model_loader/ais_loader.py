@@ -553,7 +553,12 @@ class AisModelLoader(DefaultModelLoader):
                     skip_experts=self._fused_experts is not None,
                 )
             if weights_iterator is None:
-                hf_folder, hf_weights_files, use_safetensors = self._prepare_weights(
+                (
+                    hf_folder,
+                    hf_weights_files,
+                    use_safetensors,
+                    _index_file,
+                ) = self._prepare_weights(
                     source.model_or_path,
                     source.subfolder,
                     source.revision,
