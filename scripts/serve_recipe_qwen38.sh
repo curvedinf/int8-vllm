@@ -711,6 +711,9 @@ start_server() {
     # self-disables for hidden 2048, but the explicit pin removes the
     # whole class of drift.
     export VLLM_GFX908_RESIDUAL_INT8="${VLLM_GFX908_RESIDUAL_INT8:-0}"
+    # Bolt-only scheduler levers: pin off for the Qwen recipe (same phantom-
+    # env containment as the residual seam).
+    export VLLM_BOLT_SHORT_PREFILL_COHORT="${VLLM_BOLT_SHORT_PREFILL_COHORT:-0}"
     exec setsid taskset -c "${CPUSET}" env -u HSA_OVERRIDE_GFX_VERSION \
       VLLM_API_KEY="${api_key}" \
   VLLM_GFX908_RESIDUAL_INT8="${VLLM_GFX908_RESIDUAL_INT8}" \

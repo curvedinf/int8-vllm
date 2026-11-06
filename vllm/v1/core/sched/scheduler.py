@@ -566,6 +566,22 @@ class Scheduler(SchedulerInterface):
         )
         self._prefix_bypassed_heads: set[str] = set()
 
+    def _select_waiting_queue_for_scheduling(self) -> RequestQueue | None:
+        """Waiting queue to draw an initial short-prefill cohort from.
+
+        Only WAITING requests that pass the cohort gate are candidates;
+        requests blocked on remote KV or connectors wait in their own
+        structures and never join a short cohort round."""
+        queue = self.waiting
+        while queue and not self._short_prefill_cohort_eligible(
+            queue.peek_request()
+        ):
+            # ineligible head cannot join this round; report None so the
+            # caller's `if queue and ...` skips the cohort fill rather than
+            # rescheduling around it.
+            return None
+        return queue if queue else None
+
     def _short_prefill_cohort_eligible(self, request: Request) -> bool:
         """Bound early single-page admission without delaying mature decoders."""
         horizon = self.max_num_running_reqs * (self.num_spec_tokens + 1)
