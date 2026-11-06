@@ -156,7 +156,8 @@ class AttentionRef(nn.Module):
         q = self.q_norm(q.view(B, S, self.num_heads, self.head_dim))
         k = self.k_norm(k.view(B, S, self.num_kv, self.head_dim))
         if self.rope is not None:
-            q, k = self.rope.apply_batched(q, k, positions)
+            pos = positions.to(q.device)
+            q, k = self.rope.apply_batched(q, k, pos)
         # PTQR student: emulate the deployed int8_block_g{G} KV cache — the
         # write quantizes K/V per (token, kv_head) vector exactly as
         # reshape_and_cache_g8 does; the attention then reads dequantized
