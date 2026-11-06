@@ -704,8 +704,16 @@ start_server() {
       export VLLM_CUSTOM_ALLREDUCE_ALGO=1stage
     fi
     cd "${WORKDIR}"
+    # The residual-INT8 decoder seam is a Bolt/LiLiCorr stack feature
+    # (hidden 1024/4096). Pin it OFF for this Qwen recipe: the flag was
+    # observed arriving set in workers with no in-tree/script/env setter
+    # found (2026-11-06 open diagnostic); the seam code now also
+    # self-disables for hidden 2048, but the explicit pin removes the
+    # whole class of drift.
+    export VLLM_GFX908_RESIDUAL_INT8="${VLLM_GFX908_RESIDUAL_INT8:-0}"
     exec setsid taskset -c "${CPUSET}" env -u HSA_OVERRIDE_GFX_VERSION \
       VLLM_API_KEY="${api_key}" \
+  VLLM_GFX908_RESIDUAL_INT8="${VLLM_GFX908_RESIDUAL_INT8}" \
       "${COMMON_ENV[@]}" \
   VLLM_SPEC_DEBUG_DUMP="${VLLM_SPEC_DEBUG_DUMP:-}" \
   VLLM_CAND_RING="${VLLM_CAND_RING:-}" \
