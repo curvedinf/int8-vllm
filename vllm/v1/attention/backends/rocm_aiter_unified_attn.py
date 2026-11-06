@@ -703,6 +703,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                                 flush=True,
                             )
                             _g8t.update(k=0.0, n=0)
+                _at_box = None  # set by the ATTNTRACE branch below
                 _ra8 = os.environ.get("VLLM_UA_READAUDIT_G8") or (
                     os.path.exists(
                         "/home/curved/vllm-gfx908/logs/serve_recipe_qwen38/READAUDITG8"
