@@ -109,9 +109,11 @@ class Rope:
         return rot(q), rot(k)
 
     def apply_batched(self, q, k, positions):
-        # q, k: [B, S, H, hd]; positions: [B, S]
-        cos = self.cos[positions].to(q.dtype)[:, :, None, :]  # [B,S,1,hd/2]
-        sin = self.sin[positions].to(k.dtype)[:, :, None, :]
+        # q, k: [B, S, H, hd]; positions: [B, S]. The fp32 tables ride the
+        # module .to(device); index on the tables' own device, then move.
+        pos = positions.to(self.cos.device)
+        cos = self.cos[pos].to(device=q.device, dtype=q.dtype)[:, :, None, :]
+        sin = self.sin[pos].to(device=k.device, dtype=k.dtype)[:, :, None, :]
 
         def rot(x):
             x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2:]
@@ -296,6 +298,14 @@ class FlintRef(nn.Module):
         )
         self.final_norm = RmsNorm(cfg.hidden_size, cfg.rms_norm_eps)
         self.lm_head = nn.Linear(cfg.hidden_size, cfg.vocab_size, bias=False)
+
+    def to(self, *args, **kwargs):
+        super().to(*args, **kwargs)
+        if self.rope is not None:
+            dev = self.embed.weight.device
+            self.rope.cos = self.rope.cos.to(dev)
+            self.rope.sin = self.rope.sin.to(dev)
+        return self
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor | None = None):
         # input_ids: [B, S] (or [T] -> single sequence); logits [B, S, V] fp32
