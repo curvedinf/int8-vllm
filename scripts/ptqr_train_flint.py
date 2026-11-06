@@ -154,9 +154,9 @@ def main():
         teacher = FlintRef(cfg, device="cpu")
         from ptqr_flint_model import load_flint_shards, shard_flint_tp
         if world > 1:
-            # stream + shard on CPU, then move the rank's slice to device
+            # stream (name-map + expert EP assign); build the student from
+            # the UNSHARDED teacher, then shard each separately
             load_flint_shards(teacher, args.model, world, rank)
-            shard_flint_tp(teacher, world, rank, group=tp_group)
             teacher.to(device)
         else:
             from ptqr_flint_model import load_flint_state
@@ -166,15 +166,16 @@ def main():
     for prm in teacher.parameters():
         prm.requires_grad_(False)
 
+    from ptqr_flint_model import shard_flint_tp as _shard
     if args.no_ptqr:
         student, replaced = copy.deepcopy(teacher), {}
     else:
         student, replaced = build_student(teacher, args.weight_group,
                                           args.kv_group)
-    if world > 1 and not args.no_ptqr:
-        from ptqr_flint_model import shard_flint_tp as _shard
-        # student linears are PTQRLinear now; shard_flint_tp handles both
-        _shard(student, world, rank, group=tp_group)
+    if world > 1:
+        _shard(teacher, world, rank, group=tp_group)
+        if not args.no_ptqr:
+            _shard(student, world, rank, group=tp_group)
     student.to(device)
 
     n_lin = len(replaced)
