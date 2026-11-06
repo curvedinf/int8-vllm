@@ -617,15 +617,37 @@ def tp_sum(x: torch.Tensor) -> torch.Tensor:
     return _TPSum.apply(x.contiguous())
 
 
+class _TPGather(torch.autograd.Function):
+    """all_gather with autograd: backward scatters each rank's grad slice
+    back to its local shard (grad of gather w.r.t. the local part is the
+    selection matrix)."""
+
+    @staticmethod
+    def forward(ctx, x, dim, world, group):
+        import torch.distributed as dist
+
+        ctx.dim, ctx.world, ctx.group = dim, world, group
+        parts = [torch.empty_like(x) for _ in range(world)]
+        dist.all_gather(parts, x.contiguous(), group=group)
+        return torch.cat(parts, dim=dim)
+
+    @staticmethod
+    def backward(ctx, g):
+        import torch.distributed as dist
+
+        world, group = ctx.world, ctx.group
+        rank = dist.get_rank(group=group) if group is not None else dist.get_rank()
+        n = g.shape[ctx.dim] // world
+        return (g.narrow(ctx.dim, rank * n, n).contiguous(), None, None, None)
+
+
 def _tp_gather_logits(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
     import torch.distributed as dist
 
     world = _TP_STATE["world"]
     if world == 1 or not dist.is_initialized():
         return x
-    parts = [torch.empty_like(x) for _ in range(world)]
-    dist.all_gather(parts, x.contiguous(), group=_TP_STATE["group"])
-    return torch.cat(parts, dim=dim)
+    return _TPGather.apply(x, dim, world, _TP_STATE["group"])
 
 
 if __name__ == "__main__":
