@@ -116,6 +116,9 @@ def main():
     p.add_argument("--eval_steps", type=int, default=10)
     p.add_argument("--save_every", type=int, default=50)
     p.add_argument("--tiny", action="store_true")
+    p.add_argument("--teacher_stream", action="store_true",
+                   help="layer-streamed mmap teacher (full-expert runs; "
+                        "no resident teacher anywhere)")
     p.add_argument("--n_experts_keep", type=int, default=0,
                    help="smoke only: keep the first N experts per MoE layer "
                         "(0 = all). Validates real-checkpoint wiring without "
@@ -141,6 +144,7 @@ def main():
         device = f"cuda:{local_rank}" if device != "cpu" else device
         torch.cuda.set_device(local_rank) if device != "cpu" else None
 
+    prm_frozen = False
     if args.tiny:
         cfg = flint_tiny_config()
         cfg.attention_bias = False
@@ -153,30 +157,52 @@ def main():
             cfg.num_experts = args.n_experts_keep
             cfg.num_experts_per_tok = min(cfg.num_experts_per_tok,
                                           args.n_experts_keep)
-        teacher = FlintRef(cfg, device="cpu")
-        from ptqr_flint_model import load_flint_shards, shard_flint_tp
-        if world > 1:
-            # stream (name-map + expert EP assign); build the student from
-            # the UNSHARDED teacher, then shard each separately
-            load_flint_shards(teacher, args.model, world, rank)
-            teacher.to(device)
+        if world > 1 and args.teacher_stream:
+            from ptqr_flint_model import StreamedFlintTeacher
+            teacher = StreamedFlintTeacher(
+                cfg, args.model, world, rank,
+                device=device if device != "cpu" else "cpu")
+            teacher.eval()
+            # streaming teacher bypasses the resident path entirely
+            prm_frozen = True
         else:
-            from ptqr_flint_model import load_flint_state
-            load_flint_state(teacher, args.model)
-            teacher.to(device)
+            teacher = FlintRef(cfg, device="cpu")
+            prm_frozen = False
+        from ptqr_flint_model import load_flint_shards, shard_flint_tp
+        if prm_frozen is False:
+            if world > 1:
+                # stream (name-map + expert EP assign); build the student
+                # from the UNSHARDED teacher, then shard each separately
+                load_flint_shards(teacher, args.model, world, rank)
+                teacher.to(device)
+            else:
+                from ptqr_flint_model import load_flint_state
+                load_flint_state(teacher, args.model)
+                teacher.to(device)
     teacher.eval()
-    for prm in teacher.parameters():
-        prm.requires_grad_(False)
+    if prm_frozen is False:
+        for prm in teacher.parameters():
+            prm.requires_grad_(False)
 
     from ptqr_flint_model import shard_flint_tp as _shard
-    if args.no_ptqr:
+    if args.teacher_stream and world > 1:
+        # student needs a resident source: build an unsharded skeleton with
+        # real weights streamed from the same mmap (tiny CPU peak: one
+        # tensor at a time), then PTQR-swap and shard it
+        from ptqr_flint_model import load_flint_shards
+        skeleton = FlintRef(cfg, device="cpu")
+        load_flint_shards(skeleton, args.model, world, rank)
+        student, replaced = build_student(skeleton, args.weight_group,
+                                          args.kv_group)
+        _shard(student, world, rank, group=tp_group)
+        del skeleton
+    elif args.no_ptqr:
         student, replaced = copy.deepcopy(teacher), {}
     else:
         student, replaced = build_student(teacher, args.weight_group,
                                           args.kv_group)
-    if world > 1:
-        _shard(teacher, world, rank, group=tp_group)
-        if not args.no_ptqr:
+        if world > 1:
+            _shard(teacher, world, rank, group=tp_group)
             _shard(student, world, rank, group=tp_group)
     student.to(device)
 

@@ -787,3 +787,205 @@ def load_flint_shards(model: FlintRef, ckpt_dir: str, world: int, rank: int,
                         + ("norm1" if "input_" in name else "norm2") + ".weight",
                         t)
                 del t
+
+
+class StreamedFlintTeacher(nn.Module):
+    """Layer-streamed TP teacher: weights never resident (host or device).
+
+    The 39.8B bf16 teacher is 80 GB - 4 TP shards (20 GB each) OOM the
+    61 GB host and cannot share a 32 GB MI100 with the student (whose bf16
+    masters alone are ~20 GB/rank). This teacher keeps ONE layer's rank
+    shard staged on the GPU at a time (~0.5 GB), pulled straight from the
+    mmap'd safetensors; the rest of the model never materializes.
+
+    Numerically identical to the resident sharded FlintRef: each layer is
+    the same modules with the same shard_flint_tp slicing, and partials
+    reduce through tp_sum like the resident path.
+    """
+
+    def __init__(self, cfg, ckpt_dir: str, world: int, rank: int,
+                 device="cuda", dtype=torch.bfloat16):
+        super().__init__()
+        import glob
+        import json
+        import os
+
+        from safetensors import safe_open
+
+        self.cfg, self.world, self.rank, self.device = cfg, world, rank, device
+        self.dtype = dtype
+        idx_path = os.path.join(ckpt_dir, "model.safetensors.index.json")
+        self.weight_map = json.load(open(idx_path))["weight_map"]
+        self.ckpt_dir = ckpt_dir
+        self._handles: dict[str, object] = {}
+
+        # rank sharding plan (mirrors shard_flint_tp)
+        V = cfg.vocab_size
+        self.v0, self.v1 = rank * V // world, (rank + 1) * V // world
+        nh, nkv = cfg.num_attention_heads, cfg.num_key_value_heads
+        self.qh, self.kvh = nh // world, nkv // world
+        self.h0 = rank * self.qh
+        self.hd = cfg.head_dim
+        self.keep = list(range(rank, cfg.num_experts, world))
+        g_inter = cfg.intermediate_size
+        self.r0, self.r1 = rank * g_inter // world, (rank + 1) * g_inter // world
+        sh_inter = cfg.shared_expert_intermediate_size
+        self.sr0, self.sr1 = rank * sh_inter // world, (rank + 1) * sh_inter // world
+
+        # rope tables (replicated; small)
+        rope = Rope(cfg.head_dim, cfg.max_position_embeddings,
+                    cfg.rope_theta, device)
+        self.cos, self.sin = rope.cos, rope.sin
+        self._norm_eps = cfg.rms_norm_eps
+        self._window = cfg.sliding_window
+        self._layer_types = cfg.layer_types
+        self._no_rope = set(cfg.no_rope_layer_indices or [])
+        self._mlp_only = set(cfg.mlp_only_layers or [])
+        self._top_k = cfg.num_experts_per_tok
+        self._V = V
+
+    def _t(self, name: str, sl=None) -> torch.Tensor:
+        f = self.weight_map[name]
+        h = self._handles.get(f)
+        if h is None:
+            from safetensors import safe_open
+
+            h = safe_open(os.path.join(self.ckpt_dir, f),
+                          framework="pt", device="cpu")
+            self._handles[f] = h
+        t = h.get_tensor(name).to(self.dtype)
+        return t[sl] if sl is not None else t
+
+    def _rms(self, x, w):
+        x32 = x.float()
+        v = x32.pow(2).mean(-1, keepdim=True)
+        return ((1.0 + w.float()) * (x32 * torch.rsqrt(v + self._norm_eps))
+                ).to(x.dtype)
+
+    @torch.no_grad()
+    def forward(self, input_ids, positions=None):
+        B, S = input_ids.shape
+        dev = self.device
+        if positions is None:
+            positions = torch.arange(S, device=dev)
+        pos = positions.unsqueeze(0).expand(B, S) if positions.dim() == 1 \
+            else positions
+
+        # embed (vocab rows; partial sum)
+        local = (input_ids >= self.v0) & (input_ids < self.v1)
+        embw = self._t("model.embed_tokens.weight",
+                       slice(self.v0, self.v1)).to(dev)
+        x = torch.zeros(B, S, self.cfg.hidden_size, dtype=self.dtype, device=dev)
+        rows = local
+        if rows.any():
+            x[rows] = torch.nn.functional.embedding(
+                input_ids[rows] - self.v0, embw)
+        x = tp_sum(x)
+
+        for li in range(self.cfg.num_hidden_layers):
+            x = self._layer(li, x, pos)
+
+        h = self._rms(x, self._t("model.norm.weight").to(dev))
+        lhw = self._t("lm_head.weight", slice(self.v0, self.v1)).to(dev)
+        logits = torch.nn.functional.linear(h, lhw).float()
+        return _tp_gather_logits(logits, dim=-1)
+
+    def _layer(self, li, x, pos):
+        dev = self.device
+        p = f"model.layers.{li}"
+        # --- attention ---
+        a = f"{p}.self_attn"
+        qw = self._t(f"{a}.q_proj.weight")
+        kw = self._t(f"{a}.k_proj.weight")
+        vw = self._t(f"{a}.v_proj.weight")
+        qkv = torch.cat([qw, kw, vw], dim=0).to(dev)
+        hd, qh, kvh = self.hd, self.qh, self.kvh
+        h0 = self.h0
+        qs, ks, vs = qkv.shape[0] // (qh + 2 * kvh) // hd, qh * hd, kvh * hd
+        q, k, v = qkv.split([qh * hd, kvh * hd, kvh * hd], dim=0)
+        ow = self._t(f"{a}.o_proj.weight").to(dev)
+        sink = self._t(f"{a}.softmax_offset").to(dev)  # [all heads]
+        sink = sink[h0:h0 + qh]
+
+        qn = self._t(f"{a}.q_norm.weight").to(dev)
+        kn = self._t(f"{a}.k_norm.weight").to(dev)
+
+        t = x.shape[0] * x.shape[1]
+        x2 = x.reshape(t, -1)
+        qkv_o = torch.nn.functional.linear(x2, qkv)
+        q, k, v = qkv_o.split([qh * hd, kvh * hd, kvh * hd], dim=-1)
+        q = self._rms(q.view(t, qh, hd), qn)
+        k = self._rms(k.view(t, kvh, hd), kn)
+        if li not in self._no_rope:
+            cos = self.cos[pos].to(dev, q.dtype)[:, :, None, :].reshape(-1, 1, hd // 2)
+            sin = self.sin[pos].to(dev, q.dtype)[:, :, None, :].reshape(-1, 1, hd // 2)
+            def rot(z):
+                z1, z2 = z[..., :hd // 2], z[..., hd // 2:]
+                return torch.cat((z1 * cos - z2 * sin, z1 * sin + z2 * cos), -1)
+            q, k = rot(q), rot(k)
+        rep = qh // kvh
+        k = k.repeat_interleave(rep, dim=1)
+        v = v.view(t, kvh, hd).repeat_interleave(rep, dim=1)
+        scores = torch.einsum("thd,thd->hqk",
+                              q * (hd ** -0.5), k).float().view(t, qh, t)
+        scores = scores + torch.where(torch.isfinite(sink), sink,
+                                      torch.zeros_like(sink)).view(1, -1, 1, 1)
+        qi = torch.arange(t, device=dev)[:, None]
+        ki = torch.arange(t, device=dev)[None, :]
+        mask = ki > qi
+        if self._layer_types[li] == "sliding_attention":
+            mask = mask | (qi - ki >= self._window)
+        mask = mask[None].expand(qh, -1, -1)
+        dead = ~torch.isfinite(sink).view(-1, 1, 1)
+        attn = torch.softmax(
+            scores.masked_fill(mask | dead, float("-inf")), dim=-1)
+        attn = torch.nan_to_num(attn)
+        out = torch.einsum("hqk,khd->qhd", attn, v).reshape(t, qh * hd)
+        attn_out = torch.nn.functional.linear(out, ow)  # partial
+        x = x + tp_sum(attn_out).view(x.shape)
+
+        # --- mlp ---
+        if li in self._mlp_only:
+            x = x + self._mlp_dense(f"{p}.mlp", x, self.r0, self.r1)
+        else:
+            # router (replicated)
+            rw = self._t(f"{p}.mlp.gate.weight").to(dev)
+            logits_r = torch.nn.functional.linear(x.reshape(t, -1), rw).float()
+            probs = torch.sigmoid(logits_r.reshape(x.shape[0], x.shape[1], -1)
+                                  .reshape(-1, rw.shape[0]))
+            top_p, top_i = torch.topk(probs, self._top_k, dim=-1)
+            top_p = top_p / top_p.sum(-1, keepdim=True)
+            routed = torch.zeros_like(x)
+            for gid in self.keep:
+                sel = (top_i == gid)
+                if not sel.any():
+                    continue
+                w = (top_p * sel).sum(-1)
+                rowsm = sel.any(-1)
+                ex = self._expert(f"{p}.mlp.experts.{gid}",
+                                  x.reshape(t, -1)[rowsm])
+                routed.reshape(t, -1)[rowsm] += ex * w[rowsm, None].to(x.dtype)
+            shared = self._mlp_dense(f"{p}.mlp.shared_expert", x,
+                                     self.sr0, self.sr1)
+            x = x + tp_sum(routed + shared)
+        return x
+
+    def _mlp_dense(self, prefix, x, a0, a1):
+        dev = self.device
+        t = x.shape[0] * x.shape[1]
+        g = self._t(f"{prefix}.gate_proj.weight", slice(a0, a1)).to(dev)
+        u = self._t(f"{prefix}.up_proj.weight", slice(a0, a1)).to(dev)
+        d = self._t(f"{prefix}.down_proj.weight",
+                    (slice(None), slice(a0, a1))).to(dev)
+        h = torch.nn.functional.linear(x.reshape(t, -1), g)
+        h = torch.nn.functional.silu(h) * torch.nn.functional.linear(
+            x.reshape(t, -1), u)
+        return torch.nn.functional.linear(h, d).view(x.shape)
+
+    def _expert(self, prefix, xr):
+        dev = self.device
+        g = self._t(f"{prefix}.gate_proj.weight").to(dev)
+        u = self._t(f"{prefix}.up_proj.weight").to(dev)
+        d = self._t(f"{prefix}.down_proj.weight").to(dev)
+        h = torch.nn.functional.silu(xr @ g.t()) * (xr @ u.t())
+        return h @ d.t()
