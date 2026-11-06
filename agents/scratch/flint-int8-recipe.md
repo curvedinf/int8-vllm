@@ -168,3 +168,22 @@ rung ladder (R10S60 analog) with:
   repack-cache load phase.
 - Boot gate key note: /etc/llama/llama-api.key missing; used
   VLLM_API_KEY env override (read_api_key supports it) for gate boots.
+
+## RUNG-0 SMOKE PASS (2026-11-06 23:59)
+
+TP4 real-Flint trainer smoke COMPLETED: 3 steps, all 4 ranks identical
+loss (323.79 @step0, tau=1.0, 4-experts-kept smoke config), SR-SGD updates
+applied, clean exit. Full pipeline exercised: 80GB ckpt stream + name-map
++ expert EP assign -> student PTQR swap (573 surfaces) -> TP4 sharding of
+teacher AND student -> deployed-quant forward (W8A8 GS128 fake-quant +
+int8-block KV fake-quant post-rope) -> CE+KD loss -> backward -> SGD.
+High absolute loss expected (4/256 experts + tau=1 dither; wiring gate,
+not quality). Debug trail to green (7 commits): experts-before-mlp loader
+branch order; shared-expert own-intermediate slicing (then superseded by
+name-map-only loader); router rows follow reduced experts; ProcessGroup
+out of module attrs (deepcopy); shard AFTER student build; PTQR-aware MLP
+lockstep slicing (48-vs-12 scale broadcast); rope tables follow .to();
+student unfreeze after deepcopy; autograd-aware TP gather (grad scatter).
+Full-run blockers remaining: layer-streamed teacher (20GB/rank bf16 x4
+OOMs 61GB host + won't fit 32GB MI100 alongside student), then rung
+ladder + gates.
