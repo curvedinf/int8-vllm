@@ -115,3 +115,13 @@ router excluded), corpus 4.22M tok, TP4 equivalence PASS (experts shard
 BY EXPERT - double-sharding was the bug), shard-streaming ckpt loader,
 PTQRLinear-aware student sharding, torchrun launch path. Rung-0 launch
 is next after the boot gate clears (GPUs are busy serving the boot).
+
+## Boot-fix ledger (append-only, through boot 17)
+
+Pattern observed: ~half the blockers are LATENT fork attributes/paths that
+gfx908 production never executed and the merged upstream flows now reach:
+is_encoder_only (guard), num_layers/num_state_types on MambaSpecDecodeGPUContext
+(derive from state arrays), enable_fused_gdn_decode (never assigned anywhere;
+guard falls back to the spec_decode attr, False on ROCm). Plus the phantom
+residual seam (contained at 3 layers). Boot 15 = first full worker init;
+16 = engine assembly reached; 17 in flight.
