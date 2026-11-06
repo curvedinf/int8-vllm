@@ -121,6 +121,20 @@ def main():
     torch.manual_seed(0)
     device = "cuda:0" if torch.cuda.is_available() and not args.tiny else "cpu"
 
+    # ---- TP4 launch (torchrun): shard teacher from the streamed checkpoint
+    # and shard the PTQR-swapped student in place.
+    import os as _os
+    world = int(_os.environ.get("WORLD_SIZE", "1"))
+    rank = int(_os.environ.get("RANK", "0"))
+    local_rank = int(_os.environ.get("LOCAL_RANK", "0"))
+    tp_group = None
+    if world > 1:
+        import torch.distributed as dist
+        dist.init_process_group("nccl" if device != "cpu" else "gloo")
+        tp_group = dist.group.WORLD
+        device = f"cuda:{local_rank}" if device != "cpu" else device
+        torch.cuda.set_device(local_rank) if device != "cpu" else None
+
     if args.tiny:
         cfg = flint_tiny_config()
         cfg.attention_bias = False
@@ -129,9 +143,17 @@ def main():
             torch.nn.init.normal_(prm, std=0.02)
     else:
         cfg = load_flint_config(args.model)
-        teacher = FlintRef(cfg, device=device).to(device)
-        from ptqr_flint_model import load_flint_state
-        load_flint_state(teacher, args.model)
+        teacher = FlintRef(cfg, device="cpu")
+        from ptqr_flint_model import load_flint_shards, shard_flint_tp
+        if world > 1:
+            # stream + shard on CPU, then move the rank's slice to device
+            load_flint_shards(teacher, args.model, world, rank)
+            shard_flint_tp(teacher, world, rank, group=tp_group)
+            teacher.to(device)
+        else:
+            from ptqr_flint_model import load_flint_state
+            load_flint_state(teacher, args.model)
+            teacher.to(device)
     teacher.eval()
     for prm in teacher.parameters():
         prm.requires_grad_(False)
@@ -141,6 +163,10 @@ def main():
     else:
         student, replaced = build_student(teacher, args.weight_group,
                                           args.kv_group)
+    if world > 1 and not args.no_ptqr:
+        from ptqr_flint_model import shard_flint_tp as _shard
+        # student linears are PTQRLinear now; shard_flint_tp handles both
+        _shard(student, world, rank, group=tp_group)
     student.to(device)
 
     n_lin = len(replaced)
