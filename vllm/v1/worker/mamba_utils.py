@@ -1332,7 +1332,9 @@ class MambaSpecDecodeGPUContext:
         """
         if num_reqs == 0 or not self.is_initialized:
             return
-        total_states = self.num_layers * self.num_state_types
+        # state arrays are sized num_layers * num_state_types at create();
+        # the attrs themselves were never set on this class (fork lineage)
+        total_states = self.state_base_addrs.shape[0]
         grid = (num_reqs, total_states, _TEMPORAL_TILES)
         seed_spec_window_kernel[grid](
             state_idx_gpu,
