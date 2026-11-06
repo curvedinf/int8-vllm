@@ -312,11 +312,14 @@ def residual_norm(norm, x, residual=None, *, emit_quant=False, quantized=False):
         if residual is None:
             return norm(x), x
         return norm(x, residual)
-    logger.info_once(
-        "GS128 INT8 decoder seams active: FP32 scales and reductions; "
-        "direct normalized payloads; Bolt and LiLiCorr text stack",
-        scope="process",
-    )
+    if not torch.compiler.is_compiling():
+        # dynamo fullgraph rejects Logger methods; the seam log fires once
+        # on the eager path instead.
+        logger.info_once(
+            "GS128 INT8 decoder seams active: FP32 scales and reductions; "
+            "direct normalized payloads; Bolt and LiLiCorr text stack",
+            scope="process",
+        )
     epsilon = getattr(norm, "variance_epsilon", None)
     if epsilon is None:
         epsilon = norm.eps
