@@ -149,7 +149,7 @@ class AiterW8A16LinearKernel(MPLinearKernel):
         if c.zero_points:
             return False, "Zero points are not supported by the AITER blockscale path"
 
-        if c.has_g_idx:
+        if getattr(c, "has_g_idx", False):
             return False, "Activation reordering (g_idx) not supported"
 
         gs = c.group_size

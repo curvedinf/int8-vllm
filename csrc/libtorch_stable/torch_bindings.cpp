@@ -17,11 +17,9 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "gptq_w8a16_repacked_gemm(Tensor a, Tensor b_q_weight, "
       "Tensor b_gptq_qzeros, Tensor b_gptq_scales, bool use_v2_format) "
       "-> Tensor");
-  ops.def("gptq_shuffle(Tensor! q_weight, Tensor q_perm, int bit) -> ()");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("gptq_w8a16_repacked_gemm",
            TORCH_BOX(&gptq_w8a16_repacked_gemm));
-  ops.impl("gptq_shuffle", TORCH_BOX(&gptq_shuffle));
 }
