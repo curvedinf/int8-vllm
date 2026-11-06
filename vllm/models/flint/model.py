@@ -305,25 +305,36 @@ class FlintAttention(nn.Module):
             prefix=f"{prefix}.attn",
             sinks=self.softmax_offset,
         )
-        # The fused kernel writes the KV cache itself (in the FlashInfer layout)
-        # and then calls the attention backend directly. Imported here so the
-        # module imports on platforms without FlashInfer.
-        from vllm.v1.attention.backends.flashinfer import (
-            FlashInferImpl,
-            FlashInferMetadata,
-            FlashInferTrtllmAPIDecode,
-        )
+        # ROCm (gfx908 int8 fork): no FlashInfer. The AITER unified-attention
+        # backend owns the KV-cache write (int8_block_g{G} quantized), sinks,
+        # and per-layer sliding windows; the fused qk-norm/rope/cache-write and
+        # Flint decode kernels stay off and the eager fallback below runs.
+        self._flashinfer_path = False
+        if not current_platform.is_rocm():
+            # The fused kernel writes the KV cache itself (in the FlashInfer
+            # layout) and then calls the attention backend directly. Imported
+            # here so the module imports on platforms without FlashInfer.
+            from vllm.v1.attention.backends.flashinfer import (
+                FlashInferImpl,
+                FlashInferMetadata,
+                FlashInferTrtllmAPIDecode,
+            )
 
-        impl = self.attn.impl
-        assert isinstance(impl, FlashInferImpl), "Flint requires FlashInfer attention"
-        self._metadata_cls = FlashInferMetadata
-        self._decode_cls = FlashInferTrtllmAPIDecode
-        assert get_current_vllm_config().model_config.dtype == torch.bfloat16
-        assert self.attn.kv_cache_dtype in ("auto", "bfloat16")
-        assert impl.kv_sharing_target_layer_name is None
-        self.impl = impl
+            impl = self.attn.impl
+            assert isinstance(
+                impl, FlashInferImpl
+            ), "Flint requires FlashInfer attention"
+            self._metadata_cls = FlashInferMetadata
+            self._decode_cls = FlashInferTrtllmAPIDecode
+            assert get_current_vllm_config().model_config.dtype == torch.bfloat16
+            assert self.attn.kv_cache_dtype in ("auto", "bfloat16")
+            assert impl.kv_sharing_target_layer_name is None
+            self.impl = impl
+            self._flashinfer_path = True
+        else:
+            assert get_current_vllm_config().model_config.dtype == torch.bfloat16
         # Flint decode attention and the fused low-latency decode path.
-        self.flint_decode = _flint_kernels(quant_config)
+        self.flint_decode = _flint_kernels(quant_config) and self._flashinfer_path
         # Largest pure-decode batch served by the Flint kernel; beyond it
         # FlashInfer is faster on the full-attention layers at long context.
         self.max_decode_batch = 64 if is_sliding else 8
@@ -337,6 +348,27 @@ class FlintAttention(nn.Module):
         self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
+        if not self._flashinfer_path:
+            # ROCm path: no fused writer. Apply the per-head QK RMSNorm and
+            # RoPE eagerly (the no-RoPE full-attention layers skip rotary),
+            # then hand q/k/v to the attention backend — the AITER unified
+            # backend writes the (int8-quantized) KV cache itself.
+            num_tokens = qkv.shape[0]
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            q = self.q_norm(q.view(num_tokens, self.num_heads, self.head_dim))
+            k = self.k_norm(k.view(num_tokens, self.num_kv_heads, self.head_dim))
+            if self.rotary_emb is not None:
+                q, k = self.rotary_emb(positions, q, k)
+            attn_output = torch.empty_like(q)
+            unified_attention_with_output(
+                q.view(num_tokens, self.num_heads, self.head_dim),
+                k.view(num_tokens, self.num_kv_heads, self.head_dim),
+                v.view(num_tokens, self.num_kv_heads, self.head_dim),
+                attn_output.view(num_tokens, self.num_heads, self.head_dim),
+                self.attn.layer_name,
+            )
+            output, _ = self.o_proj(attn_output)
+            return output
         k_cache, v_cache, layer_slots = self._cache_views()
         plan = self._decode_plan() if self.flint_decode else None
         q = qk_norm_rope_cache(
