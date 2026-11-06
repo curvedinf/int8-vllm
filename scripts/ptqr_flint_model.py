@@ -108,6 +108,17 @@ class Rope:
 
         return rot(q), rot(k)
 
+    def apply_batched(self, q, k, positions):
+        # q, k: [B, S, H, hd]; positions: [B, S]
+        cos = self.cos[positions].to(q.dtype)[:, :, None, :]  # [B,S,1,hd/2]
+        sin = self.sin[positions].to(k.dtype)[:, :, None, :]
+
+        def rot(x):
+            x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2:]
+            return torch.cat((x1 * cos - x2 * sin, x1 * sin + x2 * cos), dim=-1)
+
+        return rot(q), rot(k)
+
 
 class AttentionRef(nn.Module):
     def __init__(self, cfg, layer_idx: int, rope: Rope | None, device):
@@ -130,38 +141,67 @@ class AttentionRef(nn.Module):
         self.sink = nn.Parameter(torch.zeros(self.num_heads), requires_grad=False)
 
     def forward(self, x, positions, cu_len=None):
-        t = x.shape[0]
+        # x: [B, S, H] (or [T, H] treated as a single sequence)
+        squeeze = x.dim() == 2
+        if squeeze:
+            x = x.unsqueeze(0)
+        B, S, _ = x.shape
+        if positions is None:
+            positions = torch.arange(S, device=x.device)
+        if positions.dim() == 1:
+            positions = positions.unsqueeze(0).expand(B, S)
+
         qkv = self.qkv(x)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q = self.q_norm(q.view(t, self.num_heads, self.head_dim))
-        k = self.k_norm(k.view(t, self.num_kv, self.head_dim))
+        q = self.q_norm(q.view(B, S, self.num_heads, self.head_dim))
+        k = self.k_norm(k.view(B, S, self.num_kv, self.head_dim))
         if self.rope is not None:
-            q, k = self.rope.apply(q, k, positions)
+            q, k = self.rope.apply_batched(q, k, positions)
+        # PTQR student: emulate the deployed int8_block_g{G} KV cache — the
+        # write quantizes K/V per (token, kv_head) vector exactly as
+        # reshape_and_cache_g8 does; the attention then reads dequantized
+        # values. Teacher leaves this unset.
+        kvg = getattr(self, "kv_fake_quant_group", None)
+        if kvg is not None:
+            from ptqr_train_target import kv_block_quant_fake
+            k = kv_block_quant_fake(k, group=kvg)
+            v = kv_block_quant_fake(v.view(B, S, self.num_kv, self.head_dim),
+                                    group=kvg)
+
         if self.num_kv != self.num_heads:
             rep = self.num_heads // self.num_kv
-            k = k.repeat_interleave(rep, dim=1)
-            v = v.view(t, self.num_kv, self.head_dim).repeat_interleave(rep, dim=1)
+            k = k.repeat_interleave(rep, dim=2)
+            v = v.view(B, S, self.num_kv, self.head_dim).repeat_interleave(
+                rep, dim=2)
 
-        scores = torch.einsum("qhd,khd->hqk", q * self.scale, k).float()
-        # sinks: additive per-head bias on in-window scores
+        # [B, H, S, S] with causal + optional sliding window
+        q_ = (q * self.scale).permute(0, 2, 1, 3)
+        k_ = k.permute(0, 2, 1, 3)
+        v_ = v.permute(0, 2, 1, 3)
+        scores = torch.matmul(q_, k_.transpose(-1, -2)).float()
         sink = self.sink.float()
         finite = torch.isfinite(sink)
-        scores = scores + torch.where(finite, sink, torch.zeros_like(sink))[:, None, None]
+        scores = scores + torch.where(
+            finite, sink, torch.zeros_like(sink)).view(1, -1, 1, 1)
 
-        q_idx = torch.arange(t, device=x.device)[:, None]
-        k_idx = torch.arange(t, device=x.device)[None, :]
-        mask = k_idx > q_idx  # causal
-        if self.window > 0:
-            mask = mask | (q_idx - k_idx >= self.window)
-        mask = mask[None].expand(self.num_heads, -1, -1)
-        # -inf sink heads attend nothing (padding heads must not emit NaN)
-        dead = ~finite.view(-1, 1, 1)
-        mask = mask | dead
-        scores = scores.masked_fill(mask, float("-inf"))
-        attn = torch.softmax(scores, dim=-1)
-        attn = torch.nan_to_num(attn)  # fully-masked dead heads -> 0
-        out = torch.einsum("hqk,khd->qhd", attn, v.to(attn.dtype))
-        return self.o(out.reshape(t, self.num_heads * self.head_dim))
+        if getattr(self, "_mask_cache", None) is None or \
+                self._mask_cache.shape[-1] < S or self._mask_cache.device != x.device:
+            big = max(S, 128)
+            q_idx = torch.arange(big, device=x.device)[:, None]
+            k_idx = torch.arange(big, device=x.device)[None, :]
+            m = k_idx > q_idx
+            if self.window > 0:
+                m = m | (q_idx - k_idx >= self.window)
+            self._mask_cache = ~m  # allowed
+        allowed = self._mask_cache[:S, :S].to(x.device)
+        dead = ~finite.view(1, -1, 1, 1)
+        attn = torch.softmax(scores.masked_fill(
+            (~allowed[None, None]) | dead, float("-inf")), dim=-1)
+        attn = torch.nan_to_num(attn)
+        out = torch.matmul(attn.to(v_.dtype), v_).permute(0, 2, 1, 3)
+        out = out.reshape(B, S, self.num_heads * self.head_dim)
+        out = self.o(out)
+        return out.squeeze(0) if squeeze else out
 
 
 class MlpRef(nn.Module):
@@ -215,7 +255,7 @@ class LayerRef(nn.Module):
         self.mlp = (MlpRef(cfg, cfg.intermediate_size) if dense
                     else MoeRef(cfg))
 
-    def forward(self, x, positions):
+    def forward(self, x, positions, cu_len=None):
         x = x + self.attn(self.norm1(x), positions)
         x = x + self.mlp(self.norm2(x))
         return x
@@ -243,13 +283,20 @@ class FlintRef(nn.Module):
         self.lm_head = nn.Linear(cfg.hidden_size, cfg.vocab_size, bias=False)
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor | None = None):
+        # input_ids: [B, S] (or [T] -> single sequence); logits [B, S, V] fp32
+        squeeze = input_ids.dim() == 1
+        ids = input_ids.unsqueeze(0) if squeeze else input_ids
+        B, S = ids.shape
         if positions is None:
-            positions = torch.arange(input_ids.shape[0], device=input_ids.device)
-        x = self.embed(input_ids)
+            positions = torch.arange(S, device=ids.device)
+        if positions.dim() == 1:
+            positions = positions.unsqueeze(0).expand(B, S)
+        x = self.embed(ids)
         for layer in self.layers:
             x = layer(x, positions)
         h = self.final_norm(x)
-        return self.lm_head(h).float()
+        logits = self.lm_head(h).float()
+        return logits.squeeze(0) if squeeze else logits
 
 
 _HF_MAP = (  # checkpoint name -> attribute path in FlintRef
