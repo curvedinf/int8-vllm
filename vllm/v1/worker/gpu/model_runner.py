@@ -1021,7 +1021,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         randomize_inputs: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        if self.is_encoder_only:
+        if getattr(self, "is_encoder_only", False):
             empty = torch.empty(0, device=self.device)
             return empty, empty
         if skip_attn and not is_profile:
