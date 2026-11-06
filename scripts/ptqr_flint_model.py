@@ -50,7 +50,7 @@ def flint_tiny_config() -> SimpleNamespace:
         moe_intermediate_size=128,
         shared_expert_intermediate_size=256,
         num_attention_heads=8,
-        num_key_value_heads=2,
+        num_key_value_heads=4,
         head_dim=32,
         num_hidden_layers=4,
         num_experts=8,
@@ -240,7 +240,12 @@ class MoeRef(nn.Module):
         top_p, top_i = torch.topk(probs, self.top_k, dim=-1)
         top_p = top_p / top_p.sum(-1, keepdim=True)
         routed = torch.zeros_like(x)
-        for e, expert in enumerate(self.experts):
+        # under TP sharding self.experts holds this rank's slice but the
+        # router emits GLOBAL expert ids; match on the global id.
+        expert_ids = getattr(self, "_expert_ids", None) or list(
+            range(len(self.experts))
+        )
+        for e, expert in zip(expert_ids, self.experts):
             sel = (top_i == e)
             if not sel.any():
                 continue
@@ -275,6 +280,7 @@ class FlintRef(nn.Module):
     def __init__(self, cfg: SimpleNamespace, device="cpu"):
         super().__init__()
         self.cfg = cfg
+        self._tp_world = 1
         max_pos = cfg.max_position_embeddings
         self.rope = Rope(cfg.head_dim, max_pos, cfg.rope_theta, device) \
             if cfg.rope_theta else None
@@ -299,11 +305,12 @@ class FlintRef(nn.Module):
             positions = torch.arange(S, device=ids.device)
         if positions.dim() == 1:
             positions = positions.unsqueeze(0).expand(B, S)
-        if _TP_STATE["world"] > 1:
+        if self._tp_world > 1:
             v0, v1 = self._vocab_range
             local = (ids >= v0) & (ids < v1)
             x = torch.zeros(
-                B, S, H, dtype=self.embed.weight.dtype, device=ids.device
+                B, S, self.cfg.hidden_size,
+                dtype=self.embed.weight.dtype, device=ids.device,
             )
             emb = self.embed(ids[local] - v0)
             full = torch.zeros_like(x)
@@ -315,7 +322,7 @@ class FlintRef(nn.Module):
             x = layer(x, positions)
         h = self.final_norm(x)
         logits = self.lm_head(h).float()
-        if _TP_STATE["world"] > 1:
+        if self._tp_world > 1:
             logits = _tp_gather_logits(logits, dim=-1)
         return logits.squeeze(0) if squeeze else logits
 
@@ -460,11 +467,18 @@ def shard_flint_tp(model: FlintRef, world: int, rank: int, group=None) -> None:
         if mlp.__class__.__name__ == "MoeRef":
             keep = list(range(rank, mlp.experts.__len__(), world))
             mlp.experts = nn.ModuleList([mlp.experts[e] for e in keep])
+            mlp._expert_ids = keep
             mlp._partial_output = True
-        # MlpRef row/col splits work through the generic Linear sharding in
-        # the trainer (PTQRLinear.shard_rows/shard_cols); plain nn.Linear in
-        # the teacher is sliced the same way here:
-        _shard_mlp_rows_cols(mlp, world, rank)
+        # MlpRef row/col splits (dense MLP + shared expert + each kept
+        # routed expert); plain nn.Linear in the teacher is sliced directly.
+        if mlp.__class__.__name__ == "MlpRef":
+            _shard_mlp_rows_cols(mlp, world, rank)
+        else:
+            # Routed experts are sharded BY EXPERT (keep whole on their
+            # rank); only the shared expert intermediate-slices. Reducing
+            # both schemes together double-shards and corrupts the sum.
+            _shard_mlp_rows_cols(mlp.shared, world, rank)
+            mlp.shared._partial_output = False
     # final norm + all layers otherwise replicated
 
 
