@@ -701,6 +701,21 @@ def load_flint_shards(model: FlintRef, ckpt_dir: str, world: int, rank: int,
                         put(f"{a}.k_norm.weight", t)
                     elif name.endswith("softmax_offset"):
                         put(f"{a}.sink", t[h0:h0 + qh])
+                elif ".experts." in name:
+                    li = int(name.split(".")[2])
+                    e = int(name.split(".experts.")[1].split(".")[0])
+                    if e not in keep:
+                        continue
+                    local = keep.index(e)
+                    src = name.split(f".experts.{e}.")[1]
+                    tgt = f"layers.{li}.mlp.experts.{local}"
+                    if src.startswith("gate_proj"):
+                        u = sf.get_tensor(name.replace("gate_proj", "up_proj"))
+                        put(f"{tgt}.gate_up.weight", torch.cat([t, u], dim=0))
+                    elif src.startswith("up_proj"):
+                        pass
+                    elif src.startswith("down_proj"):
+                        put(f"{tgt}.down.weight", t)
                 elif ".mlp." in name or ".shared_expert." in name:
                     li = int(name.split(".")[2])
                     dense = li in (cfg.mlp_only_layers or [])
@@ -729,21 +744,6 @@ def load_flint_shards(model: FlintRef, ckpt_dir: str, world: int, rank: int,
                             pass
                         elif src.startswith("down_proj"):
                             put(f"{tgt}.down.weight", t[:, r0:r1])
-                elif ".experts." in name:
-                    li = int(name.split(".")[2])
-                    e = int(name.split(".experts.")[1].split(".")[0])
-                    if e not in keep:
-                        continue
-                    local = keep.index(e)
-                    src = name.split(f".experts.{e}.")[1]
-                    tgt = f"layers.{li}.mlp.experts.{local}"
-                    if src.startswith("gate_proj"):
-                        u = sf.get_tensor(name.replace("gate_proj", "up_proj"))
-                        put(f"{tgt}.gate_up.weight", torch.cat([t, u], dim=0))
-                    elif src.startswith("up_proj"):
-                        pass
-                    elif src.startswith("down_proj"):
-                        put(f"{tgt}.down.weight", t)
                 elif name.endswith(("input_layernorm.weight",
                                     "post_attention_layernorm.weight")):
                     li = int(name.split(".")[2])
