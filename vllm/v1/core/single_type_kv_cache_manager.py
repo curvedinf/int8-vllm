@@ -981,8 +981,12 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
+        *,
+        replay_boundaries: Sequence[int] = (),
     ) -> None:
-        super().cache_blocks(request, num_tokens, retention_interval)
+        super().cache_blocks(
+            request, num_tokens, retention_interval,
+            replay_boundaries=replay_boundaries)
         unit = self.block_pool.hash_block_size
         if unit == self.block_size:
             return
