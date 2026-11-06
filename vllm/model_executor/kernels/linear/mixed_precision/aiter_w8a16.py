@@ -292,7 +292,7 @@ class AiterW8A16LinearKernel(MPLinearKernel):
                 self.w_q_name,
                 self.w_s_name,
                 self.w_zp_name,
-                self.w_gidx_name,
+                getattr(self, "w_gidx_name", "g_idx"),
             ):
                 if pname is not None and getattr(layer, pname, None) is not None:
                     replace_parameter(
