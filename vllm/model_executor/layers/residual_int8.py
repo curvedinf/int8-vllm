@@ -306,7 +306,14 @@ def add_residual(x, residual=None):
 
 def residual_norm(norm, x, residual=None, *, emit_quant=False, quantized=False):
     """Preserve the baseline path unless the explicit residual switch is on."""
-    if not envs.VLLM_GFX908_RESIDUAL_INT8:
+    _width = x.routed.shape[-1] if isinstance(x, ResidualPair) else x.shape[-1]
+    if (
+        not envs.VLLM_GFX908_RESIDUAL_INT8
+        # the seam is qualified for Bolt/LiLiCorr hidden sizes only; other
+        # models (Qwen stack, hidden 2048) take the native path instead of
+        # raising mid-compile
+        or _width not in (1024, 4096)
+    ):
         if emit_quant or quantized:
             raise ValueError("Normal-output quantization requires INT8 residual mode")
         if residual is None:
