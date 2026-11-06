@@ -39,6 +39,20 @@ def _resolve_dflash_attention_backend(
     return target_backend
 
 
+def dflash_target_rope_is_neox_style(target_model: nn.Module) -> bool | None:
+    """is_neox_style of the target's first rotary layer (None if no RoPE).
+
+    The drafter must rotate Q/K exactly the way its target does; taken from
+    the built target before the draft model is constructed. (Qwen3-Next
+    style targets carry per-layer ``rotary_emb``; the first one defines the
+    draft's convention, mirroring qwen3_dflash.py's attn0 check.)"""
+    for m in target_model.modules():
+        emb = getattr(m, "rotary_emb", None)
+        if emb is not None and hasattr(emb, "is_neox_style"):
+            return bool(emb.is_neox_style)
+    return None
+
+
 def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
     from vllm.compilation.backends import set_model_tag
     from vllm.model_executor.models.qwen3_dflash import (
