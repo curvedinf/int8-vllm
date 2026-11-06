@@ -545,15 +545,20 @@ def shard_flint_tp(model: FlintRef, world: int, rank: int, group=None) -> None:
             mlp.experts = nn.ModuleList([mlp.experts[e] for e in keep])
             mlp._expert_ids = keep
             mlp._partial_output = True
-        # MlpRef row/col splits (dense MLP + shared expert + each kept
-        # routed expert); plain nn.Linear in the teacher is sliced directly.
+        # Dense MLP / shared expert: slice gate_up rows + down cols through
+        # the PTQR-aware helper (nn.Linear and PTQRLinear both supported;
+        # PTQR scales stay in lockstep with the weight shards).
+        # Routed experts are sharded BY EXPERT (whole) - double-slicing
+        # corrupts the sum (measured during the TP equivalence debug).
         if mlp.__class__.__name__ == "MlpRef":
-            _shard_mlp_rows_cols(mlp, world, rank)
+            _shard_linear_rows_cols(mlp.gate_up, world, rank,
+                                    cols=False, rows_gate_up=True)
+            _shard_linear_rows_cols(mlp.down, world, rank, cols=True)
+            mlp._partial_output = True
         else:
-            # Routed experts are sharded BY EXPERT (keep whole on their
-            # rank); only the shared expert intermediate-slices. Reducing
-            # both schemes together double-shards and corrupts the sum.
-            _shard_mlp_rows_cols(mlp.shared, world, rank)
+            _shard_linear_rows_cols(mlp.shared.gate_up, world, rank,
+                                    cols=False, rows_gate_up=True)
+            _shard_linear_rows_cols(mlp.shared.down, world, rank, cols=True)
             mlp.shared._partial_output = False
     # final norm + all layers otherwise replicated
 
