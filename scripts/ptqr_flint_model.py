@@ -389,3 +389,83 @@ if __name__ == "__main__":
     out2 = m(ids)
     assert torch.equal(out, out2), "forward not deterministic"
     print("FlintRef tiny smoke OK:", tuple(out.shape))
+
+
+# ---------------------------------------------------------------------------
+# TP sharding (trainer-side). Each rank holds: vocab-sliced embed + lm_head,
+# its slice of attention heads (and the matching KV heads), row/col slices of
+# the dense/shared MLPs, and experts[rank::world]. Forward semantics per rank
+# produce PARTIAL outputs wherever the unsharded op would all-reduce; the
+# trainer sums partials (autograd-exact, mirroring the Qwen trainer's
+# _RowParallelSum pattern) and all-gathers vocab-parallel logits.
+# ---------------------------------------------------------------------------
+
+def shard_flint_tp(model: FlintRef, world: int, rank: int, group=None) -> None:
+    """Shard a FlintRef in place for TP rank `rank` of `world`.
+
+    Requires torch.distributed to be initialized when world > 1 (the model's
+    forward installs the reductions through the provided `group`).
+    """
+    import torch.distributed as dist
+
+    model._tp_world, model._tp_rank, model._tp_group = world, rank, group
+    V, H = model.cfg.vocab_size, model.cfg.hidden_size
+    v0, v1 = rank * V // world, (rank + 1) * V // world
+
+    # embedding: vocab rows (id >= v1 mapped to v0 to stay in-bounds; ranks
+    # contribute only their own rows to the sum)
+    w = model.embed.weight.data[v0:v1].contiguous()
+    model.embed = nn.Embedding(v1 - v0, H, _weight=w)
+    model._vocab_range = (v0, v1)
+
+    # lm_head: keep full rows but mask to this rank's vocab slice at forward
+    model.lm_head.weight.data = model.lm_head.weight.data[v0:v1].contiguous()
+    model._lm_full_rows = V
+
+    for layer in model.layers:
+        att = layer.attn
+        nh, nkv = att.num_heads, att.num_kv
+        assert nh % world == 0 and nkv % world == 0
+        qh, kvh = nh // world, nkv // world
+        h0 = rank * qh
+        # qkv rows: [q(h0..h0+qh) | k(rank*kvh..) | v(rank*kvh..)]
+        qkv_w = att.qkv.weight.data
+        q, k, v = qkv_w.split([att.q_size, att.kv_size, att.kv_size], dim=0)
+        att.qkv.weight = nn.Parameter(torch.cat([
+            q[h0 * att.head_dim:(h0 + qh) * att.head_dim],
+            k[rank * kvh * att.head_dim:(rank + 1) * kvh * att.head_dim],
+            v[rank * kvh * att.head_dim:(rank + 1) * kvh * att.head_dim],
+        ], dim=0).contiguous())
+        att.num_heads, att.num_kv = qh, kvh
+        att.q_size, att.kv_size = qh * att.head_dim, kvh * att.head_dim
+        att.sink = nn.Parameter(att.sink.data[h0:h0 + qh].clone())
+        # o_proj: column slice over this rank's head outputs; its output is a
+        # partial sum across ranks
+        att.o.weight = nn.Parameter(
+            att.o.weight.data[:, h0 * att.head_dim:(h0 + qh) * att.head_dim]
+            .contiguous())
+        att._partial_output = True
+
+        mlp = layer.mlp
+        if mlp.__class__.__name__ == "MoeRef":
+            keep = list(range(rank, mlp.experts.__len__(), world))
+            mlp.experts = nn.ModuleList([mlp.experts[e] for e in keep])
+            mlp._partial_output = True
+        # MlpRef row/col splits work through the generic Linear sharding in
+        # the trainer (PTQRLinear.shard_rows/shard_cols); plain nn.Linear in
+        # the teacher is sliced the same way here:
+        _shard_mlp_rows_cols(mlp, world, rank)
+    # final norm + all layers otherwise replicated
+
+
+def _shard_mlp_rows_cols(mlp, world, rank):
+    inter = mlp.inter
+    gate_up = mlp.gate_up.weight.data
+    g = gate_up.shape[0] // 2
+    r0, r1 = rank * g // world, (rank + 1) * g // world
+    mlp.gate_up.weight = nn.Parameter(
+        torch.cat([gate_up[:g][r0:r1], gate_up[g:][r0:r1]], dim=0).contiguous())
+    mlp.inter = r1 - r0
+    mlp.down.weight = nn.Parameter(
+        mlp.down.weight.data[:, r0:r1].contiguous())
+    mlp._partial_output = True
