@@ -650,15 +650,9 @@ def load_flint_shards(model: FlintRef, ckpt_dir: str, world: int, rank: int,
     qh, kvh = nh // world, nkv // world
     h0 = rank * qh
     hd = cfg.head_dim
-    g_inter = cfg.intermediate_size
-    r0, r1 = rank * g_inter // world, (rank + 1) * g_inter // world
-    sh_inter = cfg.shared_expert_intermediate_size
-    sr0, sr1 = rank * sh_inter // world, (rank + 1) * sh_inter // world
-
-    def shard_gate_up_inter(t, inter):  # fused gate|up rows sliced in lockstep
-        g = t.shape[0] // 2
-        a0, a1 = rank * inter // world, (rank + 1) * inter // world
-        return torch.cat([t[:g][a0:a1], t[g:][a0:a1]], dim=0)
+    # NOTE: this loader maps names and assigns experts rank::world but does
+    # NOT slice dense/attention/shared surfaces -- shard_flint_tp(model,...)
+    # runs right after and owns all TP slicing (single source of truth).
 
     def put(path, t):
         node = model
@@ -677,9 +671,9 @@ def load_flint_shards(model: FlintRef, ckpt_dir: str, world: int, rank: int,
             for name in sf.keys():
                 t = sf.get_tensor(name).to(dtype)
                 if name == "model.embed_tokens.weight":
-                    put("embed.weight", t[v0:v1])
+                    put("embed.weight", t)
                 elif name == "lm_head.weight":
-                    put("lm_head.weight", t[v0:v1])
+                    put("lm_head.weight", t)
                 elif name == "model.norm.weight":
                     put("final_norm.weight", t)
                 elif ".self_attn." in name:
@@ -690,24 +684,19 @@ def load_flint_shards(model: FlintRef, ckpt_dir: str, world: int, rank: int,
                             name.replace("q_proj", "k_proj"))
                         v = sf.get_tensor(
                             name.replace("q_proj", "v_proj"))
-                        put(f"{a}.qkv.weight", torch.cat([
-                            t[h0 * hd:(h0 + qh) * hd],
-                            k[rank * kvh * hd:(rank + 1) * kvh * hd],
-                            v[rank * kvh * hd:(rank + 1) * kvh * hd],
-                        ], dim=0))
+                        put(f"{a}.qkv.weight", torch.cat([t, k, v], dim=0))
                     elif name.endswith("k_proj.weight"):
                         pass  # consumed by the q_proj branch
                     elif name.endswith("v_proj.weight"):
                         pass
                     elif name.endswith("o_proj.weight"):
-                        put(f"{a}.o.weight",
-                            t[:, h0 * hd:(h0 + qh) * hd])
+                        put(f"{a}.o.weight", t)
                     elif name.endswith("q_norm.weight"):
                         put(f"{a}.q_norm.weight", t)
                     elif name.endswith("k_norm.weight"):
                         put(f"{a}.k_norm.weight", t)
                     elif name.endswith("softmax_offset"):
-                        put(f"{a}.sink", t[h0:h0 + qh])
+                        put(f"{a}.sink", t)
                 elif ".experts." in name:
                     li = int(name.split(".")[2])
                     e = int(name.split(".experts.")[1].split(".")[0])
@@ -734,24 +723,21 @@ def load_flint_shards(model: FlintRef, ckpt_dir: str, world: int, rank: int,
                         src = name.split(".mlp.")[1]
                         if src.startswith("gate_proj"):
                             u = sf.get_tensor(name.replace("gate_proj", "up_proj"))
-                            put(f"{tgt}.gate_up.weight",
-                                shard_gate_up(torch.cat([t, u], dim=0)))
+                            put(f"{tgt}.gate_up.weight", torch.cat([t, u], dim=0))
                         elif src.startswith("up_proj"):
                             pass
                         elif src.startswith("down_proj"):
-                            put(f"{tgt}.down.weight", t[:, r0:r1])
+                            put(f"{tgt}.down.weight", t)
                     else:
                         tgt = f"layers.{li}.mlp.shared"
                         src = name.split(".shared_expert.")[1]
                         if src.startswith("gate_proj"):
                             u = sf.get_tensor(name.replace("gate_proj", "up_proj"))
-                            put(f"{tgt}.gate_up.weight",
-                                shard_gate_up_inter(torch.cat([t, u], dim=0),
-                                                    sh_inter))
+                            put(f"{tgt}.gate_up.weight", torch.cat([t, u], dim=0))
                         elif src.startswith("up_proj"):
                             pass
                         elif src.startswith("down_proj"):
-                            put(f"{tgt}.down.weight", t[:, sr0:sr1])
+                            put(f"{tgt}.down.weight", t)
                 elif name.endswith(("input_layernorm.weight",
                                     "post_attention_layernorm.weight")):
                     li = int(name.split(".")[2])
