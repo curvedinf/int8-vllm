@@ -149,6 +149,8 @@ def main():
         cfg = load_flint_config(args.model)
         if args.n_experts_keep:
             cfg.num_experts = args.n_experts_keep
+            cfg.num_experts_per_tok = min(cfg.num_experts_per_tok,
+                                          args.n_experts_keep)
         teacher = FlintRef(cfg, device="cpu")
         from ptqr_flint_model import load_flint_shards, shard_flint_tp
         if world > 1:

@@ -716,7 +716,9 @@ def load_flint_shards(model: FlintRef, ckpt_dir: str, world: int, rank: int,
                     li = int(name.split(".")[2])
                     dense = li in (cfg.mlp_only_layers or [])
                     if name.endswith("mlp.gate.weight"):
-                        put(f"layers.{li}.mlp.router.weight", t)
+                        n_e = cfg.num_experts
+                        put(f"layers.{li}.mlp.router.weight",
+                            t[:n_e] if n_e < t.shape[0] else t)
                         continue
                     if dense:
                         tgt = f"layers.{li}.mlp"
