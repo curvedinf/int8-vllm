@@ -125,3 +125,16 @@ is_encoder_only (guard), num_layers/num_state_types on MambaSpecDecodeGPUContext
 guard falls back to the spec_decode attr, False on ROCm). Plus the phantom
 residual seam (contained at 3 layers). Boot 15 = first full worker init;
 16 = engine assembly reached; 17 in flight.
+
+## MERGE E2E GATE CLOSED (2026-11-06 22:29)
+
+Boot 21: server HEALTH-OK; greedy completion request returned COHERENT
+output ("The capital of France is Paris. The capital of Germany is
+Berlin..."). Full path exercised: TP4 workers, AIS repack load (target +
+GPTQ draft), DFlash2 speculator graph capture, int8_block_g128 KV both
+models (startup lines confirmed), mamba fp32, scheduler + offload
+connector, first-request fixes. Total campaign: 21 boots, 10 merge
+regressions fixed (7 latent fork attrs/paths + phantom-env containment x3
++ 2 API drifts + 1 dup op registration + orjson dep).
+Remaining known-open: phantom env source (contained); boot-fix commits
+all on merge/upstream-v0.33.0.
