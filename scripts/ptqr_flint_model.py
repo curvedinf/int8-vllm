@@ -201,6 +201,8 @@ class AttentionRef(nn.Module):
         out = torch.matmul(attn.to(v_.dtype), v_).permute(0, 2, 1, 3)
         out = out.reshape(B, S, self.num_heads * self.head_dim)
         out = self.o(out)
+        if getattr(self, "_partial_output", False):
+            out = tp_sum(out)
         return out.squeeze(0) if squeeze else out
 
 
@@ -213,7 +215,10 @@ class MlpRef(nn.Module):
 
     def forward(self, x):
         g, u = self.gate_up(x).chunk(2, dim=-1)
-        return self.down(F.silu(g) * u)
+        out = self.down(F.silu(g) * u)
+        if getattr(self, "_partial_output", False):
+            out = tp_sum(out)
+        return out
 
 
 class MoeRef(nn.Module):
@@ -242,7 +247,10 @@ class MoeRef(nn.Module):
             w = (top_p * sel).sum(-1)
             rows = sel.any(-1)
             routed[rows] += expert(x[rows]) * w[rows, None].to(x.dtype)
-        return routed + self.shared(x)
+        out = routed + self.shared(x)
+        if getattr(self, "_partial_output", False):
+            out = tp_sum(out)
+        return out
 
 
 class LayerRef(nn.Module):
@@ -291,11 +299,24 @@ class FlintRef(nn.Module):
             positions = torch.arange(S, device=ids.device)
         if positions.dim() == 1:
             positions = positions.unsqueeze(0).expand(B, S)
-        x = self.embed(ids)
+        if _TP_STATE["world"] > 1:
+            v0, v1 = self._vocab_range
+            local = (ids >= v0) & (ids < v1)
+            x = torch.zeros(
+                B, S, H, dtype=self.embed.weight.dtype, device=ids.device
+            )
+            emb = self.embed(ids[local] - v0)
+            full = torch.zeros_like(x)
+            full[local] = emb.to(full.dtype)
+            x = tp_sum(full)
+        else:
+            x = self.embed(ids)
         for layer in self.layers:
             x = layer(x, positions)
         h = self.final_norm(x)
         logits = self.lm_head(h).float()
+        if _TP_STATE["world"] > 1:
+            logits = _tp_gather_logits(logits, dim=-1)
         return logits.squeeze(0) if squeeze else logits
 
 
@@ -377,18 +398,6 @@ def load_flint_state(model: FlintRef, ckpt_dir: str, strict: bool = True) -> Non
             raise KeyError(f"checkpoint missing {missing}")
 
 
-if __name__ == "__main__":
-    # CPU wiring smoke: tiny config, random weights, shape + finiteness.
-    torch.manual_seed(0)
-    cfg = flint_tiny_config()
-    cfg.attention_bias = False
-    m = FlintRef(cfg)
-    ids = torch.randint(0, cfg.vocab_size, (37,))
-    out = m(ids)
-    assert out.shape == (37, cfg.vocab_size) and torch.isfinite(out).all()
-    out2 = m(ids)
-    assert torch.equal(out, out2), "forward not deterministic"
-    print("FlintRef tiny smoke OK:", tuple(out.shape))
 
 
 # ---------------------------------------------------------------------------
@@ -409,6 +418,7 @@ def shard_flint_tp(model: FlintRef, world: int, rank: int, group=None) -> None:
     import torch.distributed as dist
 
     model._tp_world, model._tp_rank, model._tp_group = world, rank, group
+    _TP_STATE.update(world=world, rank=rank, group=group)
     V, H = model.cfg.vocab_size, model.cfg.hidden_size
     v0, v1 = rank * V // world, (rank + 1) * V // world
 
@@ -469,3 +479,60 @@ def _shard_mlp_rows_cols(mlp, world, rank):
     mlp.down.weight = nn.Parameter(
         mlp.down.weight.data[:, r0:r1].contiguous())
     mlp._partial_output = True
+
+
+# ---------------------------------------------------------------------------
+# TP forward reductions. shard_flint_tp sets _TP_STATE; module partials sum
+# across ranks (all_reduce forward == identity backward, autograd-exact), and
+# vocab-parallel logits all-gather.
+# ---------------------------------------------------------------------------
+
+_TP_STATE = {"world": 1, "rank": 0, "group": None}
+
+
+class _TPSum(torch.autograd.Function):
+    """y = sum_r x_r; dy/dx_r = 1 -> identity backward (grad of the summed
+    tensor passes through to each rank's partial unchanged)."""
+
+    @staticmethod
+    def forward(ctx, x):
+        import torch.distributed as dist
+
+        if _TP_STATE["world"] > 1 and dist.is_initialized():
+            dist.all_reduce(x, op=dist.ReduceOp.SUM, group=_TP_STATE["group"])
+        return x
+
+    @staticmethod
+    def backward(ctx, g):
+        return g
+
+
+def tp_sum(x: torch.Tensor) -> torch.Tensor:
+    return _TPSum.apply(x.contiguous())
+
+
+def _tp_gather_logits(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    import torch.distributed as dist
+
+    world = _TP_STATE["world"]
+    if world == 1 or not dist.is_initialized():
+        return x
+    parts = [torch.empty_like(x) for _ in range(world)]
+    dist.all_gather(parts, x.contiguous(), group=_TP_STATE["group"])
+    return torch.cat(parts, dim=dim)
+
+
+if __name__ == "__main__":
+    # CPU wiring smoke: tiny config, random weights, shape + finiteness.
+    torch.manual_seed(0)
+    cfg = flint_tiny_config()
+    cfg.attention_bias = False
+    m = FlintRef(cfg)
+    ids = torch.randint(0, cfg.vocab_size, (37,))
+    out = m(ids)
+    assert out.shape == (37, cfg.vocab_size) and torch.isfinite(out).all()
+    out2 = m(ids)
+    assert torch.equal(out, out2), "forward not deterministic"
+    print("FlintRef tiny smoke OK:", tuple(out.shape))
+
+
