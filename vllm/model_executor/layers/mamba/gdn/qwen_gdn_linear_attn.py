@@ -1790,7 +1790,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # chain (one kernel per GDN layer).
         _fused_dbg = os.environ.get("VLLM_GDN_FUSED_DEBUG")
         if (
-            self.enable_fused_gdn_decode
+            # the class sets enable_fused_gdn_spec_decode; the _decode alias
+            # was never assigned in any revision (latent; gfx908 never ran
+            # this CUDA-only fused path)
+            getattr(self, "enable_fused_gdn_decode",
+                    getattr(self, "enable_fused_gdn_spec_decode", False))
             and attn_metadata.num_prefills == 0
             and self._can_use_fused_gdn_mtp_decode(attn_metadata)
         ):
