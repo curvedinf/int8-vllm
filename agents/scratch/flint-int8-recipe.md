@@ -50,6 +50,23 @@ vllm/models/flint/ (upstream PR #62938).
   gate/up/down, q/k norms, 8 KV heads (k_proj [1024,2048]). Loads through
   the fork's qwen3_dflash2.py machinery modulo head-count params.
 
+## PTQR trainer port structure (scripts/ptqr_train_flint.py, planned)
+
+REUSABLE AS-IS from scripts/ptqr_train_target.py: act_quant_fake /
+kv_block_quant_fake (exact deployed semantics), PTQRLinear +
+replace_linears_with_ptqr (any nn.Linear tree), fake_quant_embedding_,
+attach_kv_fake_quant, SR-SGD + deferred updates, anneal_tau, eval_kld
+(TP vocab-parallel), rollout DAgger loaders, --no_ptqr control.
+
+NEW for Flint (build_flint_model): plain-decoder teacher/student (no GDN,
+simpler than Qwen): per-layer qkv/o PTQRLinear, per-head QK RMSNorm,
+RoPE only on SWA layers (cos_sin from rope_parameters), attention-sink
+bias (added to scores), SWA window 513 mask vs full attention, sigmoid
+router top-6 renormalize (dense), shared expert PTQRLinear MLP, routed
+experts int8 GS128 (per-expert PTQRLinear, TP-sharded 64/rank; hidden
+2048 / moe_inter 512 → small expert mats). fp32 logits accumulate.
+Training attention: SDPA/flex or curvedinf triton flash (no FLA).
+
 ## Draft int8 surface list (user-confirmed 2026-11-06: draft IS int8-ified)
 
 Same doctrine as dflash2-ptqr-r1 + Bolt text-path findings:
