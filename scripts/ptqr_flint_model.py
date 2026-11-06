@@ -628,6 +628,10 @@ if __name__ == "__main__":
 
 def load_flint_shards(model: FlintRef, ckpt_dir: str, world: int, rank: int,
                       dtype=torch.bfloat16) -> None:
+    # NOTE(PTQR memory math): a bf16 TP4 teacher shard is ~20 GB/rank; four
+    # CPU-resident shards OOM the 61 GB host and teacher+student cannot share
+    # a 32 GB MI100. Real runs need the layer-streamed teacher (TODO); this
+    # loader is for reduced-expert smoke configs and CPU-equivalence checks.
     """Stream+shard a RecursiveSI/flint checkpoint into a TP-sharded FlintRef.
 
     One tensor materializes at a time (safe_open mmap -> slice -> copy ->

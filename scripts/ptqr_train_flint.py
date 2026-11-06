@@ -114,6 +114,10 @@ def main():
     p.add_argument("--eval_steps", type=int, default=10)
     p.add_argument("--save_every", type=int, default=50)
     p.add_argument("--tiny", action="store_true")
+    p.add_argument("--n_experts_keep", type=int, default=0,
+                   help="smoke only: keep the first N experts per MoE layer "
+                        "(0 = all). Validates real-checkpoint wiring without "
+                        "the full 37.5B expert mass.")
     p.add_argument("--no_ptqr", action="store_true",
                    help="unquantized student control (teacher-vs-teacher)")
     args = p.parse_args()
@@ -143,6 +147,8 @@ def main():
             torch.nn.init.normal_(prm, std=0.02)
     else:
         cfg = load_flint_config(args.model)
+        if args.n_experts_keep:
+            cfg.num_experts = args.n_experts_keep
         teacher = FlintRef(cfg, device="cpu")
         from ptqr_flint_model import load_flint_shards, shard_flint_tp
         if world > 1:
