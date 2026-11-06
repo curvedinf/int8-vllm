@@ -446,7 +446,7 @@ class AisModelLoader(DefaultModelLoader):
         model_dir = model_config.model
         if not model_dir or not model_dir.startswith("/"):
             return  # non-local (hub id) checkpoints are not repacked
-        hf_folder, files, use_st = self._prepare_weights(
+        hf_folder, files, use_st, _index = self._prepare_weights(
             model_dir, None, model_config.revision, True, None
         )
         if not use_st:

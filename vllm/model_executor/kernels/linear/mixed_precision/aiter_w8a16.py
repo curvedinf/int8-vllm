@@ -215,7 +215,7 @@ class AiterW8A16LinearKernel(MPLinearKernel):
         # TritonW8A16LinearKernel — dense dequant of the AITER-layout
         # weights ([N, K] int8 x [N, K//G] scales), rows sliceable.
         def _dequant_rows(_unused) -> torch.Tensor:
-            w_q, w_s, _, _ = self._get_weight_params(layer)
+            w_q, w_s, _ = self._get_weight_params(layer)
             # w_q: [N, K] int8 (already de-biased), w_s: [N, K//G]
             gs = self.config.group_size
             # Emit the model dtype, not the checkpoint scale dtype: GPTQ
@@ -277,7 +277,7 @@ class AiterW8A16LinearKernel(MPLinearKernel):
         if (layer.prefix.endswith(".mlp.down_proj")
                 and (os.environ.get("VLLM_DECODE_INT8_INTERMEDIATES") == "1"
                      or os.environ.get("VLLM_DECODE_INT8_RETAIN_GS128") == "1")):
-            wq, ws, _, _ = self._get_weight_params(layer)
+            wq, ws, _ = self._get_weight_params(layer)
             if self.config.group_size != 128:
                 raise ValueError("Decode INT8 requires original GS128 weights")
             # Retain the original bytes, not the per-channel requantized copy.
@@ -311,7 +311,7 @@ class AiterW8A16LinearKernel(MPLinearKernel):
         but both published recipe checkpoints are GS128.
         """
 
-        w_q, w_s, _, _ = self._get_weight_params(layer)
+        w_q, w_s, _ = self._get_weight_params(layer)
         N, K = w_q.shape
         gs = self.config.group_size
         device = w_q.device
@@ -404,7 +404,7 @@ class AiterW8A16LinearKernel(MPLinearKernel):
         self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         c = self.config
-        w_q, w_s, _, _ = self._get_weight_params(layer)
+        w_q, w_s, _ = self._get_weight_params(layer)
 
         x_2d = x.reshape(-1, x.shape[-1]).contiguous()
         out_shape = x.shape[:-1] + (c.partition_weight_shape[1],)
