@@ -550,3 +550,126 @@ if __name__ == "__main__":
     print("FlintRef tiny smoke OK:", tuple(out.shape))
 
 
+
+
+def load_flint_shards(model: FlintRef, ckpt_dir: str, world: int, rank: int,
+                      dtype=torch.bfloat16) -> None:
+    """Stream+shard a RecursiveSI/flint checkpoint into a TP-sharded FlintRef.
+
+    One tensor materializes at a time (safe_open mmap -> slice -> copy ->
+    free), so host RAM stays far below the 80 GB checkpoint. Slicing mirrors
+    shard_flint_tp exactly; norms/routers/sinks replicate on every rank.
+    """
+    import glob
+
+    from safetensors import safe_open
+
+    files = sorted(glob.glob(os.path.join(ckpt_dir, "*.safetensors")))
+    cfg = model.cfg
+    V, H = cfg.vocab_size, cfg.hidden_size
+    v0, v1 = rank * V // world, (rank + 1) * V // world
+    nh, nkv = cfg.num_attention_heads, cfg.num_key_value_heads
+    qh, kvh = nh // world, nkv // world
+    h0 = rank * qh
+    hd = cfg.head_dim
+    g_inter = cfg.intermediate_size
+    r0, r1 = rank * g_inter // world, (rank + 1) * g_inter // world
+
+    def put(path, t):
+        node = model
+        for part in path.split("."):
+            node = getattr(node, part)
+        assert node.shape == t.shape, f"{path}: {node.shape} vs {t.shape}"
+        node.data.copy_(t.to(node.dtype))
+
+    def shard_gate_up(t):  # [2*inter, H] -> keep rank slice of both halves
+        g = t.shape[0] // 2
+        return torch.cat([t[:g][r0:r1], t[g:][r0:r1]], dim=0)
+
+    keep = list(range(rank, cfg.num_experts, world))
+    for f in files:
+        with safe_open(f, framework="pt", device="cpu") as sf:
+            for name in sf.keys():
+                t = sf.get_tensor(name).to(dtype)
+                if name == "model.embed_tokens.weight":
+                    put("embed.weight", t[v0:v1])
+                elif name == "lm_head.weight":
+                    put("lm_head.weight", t[v0:v1])
+                elif name == "model.norm.weight":
+                    put("final_norm.weight", t)
+                elif ".self_attn." in name:
+                    li = int(name.split(".")[2])
+                    a = f"layers.{li}.attn"
+                    if name.endswith("q_proj.weight"):
+                        k = sf.get_tensor(
+                            name.replace("q_proj", "k_proj"))
+                        v = sf.get_tensor(
+                            name.replace("q_proj", "v_proj"))
+                        put(f"{a}.qkv.weight", torch.cat([
+                            t[h0 * hd:(h0 + qh) * hd],
+                            k[rank * kvh * hd:(rank + 1) * kvh * hd],
+                            v[rank * kvh * hd:(rank + 1) * kvh * hd],
+                        ], dim=0))
+                    elif name.endswith("k_proj.weight"):
+                        pass  # consumed by the q_proj branch
+                    elif name.endswith("v_proj.weight"):
+                        pass
+                    elif name.endswith("o_proj.weight"):
+                        put(f"{a}.o.weight",
+                            t[:, h0 * hd:(h0 + qh) * hd])
+                    elif name.endswith("q_norm.weight"):
+                        put(f"{a}.q_norm.weight", t)
+                    elif name.endswith("k_norm.weight"):
+                        put(f"{a}.k_norm.weight", t)
+                    elif name.endswith("softmax_offset"):
+                        put(f"{a}.sink", t[h0:h0 + qh])
+                elif ".mlp." in name or ".shared_expert." in name:
+                    li = int(name.split(".")[2])
+                    dense = li in (cfg.mlp_only_layers or [])
+                    if name.endswith("mlp.gate.weight"):
+                        put(f"layers.{li}.mlp.router.weight", t)
+                        continue
+                    if dense:
+                        tgt = f"layers.{li}.mlp"
+                        src = name.split(".mlp.")[1]
+                        if src.startswith("gate_proj"):
+                            u = sf.get_tensor(name.replace("gate_proj", "up_proj"))
+                            put(f"{tgt}.gate_up.weight",
+                                shard_gate_up(torch.cat([t, u], dim=0)))
+                        elif src.startswith("up_proj"):
+                            pass
+                        elif src.startswith("down_proj"):
+                            put(f"{tgt}.down.weight", t[:, r0:r1])
+                    else:
+                        tgt = f"layers.{li}.mlp.shared"
+                        src = name.split(".shared_expert.")[1]
+                        if src.startswith("gate_proj"):
+                            u = sf.get_tensor(name.replace("gate_proj", "up_proj"))
+                            put(f"{tgt}.gate_up.weight",
+                                shard_gate_up(torch.cat([t, u], dim=0)))
+                        elif src.startswith("up_proj"):
+                            pass
+                        elif src.startswith("down_proj"):
+                            put(f"{tgt}.down.weight", t[:, r0:r1])
+                elif ".experts." in name:
+                    li = int(name.split(".")[2])
+                    e = int(name.split(".experts.")[1].split(".")[0])
+                    if e not in keep:
+                        continue
+                    local = keep.index(e)
+                    src = name.split(f".experts.{e}.")[1]
+                    tgt = f"layers.{li}.mlp.experts.{local}"
+                    if src.startswith("gate_proj"):
+                        u = sf.get_tensor(name.replace("gate_proj", "up_proj"))
+                        put(f"{tgt}.gate_up.weight", torch.cat([t, u], dim=0))
+                    elif src.startswith("up_proj"):
+                        pass
+                    elif src.startswith("down_proj"):
+                        put(f"{tgt}.down.weight", t)
+                elif name.endswith(("input_layernorm.weight",
+                                    "post_attention_layernorm.weight")):
+                    li = int(name.split(".")[2])
+                    put(f"layers.{li}."
+                        + ("norm1" if "input_" in name else "norm2") + ".weight",
+                        t)
+                del t
