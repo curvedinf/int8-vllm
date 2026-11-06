@@ -14,9 +14,6 @@
 
 STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
-      "masked_situ_and_mul(Tensor! out, Tensor input, Tensor "
-      "expert_num_tokens, float beta=1.0, float linear_beta=-1.0) -> ()");
-  ops.def(
       "gptq_w8a16_repacked_gemm(Tensor a, Tensor b_q_weight, "
       "Tensor b_gptq_qzeros, Tensor b_gptq_scales, bool use_v2_format) "
       "-> Tensor");
@@ -24,7 +21,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
-  ops.impl("masked_situ_and_mul", TORCH_BOX(&masked_situ_and_mul));
   ops.impl("gptq_w8a16_repacked_gemm",
            TORCH_BOX(&gptq_w8a16_repacked_gemm));
   ops.impl("gptq_shuffle", TORCH_BOX(&gptq_shuffle));

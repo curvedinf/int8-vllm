@@ -160,7 +160,7 @@ __global__ __launch_bounds__(kThreads) void gdn_decode_post_conv_mtp_kernel(
     const bf16_t* __restrict__ output_gate, const void* __restrict__ norm_weight,
     bf16_t* __restrict__ out, int H, int HV, int state_indices_width,
     int dt_bias_type, bool norm_weight_is_bf16, float scale, float norm_eps,
-    GdnDecodeStrides strides) {
+    bool gate_sigmoid, GdnDecodeStrides strides) {
   const int request = blockIdx.x;
   const int value_head = blockIdx.y;
   const int tid = threadIdx.x;
@@ -358,9 +358,11 @@ __global__ __launch_bounds__(kThreads) void gdn_decode_post_conv_mtp_kernel(
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
       const int value = lane + i * 32;
-      const float gate = silu_fast(__bfloat162float(
+      const float gate_raw = __bfloat162float(
           output_gate[static_cast<int64_t>(token) * strides.gate_row +
-                      value_head * kDimV + value]));
+                      value_head * kDimV + value]);
+      const float gate =
+          gate_sigmoid ? sigmoid_fast(gate_raw) : silu_fast(gate_raw);
       const float weight =
           norm_weight_is_bf16
               ? __bfloat162float(static_cast<const bf16_t*>(norm_weight)[value])
@@ -383,7 +385,8 @@ void launch_gdn_decode_post_conv_mtp(
     torch::stable::Tensor& state, torch::stable::Tensor const& norm_weight,
     torch::stable::Tensor& out, const bf16_t* a, const bf16_t* b,
     const bf16_t* output_gate, int num_key_heads, int num_value_heads,
-    double scale, double norm_eps, GdnDecodeStrides strides) {
+    double scale, double norm_eps, bool gate_sigmoid,
+    GdnDecodeStrides strides) {
   using torch::headeronly::ScalarType;
 
   const auto dt_bias_scalar_type = dt_bias.scalar_type();
@@ -409,7 +412,8 @@ void launch_gdn_decode_post_conv_mtp(
           num_key_heads, num_value_heads,
           static_cast<int>(state_indices.size(1)), dt_bias_type,
           norm_weight.scalar_type() == ScalarType::BFloat16,
-          static_cast<float>(scale), static_cast<float>(norm_eps), strides);
+          static_cast<float>(scale), static_cast<float>(norm_eps),
+          gate_sigmoid, strides);
   const hipError_t error = hipGetLastError();
   STD_TORCH_CHECK(error == hipSuccess,
                   "GDN decode MTP post-conv kernel launch failed: ",
@@ -427,7 +431,11 @@ void fused_gdn_decode_post_conv_mtp(
     torch::stable::Tensor const& num_accepted_tokens,
     torch::stable::Tensor& state, torch::stable::Tensor const& output_gate,
     torch::stable::Tensor const& norm_weight, torch::stable::Tensor& out,
-    double scale, double norm_eps) {
+    double scale, double norm_eps,
+    const std::string& output_gate_activation) {
+  STD_TORCH_CHECK(
+      output_gate_activation == "silu" || output_gate_activation == "sigmoid",
+      "output_gate_activation must be 'silu' or 'sigmoid'");
   using torch::headeronly::ScalarType;
 
   STD_TORCH_CHECK(
@@ -554,7 +562,7 @@ void fused_gdn_decode_post_conv_mtp(
         mixed_qkv, a_log, dt_bias, state_indices, cu_seqlens,
         num_accepted_tokens, state, norm_weight, out, a_ptr, b_ptr,
         output_gate_ptr, num_key_heads, num_value_heads, scale, norm_eps,
-        strides);
+        output_gate_activation == "sigmoid", strides);
   };
   const auto dispatch_state_type = [&]<int ValueHeadsPerKeyHead>() {
     if (state_scalar_type == ScalarType::Float) {
