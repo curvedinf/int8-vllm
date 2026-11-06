@@ -152,3 +152,19 @@ rung ladder (R10S60 analog) with:
    experts × small intermediate 512 — check which path the fork MoE
    machinery prefers at TP4; per-rank 64 experts).
 4. Build: extension rebuild post-merge pending (stale caches cleaned).
+
+## Pipeline status (2026-11-06 20:16)
+
+- Corpus BUILT: SDGraft/data/flint_longctx 4.22M train / 42.6K val tokens
+  (ids within vocab 150144; code+c4+agentic-chat+4-16k long legs).
+- Trainer: single-GPU path green (tiny smoke + oracle). TP4 sharding
+  scaffold committed; NEXT: partial-output all-reduce wiring in
+  FlintRef.forward (o_proj/mlp/MoE partials, vocab-parallel logits
+  gather) + 4-rank CPU equivalence check vs unsharded tiny model, then
+  rung-0 (PTQR from bf16 RTN init) real run.
+- Merge validation: micro PASS, battery 4/4; serve boot on attempt 5
+  (fixes: orjson dep, dup op registration, g_idx getattr, phantom
+  4-tuple unpacks, AIS 4-tuple, w_gidx_name default) — now in final AIS
+  repack-cache load phase.
+- Boot gate key note: /etc/llama/llama-api.key missing; used
+  VLLM_API_KEY env override (read_api_key supports it) for gate boots.
