@@ -652,6 +652,13 @@ def load_flint_shards(model: FlintRef, ckpt_dir: str, world: int, rank: int,
     hd = cfg.head_dim
     g_inter = cfg.intermediate_size
     r0, r1 = rank * g_inter // world, (rank + 1) * g_inter // world
+    sh_inter = cfg.shared_expert_intermediate_size
+    sr0, sr1 = rank * sh_inter // world, (rank + 1) * sh_inter // world
+
+    def shard_gate_up_inter(t, inter):  # fused gate|up rows sliced in lockstep
+        g = t.shape[0] // 2
+        a0, a1 = rank * inter // world, (rank + 1) * inter // world
+        return torch.cat([t[:g][a0:a1], t[g:][a0:a1]], dim=0)
 
     def put(path, t):
         node = model
@@ -739,11 +746,12 @@ def load_flint_shards(model: FlintRef, ckpt_dir: str, world: int, rank: int,
                         if src.startswith("gate_proj"):
                             u = sf.get_tensor(name.replace("gate_proj", "up_proj"))
                             put(f"{tgt}.gate_up.weight",
-                                shard_gate_up(torch.cat([t, u], dim=0)))
+                                shard_gate_up_inter(torch.cat([t, u], dim=0),
+                                                    sh_inter))
                         elif src.startswith("up_proj"):
                             pass
                         elif src.startswith("down_proj"):
-                            put(f"{tgt}.down.weight", t[:, r0:r1])
+                            put(f"{tgt}.down.weight", t[:, sr0:sr1])
                 elif name.endswith(("input_layernorm.weight",
                                     "post_attention_layernorm.weight")):
                     li = int(name.split(".")[2])
