@@ -74,6 +74,8 @@ def _collect_skip_names(model: torch.nn.Module) -> set[str]:
 
 def build_student(teacher: FlintRef, group: int, kv_group: int) -> FlintRef:
     student = copy.deepcopy(teacher)
+    for prm in student.parameters():
+        prm.requires_grad_(True)  # teacher may already be frozen
     replaced = replace_linears_with_ptqr(
         student, group=group, skip=_collect_skip_names(student)
     )
