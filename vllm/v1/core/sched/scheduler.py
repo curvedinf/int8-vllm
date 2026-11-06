@@ -498,6 +498,12 @@ class Scheduler(SchedulerInterface):
             self.mamba_partial_cache_hit
             and self.kv_cache_manager.mamba_shared_prefix_checkpoint
         )
+        # Requests with an async KV load, by stage (KV_FETCH_STAGES).
+        # None when not tracked (stats disabled or no KV connector).
+        self._kv_fetch_stages: dict[Request, str] | None = (
+            {} if self.log_stats and self.connector is not None else None
+        )
+        self._kv_fetch_counts: dict[str, int] = dict.fromkeys(KV_FETCH_STAGES, 0)
 
         # Counts of non-empty steps scheduled / processed. update_from_output
         # is called once per scheduled step in FIFO order, so these stay in sync.
@@ -621,13 +627,6 @@ class Scheduler(SchedulerInterface):
                 queue.prepend_request(candidate)
                 self._prefix_bypassed_heads.add(head.request_id)
                 break
-
-        # Requests with an async KV load, by stage (KV_FETCH_STAGES).
-        # None when not tracked (stats disabled or no KV connector).
-        self._kv_fetch_stages: dict[Request, str] | None = (
-            {} if self.log_stats and self.connector is not None else None
-        )
-        self._kv_fetch_counts: dict[str, int] = dict.fromkeys(KV_FETCH_STAGES, 0)
 
     def _drafts_unused(
         self, request: Request, num_computed_tokens: int, num_new_tokens: int
