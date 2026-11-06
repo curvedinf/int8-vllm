@@ -370,7 +370,12 @@ class DFlashQwen3Attention(nn.Module):
             )
         from vllm import envs
 
-        if envs.VLLM_GFX908_RESIDUAL_INT8:
+        # The residual-INT8 decoder seam is a Bolt/LiLiCorr text-stack
+        # feature; the Qwen DFlash draft never ran it. The env flag was
+        # observed arriving set in merged-stack boots with no findable
+        # setter (2026-11-06 open diagnostic), so this stack pins the seam
+        # off explicitly.
+        if False and envs.VLLM_GFX908_RESIDUAL_INT8:
             from vllm.model_executor.layers.decoder_int8 import projection
 
             return projection(self.o_proj, attn_output, attention=True)
