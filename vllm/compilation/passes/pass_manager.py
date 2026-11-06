@@ -35,7 +35,6 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
         RMSNormReshapeFusionPass,
     )
     from .fusion.qk_norm_rope_fusion import QKNormRoPEFusionPass
-    from .fusion.sequence_parallelism import SequenceParallelismPass
     from .utility.split_coalescing import SplitCoalescingPass
 
 if current_platform.is_cuda_alike():
@@ -50,7 +49,6 @@ if current_platform.is_cuda_alike():
 
 if current_platform.is_cuda():
     from .fusion.allreduce_rms_fusion import AllReduceFusionPass
-    from .fusion.collective_fusion import AsyncTPPass
 
 if current_platform.is_xpu():
     from .fusion.act_quant_fusion import ActivationQuantFusionPass
@@ -71,8 +69,7 @@ R = TypeVar("R")
 
 
 def with_pattern_match_debug(fn: Callable[P, R]) -> Callable[P, R]:
-    """
-    Function decorator that turns on inductor pattern match debug
+    """Function decorator that turns on inductor pattern match debug
     for the duration of the call.
     Used to avoid logging builtin Inductor pattern matching.
     """
@@ -89,8 +86,7 @@ def with_pattern_match_debug(fn: Callable[P, R]) -> Callable[P, R]:
 
 
 class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
-    """
-    The pass manager for post-grad passes.
+    """The pass manager for post-grad passes.
     It handles configuration, adding custom passes, and running passes.
     It supports uuid for the Inductor code cache. That includes torch<2.6
     support using pickling (in .inductor_pass.CustomGraphPass).
@@ -162,16 +158,11 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 from vllm.platforms.rocm import on_gfx908
 
                 if on_gfx908():
-                    from .fusion.gfx908_rms_norm_int8_quant_fusion import (
+                    from vllm.compilation.passes.fusion.gfx908_rms_norm_int8_quant_fusion import (
                         GFX908RMSNormInt8QuantFusionPass,
                     )
 
                     self.passes += [GFX908RMSNormInt8QuantFusionPass(config)]
-
-            if self.pass_config.enable_sp:
-                self.passes += [SequenceParallelismPass(config)]
-                if self.pass_config.fuse_gemm_comms:
-                    self.passes += [AsyncTPPass(config)]
 
             if enable_transformers_norm_canonicalization:
                 self.passes += [AddRMSNormFusionPass(config)]
@@ -246,8 +237,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         self.passes.append(pass_)
 
     def uuid(self) -> str:
-        """
-        The PostGradPassManager is set as a custom pass in the Inductor and
+        """The PostGradPassManager is set as a custom pass in the Inductor and
         affects compilation caching. Its uuid depends on the UUIDs of all
         dependent passes and the pass config. See InductorPass for more info.
         """

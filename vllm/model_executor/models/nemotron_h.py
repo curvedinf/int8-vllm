@@ -23,9 +23,14 @@ from itertools import islice
 
 import torch
 from torch import nn
+from transformers import NemotronHConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    ModelConfig,
+    VllmConfig,
+)
 from vllm.config.parallel import ParallelConfig
 from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.distributed.communication_op import (
@@ -41,12 +46,14 @@ from vllm.model_executor.layers.fused_moe import (
     activation_without_mul,
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
@@ -72,11 +79,11 @@ from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
     HasInnerState,
     IsHybrid,
+    MambaStateShapes,
     MixtureOfExperts,
     SupportsEagle,
     SupportsEagle3,
     SupportsLoRA,
-    SupportsMambaPrefixCaching,
     SupportsPP,
     SupportsQuant,
     SupportsReplaySSM,
@@ -90,7 +97,6 @@ from vllm.model_executor.models.utils import (
     sequence_parallel_chunk,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 
 
 class NemotronHMLP(nn.Module):
@@ -178,7 +184,7 @@ class NemotronHMLP(nn.Module):
                 out = tensor_model_parallel_all_reduce(out)
             return out
         x, _ = self.up_proj(x)
-        x = self.act_fn(x)
+        x = maybe_fused_act_quant(self.act_fn, x, self.down_proj)
         x, _ = self.down_proj(x)
         return x
 
@@ -192,6 +198,7 @@ class NemotronHMoE(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
+        assert parallel_config is not None
         self.tp_size = get_tensor_model_parallel_world_size()
         self.routed_scaling_factor = config.routed_scaling_factor
 
@@ -242,6 +249,8 @@ class NemotronHMoE(nn.Module):
                 prefix=f"{prefix}.shared_experts",
             )
 
+        self.fc1_latent_proj: ReplicatedLinear | None
+        self.fc2_latent_proj: ReplicatedLinear | None
         if self.use_latent_moe:
             self.fc1_latent_proj = ReplicatedLinear(
                 input_size=config.hidden_size,
@@ -259,6 +268,17 @@ class NemotronHMoE(nn.Module):
                 disable_tp=self.is_sequence_parallel,
                 prefix=f"{prefix}.fc2_latent_proj",
             )
+            # A bias-free, unquantized linear commutes with the TP sum
+            # (sum_r W x_r == W sum_r x_r), so one reduce after the transform
+            # suffices. Test the layer, not the model-wide `quant_config`: ModelOpt
+            # excludes the latent projections, so quantized checkpoints still get
+            # an UnquantizedLinearMethod here.
+            self.fc2_latent_proj.reduce_commutative = (
+                not config.mlp_bias
+                and isinstance(
+                    self.fc2_latent_proj.quant_method, UnquantizedLinearMethod
+                )
+            )
         else:
             self.fc1_latent_proj = None
             self.fc2_latent_proj = None
@@ -271,7 +291,7 @@ class NemotronHMoE(nn.Module):
             intermediate_size=config.moe_intermediate_size,
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
-            ckpt_names=("up_proj", "down_proj", ""),
+            ckpt_names=("up_proj", "down_proj", None),
             use_grouped_topk=True,
             num_expert_group=config.n_group,
             topk_group=config.topk_group,
@@ -625,6 +645,8 @@ class NemotronHModel(nn.Module, EagleModelMixin):
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.embed_tokens",
         )
 
         self.has_moe = "E" in config.hybrid_override_pattern
@@ -754,7 +776,7 @@ class NemotronHModel(nn.Module, EagleModelMixin):
                 self,
                 ckpt_gate_proj_name="up_proj",
                 ckpt_down_proj_name="down_proj",
-                ckpt_up_proj_name="",
+                ckpt_up_proj_name=None,
                 num_experts=self._get_max_n_routed_experts(),
                 num_redundant_experts=getattr(self, "num_redundant_experts", 0),
             )
@@ -772,11 +794,10 @@ class NemotronHForCausalLM(
     IsHybrid,
     SupportsQuant,
     MixtureOfExperts,
-    SupportsMambaPrefixCaching,
     SupportsReplaySSM,
 ):
     # Relevant only if self.has_moe is True
-    is_non_gated_moe: bool = True
+    is_non_gated_moe = True
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"backbone": "model", "mtp": None},
@@ -818,7 +839,8 @@ class NemotronHForCausalLM(
         )
         if cache_config.use_replayssm:
             return MambaStateDtypeCalculator.append_replayssm_ring(
-                base_dtype, vllm_config.model_config.dtype
+                base_dtype,
+                vllm_config.model_config.dtype,
             )
         return base_dtype
 
@@ -826,7 +848,7 @@ class NemotronHForCausalLM(
     def get_mamba_state_shape_from_config(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple[tuple[int, ...], ...]:
+    ) -> MambaStateShapes:
         """Calculate shapes for Mamba's convolutional and state caches.
 
         Args:
@@ -837,6 +859,7 @@ class NemotronHForCausalLM(
             - conv_state_shape: Shape for convolutional state cache
             - temporal_state_shape: Shape for state space model cache
             - x_cache/dt_cache/B_cache ring-buffer shapes (use_replayssm only)
+
         """
         parallel_config = vllm_config.parallel_config
         cache_config = vllm_config.cache_config
@@ -855,10 +878,12 @@ class NemotronHForCausalLM(
         )
         if cache_config.use_replayssm:
             return MambaStateShapeCalculator.append_replayssm_ring(
-                base_shape,
-                hf_config.n_groups,
-                parallel_config.tensor_parallel_size,
-                cache_config.replayssm_buffer_len,
+                base_shapes=base_shape,
+                n_groups=hf_config.n_groups,
+                tp_world_size=parallel_config.tensor_parallel_size,
+                logical_window=cache_config.replayssm_buffer_len,
+                backend=vllm_config.mamba_config.backend,
+                num_speculative_tokens=vllm_config.num_speculative_tokens,
             )
         return base_shape
 
@@ -909,6 +934,7 @@ class NemotronHForCausalLM(
                     self.moe_layers.append(layer.mixer.experts)
 
             self.num_moe_layers = len(self.moe_layers)
+            assert example_moe is not None
             self.num_logical_experts = example_moe.n_logical_experts
             self.num_physical_experts = example_moe.n_physical_experts
             self.num_local_physical_experts = example_moe.n_local_physical_experts  # noqa: E501

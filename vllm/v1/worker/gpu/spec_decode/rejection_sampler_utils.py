@@ -4,7 +4,13 @@ import os
 import torch
 
 from vllm.triton_utils import tl, tldevice, triton
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_block_argmax, tl_rand32
+from vllm.v1.spec_decode.fly import compute_fly_entropy
+from vllm.v1.worker.gpu.sample.gumbel import (
+    gumbel_block_argmax,
+    spec_step_seed,
+    tl_rand32,
+)
+from vllm.v1.worker.gpu.sample.watermark import philox_gumbel_block_argmax
 
 
 @triton.jit
@@ -191,6 +197,16 @@ def _compute_global_logprobs_and_logsumexp(
 
 
 @triton.jit
+def _is_bonus_logit(expanded_local_pos_ptr, logit_idx, num_logits):
+    next_local_pos = tl.load(
+        expanded_local_pos_ptr + logit_idx + 1,
+        mask=logit_idx + 1 < num_logits,
+        other=0,
+    )
+    return next_local_pos == 0
+
+
+@triton.jit
 def _compute_local_logits_stats_kernel(
     # [num_logits, num_blocks]
     target_local_argmax_ptr,
@@ -221,17 +237,17 @@ def _compute_local_logits_stats_kernel(
     # [max_num_reqs]
     temp_ptr,
     vocab_size,
-    num_speculative_steps,
+    num_logits,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
 ):
     logit_idx = tl.program_id(0).to(tl.int64)
-    draft_step_idx = tl.load(expanded_local_pos_ptr + logit_idx)
 
-    if draft_step_idx >= num_speculative_steps:
-        # Bonus token. Max/argmax and summed exponentials are not needed.
+    if _is_bonus_logit(expanded_local_pos_ptr, logit_idx, num_logits):
+        # Max/argmax and summed exponentials are not needed.
         return
 
+    draft_step_idx = tl.load(expanded_local_pos_ptr + logit_idx)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + logit_idx).to(tl.int64)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
 
@@ -419,14 +435,17 @@ def _compute_local_residual_mass_kernel(
     # [max_num_reqs]
     temp_ptr,
     vocab_size,
-    num_speculative_steps,
+    num_logits,
     vocab_num_blocks,
     BLOCK_SIZE: tl.constexpr,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
 ):
     logit_idx = tl.program_id(0).to(tl.int64)
+    # Adaptive verification can end before num_speculative_steps.
     draft_step_idx = tl.load(expanded_local_pos_ptr + logit_idx)
-    if draft_step_idx == 0 or draft_step_idx >= num_speculative_steps:
+    if draft_step_idx == 0 or _is_bonus_logit(
+        expanded_local_pos_ptr, logit_idx, num_logits
+    ):
         # The acceptance threshold, h, looks one position ahead and sums
         # over: max(p_i * M_b(x|x_{<i}) - M_s(x|x_{<i}), 0). Tokens at the
         # first and last (bonus) positions aren't needed for this computation.
@@ -538,12 +557,16 @@ def _rejection_kernel(
     # at the proposed token, so log q(proposal) = 0 and the Leviathan
     # ratio test / residual resample remain exact with zero plumbing.
     lookup_req_ptr,
+    # [num_logits]
+    fly_entropy_ptr,
+    fly_entropy_threshold,
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     HAS_LOOKUP: tl.constexpr,
     SYNTHETIC_MODE: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
+    FLY_WINDOW_SIZE: tl.constexpr,
     SALT_U: tl.constexpr = False,
 ):
     req_idx = tl.program_id(0)
@@ -557,6 +580,9 @@ def _rejection_kernel(
     is_greedy = temp == 0.0
 
     accepted_length = tl.zeros((), tl.int64)
+    # Freeze the accepted prefix and recovery stats until the window is confirmed.
+    pending_rejection = tl.full((), -1, tl.int64)
+    rejected_argmax = tl.full((), 0, tl.int64)
     target_lse = 0.0
     draft_lse = 0.0
     verifying = True
@@ -567,14 +593,17 @@ def _rejection_kernel(
         is_valid_draft = draft_sampled >= 0
         # Avoid possible OOB ptr access.
         draft_sampled = tl.maximum(0, draft_sampled)
-        if not is_greedy:
+        if not is_greedy and FLY_WINDOW_SIZE == 0:
             # A -1 placeholder ends verification. Greedy is excluded because it
             # stores the target argmax upon first rejection, so it rejects the
             # placeholder via `accepted` instead.
             verifying &= is_valid_draft
-
         if verifying:
+            target_argmax = tl.full((), 0, tl.int64)
+            can_defer = False
+            accepted = False
             pos = tl.load(pos_ptr + logit_idx)
+            step_seed = spec_step_seed(seed, i) if USE_BLOCK_VERIFICATION else seed
             if SALT_U:
                 # Diagnostic A/B (garble hunt): draw the acceptance uniform from
                 # a decorrelated philox stream. The engine default shares the
@@ -583,9 +612,9 @@ def _rejection_kernel(
                 # token the drafter picked; on a consistent drafter (a wall)
                 # that correlation over-accepts the repeat token through the
                 # chain. Salting preserves the marginal (any uniform u works).
-                u = tl_rand32(seed + 0x9E3779B9, pos, includes_zero=False)
+                u = tl_rand32(step_seed + 0x9E3779B9, pos, includes_zero=False)
             else:
-                u = tl_rand32(seed, pos, includes_zero=False)
+                u = tl_rand32(step_seed, pos, includes_zero=False)
             if is_greedy:
                 # Greedy sampling. Accept IFF draft matches target argmax.
                 # NOTE: Target argmax is stored directly so that resampling
@@ -605,12 +634,15 @@ def _rejection_kernel(
                 else:
                     accepted = target_argmax == draft_sampled
                 accepted &= is_valid_draft
-                verifying = accepted
-                accepted_length += accepted
-                tl.store(
-                    sampled_ptr + req_idx * sampled_stride + i,
-                    draft_sampled if accepted else target_argmax,
-                )
+                if FLY_WINDOW_SIZE > 0:
+                    target_logit = tl.load(
+                        target_logits_ptr
+                        + logit_idx * target_logits_stride
+                        + draft_sampled,
+                        mask=is_valid_draft,
+                        other=float("-inf"),
+                    ).to(tl.float32)
+                    can_defer = is_valid_draft and target_logit > float("-inf")
             elif USE_BLOCK_VERIFICATION:
                 # Block verification (Sun et al., 2024): https://arxiv.org/abs/2403.10444
                 prefix_joint_ratio = tl.exp(
@@ -646,10 +678,10 @@ def _rejection_kernel(
                 tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)
             else:
                 # Speculative decoding (Leviathan et al., 2023): https://arxiv.org/abs/2211.17192
-                target_logprob, draft_logprob, target_lse, draft_lse = (
+                target_logprob, draft_logprob, step_target_lse, step_draft_lse = (
                     _compute_global_logprobs_and_logsumexp(
                         draft_sampled,
-                        True,  # mask
+                        is_valid_draft,
                         logit_idx,
                         req_state_idx,
                         i,
@@ -672,6 +704,9 @@ def _rejection_kernel(
                         HAS_DRAFT_LOGITS,
                     )
                 )
+                if FLY_WINDOW_SIZE == 0 or pending_rejection < 0:
+                    target_lse = step_target_lse
+                    draft_lse = step_draft_lse
                 if SYNTHETIC_MODE:
                     rate = tl.load(synthetic_conditional_rates_ptr + i)
                     accepted = u < rate
@@ -687,9 +722,47 @@ def _rejection_kernel(
                         draft_logprob = 0.0
                         draft_lse = 0.0
                     accepted = target_logprob > tl.log(u) + draft_logprob
-                verifying = accepted
-                accepted_length += accepted
-                tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)
+                if FLY_WINDOW_SIZE > 0:
+                    accepted &= is_valid_draft
+                    can_defer = (
+                        is_valid_draft
+                        and target_logprob > float("-inf")
+                        and draft_logprob > float("-inf")
+                    )
+
+            if not USE_BLOCK_VERIFICATION or is_greedy:
+                if FLY_WINDOW_SIZE > 0:
+                    if pending_rejection >= 0:
+                        # Only native acceptance can confirm a pending window.
+                        verifying = accepted
+                        if accepted and i - pending_rejection == FLY_WINDOW_SIZE:
+                            accepted_length = i + 1
+                            pending_rejection = tl.full((), -1, tl.int64)
+                    elif accepted:
+                        accepted_length = i + 1
+                    else:
+                        rejected_argmax = target_argmax
+                        entropy = tl.load(fly_entropy_ptr + logit_idx)
+                        verifying = (
+                            can_defer
+                            and i + FLY_WINDOW_SIZE < num_draft_tokens
+                            and entropy >= fly_entropy_threshold
+                        )
+                        if verifying:
+                            pending_rejection = i
+                    tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)
+                else:
+                    verifying = accepted
+                    accepted_length += accepted
+                    tl.store(
+                        sampled_ptr + req_idx * sampled_stride + i,
+                        target_argmax if is_greedy and not accepted else draft_sampled,
+                    )
+    if FLY_WINDOW_SIZE > 0 and is_greedy and accepted_length < num_draft_tokens:
+        tl.store(
+            sampled_ptr + req_idx * sampled_stride + accepted_length,
+            rejected_argmax,
+        )
 
     tl.store(rejected_steps_ptr + req_idx, accepted_length)
     if USE_BLOCK_VERIFICATION and not is_greedy and accepted_length < num_draft_tokens:
@@ -720,6 +793,43 @@ def _rejection_kernel(
 
 
 @triton.jit
+def _seeded_resample_argmax(
+    residual_logits,
+    block,
+    mask,
+    resample_token_idx,
+    expanded_idx_mapping_ptr,
+    temp_ptr,
+    seed_ptr,
+    pos_ptr,
+    vocab_size,
+    USE_FP64: tl.constexpr,
+    POS_SALT: tl.constexpr = 0,
+):
+    return gumbel_block_argmax(
+        residual_logits,
+        block,
+        mask,
+        resample_token_idx,
+        expanded_idx_mapping_ptr,
+        temp_ptr,
+        seed_ptr,
+        pos_ptr,
+        None,  # logits_cache_ptr
+        0,  # logits_cache_stride_0
+        0,  # logits_cache_stride_1
+        None,  # logits_cache_col_ptr
+        None,  # logits_cache_source_ptr
+        0,  # logits_cache_source_stride
+        vocab_size,
+        IS_DRAFTING=False,
+        APPLY_TEMPERATURE=False,
+        USE_FP64=USE_FP64,
+        POS_SALT=POS_SALT,
+    )
+
+
+@triton.jit(do_not_specialize=["watermark_key_0", "watermark_key_1"])
 def _resample_kernel(
     # [num_reqs, num_blocks]
     resampled_local_argmax_ptr,
@@ -754,11 +864,22 @@ def _resample_kernel(
     pos_ptr,
     # [num_logits]
     cumulative_log_p_ptr,
+    # [num_logits, CONTEXT_WIDTH]
+    contexts_ptr,
+    contexts_stride,
+    # [max_num_reqs], uint8 view of a bool tensor
+    watermarking_ptr,
+    watermarking_skip_mask_ptr,
+    watermark_key_0,
+    watermark_key_1,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     USE_FP64: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
+    CONTEXT_WIDTH: tl.constexpr,
+    WATERMARK: tl.constexpr,
+    DEDUPLICATE_CONTEXTS: tl.constexpr,
     SALT_RESAMPLE: tl.constexpr = False,
 ):
     req_idx = tl.program_id(0)
@@ -792,6 +913,25 @@ def _resample_kernel(
     ).to(tl.float32)
 
     # Compute the residual logits to resample the rejected token from.
+    is_watermarked = False
+    if WATERMARK:
+        is_watermarked = (
+            tl.load(
+                watermarking_ptr + req_state_idx,
+                mask=req_state_idx >= 0,
+                other=0,
+            )
+            != 0
+        )
+
+    skip_watermarking = False
+    if DEDUPLICATE_CONTEXTS:
+        skip_watermarking = (
+            (tl.load(watermarking_skip_mask_ptr + resample_token_idx) != 0)
+            & is_watermarked
+            & (temp != 0.0)
+        )
+
     if is_bonus or not is_valid_rejected_draft:
         # Bonus token (no rejections) or -1 placeholder token. In either case,
         # directly use the target logits.
@@ -851,24 +991,49 @@ def _resample_kernel(
         ).to(tl.float32)
 
     # Resample the rejected/bonus token.
-    value, idx = gumbel_block_argmax(
-        residual_logits,
-        block,
-        mask,
-        resample_token_idx,
-        expanded_idx_mapping_ptr,
-        temp_ptr,
-        seed_ptr,
-        pos_ptr,
-        None,  # logits_cache_ptr
-        0,  # logits_cache_stride_0
-        0,  # logits_cache_stride_1
-        None,  # logits_cache_col_ptr
-        vocab_size,
-        APPLY_TEMPERATURE=False,
-        USE_FP64=USE_FP64,
-        POS_SALT=(1 << 40) if SALT_RESAMPLE else 0,
-    )
+    if WATERMARK:
+        # Padded and greedy rows retain the stock draw.
+        if is_watermarked & (temp != 0.0) & ~skip_watermarking:
+            watermark_value, idx = philox_gumbel_block_argmax(
+                residual_logits,
+                mask,
+                block_idx,
+                contexts_ptr + resample_token_idx * contexts_stride,
+                watermark_key_0.to(tl.uint32),
+                watermark_key_1.to(tl.uint32),
+                CONTEXT_WIDTH,
+                BLOCK_SIZE,
+            )
+            # Detector compatibility fixes the keyed draw at fp32.
+            value = watermark_value.to(tl.float64) if USE_FP64 else watermark_value
+        else:
+            value, idx = _seeded_resample_argmax(
+                residual_logits,
+                block,
+                mask,
+                resample_token_idx,
+                expanded_idx_mapping_ptr,
+                temp_ptr,
+                seed_ptr,
+                pos_ptr,
+                vocab_size,
+                USE_FP64=USE_FP64,
+                POS_SALT=(1 << 40) if SALT_RESAMPLE else 0,
+            )
+    else:
+        value, idx = _seeded_resample_argmax(
+            residual_logits,
+            block,
+            mask,
+            resample_token_idx,
+            expanded_idx_mapping_ptr,
+            temp_ptr,
+            seed_ptr,
+            pos_ptr,
+            vocab_size,
+            USE_FP64=USE_FP64,
+            POS_SALT=(1 << 40) if SALT_RESAMPLE else 0,
+        )
     token_id = block_idx * BLOCK_SIZE + idx
     tl.store(
         resampled_local_argmax_ptr
@@ -978,6 +1143,13 @@ def rejection_sample(
     salt_resample: bool = False,
     salt_u: bool = False,
     lookup_req: torch.Tensor | None = None,
+    contexts: torch.Tensor | None = None,
+    watermarking: torch.Tensor | None = None,
+    watermarking_skip_mask: torch.Tensor | None = None,
+    watermark_key: int | None = None,
+    fly_window_size: int = 0,
+    fly_entropy_threshold: float = 0.3,
+    fly_entropy_top_k: int = 3,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
     assert draft_logits is None or (
@@ -985,6 +1157,40 @@ def rejection_sample(
     )
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape
+
+    watermark = contexts is not None
+    assert watermark == (watermarking is not None) == (watermark_key is not None), (
+        "contexts, watermarking and watermark_key must be set together."
+    )
+    assert watermarking_skip_mask is None or watermark, (
+        "watermarking_skip_mask requires watermarking."
+    )
+    contexts_stride = 0
+    context_width = 1
+    watermarking_bytes: torch.Tensor | None = None
+    watermarking_skip_mask_bytes: torch.Tensor | None = None
+    watermark_key_0 = 0
+    watermark_key_1 = 0
+    if contexts is not None:
+        assert watermarking is not None and watermark_key is not None
+        assert contexts.ndim == 2 and contexts.shape[0] == num_logits
+        # Context words are hashed as uint32, so int32 (the request-state token
+        # dtype) and int64 both land on the same PRF stream, -1 included.
+        assert contexts.dtype in (torch.int32, torch.int64)
+        if contexts.stride(-1) != 1:
+            contexts = contexts.contiguous()
+        assert watermarking.ndim == 1 and watermarking.dtype == torch.bool
+        contexts_stride = contexts.stride(0)
+        context_width = contexts.shape[-1]
+        watermarking_bytes = watermarking.view(torch.uint8)
+        if watermarking_skip_mask is not None:
+            assert watermarking_skip_mask.shape == (num_logits,)
+            assert watermarking_skip_mask.dtype == torch.bool
+            if not watermarking_skip_mask.is_contiguous():
+                watermarking_skip_mask = watermarking_skip_mask.contiguous()
+            watermarking_skip_mask_bytes = watermarking_skip_mask.view(torch.uint8)
+        watermark_key_0 = watermark_key & 0xFFFFFFFF
+        watermark_key_1 = watermark_key >> 32
     draft_logits_stride_0 = 0
     draft_logits_stride_1 = 0
     if has_draft_logits := draft_logits is not None:
@@ -993,6 +1199,13 @@ def rejection_sample(
         # In some cases (e.g. MiMo v2.5 Pro + DFlash) the target model's
         # vocab size is larger than the draft's due to padding.
         vocab_size = min(vocab_size, draft_logits.size(-1))
+
+    fly_entropy = None
+    if fly_window_size > 0:
+        assert synthetic_conditional_rates is None and not use_block_verification
+        fly_entropy = compute_fly_entropy(
+            target_logits[:, :vocab_size], fly_entropy_top_k, from_logits=True
+        )
 
     # Compute the per-vocab-block logits stats, such as target argmax
     # (for greedy requests), and target max + softmax exponential
@@ -1035,7 +1248,7 @@ def rejection_sample(
         expanded_local_pos,
         temperature,
         vocab_size,
-        num_speculative_steps,
+        num_logits,
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
     )
@@ -1106,7 +1319,7 @@ def rejection_sample(
                 expanded_local_pos,
                 temperature,
                 vocab_size,
-                num_speculative_steps,
+                num_logits,
                 vocab_num_blocks,
                 BLOCK_SIZE=VOCAB_BLOCK_SIZE,
                 PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
@@ -1184,6 +1397,8 @@ def rejection_sample(
         local_residual_mass,
         local_residual_mass.stride(0) if local_residual_mass is not None else 0,
         lookup_req,
+        fly_entropy,
+        fly_entropy_threshold,
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
         HAS_DRAFT_LOGITS=has_draft_logits,
@@ -1191,6 +1406,7 @@ def rejection_sample(
         SYNTHETIC_MODE=synthetic_conditional_rates is not None,
         USE_BLOCK_VERIFICATION=use_block_verification,
         SALT_U=salt_u,
+        FLY_WINDOW_SIZE=fly_window_size,
         num_warps=1,
     )
 
@@ -1226,12 +1442,21 @@ def rejection_sample(
         seed,
         pos,
         cumulative_log_p,
+        contexts,
+        contexts_stride,
+        watermarking_bytes,
+        watermarking_skip_mask_bytes,
+        watermark_key_0,
+        watermark_key_1,
         vocab_size,
         BLOCK_SIZE=RESAMPLE_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
         USE_FP64=use_fp64,
         USE_BLOCK_VERIFICATION=use_block_verification,
         SALT_RESAMPLE=salt_resample,
+        CONTEXT_WIDTH=context_width,
+        WATERMARK=watermark,
+        DEDUPLICATE_CONTEXTS=watermarking_skip_mask is not None,
     )
 
     # Insert the resampled tokens into the output sampled.

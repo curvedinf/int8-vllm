@@ -366,6 +366,11 @@ gh pr list --repo vllm-project/vllm --state open --search "<short area keywords>
   every changed line and run relevant tests. AI-assisted PR descriptions must
   state why it is not duplicating an existing PR, test commands and results,
   model eval results when output-affecting, and that AI assistance was used.
+- User-visible changes (features, CLI args, config fields, env vars, models,
+  hardware, defaults, deprecations) must update the rendered docs in the same PR;
+  follow [Documenting User-Visible Changes](docs/contributing/README.md#documenting-user-visible-changes).
+- Before opening a PR (drafts included) or requesting re-review, run the
+  [`pr-checklist`](.agents/skills/pr-checklist/SKILL.md) skill and address its findings.
 - Fail closed: if work is duplicate/trivial busywork, stop and explain.
 
 ### Upstream development workflow

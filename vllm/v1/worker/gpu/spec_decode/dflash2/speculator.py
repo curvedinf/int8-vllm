@@ -11,7 +11,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.profiler.lifecycle import lifecycle
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax, spec_step_seed
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 # Env-gated candidate ring (VLLM_CAND_RING): per-round (candidate_ids,
@@ -86,15 +86,17 @@ def _selector_walk_kernel(
             other=0,
         )
 
-        # Candidate ids key the noise, matching the target's own sampling.
-        position = tl.load(sample_pos_ptr + flat) - 1
+        # sample_pos is the predicted token's position P. Sampling keys a draw
+        # by the position before the sampled token, P-1.
+        sample_pos = tl.load(sample_pos_ptr + flat) - 1
         _, index = gumbel_noised_argmax(
             scores,
             candidates,
             mask & valid,
-            seed,
-            position,
+            spec_step_seed(seed, step),
+            sample_pos,
             temperature if SAMPLE_PROBABILISTIC else 0.0,
+            IS_DRAFTING=True,
             USE_FP64=USE_FP64,
         )
 
@@ -244,6 +246,8 @@ class DFlash2Speculator(DFlashSpeculator):
         self._lookup_rounds = 0
         draft_config = self.draft_model_config.hf_config.dflash_config
         self.selector_top_k = int(draft_config[self._candidate_top_k_key])
+        # Upstream code paths reference the same value as ``top_k``.
+        self.top_k = self.selector_top_k
         self._anchor_indices = (
             torch.arange(self.max_num_reqs, dtype=torch.int64, device=device)
             * self.num_query_per_req
@@ -449,7 +453,7 @@ class DFlash2Speculator(DFlashSpeculator):
             hidden_states.flatten(0, 1)
         )
         candidate_ids = candidate_ids.view(
-            num_reqs, self.num_speculative_steps, self.selector_top_k
+            num_reqs, self.num_speculative_steps, self.top_k
         )
         unary_logits = unary_logits.view_as(candidate_ids)
         if os.environ.get("VLLM_DFLASH_AUDIT"):
@@ -481,6 +485,12 @@ class DFlash2Speculator(DFlashSpeculator):
         # rtx3090 kvarn-v2 fix. Pure GPU op, cudagraph-capture-safe.
         scores = torch.nan_to_num(scores, nan=-1e30, posinf=1e30, neginf=-1e30)
         self._sample_path(candidate_ids, scores, num_reqs)
+        if getattr(self, "enable_adaptive_verification", False):
+            self._maybe_predict_acceptance(
+                self.candidate_sampler.scores[:num_reqs].flatten(0, 1),
+                self.sample_idx_mapping[:num_sample],
+                self.sample_col[:num_sample],
+            )
         # GOALOPT iter 10: adaptive lookup override (greedy rows, exact
         # target-argmax chain verification) ahead of the TP broadcast so
         # every rank verifies the same proposals.

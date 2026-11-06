@@ -6,6 +6,7 @@ import os
 import re
 from collections.abc import Iterable
 
+import regex as re
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -22,7 +23,6 @@ def spec_round() -> int:
 
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
-    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
@@ -32,6 +32,7 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
@@ -47,7 +48,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.weight_utils import make_attention_sink
 from vllm.multimodal.inputs import NestedTensors
+from vllm.platforms import current_platform
 from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.transformers_utils.repo_utils import get_hf_file_bytes
 from vllm.v1.attention.backend import AttentionType
@@ -61,6 +64,7 @@ from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
     get_draft_quant_config,
+    map_draft_quant_config,
     maybe_prefix,
     process_eagle_weight,
 )
@@ -113,7 +117,9 @@ def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
     if override is not None:
         return bool(override)
     layer_types = getattr(config, "layer_types", None)
-    return bool(layer_types) and layer_types[layer_idx] == _SLIDING_ATTENTION
+    if not layer_types:
+        return False
+    return layer_types[layer_idx] == _SLIDING_ATTENTION
 
 
 def dflash_has_any_non_causal(config: Qwen3Config) -> bool:
@@ -124,28 +130,9 @@ def dflash_has_any_non_causal(config: Qwen3Config) -> bool:
     )
 
 
-def dflash_target_rope_is_neox_style(target_model: nn.Module) -> bool | None:
-    """The target's RoPE layout, from its first attention layer.
-
-    A DFlash head must rotate Q/K the way the target it was distilled against
-    does, and a mismatch is silent — acceptance collapses but nothing errors and
-    the output stays correct. Draft checkpoints do not carry this, so take it
-    from the target. None if the target uses no RoPE.
-    """
-    language_model = (
-        target_model.get_language_model()
-        if hasattr(target_model, "get_language_model")
-        else target_model
-    )
-    for module in language_model.modules():
-        style = getattr(module, "is_neox_style", None)
-        if isinstance(style, bool):
-            return style
-    return None
-
-
 def _get_dflash_fc_input_size(vllm_config: VllmConfig) -> int:
     spec_config = vllm_config.speculative_config
+    assert spec_config is not None
     config = spec_config.draft_model_config.hf_config
     aux_layers = get_eagle3_aux_layers_from_config(spec_config)
     num_features_to_use = len(aux_layers) if aux_layers else config.num_hidden_layers
@@ -236,6 +223,7 @@ class DFlashQwen3Attention(nn.Module):
         rms_norm_eps: float = 1e-06,
         attention_bias: bool = False,
         add_swa_attention_sink_bias: bool = False,
+        v_scale: float | None = None,
         sliding_window: int | None = None,
         causal: bool = False,
         is_neox_style: bool = True,
@@ -261,6 +249,7 @@ class DFlashQwen3Attention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
+        self.v_scale = v_scale
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -287,9 +276,7 @@ class DFlashQwen3Attention(nn.Module):
         )
 
         self.attention_sink_bias = (
-            torch.nn.Parameter(torch.empty(self.num_heads), requires_grad=False)
-            if add_swa_attention_sink_bias
-            else None
+            make_attention_sink(self.num_heads) if add_swa_attention_sink_bias else None
         )
 
         self.sliding_window = sliding_window
@@ -306,6 +293,24 @@ class DFlashQwen3Attention(nn.Module):
             sinks=self.attention_sink_bias,
         )
         self.causal = causal
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx1x
+            from vllm.v1.attention.backends.rocm_segmented_attn import (
+                RocmSegmentedAttentionImpl,
+            )
+
+            if on_gfx1x() and isinstance(self.attn.impl, RocmSegmentedAttentionImpl):
+                # Startup segmented tuning needs the draft's actual attention mode.
+                # Causality is normally supplied later through attention metadata.
+                self.attn.segmented_causal = causal
+                speculative_config = get_current_vllm_config().speculative_config
+                if (
+                    speculative_config is not None
+                    and speculative_config.num_speculative_tokens is not None
+                ):
+                    self.attn.segmented_query_limit = (
+                        speculative_config.num_speculative_tokens + 1
+                    )
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
@@ -351,6 +356,9 @@ class DFlashQwen3Attention(nn.Module):
                 f"k_abs={k.abs().max().item():.3f} impl={type(self.attn.impl).__name__}",
                 flush=True,
             )
+
+        if self.v_scale is not None:
+            v = v * self.v_scale
         attn_output = self.attn(q, k, v)
         if os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not (
             torch.cuda.is_current_stream_capturing()
@@ -398,11 +406,11 @@ class DFlashQwen3DecoderLayer(nn.Module):
         # non-causal) from the draft config.
         sliding_window, causal = _resolve_layer_attention(config, layer_idx)
 
-        # RoPE layout, copied off the target at load time by the draft loader
-        # (see `dflash_target_rope_is_neox_style`). Checkpoints do not carry it:
-        # a head distilled from an interleaved-RoPE target must rotate the way
-        # that target does, or every drafted Q/K is wrong and acceptance
-        # collapses with no error raised.
+        # RoPE layout. The rotation applies to the draft's own Q/K, so this is
+        # fixed by how the head was distilled, not by the target: a neox-trained
+        # head on an interleaved target still needs neox. A mismatch is silent --
+        # acceptance collapses and nothing errors -- so a checkpoint that was
+        # distilled the other way has to say so here.
         is_neox_style = getattr(config, "is_neox_style", True)
 
         self.self_attn = DFlashQwen3Attention(
@@ -413,6 +421,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
             rms_norm_eps=config.rms_norm_eps,
             attention_bias=getattr(config, "attention_bias", False),
             add_swa_attention_sink_bias=add_swa_attention_sink_bias,
+            v_scale=dflash_config.get("attention_value_scale"),
             sliding_window=sliding_window,
             causal=causal,
             is_neox_style=is_neox_style,
@@ -462,13 +471,17 @@ class DFlashQwen3Model(nn.Module):
     decoder_layer_cls = DFlashQwen3DecoderLayer
 
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={
-            "midlayer.": "layers.0.",
+        orig_to_new_regex={
+            # Match a complete module name, including bare names and trailing
+            # wildcards in quantization configs, but not e.g. midlayer_extra.
+            re.compile(r"(?<![A-Za-z0-9_])midlayer(?=\.|\*|$)"): "layers.0",
             # Muse-Glimmer-30B-assistant names the aux-hidden-state encoder
             # `encoder.fc` / `encoder.output_norm_enc`; this head calls them
             # `fc` / `hidden_norm`. Same tensors and shapes, different names.
-            "encoder.output_norm_enc.": "hidden_norm.",
-            "encoder.fc.": "fc.",
+            re.compile(r"(?<![A-Za-z0-9_])encoder\.output_norm_enc(?=\.|\*|$)"): (
+                "hidden_norm"
+            ),
+            re.compile(r"(?<![A-Za-z0-9_])encoder\.fc(?=\.|\*|$)"): "fc",
         },
         orig_to_new_stacked={
             ".q_proj": (".qkv_proj", "q"),
@@ -487,18 +500,27 @@ class DFlashQwen3Model(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        self.config = speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
         self.quant_config = get_draft_quant_config(vllm_config)
+        map_draft_quant_config(
+            self.quant_config,
+            self.hf_to_vllm_mapper,
+            prefix,
+            start_layer_id,
+            self.config.num_hidden_layers,
+        )
         _shift_draft_quant_modules(self.quant_config, start_layer_id)
 
         drafter_config = getattr(self.config, "eagle_config", {})
         drafter_config.update(getattr(self.config, "dflash_config", {}))
 
-        if drafter_config is not None and "use_aux_hidden_state" in drafter_config:
-            self.use_aux_hidden_state = drafter_config["use_aux_hidden_state"]
-        else:
-            self.use_aux_hidden_state = True
+        self.use_aux_hidden_state = drafter_config.get(
+            "use_aux_hidden_state",
+            getattr(self.config, "use_aux_hidden_state", True),
+        )
 
         current_vllm_config = get_current_vllm_config()
 
@@ -513,7 +535,9 @@ class DFlashQwen3Model(nn.Module):
         # at that slot id. Some checkpoints (XiaomiMiMo/MiMo-V2.5-Pro-FP4-DFlash) ship
         # with a separate mask embedding tensor to use instead. When present, we load it
         # and substitute it for embed_tokens[mask_token_id] when computing embeddings.
-        self.mask_token_id = drafter_config.get("mask_token_id")
+        self.mask_token_id = drafter_config.get(
+            "mask_token_id", getattr(self.config, "mask_token_id", None)
+        )
         self.mask_embedding = nn.Parameter(
             torch.zeros(
                 self.config.hidden_size,
@@ -571,96 +595,109 @@ class DFlashQwen3Model(nn.Module):
         has_bias: bool,
     ) -> None:
         self._hidden_norm_weight = self.hidden_norm.weight.data
+        self._context_qkv_projs = [a.qkv_proj for a in layers_attn]
+        self._context_q_sizes = [a.q_size for a in layers_attn]
 
         # KV projection weights: [num_layers * 2 * kv_size, hidden_size].
         # A quantized drafter (GPTQ int8) stores packed int8 + scales; the
         # fused projection below runs raw F.linear, so dequantize the sliced
         # K/V rows HERE (checkpoint layout — no repack/transposition to undo).
         # Mirrors the #51581 fix class from the upstream PR thread.
-        def _dense_kv_rows(attn) -> torch.Tensor:
+        def _dense_kv_rows(attn) -> torch.Tensor | None:
             # TritonW8A16 attaches the dequant hook to the layer itself
             # (see process_weights_after_loading), not to quant_method.
             deq = getattr(attn.qkv_proj, "dequant_kv_rows", None)
             if deq is not None:
                 return deq(None)[attn.q_size :]  # full dense [N, K], keep KV rows
-            return attn.qkv_proj.weight[attn.q_size :]
+            if isinstance(attn.qkv_proj.quant_method, UnquantizedLinearMethod):
+                return attn.qkv_proj.weight[attn.q_size :]
+            # Packed storage the fused F.linear below cannot consume; the
+            # caller falls back to running each projection through its
+            # quant method.
+            return None
 
         kv_weights = [_dense_kv_rows(a) for a in layers_attn]
-        # The fused projection runs against the speculator's hidden-state
-        # buffer (draft dtype); the shared target embedding is fp16 when the
-        # target is, so derive the dtype from the draft config instead of the
-        # (possibly shared) embedding weights.
-        from vllm.config import get_current_vllm_config as _get_cfg
-
-        _spec = _get_cfg().speculative_config
-        draft_dtype = (
-            _spec.draft_model_config.dtype
-            if _spec is not None and _spec.draft_model_config is not None
-            else self.embed_tokens.weight.dtype
-        )
-        dense = torch.cat(kv_weights, dim=0).to(draft_dtype)
         self._ckv_q: torch.Tensor | None = None
         self._ckv_s: torch.Tensor | None = None
-        # NOTE: dtype ladder measured 2026-08-24 at TP4/C8 NS=15 —
-        #   bf16 (checkpoint dtype): 71.2% acceptance, 11.68 acc len
-        #   fp16 dense:               69.2% acceptance, 11.38 acc len
-        #   int8 W8A8:                66.0% acceptance, 10.90 acc len
-        # The projection's K output feeds attention after norm+RoPE, so any
-        # rounding below the checkpoint's bf16 lands in every draft scoring
-        # step. Default stays checkpoint-dtype dense — the sanctioned float
-        # exception (with the selector codebooks).
-        #
-        # E8 (VLLM_GFX908_DF2_CTXKV_W8A8=1, default OFF) re-gates the int8
-        # rung: that ladder predates the round-to-nearest activation
-        # quantizer, and the trunc-toward-zero aiter quant it measured with
-        # carried a ~10x stop-prob inflation confound. E8 pairs
-        # per-channel-requantized int8 weights with pertoken_quant_rn
-        # activations on the same AITER CK W8A8 custom ops the rest of the
-        # stack uses, and must re-pass the acceptance gate (±1pt of the
-        # bf16 baseline) before it can become default. Weight requant is
-        # the exact chain from aiter_w8a16.py (AiterW8A16LinearKernel):
-        # dequant -> fp32 -> wmax = abs.amax(dim=1)/127;
-        # q = (dense/s).round().clamp(-127,127).to(int8).
-        e8 = os.environ.get("VLLM_GFX908_DF2_CTXKV_W8A8", "0") == "1"
-        gemm_op = getattr(torch.ops.vllm, "rocm_aiter_gemm_a8w8_ck", None)
-        if e8 and gemm_op is not None:
-            dense_f32 = dense.float()
-            wmax = dense_f32.abs().amax(dim=1, keepdim=True).clamp(min=1e-12)
-            self._ckv_s = (wmax / 127.0).to(torch.float32).contiguous()
-            self._ckv_q = (
-                (dense_f32 / self._ckv_s)
-                .round()
-                .clamp(-127, 127)
-                .to(torch.int8)
-                .contiguous()
-            )
-            # While _ckv_q is live the quant path owns the GEMM and nothing
-            # else reads the dense copy (the dense fallback in
-            # _project_context_kv only runs without the custom op, and op
-            # registration is process-static), so free it rather than hold
-            # both layouts; the int8+f32-scale copy is ~25x smaller.
-            logger.info(
-                "E8 ctx-KV W8A8: dense %s KV projection (%d rows, %.1f MiB) "
-                "requantized per-channel int8; dense copy freed",
-                dense.dtype,
-                dense.shape[0],
-                dense.numel() * dense.element_size() / 2**20,
-            )
-            self._fused_kv_weight = torch.empty(
-                0, device=dense.device, dtype=dense.dtype
-            )
-        else:
-            if e8:
-                logger.warning_once(
-                    "VLLM_GFX908_DF2_CTXKV_W8A8=1 but the AITER CK W8A8 "
-                    "custom op is unavailable; ctx-KV projection stays dense"
-                )
-            self._fused_kv_weight = dense
-        if has_bias:
-            kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
-            self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
-        else:
+        if any(w is None for w in kv_weights):
+            # Quantized linear weights may use packed storage that cannot be
+            # consumed by F.linear. Run each projection through its quant method.
+            self._fused_kv_weight = None
             self._fused_kv_bias = None
+        else:
+            # The fused projection runs against the speculator's hidden-state
+            # buffer (draft dtype); the shared target embedding is fp16 when the
+            # target is, so derive the dtype from the draft config instead of the
+            # (possibly shared) embedding weights.
+            from vllm.config import get_current_vllm_config as _get_cfg
+
+            _spec = _get_cfg().speculative_config
+            draft_dtype = (
+                _spec.draft_model_config.dtype
+                if _spec is not None and _spec.draft_model_config is not None
+                else self.embed_tokens.weight.dtype
+            )
+            dense = torch.cat(kv_weights, dim=0).to(draft_dtype)
+            # NOTE: dtype ladder measured 2026-08-24 at TP4/C8 NS=15 —
+            #   bf16 (checkpoint dtype): 71.2% acceptance, 11.68 acc len
+            #   fp16 dense:               69.2% acceptance, 11.38 acc len
+            #   int8 W8A8:                66.0% acceptance, 10.90 acc len
+            # The projection's K output feeds attention after norm+RoPE, so any
+            # rounding below the checkpoint's bf16 lands in every draft scoring
+            # step. Default stays checkpoint-dtype dense — the sanctioned float
+            # exception (with the selector codebooks).
+            #
+            # E8 (VLLM_GFX908_DF2_CTXKV_W8A8=1, default OFF) re-gates the int8
+            # rung: that ladder predates the round-to-nearest activation
+            # quantizer, and the trunc-toward-zero aiter quant it measured with
+            # carried a ~10x stop-prob inflation confound. E8 pairs
+            # per-channel-requantized int8 weights with pertoken_quant_rn
+            # activations on the same AITER CK W8A8 custom ops the rest of the
+            # stack uses, and must re-pass the acceptance gate (±1pt of the
+            # bf16 baseline) before it can become default. Weight requant is
+            # the exact chain from aiter_w8a16.py (AiterW8A16LinearKernel):
+            # dequant -> fp32 -> wmax = abs.amax(dim=1)/127;
+            # q = (dense/s).round().clamp(-127,127).to(int8).
+            e8 = os.environ.get("VLLM_GFX908_DF2_CTXKV_W8A8", "0") == "1"
+            gemm_op = getattr(torch.ops.vllm, "rocm_aiter_gemm_a8w8_ck", None)
+            if e8 and gemm_op is not None:
+                dense_f32 = dense.float()
+                wmax = dense_f32.abs().amax(dim=1, keepdim=True).clamp(min=1e-12)
+                self._ckv_s = (wmax / 127.0).to(torch.float32).contiguous()
+                self._ckv_q = (
+                    (dense_f32 / self._ckv_s)
+                    .round()
+                    .clamp(-127, 127)
+                    .to(torch.int8)
+                    .contiguous()
+                )
+                # While _ckv_q is live the quant path owns the GEMM and nothing
+                # else reads the dense copy (the dense fallback in
+                # _project_context_kv only runs without the custom op, and op
+                # registration is process-static), so free it rather than hold
+                # both layouts; the int8+f32-scale copy is ~25x smaller.
+                logger.info(
+                    "E8 ctx-KV W8A8: dense %s KV projection (%d rows, %.1f MiB) "
+                    "requantized per-channel int8; dense copy freed",
+                    dense.dtype,
+                    dense.shape[0],
+                    dense.numel() * dense.element_size() / 2**20,
+                )
+                self._fused_kv_weight = torch.empty(
+                    0, device=dense.device, dtype=dense.dtype
+                )
+            else:
+                if e8:
+                    logger.warning_once(
+                        "VLLM_GFX908_DF2_CTXKV_W8A8=1 but the AITER CK W8A8 "
+                        "custom op is unavailable; ctx-KV projection stays dense"
+                    )
+                self._fused_kv_weight = dense
+            if has_bias:
+                kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
+                self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
+            else:
+                self._fused_kv_bias = None
 
         # K-norm weights stacked into one contiguous [num_layers, head_dim]
         # tensor so the per-layer K-norm runs as a single grouped kernel.
@@ -754,18 +791,27 @@ class DFlashQwen3Model(nn.Module):
             ).to(normed_context_states.dtype)
             if self._fused_kv_bias is not None:
                 all_kv_flat = all_kv_flat + self._fused_kv_bias
-        else:
+            all_kv = all_kv_flat.view(num_ctx, num_layers, 2, num_kv_heads, head_dim)
+        elif self._fused_kv_weight is not None:
             all_kv_flat = F.linear(
                 normed_context_states, self._fused_kv_weight, self._fused_kv_bias
             )
+            all_kv = all_kv_flat.view(num_ctx, num_layers, 2, num_kv_heads, head_dim)
+        else:
+            layer_kv = []
+            for proj, q_size in zip(
+                self._context_qkv_projs, self._context_q_sizes, strict=True
+            ):
+                qkv, _ = proj(normed_context_states)
+                layer_kv.append(
+                    qkv[:, q_size:].view(num_ctx, 2, num_kv_heads, head_dim)
+                )
+            all_kv = torch.stack(layer_kv, dim=1)
+
         # Single contiguous copy that separates K/V and transposes to
-        # layer-major layout.  Result: [2, L, num_ctx, nkv, hd] contiguous.
+        # layer-major layout. Result: [2, L, num_ctx, nkv, hd] contiguous.
         # Indexing dim-0 gives contiguous [L, num_ctx, nkv, hd] for K and V.
-        all_kv = (
-            all_kv_flat.view(num_ctx, num_layers, 2, num_kv_heads, head_dim)
-            .permute(2, 1, 0, 3, 4)
-            .contiguous()
-        )
+        all_kv = all_kv.permute(2, 1, 0, 3, 4).contiguous()
         all_k = all_kv[0]  # [L, num_ctx, nkv, hd], contiguous
         all_v = all_kv[1]  # [L, num_ctx, nkv, hd], contiguous
         if os.environ.get("VLLM_DFLASH_AUDIT"):
@@ -874,6 +920,10 @@ class DFlashQwen3Model(nn.Module):
         if context_slot_mapping is None:
             return
 
+        v_scale = getattr(self.layers[0].self_attn, "v_scale", None)
+        if v_scale is not None:
+            all_v.mul_(v_scale)
+
         # --- Per-layer cache insert ---
         all_k_final = all_k_flat.view(L, num_ctx, nkv, hd)
         if os.environ.get("VLLM_DFLASH_AUDIT"):
@@ -980,26 +1030,9 @@ class DFlashQwen3Model(nn.Module):
             _qa.record_dflash_stage("backbone_output", hidden=hidden_states)
         return hidden_states
 
-    def _preprocess(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> Iterable[tuple[str, torch.Tensor]]:
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        for name, loaded_weight in weights:
-            if "attention_sink_bias" in name:
-                # Sink bias is per-head; shard it across TP ranks like the
-                # attention heads themselves.
-                heads_per_rank = loaded_weight.shape[0] // tp_size
-                loaded_weight = loaded_weight.narrow(
-                    0, tp_rank * heads_per_rank, heads_per_rank
-                )
-            yield name, loaded_weight
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(
-            self._preprocess(weights), mapper=self.hf_to_vllm_mapper
-        )
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
@@ -1007,13 +1040,13 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
-        self.draft_model_config = vllm_config.speculative_config.draft_model_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        self.draft_model_config = speculative_config.draft_model_config
         self.config = self.draft_model_config.hf_config
         if getattr(self.config, "draft_vocab_size", None) is None:
             self.config.draft_vocab_size = getattr(self.config, "vocab_size", None)
-        target_layer_num = vllm_config.model_config.get_num_layers(
-            vllm_config.parallel_config
-        )
+        target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
         self.model = self.model_cls(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
@@ -1051,7 +1084,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
     ) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
@@ -1150,7 +1183,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             model_weights["model.mask_embedding"] = mask_embedding
             self.model.has_separate_mask_embedding = True
 
-        orig_to_new_substr = {}
+        orig_to_new_substr: dict[str, None] = {}
         if not includes_draft_id_mapping:
             orig_to_new_substr["draft_id_to_target_id"] = None
         if not includes_embed_tokens:
@@ -1182,13 +1215,13 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         if os.environ.get("VLLM_SPEC_DEBUG_DUMP"):
             w = self.model._fused_kv_weight
             hs = self.model._hidden_norm_weight
-            if w.numel():
+            if w is not None and w.numel():
                 logger.info(
                     "[SPEC-DBG5] fused_kv nan=%d/%d absmax=%.4f hidden_norm nan=%d/%d",
                     int(w.isnan().sum()), w.numel(), float(w.abs().max()),
                     int(hs.isnan().sum()), hs.numel(),
                 )
-            else:
+            elif self.model._ckv_q is not None:
                 # E8 freed the dense copy; dump the int8 requant instead.
                 q = self.model._ckv_q
                 logger.info(
