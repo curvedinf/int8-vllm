@@ -50,6 +50,25 @@ vllm/models/flint/ (upstream PR #62938).
   gate/up/down, q/k norms, 8 KV heads (k_proj [1024,2048]). Loads through
   the fork's qwen3_dflash2.py machinery modulo head-count params.
 
+## Draft int8 surface list (user-confirmed 2026-11-06: draft IS int8-ified)
+
+Same doctrine as dflash2-ptqr-r1 + Bolt text-path findings:
+
+| Draft surface | Treatment |
+|---|---|
+| q/k/v/o_proj, mlp gate/up/down (5 layers) | GPTQ INT8 GS128 + AITER W8A8 |
+| attention_conv + mlp_conv kernel_projection | per-channel W8A8 (DFlashGroupedConv requant, VLLM_GFX908_DF2_W8A8 default ON) |
+| attention_conv + mlp_conv base_kernel | bf16 dense (dequant-grid surface) |
+| candidate_selector.hidden_projection | W8A8 (selector projections quantized, as Qwen draft) |
+| predecessor/successor codebooks | bf16 (measured exception, audited) |
+| fc.weight (ctx projection, 5x2048) | bf16 dense (dtype ladder 71.2 > 69.2 > 66.0% acceptance; E8 W8A8 lever VLLM_GFX908_DF2_CTXKV_W8A8 exists, off) |
+| q/k norm, hidden_norm, layer norms | bf16 (norms) |
+| Draft KV cache | int8_block_g128 (explicit in speculative config) |
+| Draft compute dtype | bf16 from its own checkpoint (never the target dtype) |
+
+PTQR: draft rung-1 recipe (ptqr_train_draft*.py port to flint tokenizer/
+config; fidelity gate top-1 == bf16; acceptance ±1pt at TP4/C8).
+
 ## Exceptions (from Qwen 27B + Bolt measured findings)
 
 1. bf16 draft residual/compute dtype (draft resolves own dtype; never force
