@@ -91,3 +91,27 @@ before main promotion.
   cudagraph utils + mamba_hybrid).
 - After conflicts: syntax sweep → import smoke on pinned venv → rebuild
   extensions → validation ladder → serve boot.
+
+## Serve-boot campaign (2026-11-06 evening, in progress)
+
+Merge E2E gate: micro PASS + battery 4/4 done; serve boot iteratively
+deeper. Fixed in sequence: orjson dep; dup gptq_shuffle op registration
+(delta file = gptq_w8a16_repacked_gemm only); c.has_g_idx getattr;
+phantom 4-tuple _get_weight_params unpacks x4; AIS read-plan 4-tuple;
+w_gidx_name default; fork-latent NameError dflash_target_rope_is_neox_style
+(defined, attn0 convention); fork-only is_encoder_only guarded getattr.
+
+OPEN MYSTERY: VLLM_GFX908_RESIDUAL_INT8 arrives SET in workers (proven by
+control flow: quantized=True raise + draft entering decoder_int8
+projection) with no setter in tree/script/profile/systemd/sitecustomize;
+isolated subprocess eval says False; in-script env dump got truncated by
+the launcher's log redirect. Contained: seam self-disables for hidden
+2048 (degrade-not-raise) AND the qwen38 script now pins the env OFF
+explicitly. Bolt path untouched (1024/4096 + its own script sets =1).
+Boot 14 (pinned) in flight at target-weight AIS load.
+
+PTQR Flint pipeline (all committed): FlintRef+trainer (65 surfaces,
+router excluded), corpus 4.22M tok, TP4 equivalence PASS (experts shard
+BY EXPERT - double-sharding was the bug), shard-streaming ckpt loader,
+PTQRLinear-aware student sharding, torchrun launch path. Rung-0 launch
+is next after the boot gate clears (GPUs are busy serving the boot).
