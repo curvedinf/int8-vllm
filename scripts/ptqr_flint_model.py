@@ -1001,3 +1001,83 @@ class StreamedFlintTeacher(nn.Module):
         d = self._t(f"{prefix}.down_proj.weight").to(dev)
         h = torch.nn.functional.silu(xr @ g.t()) * (xr @ u.t())
         return h @ d.t()
+
+
+def presplit_flint_shards(ckpt_dir: str, out_root: str, world: int) -> list[str]:
+    """Split the Flint checkpoint into per-rank safetensors (one rank/pass).
+
+    Each output holds exactly one TP rank's tensors: non-expert slices
+    (vocab rows, qkv head slices, o cols, intermediate slices) + its
+    rank::world experts (whole), original names preserved. Peak anon =
+    ONE rank's shard (~20GB); the checkpoint is read world times.
+    """
+    import glob as _glob
+    import os as _os
+
+    import torch as _torch
+    from safetensors import safe_open
+    from safetensors.torch import save_file
+
+    cfg = load_flint_config(ckpt_dir)
+    V = cfg.vocab_size
+    hd = cfg.head_dim
+    qh = cfg.num_attention_heads // world
+    kvh = cfg.num_key_value_heads // world
+    g_inter = cfg.intermediate_size
+    sh_inter = cfg.shared_expert_intermediate_size
+    files = sorted(_glob.glob(_os.path.join(ckpt_dir, "*.safetensors")))
+    outs = []
+    for r in range(world):
+        out = _os.path.join(out_root, f"rank{r}.safetensors")
+        outs.append(out)
+        if _os.path.exists(out):
+            continue
+        _os.makedirs(out_root, exist_ok=True)
+        buf: dict = {}
+        v0, v1 = r * V // world, (r + 1) * V // world
+        h0 = r * qh
+        r0, r1 = r * g_inter // world, (r + 1) * g_inter // world
+        sr0 = r * sh_inter // world
+        sr1 = (r + 1) * sh_inter // world
+        for f in files:
+            with safe_open(f, framework="pt", device="cpu") as sf:
+                for name in sf.keys():
+                    if name.endswith(("k_proj.weight", "v_proj.weight")):
+                        continue  # folded into q_proj below
+                    t = sf.get_tensor(name)
+                    if name in ("model.embed_tokens.weight", "lm_head.weight"):
+                        buf[name] = t[v0:v1].contiguous()
+                    elif ".self_attn.q_proj.weight" in name:
+                        k = sf.get_tensor(name.replace("q_proj", "k_proj"))
+                        v = sf.get_tensor(name.replace("q_proj", "v_proj"))
+                        buf[name] = _torch.cat([
+                            t[h0 * hd:(h0 + qh) * hd],
+                            k[r * kvh * hd:(r + 1) * kvh * hd],
+                            v[r * kvh * hd:(r + 1) * kvh * hd]], dim=0).contiguous()
+                    elif ".self_attn.o_proj.weight" in name:
+                        buf[name] = t[:, h0 * hd:(h0 + qh) * hd].contiguous()
+                    elif ".experts." in name:
+                        e = int(name.split(".experts.")[1].split(".")[0])
+                        if e % world == r:
+                            buf[name] = t
+                    elif ".shared_expert." in name or ".mlp." in name:
+                        li = int(name.split(".")[2])
+                        a0, a1 = ((r0, r1) if li in (cfg.mlp_only_layers or [])
+                                  else (sr0, sr1))
+                        if name.endswith(".mlp.gate.weight"):
+                            buf[name] = t  # router, full
+                        elif name.endswith("gate_proj.weight"):
+                            u = sf.get_tensor(name.replace("gate_proj", "up_proj"))
+                            g = t.shape[0]
+                            buf[name] = _torch.cat(
+                                [t[:g][a0:a1], u[g:][a0:a1]], dim=0).contiguous()
+                        elif name.endswith("down_proj.weight"):
+                            buf[name] = t[:, a0:a1].contiguous()
+                        else:
+                            buf[name] = t
+                    else:
+                        buf[name] = t
+                    del t
+        save_file(buf, out, metadata={"format": "pt"})
+        buf.clear()
+    return outs
