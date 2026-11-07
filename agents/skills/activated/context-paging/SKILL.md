@@ -30,7 +30,8 @@ SQLite at `<project>/agents/context-paging/context.db` (`CP_DB` overrides); keep
 | `cp_tag.py` | attach tag to page | `page_id tag` |
 | `cp_message_add.py` | capture a message row | `role content\|-` |
 | `cp_message_list.py` | list or filter messages | `[query] [limit]` |
-| `cp_search.py` | project-wide recovery across pages and messages | `query` |
+| `cp_search.py` | project-wide recovery across pages and messages; compact references | `query --offset N` |
+| `cp_around.py` | browse messages around an id, in order | `message_id [count] --full` |
 | `cp_cleanup.py` | prune ended/stale sessions when due (>24h) | `--days N --stale-days N --force` |
 | `cp_init.py` | create the schema only | — |
 | `cp_subscribe.py` | subscribe a project to harness capture | `[project_dir]` |
@@ -42,7 +43,7 @@ SQLite at `<project>/agents/context-paging/context.db` (`CP_DB` overrides); keep
 ## Working discipline
 
 1. Page out exact, durable material as it is produced: decisions with rationale, file paths from long investigations, error text, large tool outputs worth keeping. One page per unit; the topic and tags name it for later retrieval.
-2. Page in when resuming (`cp_page_in.py --all`), when a previously known detail is missing after compaction (`cp_search.py "<term>"`), and by id (`cp_page_in.py --id N`) for full text. When you author a compaction summary, follow [context-compaction-procedure](../../triggered/context-compaction-procedure/SKILL.md) instead of the harness template.
+2. Search returns compact references — ids and excerpts, never full contents — with `--offset` paging through further matches. Follow a hit with `cp_around.py <message_id>` to read it with its neighbors in order (`--full` for whole contents) or `cp_page_in.py --id N` for a full page, so minimal data enters the context until detail is needed. Page in when resuming (`cp_page_in.py --all`) or when a previously known detail is missing after compaction. When you author a compaction summary, follow [context-compaction-procedure](../../triggered/context-compaction-procedure/SKILL.md) instead of the harness template.
 3. Messages are capture, pages are curation: hooks record verbatim user messages; record your own summaries and decisions as pages.
 
 ## Install into a project

@@ -27,3 +27,11 @@
 - **Verified:** manual stdin dispatcher test captured a UserPromptSubmit message in the subscribed project and printed the SessionStart paging notice; an unsubscribed cwd produced no capture and exited 0 (fail-open). `/reload` now (or the next session) activates the hooks.
 - **Live verification (2026-11-07 21:4x, after harness restart):** resume created the paging session (`session_6e07ba7c…`) and post-resume prompts were captured automatically; page-out → `cp_search` → `cp_page_in` round-trip confirmed; the full page lifecycle and session delete were exercised and the probe session removed. Caveat: kimi-code fires `UserPromptSubmit` only for prompts that start a turn — steering messages typed while the agent is mid-turn are not captured; record those with `cp_message_add.py user -` (also use it for assistant-side decisions).
 - **Self-improvement:** unchanged (enabled).
+
+## Update 2026-11-07 (second) — dev-skills @ 03589ff1c05daf753258f6d5d79dafe784e91075
+
+- **Source:** https://github.com/curvedinf/dev-skills @ `03589ff1c05daf753258f6d5d79dafe784e91075` (main, 2026-11-07, "cp search / around"); prior revision `a8623a53…`
+- **Changed upstream (only this skill):** `context-paging` — `cp_search.py` now returns compact references with `--offset` paging (8 pages + 8 messages per page), new `cp_around.py` for ordered message context, `SKILL.md` table + working-discipline text updated
+- **Applied:** copied the three files byte-identical (`diff -r` clean for the whole skill folder); no other upstream skill changed, so nothing else copied
+- **Preserved local refinements:** `refine-skill`, `design-validation`, `run-experiment` SKILL.md keep their locally applied self-improvement patches (upstream did not change them in this revision); upstream `AGENTS.md` unchanged, so no routing edits
+- **Verified live:** `cp_search.py "context paging"` returns the compact excerpt form; `cp_around.py 2 2 --full` prints the surrounding messages in order from the real paging DB
