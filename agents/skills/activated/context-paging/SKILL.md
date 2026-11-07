@@ -24,13 +24,13 @@ SQLite at `<project>/agents/context-paging/context.db` (`CP_DB` overrides); keep
 | `cp_topic.py` | get-or-create topic | `[name]` (`CP_TOPIC`) |
 | `cp_topic_list.py` | topics with page counts | — |
 | `cp_page_out.py` | store a page of exact context | `content\|- [topic] [tag ...]`, `--kind note\|decision\|summary\|reference\|error` |
-| `cp_page_in.py` | reload pages: recent, matching, or by id | `[query] --id N --all --full --limit N` |
+| `cp_page_in.py` | reload pages: recent, matching, or by id (`--id` never time-filtered) | `[query] --id N --all --full --limit N --since DUR` |
 | `cp_page_update.py` | replace page content, id stable | `id content\|-` |
 | `cp_page_delete.py` | delete page | `id` |
 | `cp_tag.py` | attach tag to page | `page_id tag` |
 | `cp_message_add.py` | capture a message row | `role content\|-` |
-| `cp_message_list.py` | list or filter messages | `[query] [limit]` |
-| `cp_search.py` | project-wide recovery across pages and messages; compact references | `query --offset N` |
+| `cp_message_list.py` | list or filter messages chronologically | `[query] [limit] --since DUR` |
+| `cp_search.py` | chronological project-wide recovery search; compact references | `query --since DUR --offset N` |
 | `cp_around.py` | browse messages around an id, in order | `message_id [count] --full` |
 | `cp_cleanup.py` | prune ended/stale sessions when due (>24h) | `--days N --stale-days N --force` |
 | `cp_init.py` | create the schema only | — |
@@ -38,12 +38,12 @@ SQLite at `<project>/agents/context-paging/context.db` (`CP_DB` overrides); keep
 | `cp_unsubscribe.py` | unsubscribe; database kept | `[project_dir]` |
 | `cp_subscribed.py` | gate: exit 0 iff subscribed | `[project_dir]` |
 
-`CP_SESSION` names the current session (else `manual`); `CP_TOPIC` and `CP_TAGS` (comma-separated) supply defaults, so `cp_page_out.py "<exact content>"` is a complete call. A `-` content argument reads stdin.
+`CP_SESSION` names the current session (else `manual`); `CP_TOPIC` and `CP_TAGS` (comma-separated) supply defaults, so `cp_page_out.py "<exact content>"` is a complete call. A `-` content argument reads stdin. Read lookups (`cp_search.py`, `cp_message_list.py`, `cp_page_in.py` listings) default to the past hour, order oldest-first, and open with a compact `[filters: …]` line stating what was applied; widen with `--since 30m|24h|7d|any`. Empty windowed results name how many matches lie beyond the window; exact loads (`--id N`, `cp_around.py`) are never time-filtered.
 
 ## Working discipline
 
 1. Page out exact, durable material as it is produced: decisions with rationale, file paths from long investigations, error text, large tool outputs worth keeping. One page per unit; the topic and tags name it for later retrieval.
-2. Search returns compact references — ids and excerpts, never full contents — with `--offset` paging through further matches. Follow a hit with `cp_around.py <message_id>` to read it with its neighbors in order (`--full` for whole contents) or `cp_page_in.py --id N` for a full page, so minimal data enters the context until detail is needed. Page in when resuming (`cp_page_in.py --all`) or when a previously known detail is missing after compaction. When you author a compaction summary, follow [context-compaction-procedure](../../triggered/context-compaction-procedure/SKILL.md) instead of the harness template.
+2. Search returns compact references — ids and excerpts, never full contents — windowed to the past hour by default, with `--since` widening and `--offset` paging through further matches. Follow a hit with `cp_around.py <message_id>` to read it with its neighbors in order (`--full` for whole contents) or `cp_page_in.py --id N` for a full page, so minimal data enters the context until detail is needed. Page in when resuming (`cp_page_in.py --all`) or when a previously known detail is missing after compaction. When you author a compaction statement, follow [context-compaction-procedure](../../triggered/context-compaction-procedure/SKILL.md) instead of the harness template.
 3. Messages are capture, pages are curation: hooks record verbatim user messages; record your own summaries and decisions as pages.
 
 ## Install into a project

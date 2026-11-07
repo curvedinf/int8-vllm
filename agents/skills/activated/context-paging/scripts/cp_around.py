@@ -37,6 +37,7 @@ def main():
         " WHERE session_id = ? AND id >= ? ORDER BY id ASC LIMIT ?",
         (sid, mid, count + 1),
     ).fetchall()
+    print(cp.filters_line(id=mid, count=count, full="yes" if full else None))
     for r in before + after:
         marker = "->" if r["id"] == mid else "  "
         print(

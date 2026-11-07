@@ -183,6 +183,43 @@ def est_tokens(text):
     return max(1, len(text) // 4)
 
 
+def parse_since(argv):
+    """Split --since DUR out of argv; return (rest, sqlite_modifier, label).
+
+    DUR is Nm, Nh, Nd, or any; the default lookup window is the past hour.
+    A None modifier means unbounded.
+    """
+    if "--since" not in argv:
+        return list(argv), "-1 hour", "1h"
+    i = argv.index("--since")
+    if i + 1 >= len(argv):
+        sys.exit("--since needs a duration: 30m, 1h, 7d, or any")
+    val = argv[i + 1]
+    rest = argv[:i] + argv[i + 2:]
+    if val == "any":
+        return rest, None, "any"
+    n, unit = val[:-1], val[-1:]
+    if not (n.isdigit() and unit in ("m", "h", "d")):
+        sys.exit("--since needs a duration: 30m, 1h, 7d, or any")
+    unit_name = {"m": "minutes", "h": "hours", "d": "days"}[unit]
+    return rest, "-%d %s" % (int(n), unit_name), val
+
+
+def filters_line(**kw):
+    """Render applied lookup filters as one compact header line."""
+    parts = []
+    for k, v in kw.items():
+        if v is None or v is False:
+            continue
+        if v is True:
+            parts.append(k)
+            continue
+        if isinstance(v, str) and (not v or " " in v):
+            v = '"%s"' % v
+        parts.append("%s=%s" % (k, v))
+    return "[filters: %s]" % " ".join(parts)
+
+
 def excerpt(text, needle="", width=240):
     flat = " ".join(text.split())
     i = flat.lower().find(needle.lower()) if needle else 0

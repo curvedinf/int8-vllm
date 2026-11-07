@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Reload pages of the current session: recent, matching a query, or by id.
 
-usage: cp_page_in.py [QUERY] [--id N] [--all] [--full] [--limit N]
+usage: cp_page_in.py [QUERY] [--id N] [--all] [--full] [--limit N] [--since DUR]
 
---all searches every session in this project; --full prints whole contents;
-default limit is 10 entries.
+--all searches every session in this project; --full prints whole
+contents; listings default to the past hour (--since 30m, 24h, 7d, or any
+widens) and order oldest-first; default limit is 10 entries. --id is
+exact retrieval and is never time-filtered.
 """
 import sys
 
@@ -48,7 +50,8 @@ def show(con, rows, full):
 
 
 def main():
-    query, opts = parse(sys.argv[1:])
+    argv, modifier, label = cp.parse_since(sys.argv[1:])
+    query, opts = parse(argv)
     con = cp.connect()
     if opts["id"] is not None:
         rows = con.execute(
@@ -59,32 +62,44 @@ def main():
         ).fetchall()
         if not rows:
             sys.exit("no page %d" % opts["id"])
+        print(cp.filters_line(id=opts["id"]))
         show(con, rows, True)
         return
     sid, key, _ = cp.ensure_session(con)
+    conds, params = [], []
+    if not opts["all"]:
+        conds.append("p.session_id = ?")
+        params.append(sid)
+    if query:
+        conds.append("p.content LIKE ?")
+        params.append("%" + query + "%")
+    tc = " AND p.created_at >= datetime('now', ?)" if modifier else ""
     sql = (
         "SELECT p.*, s.key AS session_key, t.name AS topic FROM pages p"
         " JOIN sessions s ON s.id = p.session_id"
         " LEFT JOIN topics t ON t.id = p.topic_id"
     )
-    where, params = [], []
-    if not opts["all"]:
-        where.append("p.session_id = ?")
-        params.append(sid)
-    if query:
-        where.append("p.content LIKE ?")
-        params.append("%" + query + "%")
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY p.id DESC LIMIT ?"
-    params.append(opts["limit"])
-    rows = con.execute(sql, params).fetchall()
-    scope = "all sessions" if opts["all"] else "session %d key=%s" % (sid, key)
+    if conds:
+        sql += " WHERE " + " AND ".join(conds)
+    sql += tc + " ORDER BY p.id ASC LIMIT ?"
+    rows = con.execute(sql, params + ([modifier] if modifier else []) + [opts["limit"]]).fetchall()
+    print(cp.filters_line(scope=("all" if opts["all"] else key), query=query,
+                          since=label, limit=opts["limit"]))
+    older_n = 0
+    if modifier and conds:
+        older_n = con.execute(
+            "SELECT COUNT(*) FROM pages p WHERE " + " AND ".join(conds), params
+        ).fetchone()[0]
     if not rows:
-        print("no pages (%s)" % scope)
+        line = "no pages"
+        if older_n:
+            line += "; %d page(s) beyond the window (--since any)" % older_n
+        print(line)
         return
-    print("%d page(s), %s:" % (len(rows), scope))
+    print("%d page(s):" % len(rows))
     show(con, rows, opts["full"])
+    if older_n:
+        print("(%d page(s) older beyond the window: --since any)" % older_n)
 
 
 if __name__ == "__main__":

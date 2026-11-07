@@ -35,3 +35,11 @@
 - **Applied:** copied the three files byte-identical (`diff -r` clean for the whole skill folder); no other upstream skill changed, so nothing else copied
 - **Preserved local refinements:** `refine-skill`, `design-validation`, `run-experiment` SKILL.md keep their locally applied self-improvement patches (upstream did not change them in this revision); upstream `AGENTS.md` unchanged, so no routing edits
 - **Verified live:** `cp_search.py "context paging"` returns the compact excerpt form; `cp_around.py 2 2 --full` prints the surrounding messages in order from the real paging DB
+
+## Update 2026-11-07 (third) — dev-skills @ a740ada51ce258f9907535776e8749b16fa14681
+
+- **Source:** https://github.com/curvedinf/dev-skills @ `a740ada51ce258f9907535776e8749b16fa14681` (main, 2026-11-07, "cp chrono filter"); prior revision `03589ff1…`
+- **Changed upstream (only context-paging):** read lookups (`cp_search.py`, `cp_message_list.py`, `cp_page_in.py` listings) now default to the past hour, order oldest-first, and print a `[filters: …]` header; new `--since 30m|1h|7d|any` widening; empty windowed results say how many matches lie beyond the window; `--id N` and `cp_around.py` are never time-filtered. `cpcommon.py` gained `parse_since`/`filters_line`; `cp_around.py` header line added
+- **Applied:** whole skill folder copied byte-identical (`diff -r` clean); no other upstream file changed
+- **Preserved local refinements:** `refine-skill`, `design-validation`, `run-experiment` SKILL.md keep their local self-improvement patches; upstream `AGENTS.md` unchanged
+- **Verified live:** default `cp_search.py "context paging"` shows the `since=1h` header and the beyond-window hint; `--since any` widens; `cp_message_list.py` shows the chronological header and captured prompts
