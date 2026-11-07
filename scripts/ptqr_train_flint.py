@@ -172,12 +172,14 @@ def main():
     p.add_argument("--eval_steps", type=int, default=10)
     p.add_argument("--save_every", type=int, default=50)
     p.add_argument("--tiny", action="store_true")
-    p.add_argument("--rank_shards", default="",
-                   help="dir of presplit per-rank safetensors (rankN.safetensors); "
+    p.add_argument("--rank_shards", default="",                   help="dir of presplit per-rank safetensors (rankN.safetensors); "
                         "student build reads only this rank's file")
     p.add_argument("--teacher_stream", action="store_true",
                    help="layer-streamed mmap teacher (full-expert runs; "
                         "no resident teacher anywhere)")
+    p.add_argument("--init_from", default="",
+                   help="previous rung's out_dir: resume masters+scales "
+                        "from its latest saved per-rank shard")
     p.add_argument("--n_experts_keep", type=int, default=0,
                    help="smoke only: keep the first N experts per MoE layer "
                         "(0 = all). Validates real-checkpoint wiring without "
@@ -316,6 +318,25 @@ def main():
         for m in student.modules():
             if m.__class__.__name__ == "AttentionRef":
                 m.kv_fake_quant_group = args.kv_group
+        if args.init_from:
+            # chained rungs: overwrite masters+scales with the previous
+            # rung's saved shard (identical geometry — sharding is
+            # deterministic); embedding rides along already fake-quantized
+            import glob as _glob
+            prev = sorted(_glob.glob(os.path.join(
+                args.init_from, f"ptqr_target_step*_rank{rank}.pt")))
+            assert prev, f"--init_from: no shard for rank {rank} in {args.init_from}"
+            ck = torch.load(prev[-1], weights_only=True,
+                            map_location="cpu", mmap=True)
+            sd = ck["model_state_dict"]
+            mine = dict(student.state_dict())
+            with torch.no_grad():
+                for k, v in sd.items():
+                    assert k in mine and mine[k].shape == v.shape, \
+                        f"init_from {k}: {mine.get(k)} vs {tuple(v.shape)}"
+                    mine[k].copy_(v.to(mine[k].dtype))
+            print(f"[init r{rank}] {os.path.basename(prev[-1])} "
+                  f"({len(sd)} tensors, step {ck.get('step')})", flush=True)
         _rssm("post-swap")
         _rssm("post-todevice")  # already on device since to_empty
         _gc.collect()

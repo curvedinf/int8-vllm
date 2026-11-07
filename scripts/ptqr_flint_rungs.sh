@@ -13,6 +13,11 @@ OUT=/home/curved/models/flint-ptqr-r${RUNG}
 STEPS=(60 120 200)
 LRS=(1e-5 7e-6 4e-6)
 IDX=$((RUNG - 1)); (( IDX < 0 )) && IDX=0
+# rungs chain: rung N resumes masters+scales from rung N-1's latest save
+INIT=()
+if (( RUNG > 1 )); then
+  INIT=(--init_from "/home/curved/models/flint-ptqr-r$((RUNG - 1))")
+fi
 
 export ROCM_PATH=/opt/rocm LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH
 export PYTORCH_HIP_ALLOC_CONF=expandable_segments:True MALLOC_ARENA_MAX=2
@@ -27,4 +32,4 @@ exec .venv/bin/python -m torch.distributed.run --nproc_per_node=4 \
   --seq_len 2048 --batch_size 1 \
   --max_steps "${STEPS[$IDX]}" --lr "${LRS[$IDX]}" \
   --logits_chunk 128 --save_every 20 --eval_every 20 \
-  --out_dir "${OUT}" "$@"
+  --out_dir "${OUT}" "${INIT[@]}" "$@"
