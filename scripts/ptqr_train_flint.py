@@ -250,7 +250,9 @@ def main():
         for m in student.modules():
             if m.__class__.__name__ == "AttentionRef":
                 m.kv_fake_quant_group = args.kv_group
+        _rssm("post-swap")
         student.to(device)
+        _rssm("post-todevice")
         _gc.collect()
         if wave == 0:
             dist.barrier(group=tp_group)
