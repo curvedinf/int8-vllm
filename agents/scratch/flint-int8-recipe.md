@@ -898,3 +898,17 @@ turn: (1) fix serving-dump keying for the final vector cosine; (2) if
 agreement holds, fetch upstream vLLM PR #62938 (Flint model) for any
 numerics notes; (3) then escalate to user with the full evidence
 table (four agreeing implementations, verified inputs, NLL 25-30).
+
+## TURN 26 (2026-11-07 ~18:2x): keyed dump missed; turn budget end
+
+1024-token key never matched (chunked prefill splits the prompt;
+layer-hook input shape differs per chunk) — 0 dumps, NLL line lost to
+an early exit. Vector cosine still unobtained. NEXT SESSION, in
+order: (1) key the hook on "input includes our exact first token id
+pattern" OR simply dump EVERY forward to unique files and pick the
+one whose rms matches the [serve L] prints of the real prefill (the
+last batch of 50 [serve L] lines before generation); (2) cos vs
+teacher at L0/L48; (3) fetch vLLM PR #62938 for numerics notes;
+(4) escalate to user with evidence table if agreement holds. All
+other deliverables (trainer/KD-cache/exporter/draft/AIS/serving-boot/
+ladder) are committed and ready.
