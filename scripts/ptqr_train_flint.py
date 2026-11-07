@@ -34,6 +34,12 @@ print(f"[BOOT pid={_os0.getpid()} rank={_os0.environ.get('RANK','?')}] "
       f"rss={_r0}kB", flush=True)
 
 import argparse
+import faulthandler as _fh
+import signal as _sig
+try:
+    _fh.register(_sig.SIGUSR1, all_threads=True)
+except (AttributeError, ValueError):
+    pass
 import copy
 import math
 import os
