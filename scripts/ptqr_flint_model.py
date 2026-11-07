@@ -189,11 +189,10 @@ class AttentionRef(nn.Module):
         scores = torch.matmul(q_, k_.transpose(-1, -2)).float()
         # sink = ONE virtual key in the softmax denominator (upstream
         # kernel semantics), never a broadcast bias on every key.
-        # The kernel compares sink_val*(LOG2E/softmax_scale_log2) — the
-        # sink is in RAW qk units; scores here are scaled by 1/sqrt(d),
-        # so the sink must be scaled identically (else it dominates the
-        # softmax ~sqrt(d)x too strongly and attention outputs collapse)
-        sink = self.sink.float() * self.scale
+        # decode_attention.py folds `sink * LOG2E` against the *scaled*
+        # logits (`ex2(sink_s - m)`), i.e. the sink is already in natural
+        # logit units and must NOT be scaled by 1/sqrt(d) again.
+        sink = self.sink.float()
         finite = torch.isfinite(sink)
         sink_col = torch.where(finite, sink,
                                torch.full_like(sink, float("-inf"))
@@ -1242,11 +1241,10 @@ class StreamedFlintTeacher(nn.Module):
         v_ = v.permute(0, 2, 1, 3)
         scores = torch.matmul(q_, k_.transpose(-1, -2)).float()
         # sink = ONE virtual key in the softmax denominator (upstream
-        # kernel semantics); sink is in RAW qk units — scale like the
-        # scores (kernel: sink_val*(LOG2E/softmax_scale_log2))
+        # kernel semantics); decode_attention.py adds `sink * LOG2E` to the
+        # *scaled* logits — the sink is in natural logit units, not raw qk.
         if _abl == "sinks":
             sink = torch.full_like(sink, float("-inf"))
-        sink = sink * (hd ** -0.5)
         if os.environ.get("FLINT_DBG_SCORES") and li == int(
                 os.environ["FLINT_DBG_SCORES"]) and self.rank == 0:
             mx = scores.amax(dim=-1)

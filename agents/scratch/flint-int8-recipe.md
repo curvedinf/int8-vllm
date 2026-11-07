@@ -1287,3 +1287,15 @@ self.kv_holding_waiting` in scheduler.py; the fork profiler
 `kv_holding_waiting`/`deferred_waiting`. Re-ran the flint TRITON_ATTN
 probe with PREFIX_FAIR=1 + SHORT_PREFILL_COHORT=1 explicitly to exercise
 the fixed path (result below when it lands).
+
+Sink values are LARGE (checkpoint `softmax_offset`, fp32 per head):
+L0 -9.0..9.9 mean 3.7; L2 -0.15..9.75; L20 1.97..7.28 mean 5.27;
+L47 -0.75..5.9. exp(sink) is 1e1..1e4 — the learned sink is a real
+"attend nothing" prior, not a rounding detail. Consequence: the old
+`NOSINK` toggles being bitwise inert under fork-UA at 64 tokens means
+the UA path was NOT applying the sinks at all — a leading suspect for
+the UA corruption (SDPA-with-raw-sinks gives 4.74). Teacher fix applied:
+removed the extra 1/sqrt(hd) on the sink in both `AttentionRef` and
+`StreamedFlintTeacher._apply_layer` (kernel folds raw `sink*log2e` into
+the scaled logits); re-measure queued. Next: SDPA+NOSINK A/B to prove
+sink essentiality.
