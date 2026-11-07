@@ -228,7 +228,11 @@ def main():
         # zero pages when the slicer reads them (the 54GB OOM class); on
         # meta the shard math is shape-only, and to_empty materializes
         # just the ~20GB shard.
-        student = FlintRef(cfg, device="meta")
+        # torch.device context: FlintRef's internal nn.Linears otherwise
+        # default to CPU + kaiming init, materializing all 80GB of pages —
+        # THE 54GB OOM (SIGUSR1 dump named nn.Linear.reset_parameters)
+        with torch.device("meta"):
+            student = FlintRef(cfg, device="meta")
         _shard(student, world, rank, group=tp_group)  # shapes shrink to shard
         # materialize the shard directly on the GPU; the host never holds
         # the student (the entire host-OOM class dies here)
