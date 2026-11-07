@@ -1081,3 +1081,26 @@ call in the ROCm path for an fp32-table rotary (match the reference
 kernel's numerics); re-run matched-window serving NLL (target: drop
 toward 8-10 and beyond). (2) teacher-side: chase 8.5->2-4 (per-token
 analysis on window-1 head; compare vs fp32-residual/other flags).
+
+## TURN 35 (2026-11-07 ~20:0x): serving fp32-rope patch — INERT?!
+
+Added fp32-table RoPE to the ROCm eager path (commit in log); serving
+NLL on the 64-token window is BITWISE identical to pre-patch
+(25.982864781031534 both) — 15 significant digits. Patch confirmed
+present in the imported module source (inspect check). => The eager
+rope block either (a) is dead on this execution path (check which
+forward actually runs: maybe unified_attention_with_output's KV write
+uses its own q/k before ours? no...), (b) positions/cos_sin indexing
+produces values identical to the op's (implausible at 15 digits), or
+(c) something upstream of the patch makes both variants equal (e.g.
+rotary_emb None for all layers on serving — but then the old code
+would have skipped too and outputs identical BECAUSE ROPE NEVER RAN —
+CHECK: on serving, is cos_sin_cache present? If get_rope returns a
+rotary whose cos_sin_cache is EMPTY or the op no-ops...). Next
+session (cheap): add an env-gated print of positions.min/max +
+cos_sin_cache.shape + a checksum of q before/after rope in the eager
+path; run once. If rope is dead on serving, that IS the serving bug
+(no positional encoding at all in SWF layers!) and explains serving
+25.98 vs teacher 8.47.
+Also note: spawn method issue — heredoc scripts die under spawn;
+always run file-based scripts for vLLM.
