@@ -568,3 +568,29 @@ q/k equality module-vs-teacher for rank0 heads 0-7, (b) module out
 head-slices vs teacher rank out, (c) attention probs row 0 head 0
 both paths. The first diverging tensor is THE bug. Then NLL gate ->
 smoke -> RUNG 1.
+
+## TURN 13 (2026-11-07 12:3x): ghosts identified; one clean test remains
+
+1. GEMM shape non-determinism: F.linear with [5120,2048] vs [1280,2048]
+   weights gives different bf16 results for the SAME rows (ROCm
+   accumulation order) — explains ALL the ULP-level "divergences"
+   (0.004-0.015 weight-value diffs, normed q/k "mismatches", the
+   staged-weight ghost probe). NOT bugs.
+2. The serial rank-sim is INVALID for the MLP: with tp_sum=identity,
+   rank r's silu-MLP ran on x+attn_partial_r; the real path all-reduces
+   attention first (mlp on the SAME full x). mlpA(0.058) vs mlpB(0.028)
+   rms gap = artifact. Only the distributed path is testable there.
+3. presplit file, pread, staged weights: ALL bitwise-verified (again).
+REMAINING REAL QUESTION, the only one: LayerRef world=1 layer-0 (rms
+0.0258) vs the REAL 4-rank sweep capture (rms 0.0646) on identical ids
+— 2.5x rms gap is NOT noise. All cross-process compares are now
+suspect (RNG order ghosts twice already).
+CLEAN TEST (next session, ONE 4-rank job): extend agents/tmp/
+sweep_capture.py — after sweep_states, on RANK 0 ONLY, build the
+LayerRef world=1 layer-0 from full-ckpt tensors (safe_open, in-process,
+ids already fixed), run it, and compare against the captured state IN
+THE SAME PROCESS. No cross-process anything. If they differ -> inspect
+where (the C-side _apply_layer ran distributed; A-side single) — dump
+both attn/mlp partials from inside real code. If they MATCH -> the
+teacher was correct all along and the NLL 11 problem lives elsewhere
+(e.g., the TRAINING-side student or eval path pairing).
