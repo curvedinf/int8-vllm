@@ -64,7 +64,16 @@ from .ops.moe import (
     flint_moe_ll,
     ll_weights_from_layers,
 )
-from .ops.norm import RMSNorm, silu_and_mul
+# ROCm (gfx908 int8 fork): Flint's own Triton norm kernel fails to
+# compile here ("couldn't allocate output register for constraint 'f'" —
+# inline-asm rsqrt written for newer gfx targets; kills the worker at the
+# first profiling forward). Route norms/activation to the standard fork
+# layers, battle-tested on gfx908 by the qwen38 recipe.
+if current_platform.is_rocm():
+    from vllm.model_executor.layers.activation import silu_and_mul
+    from vllm.model_executor.layers.layernorm import RMSNorm
+else:
+    from .ops.norm import RMSNorm, silu_and_mul
 from .ops.qk_norm_rope import qk_norm_rope_cache
 from .ops.qkv_fused import MAX_M as LL_MAX_TOKENS
 from .ops.qkv_fused import flint_qkv_fused
