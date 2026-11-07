@@ -1246,3 +1246,25 @@ forces UA (10-min read, no GPU); implement a supported override
 (e.g., allow backend selection when sinks are None); (2) benchmark
 the SDPA+cache route if override remains blocked. Teacher gap and
 Qwen/Bolt quality checks remain queued.
+
+## TURN 44 (2026-11-07 ~21:5x): BACKEND OVERRIDE FOUND — CLI flag works; env var is a no-op
+
+`VLLM_ATTENTION_BACKEND` is NOT a vLLM env var in this tree (grep of
+envs.py: zero hits) — that is why every env-var attempt in turns 42-43
+silently kept the AITER unified-attention pin. The sanctioned lever is
+the EngineArgs/CLI field `attention_backend` (arg_utils.py:811) which
+sets `attention_config.backend`; the platform then takes the
+"selected_backend" branch in rocm.py:get_attn_backend_cls and skips the
+hard UA pin. Verified live: `LLM(attention_backend="TRITON_ATTN", ...)`
+logs "Using TRITON_ATTN backend (selected via --attention-backend)" at
+rocm.py:889. Matched-window serving NLL for TRITON_ATTN run in flight
+(expect ~4.7 like the SDPA reference, not ~26 like UA).
+
+Also found while reading the teacher: teacher `_apply_layer` scales the
+sink by 1/sqrt(head_dim) (comment claims kernel uses raw qk units), but
+the upstream decode kernel folds `sink * log2e` directly against the
+*scaled* logits (decode_attention.py:689) — i.e. the sink is in natural
+logit units and must NOT be scaled again. Serving-SDPA appends the raw
+sink (match), teacher scales it (suspect). Teacher ablation
+(FLINT_ABLATE=sinks) queued to test whether this closes the 10.13->4.74
+teacher gap.
