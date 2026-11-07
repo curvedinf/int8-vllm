@@ -133,7 +133,7 @@ def eval_kld_flint(student, teacher, val_src, steps: int | None = None,
         if isinstance(item[0], (tuple, list)):   # cached: ((x, y), path)
             (x, y), ltp = item
             x, y = x.cuda(), y.cuda()
-            logits_t = torch.load(ltp, mmap=True, weights_only=True) \
+            logits_t = torch.load(ltp, mmap=True, weights_only=True)["logits"] \
                 .to(x.device).float()
         else:                              # live teacher
             x, y = item
@@ -428,7 +428,12 @@ def main():
             for j in range(len(batches)):
                 p = os.path.join(kd_dir, f"{split}_{j}.pt")
                 if rank == 0:
-                    torch.save(lts[j], p)
+                    # y rides with the logits: the dataloader SHUFFLES
+                    # unseeded, so a later re-iteration cannot reconstruct
+                    # which window the sweep saw (the g2x NLL probes were
+                    # invalidated by exactly this)
+                    torch.save({"logits": lts[j],
+                                "y": batches[j][1].clone()}, p)
                 outs.append((batches[j], p))
             del lts
             return outs
