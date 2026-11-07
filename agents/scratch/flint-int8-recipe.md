@@ -594,3 +594,26 @@ where (the C-side _apply_layer ran distributed; A-side single) — dump
 both attn/mlp partials from inside real code. If they MATCH -> the
 teacher was correct all along and the NLL 11 problem lives elsewhere
 (e.g., the TRAINING-side student or eval path pairing).
+
+## TURN 14 (2026-11-07 12:5x): divergence CONFIRMED in-process
+
+agents/tmp/sweep_capture2.py (one 4-rank job, same process on rank 0,
+same ids): A(LayerRef w1) rms 0.02576 vs C(distributed sweep) rms
+0.06464, max|A-C| 1.105. REAL, ghost-free. Artifacts:
+/tmp/same_process_l0.pt (hA, hC, ids).
+The distributed layer-0 emits ~2.5x the residual energy of the
+single-rank reference. Attention math verified equivalent (ULP);
+MLP partials in the real path run on the SAME post-reduce input as A.
+=> next: instrument INSIDE _apply_layer at layer 0 on rank 0 in the
+same job (env-gated prints of attn_partial/mlp_partial rms + the
+post-tp_sum x), and cross-check each against the A-side equivalents
+computed from /tmp/same_process_l0.pt ids. The doubled energy smells
+like a DOUBLE-COUNT (e.g., a partial summed twice, or o_proj/mlp
+partials overlapping across ranks). Suspect list for double-count:
+the tp_sum in _apply_layer runs all_reduce on a tensor that ALREADY
+includes a rank-local residual copy; or _TP_STATE group semantics
+(all_reduce on the WORLD group vs tp subgroup applying to all ranks
+of a different comm) — CHECK the actual x each rank carries AFTER
+layer 0 across ranks (they must be IDENTICAL post-reduce; if they
+already differ pre-reduce in composition, the bug is upstream of the
+reduce).
