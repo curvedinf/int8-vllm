@@ -1209,3 +1209,19 @@ bug is a single-block/64-token UA path (still fatal); if UA stays bad,
 bisect the KV write: run with kv_cache_dtype bf16 explicitly, and
 probe `attn` cache tensors after a prefill (hook). (2) teacher gap
 (10 vs 4.7) continues. (3) Qwen27B+Bolt checks REQUIRED before finish.
+
+## TURN 42 (2026-11-08 ~02:0x): UA pathologies multiply; backend pinning
+
+UA on a 1024-token window HANGS (>15 min at 0% prefill; killed) — in
+addition to garbage at 64 tokens (25.98 vs SDPA 4.74). So UA is both
+wrong AND non-scaling on this model. NOSINK + VLLM_ATTENTION_BACKEND=
+TRITON_ATTN still selects ROCM_AITER_UNIFIED_ATTN (log line "Setting
+kv cache block size to 64 for ROCM_AITER_UNIFIED_ATTN") — the pinning
+ignores both. NEXT LEVER: VLLM_ROCM_USE_AITER=0 entirely (fork's plain
+ROCm triton path — qwen38-proven) + NOSINK; sinks are measured
+negligible so the fork's non-sink backend is acceptable for the
+recipe IF it computes sliding windows + GQA correctly. If that lands
+NLL ~4-7, the Flint serving recipe answer = sinks off + fork triton
+attention (documented deviation, journaled), avoiding the UA bug
+entirely. Qwen27B+Bolt checks still REQUIRED; teacher gap (10 vs 4.7)
+continues.
