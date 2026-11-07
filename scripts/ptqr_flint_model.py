@@ -187,10 +187,16 @@ class AttentionRef(nn.Module):
         k_ = k.permute(0, 2, 1, 3)
         v_ = v.permute(0, 2, 1, 3)
         scores = torch.matmul(q_, k_.transpose(-1, -2)).float()
+        # the sink is ONE VIRTUAL KEY in the softmax (upstream kernel:
+        # denom = sum(exp(s-m)) + exp(sink-m)); broadcasting it onto every
+        # key distorts the whole distribution (real sinks are +2..+10)
         sink = self.sink.float()
         finite = torch.isfinite(sink)
-        scores = scores + torch.where(
-            finite, sink, torch.zeros_like(sink)).view(1, -1, 1, 1)
+        sink_col = torch.where(finite, sink,
+                               torch.full_like(sink, float("-inf"))
+                               ).view(1, -1, 1, 1).expand(
+            *scores.shape[:-1], 1)
+        scores = torch.cat([scores, sink_col], dim=-1)
 
         if getattr(self, "_mask_cache", None) is None or \
                 self._mask_cache.shape[-1] < S or self._mask_cache.device != x.device:
@@ -202,11 +208,15 @@ class AttentionRef(nn.Module):
                 m = m | (q_idx - k_idx >= self.window)
             self._mask_cache = ~m  # allowed
         allowed = self._mask_cache[:S, :S].to(x.device)
+        # sink column is always "allowed" (it IS the virtual key)
+        allowed2 = torch.cat(
+            [allowed, allowed.new_ones(S, 1)], dim=-1)[None, None]
         dead = ~finite.view(1, -1, 1, 1)
         attn = torch.softmax(scores.masked_fill(
-            (~allowed[None, None]) | dead, float("-inf")), dim=-1)
+            (~allowed2) | dead, float("-inf")), dim=-1)
         attn = torch.nan_to_num(attn)
-        out = torch.matmul(attn.to(v_.dtype), v_).permute(0, 2, 1, 3)
+        out = torch.matmul(attn[..., :S].to(v_.dtype), v_) \
+            .permute(0, 2, 1, 3)
         out = out.reshape(B, S, self.num_heads * self.head_dim)
         out = self.o(out)
         if getattr(self, "_partial_output", False):
@@ -1206,19 +1216,25 @@ class StreamedFlintTeacher(nn.Module):
         k_ = k.permute(0, 2, 1, 3)
         v_ = v.permute(0, 2, 1, 3)
         scores = torch.matmul(q_, k_.transpose(-1, -2)).float()
-        scores = scores + torch.where(torch.isfinite(sink), sink,
-                                      torch.zeros_like(sink)).view(1, -1, 1, 1)
+        # sink = ONE virtual key in the softmax denominator (upstream
+        # kernel semantics), never a broadcast bias on every key
+        sink_col = torch.where(torch.isfinite(sink), sink,
+                               torch.full_like(sink, float("-inf"))
+                               ).view(1, -1, 1, 1).expand(
+            *scores.shape[:-1], 1)
+        scores = torch.cat([scores, sink_col], dim=-1)
         qi = torch.arange(S, device=dev)[:, None]
         ki = torch.arange(S, device=dev)[None, :]
         mask = ki > qi
         if self._layer_types[li] == "sliding_attention":
             mask = mask | (qi - ki >= self._window)
-        mask = mask[None, None]
+        mask = torch.cat(
+            [mask, mask.new_ones(S, 1)], dim=-1)[None, None]
         dead = (~torch.isfinite(sink)).view(1, -1, 1, 1)
         attn = torch.softmax(
             scores.masked_fill(mask | dead, float("-inf")), dim=-1)
         attn = torch.nan_to_num(attn)
-        out = torch.matmul(attn.to(v_.dtype), v_) \
+        out = torch.matmul(attn[..., :S].to(v_.dtype), v_) \
             .permute(0, 2, 1, 3).reshape(B, S, qh * hd)
         attn_out = torch.nn.functional.linear(out, W["o"])  # partial [B, S, H]
         x = x + tp_sum(attn_out)
