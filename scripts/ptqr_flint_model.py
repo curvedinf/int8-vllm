@@ -965,6 +965,31 @@ class StreamedFlintTeacher(nn.Module):
         return _tp_gather_logits(logits, dim=-1)
 
     @torch.no_grad()
+    def sweep_states(self, batches, exits):
+        """Layer-major sweep that captures hidden states after the given
+        layer indices (the DFlash2 draft's target exit states) instead of
+        logits. Returns per batch a [S, len(exits), H] fp16 CPU tensor —
+        the flint draft-cache format (mirrors the qwen cache builder's
+        forward-hook capture)."""
+        dev = self.device
+        exits = sorted(exits)
+        xs, poss = [], []
+        for b in batches:
+            S = b.shape[1]
+            xs.append(self._embed(b))
+            poss.append(torch.arange(S, device=dev).unsqueeze(0)
+                        .expand(b.shape[0], S))
+        caps = [[] for _ in batches]
+        for li in range(self.cfg.num_hidden_layers):
+            W = self._stage_layer(li)
+            for i in range(len(xs)):
+                xs[i] = self._apply_layer(li, xs[i], poss[i], W)
+                if li in exits:
+                    caps[i].append(xs[i].detach()[0].to(torch.float16).cpu())
+            del W
+        return [torch.stack(c, dim=1) for c in caps]
+
+    @torch.no_grad()
     def sweep(self, batches):
         """Layer-major multi-batch pass: each layer's weights stage on the
         device ONCE for every batch in `batches` (list of [B, S] id tensors).
