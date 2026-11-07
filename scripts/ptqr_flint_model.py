@@ -1247,12 +1247,27 @@ class StreamedFlintTeacher(nn.Module):
         out = torch.matmul(attn[..., :S].to(v_.dtype), v_) \
             .permute(0, 2, 1, 3).reshape(B, S, qh * hd)
         attn_out = torch.nn.functional.linear(out, W["o"])  # partial [B, S, H]
+        _dbg = os.environ.get("FLINT_DBG_LAYER")
+        if _dbg is not None and li == int(_dbg):
+            ar = attn_out.float().pow(2).mean().sqrt().item()
+            print(f"[dbg L{li} r{self.rank}] attn_partial rms {ar:.5f}",
+                  flush=True)
         x = x + tp_sum(attn_out)
 
         # --- mlp ---
+        _dbg2 = os.environ.get("FLINT_DBG_LAYER")
+        if _dbg2 is not None and li == int(_dbg2):
+            xr = x.float().pow(2).mean().sqrt().item()
+            print(f"[dbg L{li} r{self.rank}] x_post_attn rms {xr:.5f}",
+                  flush=True)
         xn2 = self._rms(x, W["w_post"])
         if li in self._mlp_only:
-            x = x + self._mlp_dense(xn2, W["dense"])
+            mlp_part = self._mlp_dense(xn2, W["dense"])
+            # dense-MLP partials MUST all-reduce (each rank holds one
+            # intermediate slice; missing this left layers 0-1 with a
+            # quarter of the MLP and rank-divergent residuals — the
+            # layer-0 2.5x divergence)
+            x = x + tp_sum(mlp_part)
         else:
             rw = W["router"]
             logits_r = torch.nn.functional.linear(
@@ -1271,7 +1286,13 @@ class StreamedFlintTeacher(nn.Module):
                 ex = self._expert(xn2.reshape(t, -1)[rowsm], g, u, d)
                 routed.reshape(t, -1)[rowsm] += ex * w[rowsm, None].to(x.dtype)
             shared = self._mlp_dense(xn2, W["shared"])
-            x = x + tp_sum(routed + shared)
+            mlp_part = routed + shared
+            x = x + tp_sum(mlp_part)
+        if _dbg is not None and li == int(_dbg):
+            mr = mlp_part.float().pow(2).mean().sqrt().item()
+            xo = x.float().pow(2).mean().sqrt().item()
+            print(f"[dbg L{li} r{self.rank}] mlp_partial rms {mr:.5f} "
+                  f"x_out rms {xo:.5f}", flush=True)
         return x
 
     def _layer(self, li, x, pos):
