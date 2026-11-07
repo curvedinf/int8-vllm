@@ -793,3 +793,38 @@ or embed*sqrt(d) init convention — CHECK the vendor wheel's
 FlintDecoderLayer.forward residual line). If they DIVERGE at L0
 already, wire the LayerRef single-process L0 (verified equivalent
 hand-math) as the tiebreaker.
+
+## TURN 22 (2026-11-07 ~17:2x): vendor residual = standard
+
+Vendor FlintDecoderLayer: standard Qwen3Moe pre-norm residual via
+sglang LayerCommunicator (norms + scatter; no per-layer scaling, no
+sqrt(d) embed convention). So the L0-2 residual collapse is NOT a
+missed residual scale in the vendor reference either. State:
+- teacher NLL 24.9 (depth48), serving NLL ~20 (chat) — both garbage,
+  both collapse L0-2 identically, all components verified vs vendor.
+REMAINING HYPOTHESES (ordered):
+1. The checkpoint at <models>/flint-bf16 — byte-identical to HF — is
+   NOT the weights the vendor benchmarks (e.g., HF repo hosts a
+   DIFFERENT (quantized/base) variant; model card says benchmarks ran
+   via sglang+FA4 on B300 with nvfp4 assets...). CHECK: the HF repo
+   file list — model-*.safetensors ~80GB bf16 = the full model. The
+   sglang serve scripts use THIS repo. So weights right.
+2. THE ROUTER: vendor `sigmoid_routing` selects top-k on
+   scores+bias but weights = raw scores; renormalized. Mine matches.
+   BUT expert_bias defaults zeros AND the checkpoint has NO
+   mlp.gate.bias tensor — vendor comment says "Checkpoints without a
+   router bias leave this at zero" — fine.
+3. q_norm/k_norm placement: vendor applies to FLAT [T, H*D] q/k
+   (apply_qk_norm reshapes per-head, norm, flatten). Mine: per-head on
+   [B,S,H,D]. Equivalent.
+4. UNTESTED: attention on the LAST token pattern / causal mask off-by-
+   one in MY eval only (teacher NLL probe uses logits[i] vs y[i] —
+   aligned by construction).
+5. The REAL possibility everyone missed: the corpus window's first
+   tokens start MID-DOCUMENT (no BOS!) — tok[:1025] raw slice. A model
+   expecting <|begin_of_text|> may produce garbage NLL on BOS-less
+   text! The chat-templated serving probe (which HAD proper specials)
+   gave NLL 20 — but that's the serving path (broken backend?). THE
+   TEACHER was NEVER tested on BOS-prefixed natural text!! NEXT (2-min
+   CPU probe): prepend 150000 (bos) to the window in nll_decay and
+   rerun the NLL at depth 48. ALSO try a repeated-pattern string.
