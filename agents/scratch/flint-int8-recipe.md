@@ -986,3 +986,22 @@ itself ran UNREDUCED = artifact!! The REAL never-done test: teacher
 TP4 with _TP_STATE correctly set vs LayerRef world=1, same process.
 NEXT SESSION: rerun sweep_capture2 with _TP_STATE.update(world=4)
 after teacher creation; expect A==C; then NLL gate directly.
+
+CORRECTION (same turn): repeat_probe.py DOES set _TP_STATE (verified
+in the script) — so its 16% repetition failure stands as a REAL,
+properly-reduced TP4 failure. The sweep_capture2 artifact explains
+the turn-14 'divergence' only. Standing state: reduced TP4 teacher
+fails repetition; its semantics match upstream (byte-identical
+reference, GSM8K 0.952 upstream on the SAME weights at TP=1 Flint-
+kernel path). The fork's serving (stock-layer fallback at TP4) also
+fails — the validated path was TP=1+Flint-kernels, NOT the stock-
+layer path. DECISIVE remaining experiment: teacher TP4 vs a KNOWN-
+GOOD numeric on identical input. Options: (a) upstream stock-layer
+path on any NVIDIA GPU (TP4) — user help needed; (b) port my teacher
+to run TP=1 streaming (40GB/R... infeasible 32GB GPU); (c) TP=2
+(40GB host/RAM infeasible)... So (a) or: (d) numerically verify the
+TP4 sweep against LayerRef TP4 (shard_flint_tp on LayerRef — both
+TP4, same sharding, in one job — if THEY differ, the bug is in my
+teacher's sweep/staging; if equal, both share a semantic divergence
+from upstream that survived inspection). (d) is runnable NOW and is
+the next session's first action.
