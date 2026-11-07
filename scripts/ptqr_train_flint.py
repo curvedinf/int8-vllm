@@ -231,12 +231,17 @@ def main():
         # torch.device context: FlintRef's internal nn.Linears otherwise
         # default to CPU + kaiming init, materializing all 80GB of pages —
         # THE 54GB OOM (SIGUSR1 dump named nn.Linear.reset_parameters)
-        with torch.device("meta"):
+        with torch.device("meta"), torch.dtype(torch.bfloat16):
             student = FlintRef(cfg, device="meta")
         _shard(student, world, rank, group=tp_group)  # shapes shrink to shard
         # materialize the shard directly on the GPU; the host never holds
         # the student (the entire host-OOM class dies here)
+        print(f"[gpu r{rank}] pre-toempty allocated="
+              f"{torch.cuda.memory_allocated()/2**30:.1f}G reserved="
+              f"{torch.cuda.memory_reserved()/2**30:.1f}G", flush=True)
         student.to_empty(device=device)
+        print(f"[gpu r{rank}] post-toempty allocated="
+              f"{torch.cuda.memory_allocated()/2**30:.1f}G", flush=True)
         if student.rope is not None:  # plain attrs stay meta after to_empty
             from ptqr_flint_model import Rope as _Rope
             nr = _Rope(cfg.head_dim, cfg.max_position_embeddings,
