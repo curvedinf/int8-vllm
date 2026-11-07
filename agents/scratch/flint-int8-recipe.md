@@ -1467,3 +1467,41 @@ sweeps (one sweep each, seq 2048), rank 0 spills ~615 MB/batch files
 `eval step N kld ... lm ...` — that KLD vs the bf16 teacher is the
 rung-1 gate. After rung 1: rungs 2/3 chain via --init_from, then export
 + serving KLD/acceptance gates, then the draft.
+
+## TURN 55 (2026-11-08 ~00:0x): QA gate map for the required Qwen/Bolt checks
+
+Objective extension requires full quality checks on Qwen 27B and Bolt
+"configured according to the recipes". Gate lists read from
+docs/recipes/README.md (canonical) and docs/recipes/nemotron_bolt.md:
+
+Qwen 27B (boot scripts/serve_recipe_qwen38.sh; port 8020):
+  1. test_int8_kv_micro.py; 2. battery_gfx908.py 4/4;
+  3. kld_probe_v2.py (real-artifact KLD; kld_gate_boot.sh <tag> wraps
+     boot+probe);
+  4. coherence curl;
+  5. ua_live_soak.py -n 500 (stack assertions: AITER W8A8, UA, CAR=0,
+     epilogue off, int8_block_g128 KV both models, fp32 mamba, TP4, C8,
+     DFlash2; NOTE README gate text says NS=13 while the serve script
+     defaults NS=6 — record the mismatch and run the gate with the
+     script's configured pair).
+
+Bolt (scripts/serve_recipe_bolt.sh; port 8020; key via VLLM_API_KEY or
+/etc/llama/llama-api.key — the key file is not readable by this user,
+script falls back to VLLM_API_KEY):
+  1. same micro+battery; 2. C8 answer smoke acceptance ~4.55;
+  3. 28,067-token retrieval cold + prefix replay;
+  4. ua_live_soak.py --model nemotron-bolt --concurrency 8 -n 500
+     (500/500 coherence);
+  5. probe_bolt_quality.py --output logs/bolt-quality.json (52-prompt
+     logprob corpus, 52/52 finite/readable, 10 strict-format);
+  Bolt's recipe explicitly has NO matched official-reference KLD gate —
+  implementation + coherence gates only.
+Both need the 4 GPUs, so they run after the flint ladder; qwen38 serves
+port 8020 and Bolt also 8020 — boot them one at a time.
+
+Flint int8 surface plan (for the engine step): GPTQ GS128 W8A8 for
+q/k/v/o, dense+shared MLP, and all 256 routed experts/layer (MoE — new
+for this fork's dense-qwen stack, to be validated on boot); bf16
+exceptions: router gate, qk norms, softmax sinks; embed/lm_head via the
+existing loader int8 conversions (VLLM_GFX908_INT8_EMBEDDING /
+INT8_LM_HEAD).
