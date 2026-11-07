@@ -1198,7 +1198,15 @@ class StreamedFlintTeacher(nn.Module):
         q, k, v = qkv_o.split([qh * hd, kvh * hd, kvh * hd], dim=-1)
         q = self._rms(q.view(B, S, qh, hd), qn)
         k = self._rms(k.view(B, S, kvh, hd), kn)
-        if li not in self._no_rope:
+        # FLINT_ABLATE ablations (semantics hunt): rope|norope_invert|
+        # sinks|window — one GPU cycle each, watch teacher NLL collapse
+        _abl = os.environ.get("FLINT_ABLATE", "")
+        do_rope = (li not in self._no_rope)
+        if _abl == "rope":
+            do_rope = False
+        elif _abl == "norope_invert":
+            do_rope = not do_rope
+        if do_rope:
             cos = self.cos[pos].to(dev, q.dtype)[:, :, None, :]
             sin = self.sin[pos].to(dev, q.dtype)[:, :, None, :]
 
@@ -1218,6 +1226,8 @@ class StreamedFlintTeacher(nn.Module):
         scores = torch.matmul(q_, k_.transpose(-1, -2)).float()
         # sink = ONE virtual key in the softmax denominator (upstream
         # kernel semantics), never a broadcast bias on every key
+        if _abl == "sinks":
+            sink = torch.full_like(sink, float("-inf"))
         sink_col = torch.where(torch.isfinite(sink), sink,
                                torch.full_like(sink, float("-inf"))
                                ).view(1, -1, 1, 1).expand(
@@ -1226,7 +1236,7 @@ class StreamedFlintTeacher(nn.Module):
         qi = torch.arange(S, device=dev)[:, None]
         ki = torch.arange(S, device=dev)[None, :]
         mask = ki > qi
-        if self._layer_types[li] == "sliding_attention":
+        if self._layer_types[li] == "sliding_attention" and _abl != "window":
             mask = mask | (qi - ki >= self._window)
         mask = torch.cat(
             [mask, mask.new_ones(S, 1)], dim=-1)[None, None]
