@@ -377,7 +377,23 @@ class FlintAttention(nn.Module):
             q = self.q_norm(q.view(num_tokens, self.num_heads, self.head_dim))
             k = self.k_norm(k.view(num_tokens, self.num_kv_heads, self.head_dim))
             if self.rotary_emb is not None:
-                q, k = self.rotary_emb(positions, q, k)
+                # reference numerics (qk_norm_rope.py): rotate in fp32
+                # from the fp32 cos/sin cache — vLLM's rotary op rounds
+                # the cache to bf16 first, a documented deviation
+                cache = self.rotary_emb.cos_sin_cache
+                half = self.head_dim // 2
+                cpos = positions.long()
+                cos = cache[cpos][:, None, :half].to(torch.float32)
+                sin = cache[cpos][:, None, half:].to(torch.float32)
+
+                def _rot_fp32(x):
+                    xf = x.float()
+                    x1, x2 = xf[..., :half], xf[..., half:]
+                    return torch.cat([x1 * cos - x2 * sin,
+                                      x2 * cos + x1 * sin], -1).to(x.dtype)
+
+                q = _rot_fp32(q)
+                k = _rot_fp32(k)
             attn_output = torch.empty_like(q)
             unified_attention_with_output(
                 q.view(num_tokens, self.num_heads, self.head_dim),
