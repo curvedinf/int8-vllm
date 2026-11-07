@@ -1505,3 +1505,23 @@ for this fork's dense-qwen stack, to be validated on boot); bf16
 exceptions: router gate, qk norms, softmax sinks; embed/lm_head via the
 existing loader int8 conversions (VLLM_GFX908_INT8_EMBEDDING /
 INT8_LM_HEAD).
+
+## TURN 56 (2026-11-08 ~00:0x): int8 MoE kernel identified — aiter grouped a8w8 blockscale
+
+The flint experts (256/layer, top-6) are the only surface without an
+existing fork int8 W8A8 path: AutoGPTQMoEMethod accepts int8 GPTQ with
+group scales but selects a **wna16 (A16W8)** backend (`select_wna16_moe_backend`,
+input_dtype None); the int8 MoE oracle supports per-channel int8
+(`kInt8StaticChannelSym`) only. The sibling aiter checkout, however,
+already ships the exact kernel semantics needed:
+`aiter/ops/triton/moe/moe_op_gemm_a8w8_blockscale.py` —
+`moe_gemm_a8w8_blockscale(x, w, x_block_scales, w_block_scales,
+routing_data, gather_indx, scatter_indx, apply_swiglu=...)` with
+BLOCK_SIZE_K=128 block scales over grouped experts (adapted from
+triton-kernels matmul_ogs; routing via aiter moe_routing RoutingData).
+Plan: flint MoE int8 W8A8 = per-128-K activation quant (reuse the dense
+kernel's `_quantize_activation_per_block`) + expert weights packed as
+[E,K,N] int8 with [E,K/128,N/128] scales + RoutingData from the existing
+fused-MoE sort + this kernel for gate_up (swiglu) and down. Remaining
+exceptions for flint: router gate, qk norms, sinks (bf16); embed/lm_head
+via the loader int8 conversions; KV int8_block_g128; no mamba surfaces.
