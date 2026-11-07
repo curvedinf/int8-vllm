@@ -414,21 +414,23 @@ def main():
         import itertools as _it
 
         def _precache(it, n, split):
-            """Sweep the teacher once over the first n batches; rank 0
-            spills fp16 logits to files (one shared page-cache copy for all
-            ranks — in-RAM copies would be 4x ~12 GB on this 61 GB host).
+            """ONE sweep over the first n batches (each chunk re-stages every
+            layer — chunking multiplies the shard IO; the sweep offloads
+            fp16 logits per batch so a single pass is memory-safe). Rank 0
+            spills to files (one shared page-cache copy for all ranks —
+            in-RAM copies would be 4x ~12 GB on this 61 GB host).
             Returns [((x, y), path), ...]."""
             batches = list(_it.islice(it, n))
+            if not batches:
+                return []
+            lts = teacher.sweep([x for x, _ in batches])
             outs = []
-            for i in range(0, len(batches), 4):
-                chunk = batches[i:i + 4]
-                lts = teacher.sweep([x for x, _ in chunk])
-                for j in range(len(chunk)):
-                    p = os.path.join(kd_dir, f"{split}_{i + j}.pt")
-                    if rank == 0:
-                        torch.save(lts[j], p)
-                    outs.append((batches[i + j], p))
-                del lts
+            for j in range(len(batches)):
+                p = os.path.join(kd_dir, f"{split}_{j}.pt")
+                if rank == 0:
+                    torch.save(lts[j], p)
+                outs.append((batches[j], p))
+            del lts
             return outs
 
         if rank == 0:

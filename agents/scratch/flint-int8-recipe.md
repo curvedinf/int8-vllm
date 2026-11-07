@@ -223,3 +223,67 @@ Status: g12 (full-expert rung-0, 3 steps, seq 1024, --rank_shards) —
 audit shapes verified correct (qkv [1280,2048], 3107x2048/3008x512/
 49x1024/47x256/2x1536 class counts all match); 3-step green check
 pending at ledger-write time.
+
+## STREAMED-TEACHER IO CAMPAIGN (2026-11-07 04:1x-05:3x, CLOSED)
+
+g13 (first teacher exercise) exposed four never-run defects in
+StreamedFlintTeacher._layer (fixed + bit-exact vs resident at B=1 and
+B=3): unsliced full-ckpt q/k/v/o (dead weight-split); einsum with output
+subscripts absent from inputs; missing input/post_attention layernorm;
+flattened B*S attention leaking causal masks across batch rows.
+
+g14 exposed the FATAL architecture problem: _t() materializes FULL
+checkpoint tensors then slices -> the teacher reads the 80GB ckpt per
+batch per step; 4 ranks = ~320 GB/step aggregate; all GPUs idle in page
+waits at ~1 MB/s (bcache). FIX (commit dd44710973): teacher reads the
+presplit rank shard (20GB/rank; presplit-aware getters — fused qkv entry,
+gate/up SEPARATE (canonical format = on-disk files; the earlier "fused
+gate_up" presplit writer fix was reverted — the old files' empty-cat bug
+was benign), o/down pre-sliced); refactored _stage_layer/_apply_layer;
+sweep() = layer-major over many batches (weights stage once per rung).
+Trainer: --kd_cache 20 stage-replay (sweep once over M train + E val
+batches -> rank0 spills fp16 logits to out_dir/kdcache (one shared
+page-cache copy, 4-rank RAM copies would be ~49 GB); steps replay
+torch.load(mmap).to(dev)). KD-cache path vs live path switchable
+(--kd_cache 0 = live). eval_kld_flint takes both sources.
+
+Per-rung cost model now: teacher sweep = ONE 20GB/rank sequential read
+(~2-5 min) + M×0.6 GB fp16 spill; training steps are student-bound.
+
+NEXT: g15 smoke (KD cache 4, eval_every 2, out ptqr_flint_smoke) then
+rung 1 via scripts/ptqr_flint_rungs.sh 1 (kd_cache default 20, 60 steps,
+seq 2048, save/eval every 20, chained --init_from for rungs 2-3).
+
+## IO CAMPAIGN ROUND 2 (2026-11-07 06:2x-07:5x) — WON at g19/g20
+
+g15 crash: sweep got CPU input ids → _embed now moves ids to device.
+g16/g17: sweep still crawled (2.3 MB/s). MEASURED: single-stream dd =
+553 MB/s — the disk is FAST; the pattern (mmap tensor faults, 4
+concurrent ranks) is the problem. Fixes landed in sequence:
+1. fadvise WILLNEED per-layer prefetch parsed from the safetensors
+   header (helped 3/4 ranks; the coldest rank then streamed alone at
+   1.4 MB/s inside the collective lockstep — g17 killed).
+2. warm_shard(): staggered reverse-order 64MB sequential pre-read behind
+   barriers (114s for all four) — but sweep-time mmap faults under the
+   SATURATED page cache still degrade to page-by-page direct reclaim
+   (g18 crawl).
+3. _t() presplit path now pread()s tensors in 16MB chunks (sequential
+   read path) + zero-copy frombuffer; shapes/dtypes parsed at init.
+   g19: "[kd] cached 4 train + 10 val teacher sweeps in 421s" — KD
+   precompute GREEN. _precache now does ONE sweep per split (chunking
+   re-staged every layer per chunk — 4-chunking would have cost 5x on
+   rung 1's 20 batches).
+g19 post-cache crash: hipblasCreate ALLOC_FAILED in the BACKWARD
+(dy @ wq) on rank3 — smoke lacked
+PYTORCH_HIP_ALLOC_CONF=expandable_segments:True (rungs.sh has it;
+the 19.1G fragmented build needs it). g20 rerun with it. If OOM
+persists at seq 2048: port the Qwen trainer's chunked lm_head+loss
+path (logits_chunk arg exists, unused in one_batch; the Qwen program
+bounded head memory via 16 partial-grad chunks).
+
+Draft port committed (a99b184ccf): ptqr_flint_draft_cache.py (sweep_
+states, exits from the DRAFT's dflash_config) + ptqr_train_draft_
+flint_ptqr.py (CFG mutated pre-construction; load_draft takes the dir
+EXPLICITLY — its default arg binds DRAFT_DIR at def time; CPU load
+check PASS 710.1M params). Cache build TODO: 243 train seqs (one
+sweep_states call, chunked 64).
