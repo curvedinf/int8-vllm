@@ -1225,3 +1225,24 @@ NLL ~4-7, the Flint serving recipe answer = sinks off + fork triton
 attention (documented deviation, journaled), avoiding the UA bug
 entirely. Qwen27B+Bolt checks still REQUIRED; teacher gap (10 vs 4.7)
 continues.
+
+## TURN 43 (2026-11-08 ~02:2x): UA pin is hard; backend routing blocked
+
+Even VLLM_ROCM_USE_AITER=0 + NOSINK + VLLM_ATTENTION_BACKEND=
+TRITON_ATTN still boots ROCM_AITER_UNIFIED_ATTN for flint ("Setting
+kv cache block size to 64 for ROCM_AITER_UNIFIED_ATTN"). The pin
+survives every lever tried. For the RECIPE this means: a flint
+deployment needs either (a) a fixed UA path (its bug: garbage at 64
+tok, hang at 1024 tok — both model-specific; UA itself is fine for
+qwen38), or (b) a real cached attention implementation in the fork
+model (the VLLM_FLINT_SDPA branch needs KV-cache write/read added to
+become deployment-viable; it currently proves correctness at NLL
+4.74 on prefill), or (c) find the registry override path
+(Attention layer's backend selection: check vllm/model_executor/
+layers/attention/attention.py for the selector; the flint Attention
+call may pass an explicit backend).
+NEXT SESSION PRIORITY: (1) locate the registry/selector code that
+forces UA (10-min read, no GPU); implement a supported override
+(e.g., allow backend selection when sinks are None); (2) benchmark
+the SDPA+cache route if override remains blocked. Teacher gap and
+Qwen/Bolt quality checks remain queued.
