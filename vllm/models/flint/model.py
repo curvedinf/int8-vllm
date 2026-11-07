@@ -70,8 +70,13 @@ from .ops.moe import (
 # first profiling forward). Route norms/activation to the standard fork
 # layers, battle-tested on gfx908 by the qwen38 recipe.
 if current_platform.is_rocm():
-    from vllm.model_executor.layers.activation import silu_and_mul
+    from vllm.model_executor.layers.activation import SiluAndMul
     from vllm.model_executor.layers.layernorm import RMSNorm
+
+    _silu_and_mul_op = SiluAndMul()
+
+    def silu_and_mul(x):
+        return _silu_and_mul_op(x)
 else:
     from .ops.norm import RMSNorm, silu_and_mul
 from .ops.qk_norm_rope import qk_norm_rope_cache
