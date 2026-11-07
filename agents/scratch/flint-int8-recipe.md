@@ -465,3 +465,25 @@ HYPOTHESES (ranked, next session):
    diverging layer pinpoints the shared bug.
 4. Check chunked prefill/window interaction in serving (UA prefill
    window semantics) separately if teacher-side ablation finds nothing.
+
+## ABLATION RESULTS (turn 9, 2026-11-07 ~11:1x)
+
+FLINT_ABLATE env added (commit chain). NLL via matched-targets probe:
+- baseline (g25): 10.9999, top1 3.2%
+- sinks-dead:     26.065  top1 0.8%  => sinks are LOAD-BEARING and
+  correctly implemented (live sinks help a lot)
+- norope_invert:  12.167  top1 0.1%  => rope assignment (rope on SWA
+  layers, none on full-attn) is CORRECT (inverting hurts)
+Remaining ablations: rope-off-everywhere, window-off.
+OBSERVATION: baseline logits are ALL strongly negative (row max -12.9,
+min -82.5) while sinks-dead shifts them UP (+11.7 max) — live sinks
+suppress the whole logit vector ~25 units. Consistent with reference
+semantics (sink competes in e-units with scaled scores; values +2..+10
+dominate typical scaled scores) but worth cross-checking against the
+serving model's logit scale when the in-process oracle lands.
+Also exonerated: weight layout (q_proj [4096,2048] is forced [out,in];
+transposed impossible given hidden 2048).
+NEXT: (a) remaining 2 ablations; (b) serving per-layer hidden dump vs
+sweep_states on identical ids (the definitive divergence localizer);
+(c) if teacher reaches NLL ~3-5, IMMEDIATELY run the 3-step smoke and
+launch rung 1 (scripts/ptqr_flint_rungs.sh 1).
