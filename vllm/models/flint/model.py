@@ -395,13 +395,58 @@ class FlintAttention(nn.Module):
                 q = _rot_fp32(q)
                 k = _rot_fp32(k)
             attn_output = torch.empty_like(q)
-            unified_attention_with_output(
-                q.view(num_tokens, self.num_heads, self.head_dim),
-                k.view(num_tokens, self.num_kv_heads, self.head_dim),
-                v.view(num_tokens, self.num_kv_heads, self.head_dim),
-                attn_output.view(num_tokens, self.num_heads, self.head_dim),
-                self.attn.layer_name,
-            )
+            if os.environ.get("VLLM_FLINT_SDPA"):
+                # DEBUG ONLY (UA isolation): plain flash-style attention,
+                # no KV-cache write. Windows + sinks applied explicitly.
+                qh = self.num_heads // self.num_kv_heads
+                kk = k.view(num_tokens, self.num_kv_heads, self.head_dim) \
+                    .repeat_interleave(qh, dim=1)
+                vv = v.view(num_tokens, self.num_kv_heads, self.head_dim) \
+                    .repeat_interleave(qh, dim=1)
+                qq = q.view(num_tokens, self.num_heads, self.head_dim)
+                win = getattr(self.attn, "per_layer_sliding_window", None) \
+                    or getattr(self.attn, "sliding_window", None)
+                scores = torch.einsum("thd,shd->hts", qq.float(),
+                                      kk.float()) * (self.head_dim ** -0.5)
+                t_idx = torch.arange(num_tokens, device=qq.device)
+                mask = t_idx[None, :] > t_idx[:, None]
+                if win and win > 0:
+                    mask = mask | ((t_idx[:, None] - t_idx[None, :]) >= win)
+                sink = getattr(self, "softmax_offset", None)
+                if sink is not None:
+                    sv = torch.where(
+                        torch.isfinite(sink.float()), sink.float(),
+                        torch.full_like(sink.float(), float("-inf")))
+                    sv = sv.view(1, -1, 1).expand(num_tokens, -1, 1)
+                    sc_full = torch.cat([scores.permute(1, 0, 2), sv],
+                                        dim=-1)
+                else:
+                    sc_full = torch.cat(
+                        [scores.permute(1, 0, 2),
+                         torch.full((num_tokens, self.num_heads, 1),
+                                    float("-inf"), device=scores.device)],
+                        dim=-1)
+                m = mask[None].expand(self.num_heads, -1, -1)
+                m = torch.cat([m, torch.zeros(
+                    self.num_heads, num_tokens, 1, dtype=torch.bool,
+                    device=scores.device)], dim=-1)
+                attn = torch.softmax(
+                    sc_full.permute(1, 0, 2).masked_fill(m, float("-inf")),
+                    -1)
+                attn = torch.nan_to_num(attn)[..., :num_tokens]
+                out = torch.einsum("hts,shd->thd", attn,
+                                   vv.float()).to(q.dtype)
+                attn_output.view(num_tokens, self.num_heads,
+                                 self.head_dim).copy_(out)
+            else:
+                unified_attention_with_output(
+                    q.view(num_tokens, self.num_heads, self.head_dim),
+                    k.view(num_tokens, self.num_kv_heads, self.head_dim),
+                    v.view(num_tokens, self.num_kv_heads, self.head_dim),
+                    attn_output.view(num_tokens, self.num_heads,
+                                     self.head_dim),
+                    self.attn.layer_name,
+                )
             output, _ = self.o_proj(
                 attn_output.view(num_tokens, self.num_heads * self.head_dim))
             return output
