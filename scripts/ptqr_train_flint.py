@@ -130,7 +130,7 @@ def eval_kld_flint(student, teacher, val_src, steps: int | None = None,
     n_tok = 0
     items = itertools.islice(val_src, steps) if steps is not None else val_src
     for item in items:
-        if isinstance(item[0], tuple):     # cached: ((x, y), path)
+        if isinstance(item[0], (tuple, list)):   # cached: ((x, y), path)
             (x, y), ltp = item
             x, y = x.cuda(), y.cuda()
             logits_t = torch.load(ltp, mmap=True, weights_only=True) \
