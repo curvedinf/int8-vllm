@@ -1078,14 +1078,17 @@ class StreamedFlintTeacher(nn.Module):
         if local.any():
             x[local] = torch.nn.functional.embedding(
                 input_ids[local] - self.v0, embw)
-        return tp_sum(x)
+        x = tp_sum(x)
+        if os.environ.get("FLINT_FP32"):
+            return x.float()
+        return x
 
     def _head(self, x):
         dev = self.device
         h = self._rms(x, self._t("model.norm.weight").to(dev))
         lhw = self._t("lm_head.weight",
                       None if self.presplit else slice(self.v0, self.v1)).to(dev)
-        logits = torch.nn.functional.linear(h, lhw).float()
+        logits = torch.nn.functional.linear(h, lhw.to(h.dtype)).float()
         return _tp_gather_logits(logits, dim=-1)
 
     @torch.no_grad()
@@ -1185,6 +1188,17 @@ class StreamedFlintTeacher(nn.Module):
                 g, u = self._gated_w(f"{p}.mlp.experts.{gid}")
                 d = self._down_w(f"{p}.mlp.experts.{gid}")
                 W["experts"].append((g.to(dev), u.to(dev), d.to(dev)))
+        if os.environ.get("FLINT_FP32"):
+            # reference numerics (PR 62938): FP32 fused add + RMSNorm —
+            # bf16 residuals at the measured early-layer rms (1e-3)
+            # catastrophically cancel
+            def _f32(v):
+                if torch.is_tensor(v):
+                    return v.float()
+                if isinstance(v, tuple):
+                    return tuple(x.float() for x in v)
+                return [tuple(x.float() for x in tup) for tup in v]
+            W = {k: _f32(v) for k, v in W.items()}
         return W
 
     def _apply_layer(self, li, x, pos, W):
