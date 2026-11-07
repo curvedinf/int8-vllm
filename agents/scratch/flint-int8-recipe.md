@@ -342,3 +342,32 @@ flint_ptqr.py (CFG mutated pre-construction; load_draft takes the dir
 EXPLICITLY — its default arg binds DRAFT_DIR at def time; CPU load
 check PASS 710.1M params). Cache build TODO: 243 train seqs (one
 sweep_states call, chunked 64).
+
+## SEMANTICS HUNT (turn 3, 2026-11-07 ~09:4x) — two fixes landed, more remain
+
+g23 (standard RMSNorm w*x — Flint ops/norm kernel is s*rs*w; my (1+w)
+was Gemma-style): teacher NLL 85 -> 14.25. g24 (sink = virtual key in
+the softmax denominator via cat+slice, NOT a broadcast bias on every
+key — matches the upstream kernel l+exp(sink-m)): NLL 14.25 -> 13.83,
+top1 0.3% — still ~uniform. MORE BUGS REMAIN. Both were invisible to
+the tiny checks (zero sinks; circular teacher-vs-student; ones-init
+norms now identity).
+
+NEXT-SESSION AUDIT (continue here): teacher NLL target ~2-4, top1
+>25%. Remaining candidates, unverified: (1) rope split form inside
+rot() — neox half-split assumed; upstream asserts is_neox_style but
+VERIFY the actual rot dim pairing; (2) GQA q/kv head INTERLEAVE under
+TP slicing (h0*qh head order vs the checkpoint's head layout — if
+k-head slices land on wrong heads, per-head k_norm/sinks scramble);
+(3) dense-vs-MoE dispatch + shared-expert weight application (any
+shared-expert gate/scale?); (4) router top-6 renorm + expert weight
+application order; (5) embed mask/gather + lm_head gather order;
+(6) window semantics off-by-one (>= window vs > window). DECISIVE
+GATE if inspection stalls: run upstream vLLM Flint (vllm/models/flint,
+TP4, bf16, offline generate, 37-token prompt) — coherent text proves
+the serving path; then diff its layer-0..N hidden states vs
+FlintRef's on the same ids (hook the serving model) to localize the
+divergence in ONE pass. g24 run artifacts: /tmp/ptqr_g24.log,
+smoke kdcache at /home/curved/models/ptqr_flint_smoke/kdcache.
+Commits: 9137322454 (pread), 4ecde2103a (warm), 3d74854956 (ledger),
+chunked-loss + eval-list + norm 5790e5922b-adjacent chain; see git log.
