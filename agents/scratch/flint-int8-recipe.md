@@ -1323,3 +1323,27 @@ Also: env-injection mystery resurfaces — `VLLM_BOLT_SHORT_PREFILL_COHORT`
 and `VLLM_GFX908_PREFIX_FAIR_ADMISSION` were SET in engine workers even
 though the launching shell had no VLLM_* vars; same class as the open
 `VLLM_GFX908_RESIDUAL_INT8` mystery in upstream-v0330-merge.md.
+
+## TURN 47 (2026-11-07 ~22:2x): CONFIRMED — serving attention contributes ~nothing
+
+Teacher ablations on the SAME 64-token window (all inputs/targets
+matched, teacher fixed-sink run since the sink rescale changed nothing:
+10.1779 vs 10.13 at 1024 — sinks are real but not the teacher gap):
+- default teacher: 10.18
+- FLINT_ABLATE=attn_zero (every layer's attention output zeroed):
+  **26.4425** ~= serving 25.9829 (UA and TRITON_ATTN, bitwise equal).
+So the serving model is running with near-zero attention: the
+`attn_output = torch.empty_like(q)` filled by
+`unified_attention_with_output(...)` is effectively zeros, and the
+remaining 0.46 NLL delta is the teacher-vs-serving MLP/rope/noise floor.
+All three attention backends share the exact same
+`if attn_metadata is None: return output.fill_(0)` branch, which also
+explains every bitwise-inert toggle. The helper is a
+`direct_register_custom_op` whose `get_attention_context()` reads
+`forward_context.attn_metadata` — prime suspect: the flint layer names
+or the custom-op context boundary make `attn_metadata` None during real
+prefill. `VLLM_FLINT_DBG_OUT=1` (model.py, prints impl class, metadata
+type, out_absmax, q_absmax on the first forward of each layer) run in
+flight to confirm.
+Teacher remaining gap (10.18 vs SDPA-serving 4.74) is still open and
+SEPARATE; `attn_zero` bounds the serving side, not the teacher.

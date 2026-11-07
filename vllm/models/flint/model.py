@@ -451,6 +451,19 @@ class FlintAttention(nn.Module):
                                      self.head_dim),
                     self.attn.layer_name,
                 )
+            if os.environ.get("VLLM_FLINT_DBG_OUT") and not getattr(
+                    self, "_dbg_out_done", False):
+                self._dbg_out_done = True
+                try:
+                    from vllm.forward_context import get_forward_context
+                    _am = type(get_forward_context().attn_metadata).__name__
+                except Exception as _e:  # noqa: BLE001 - debug only
+                    _am = f"ERR {_e}"
+                print(
+                    f"[dbgout {self.attn.layer_name}] "
+                    f"impl={type(self.attn.impl).__name__} meta={_am} "
+                    f"out_absmax={float(attn_output.abs().max())} "
+                    f"q_absmax={float(q.abs().max())}", flush=True)
             output, _ = self.o_proj(
                 attn_output.view(num_tokens, self.num_heads * self.head_dim))
             return output
