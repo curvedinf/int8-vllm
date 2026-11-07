@@ -72,15 +72,20 @@ def flint_tiny_config() -> SimpleNamespace:
 class RmsNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
-        self.weight = nn.Parameter(torch.zeros(dim))
+        # ones-init: identity under the standard w*x formula (the tiny
+        # random-weight checks build on this; real weights are loaded)
+        self.weight = nn.Parameter(torch.ones(dim))
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # standard RMSNorm (w * x/rms) — Flint's ops/norm.py kernel is
+        # (s * rs * w), NOT Gemma-style (1+w); the (1+w) form produced
+        # garbage teacher logits on the real checkpoint (measured NLL 85)
         dtype = x.dtype
         x32 = x.float()
         v = x32.pow(2).mean(-1, keepdim=True)
         x32 = x32 * torch.rsqrt(v + self.eps)
-        return ((1.0 + self.weight.float()) * x32).to(dtype)
+        return (self.weight.float() * x32).to(dtype)
 
 
 class Rope:
@@ -948,9 +953,10 @@ class StreamedFlintTeacher(nn.Module):
         return t[sl] if sl is not None else t
 
     def _rms(self, x, w):
+        # standard RMSNorm (w * x/rms) — matches Flint ops/norm.py (s*rs*w)
         x32 = x.float()
         v = x32.pow(2).mean(-1, keepdim=True)
-        return ((1.0 + w.float()) * (x32 * torch.rsqrt(v + self._norm_eps))
+        return (w.float() * (x32 * torch.rsqrt(v + self._norm_eps))
                 ).to(x.dtype)
 
     # --- weight getters. presplit rank files pre-apply this rank's slices
