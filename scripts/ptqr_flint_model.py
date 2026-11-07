@@ -839,6 +839,7 @@ class StreamedFlintTeacher(nn.Module):
             with _so(shard, framework="pt", device="cpu") as _sf:
                 names = list(_sf.keys())
             self.weight_map = {n: f"rank{rank}.safetensors" for n in names}
+            self.shard_path = shard
         else:
             idx_path = os.path.join(ckpt_dir,
                                     "model.safetensors.index.json")
@@ -915,6 +916,20 @@ class StreamedFlintTeacher(nn.Module):
     # --- weight getters. presplit rank files pre-apply this rank's slices
     # AND fuse qkv (k/v folded into the q_proj entry) and gate|up (up folded
     # into the gate_proj entry); the full-checkpoint path slices here. ---
+    def warm_shard(self):
+        """Sequentially read this rank's shard file once (big reads).
+
+        Staggered across ranks by the caller: concurrent mmap/fadvise
+        streams from 4 ranks seek-storm the bcache device (measured 2.3
+        MB/s); one warm stream does 553 MB/s. Warming in REVERSE rank
+        order leaves the earliest-warmed files partially evicted, so at
+        most one rank streams cold during the (collective) sweep."""
+        if not self.presplit:
+            return
+        with open(self.shard_path, "rb") as f:
+            while f.read(1 << 26):
+                pass
+
     def _prefetch_layer(self, li: int):
         """Sequentially prefetch layer li's tensors (fadvise WILLNEED).
         Per-tensor calls: expert tensors for this rank are interleaved in

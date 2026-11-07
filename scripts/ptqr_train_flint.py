@@ -436,6 +436,12 @@ def main():
         if world > 1:
             dist.barrier(group=tp_group)
         t0 = time.time()
+        for r in range(world - 1, -1, -1):   # reverse: rank0 warms LAST
+            if rank == r:
+                teacher.warm_shard()
+            dist.barrier(group=tp_group)
+        print(f"[kd r{rank}] shard warmed in {time.time() - t0:.0f}s",
+              flush=True)
         kd_train = _precache(train_iter, args.kd_cache, "train")
         kd_val = _precache(val_iter, args.eval_steps, "val") \
             if val_iter is not None else []
