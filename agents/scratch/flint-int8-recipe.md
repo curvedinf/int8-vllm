@@ -487,3 +487,27 @@ NEXT: (a) remaining 2 ablations; (b) serving per-layer hidden dump vs
 sweep_states on identical ids (the definitive divergence localizer);
 (c) if teacher reaches NLL ~3-5, IMMEDIATELY run the 3-step smoke and
 launch rung 1 (scripts/ptqr_flint_rungs.sh 1).
+
+## ABLATIONS COMPLETE + DIVERGENCE LOCALIZED (turn 10, 2026-11-07 11:1x)
+
+All four ablations (NLL, matched targets): baseline 11.00 | sinks-dead
+26.07 | rope-off 11.50 | norope-invert 12.17 | window-off 10.84.
+=> Attention SEMANTICS fully exonerated (sinks correct+load-bearing;
+rope assignment correct; window nearly neutral at seq 1024).
+
+MECHANICS ISOLATION (agents/tmp/layer_ref_check.py + sweep_capture.py):
+world=1 LayerRef w/ full-ckpt tensors vs world=4 presplit sweep on the
+same 64 random ids (seed 7), exits [0, 2]:
+- layer 0 (DENSE, no MoE): ALREADY DIVERGES — ref rms 0.026 vs sweep
+  rms 0.065 (rel diff 2.4x). /tmp/layer_sweep_tp4.pt, /tmp/layer_ref_*.pt
+=> bug bounded to layer-level MECHANICS, not MoE math: candidates =
+TP head slicing of qkv under GQA (kvh=1/rank; repeat_interleave maps
+q-head h -> kv-head h//8), per-rank sink slicing sink[h0:h0+qh], o_proj
+col slicing, dense-MLP inter slicing, or tp_sum ordering.
+NEXT (fresh session): within-layer bisect — compare x+attn(norm1(x))
+and the MLP separately between sweep and ref at layer 0 (extend
+sweep_states to capture mid-layer, or replicate the sweep's per-rank
+attn math manually on 1 GPU). The layer-2 compare needs exits fix
+(capture used [0,2]; compare indexed wrongly once — rerun with the
+saved files). Then fix, re-run g25 NLL gate (target 2-4), smoke, and
+LAUNCH RUNG 1 (scripts/ptqr_flint_rungs.sh 1).
