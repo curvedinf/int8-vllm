@@ -1161,3 +1161,13 @@ Also this turn: VLLM_FLINT_SDPA debug branch added (plain masked
 attention, no KV write — isolates AITER UA vs model semantics);
 import os fixed (worker NameError); eager/no-chunked-prefill serving
 rerun in flight (gt_lp8).
+
+## TURN 39 (2026-11-08 ~00:xx): eager verdict + SDPA run in flight
+
+Serving --enforce-eager + no-chunked-prefill: NLL 25.73 vs 25.98
+default — graphs/chunked-prefill EXONERATED. SDPA isolation run
+(VLLM_FLINT_SDPA=1: plain masked attention w/ windows+sinks, no KV
+write, bypasses AITER UA) in flight (gt_lp9). If it lands ~10 =>
+AITER UA is the serving bug; ~26 => the bug is in the model/loader
+path shared with UA. ALSO: goal extended with Qwen27B + Bolt full
+quality checks (see turn-38 entry) — REQUIRED before finishing.
