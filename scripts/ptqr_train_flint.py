@@ -45,6 +45,7 @@ import itertools
 import math
 import os
 import sys
+import time
 from pathlib import Path
 
 import torch
@@ -109,12 +110,14 @@ def _apply_kv_fake(att, k: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
-def eval_kld_flint(student, teacher, val_iter, steps: int, chunk: int = 256):
+def eval_kld_flint(student, teacher, val_src, steps: int | None = None,
+                   chunk: int = 256):
     """Held-out KLD vs the BF16 teacher at tau=0 (the judge metric).
 
-    Flint variant of eval_kld: FlintRef returns full fp32 logits directly,
-    so KLD/teacher-NLL run chunked over tokens (vocab 150144 makes a full
-    [S, V] fp32 pair ~2.4 GB; chunks keep the transient at ~0.6 GB).
+    val_src: iterable of (x, y) with a LIVE teacher, or the KD-cache list
+    [((x, y), logits_path)] with precomputed fp16 teacher logits.
+    Chunked over tokens (vocab 150144 makes a full [S, V] fp32 pair
+    ~2.4 GB; chunks keep the transient at ~0.6 GB).
     """
     taus = [(m, m.tau) for m in student.modules()
             if m.__class__.__name__ == "PTQRLinear"]
@@ -125,10 +128,18 @@ def eval_kld_flint(student, teacher, val_iter, steps: int, chunk: int = 256):
     kl_sum = 0.0
     lm_sum = 0.0
     n_tok = 0
-    for x, y in itertools.islice(val_iter, steps):
-        x, y = x.cuda(), y.cuda()
+    items = itertools.islice(val_src, steps) if steps is not None else val_src
+    for item in items:
+        if isinstance(item[0], tuple):     # cached: ((x, y), path)
+            (x, y), ltp = item
+            x, y = x.cuda(), y.cuda()
+            logits_t = torch.load(ltp, mmap=True, weights_only=True) \
+                .to(x.device).float()
+        else:                              # live teacher
+            x, y = item
+            x, y = x.cuda(), y.cuda()
+            logits_t = teacher(x).float()
         logits_s = student(x).float()
-        logits_t = teacher(x).float()
         y_flat = y.reshape(-1)
         s_flat = logits_s.reshape(-1, logits_s.shape[-1])
         t_flat = logits_t.reshape(-1, logits_t.shape[-1])
@@ -140,6 +151,7 @@ def eval_kld_flint(student, teacher, val_iter, steps: int, chunk: int = 256):
             lm_sum += F.cross_entropy(
                 t_flat[sl], y_flat[sl], reduction="sum").item()
         n_tok += y_flat.numel()
+        del logits_s, logits_t, s_flat, t_flat
     if was_training:
         student.train()
     for m, t in taus:
@@ -180,6 +192,10 @@ def main():
     p.add_argument("--init_from", default="",
                    help="previous rung's out_dir: resume masters+scales "
                         "from its latest saved per-rank shard")
+    p.add_argument("--kd_cache", type=int, default=20,
+                   help="stage-replay: sweep the streamed teacher once over "
+                        "this many train batches and replay their logits "
+                        "(0 = live teacher per step — ~320 GB/step of IO)")
     p.add_argument("--n_experts_keep", type=int, default=0,
                    help="smoke only: keep the first N experts per MoE layer "
                         "(0 = all). Validates real-checkpoint wiring without "
@@ -231,8 +247,11 @@ def main():
                                           args.n_experts_keep)
         if world > 1 and args.teacher_stream:
             from ptqr_flint_model import StreamedFlintTeacher
+            # presplit rank shards when available: per-rank IO is its own
+            # 20GB file, not the full 80GB checkpoint per pass
+            tdir = args.rank_shards if args.rank_shards else args.model
             teacher = StreamedFlintTeacher(
-                cfg, args.model, world, rank,
+                cfg, tdir, world, rank,
                 device=device if device != "cpu" else "cpu")
             teacher.eval()
             # streaming teacher bypasses the resident path entirely
@@ -383,13 +402,57 @@ def main():
                                 tiny=args.tiny, tiny_vocab=teacher.cfg.vocab_size) \
         if os.path.exists(val_path) or args.tiny else None
 
-    def one_batch(x, y, tau):
+    # --- KD-logit cache (stage-replay): the streamed teacher runs ONCE per
+    # rung in a layer-major sweep (each layer's weights stage once for ALL
+    # cached batches — one 20GB/rank pass total); training then replays the
+    # cached bf16-teacher logits. Live per-step streaming costs a full
+    # checkpoint pass per batch per step (~320 GB/step aggregate — measured
+    # crawl at ~1 MB/s). Set --kd_cache 0 for the live path.
+    kd_dir = os.path.join(args.out_dir, "kdcache")
+    kd_train = kd_val = None
+    if args.kd_cache > 0 and prm_frozen:
+        import itertools as _it
+
+        def _precache(it, n, split):
+            """Sweep the teacher once over the first n batches; rank 0
+            spills fp16 logits to files (one shared page-cache copy for all
+            ranks — in-RAM copies would be 4x ~12 GB on this 61 GB host).
+            Returns [((x, y), path), ...]."""
+            batches = list(_it.islice(it, n))
+            outs = []
+            for i in range(0, len(batches), 4):
+                chunk = batches[i:i + 4]
+                lts = teacher.sweep([x for x, _ in chunk])
+                for j in range(len(chunk)):
+                    p = os.path.join(kd_dir, f"{split}_{i + j}.pt")
+                    if rank == 0:
+                        torch.save(lts[j], p)
+                    outs.append((batches[i + j], p))
+                del lts
+            return outs
+
+        if rank == 0:
+            os.makedirs(kd_dir, exist_ok=True)
+        if world > 1:
+            dist.barrier(group=tp_group)
+        t0 = time.time()
+        kd_train = _precache(train_iter, args.kd_cache, "train")
+        kd_val = _precache(val_iter, args.eval_steps, "val") \
+            if val_iter is not None else []
+        print(f"[kd r{rank}] cached {len(kd_train)} train + {len(kd_val)} val "
+              f"teacher sweeps in {time.time() - t0:.0f}s", flush=True)
+
+    def _kd_load(path):
+        return torch.load(path, mmap=True, weights_only=True)
+
+    def one_batch(x, y, tau, logits_t=None):
         if replaced:
             for m in replaced.values():
                 m.tau = tau
         logits_s = student(x)
-        with torch.no_grad():
-            logits_t = teacher(x)
+        if logits_t is None:
+            with torch.no_grad():
+                logits_t = teacher(x)
         ce = F.cross_entropy(
             logits_s.float().reshape(-1, logits_s.shape[-1]), y.reshape(-1))
         T = args.distill_temperature
@@ -403,6 +466,30 @@ def main():
 
     step = 0
     while step < args.max_steps:
+        if kd_train is not None:
+            (x, y), ltp = kd_train[step % len(kd_train)]
+            tau = anneal_tau(step, args.max_steps, args.temp_start,
+                             args.temp_end)
+            loss, ce, kd = one_batch(x.to(device), y.to(device), tau,
+                                     _kd_load(ltp).to(device))
+            loss.backward()
+            if replaced:
+                apply_deferred_updates(student)
+            if step % 10 == 0:
+                print(f"step {step:4d} tau {tau:.4f} loss {loss.item():.4f} "
+                      f"ce {ce.item():.4f} kd {kd.item():.4f}", flush=True)
+            if kd_val and args.eval_every and step % args.eval_every == 0:
+                kld, lm = eval_kld_flint(student, teacher, kd_val)
+                if rank == 0:
+                    print(f"eval step {step:4d} kld {kld:.6f} "
+                          f"teacher_nll {lm:.4f}", flush=True)
+            if args.save_every and step % args.save_every == 0:
+                save_ptqr_checkpoint(student, replaced, Path(args.out_dir),
+                                     step, args, rank=rank, world=world,
+                                     vocab_size=teacher.cfg.vocab_size)
+            step += 1
+            student.zero_grad(set_to_none=True)
+            continue
         for x, y in train_iter:
             if step >= args.max_steps:
                 break

@@ -832,7 +832,8 @@ class StreamedFlintTeacher(nn.Module):
         self.cfg, self.world, self.rank, self.device = cfg, world, rank, device
         self.dtype = dtype
         shard = os.path.join(ckpt_dir, f"rank{rank}.safetensors")
-        if os.path.exists(shard):  # presplit dir: single-file weight map
+        self.presplit = os.path.exists(shard)
+        if self.presplit:  # presplit dir: single-file weight map
             from safetensors import safe_open as _so
 
             with _so(shard, framework="pt", device="cpu") as _sf:
@@ -892,6 +893,100 @@ class StreamedFlintTeacher(nn.Module):
         return ((1.0 + w.float()) * (x32 * torch.rsqrt(v + self._norm_eps))
                 ).to(x.dtype)
 
+    # --- weight getters. presplit rank files pre-apply this rank's slices
+    # AND fuse qkv (k/v folded into the q_proj entry) and gate|up (up folded
+    # into the gate_proj entry); the full-checkpoint path slices here. ---
+    def _qkv_w(self, a):
+        if self.presplit:
+            return self._t(f"{a}.q_proj.weight")
+        hd, qh, kvh = self.hd, self.qh, self.kvh
+        h0, r = self.h0, self.rank
+        return torch.cat([
+            self._t(f"{a}.q_proj.weight", slice(h0 * hd, (h0 + qh) * hd)),
+            self._t(f"{a}.k_proj.weight",
+                    slice(r * kvh * hd, (r + 1) * kvh * hd)),
+            self._t(f"{a}.v_proj.weight",
+                    slice(r * kvh * hd, (r + 1) * kvh * hd)),
+        ], dim=0)
+
+    def _o_w(self, a):
+        if self.presplit:
+            return self._t(f"{a}.o_proj.weight")
+        hd, qh, h0 = self.hd, self.qh, self.h0
+        return self._t(f"{a}.o_proj.weight",
+                       (slice(None), slice(h0 * hd, (h0 + qh) * hd)))
+
+    def _gated_w(self, prefix, rng=None):
+        """(gate, up) weight matrices for an MLP/expert prefix.
+
+        rng: (a0, a1) intermediate range for dense/shared MLPs, None for
+        whole experts. presplit stores gate as its own (sliced) entry and
+        up separately (whole — slice here); k_proj/v_proj are the only
+        folded entries."""
+        if self.presplit:
+            gate = self._t(f"{prefix}.gate_proj.weight")
+            up = self._t(f"{prefix}.up_proj.weight")
+            if rng is not None and up.shape[0] != rng[1] - rng[0]:
+                up = up[rng[0]:rng[1]]
+            return gate, up
+        if rng is None:
+            return (self._t(f"{prefix}.gate_proj.weight"),
+                    self._t(f"{prefix}.up_proj.weight"))
+        return (self._t(f"{prefix}.gate_proj.weight", slice(rng[0], rng[1])),
+                self._t(f"{prefix}.up_proj.weight", slice(rng[0], rng[1])))
+
+    def _down_w(self, prefix, rng=None):
+        if self.presplit:
+            return self._t(f"{prefix}.down_proj.weight")
+        if rng is None:
+            return self._t(f"{prefix}.down_proj.weight")
+        return self._t(f"{prefix}.down_proj.weight",
+                       (slice(None), slice(rng[0], rng[1])))
+
+    def _embed(self, input_ids):
+        dev = self.device
+        B, S = input_ids.shape
+        local = (input_ids >= self.v0) & (input_ids < self.v1)
+        embw = self._t("model.embed_tokens.weight",
+                       None if self.presplit else slice(self.v0, self.v1)
+                       ).to(dev)
+        x = torch.zeros(B, S, self.cfg.hidden_size, dtype=self.dtype, device=dev)
+        if local.any():
+            x[local] = torch.nn.functional.embedding(
+                input_ids[local] - self.v0, embw)
+        return tp_sum(x)
+
+    def _head(self, x):
+        dev = self.device
+        h = self._rms(x, self._t("model.norm.weight").to(dev))
+        lhw = self._t("lm_head.weight",
+                      None if self.presplit else slice(self.v0, self.v1)).to(dev)
+        logits = torch.nn.functional.linear(h, lhw).float()
+        return _tp_gather_logits(logits, dim=-1)
+
+    @torch.no_grad()
+    def sweep(self, batches):
+        """Layer-major multi-batch pass: each layer's weights stage on the
+        device ONCE for every batch in `batches` (list of [B, S] id tensors).
+        Returns the list of full-vocab logits per batch as fp16 CPU tensors
+        (fp32 [S, V] is ~1.2 GB/batch at seq 2048 — never keep M of those on
+        device). Total weight IO per rank = one pass over its shard — vs one
+        FULL pass PER BATCH in the batch-major forward (320 GB/step
+        aggregate; measured crawl)."""
+        dev = self.device
+        xs, poss = [], []
+        for b in batches:
+            S = b.shape[1]
+            xs.append(self._embed(b))
+            poss.append(torch.arange(S, device=dev).unsqueeze(0)
+                        .expand(b.shape[0], S))
+        for li in range(self.cfg.num_hidden_layers):
+            W = self._stage_layer(li)
+            for i in range(len(xs)):
+                xs[i] = self._apply_layer(li, xs[i], poss[i], W)
+            del W
+        return [self._head(x).to(torch.float16).cpu() for x in xs]
+
     @torch.no_grad()
     def forward(self, input_ids, positions=None):
         B, S = input_ids.shape
@@ -900,55 +995,56 @@ class StreamedFlintTeacher(nn.Module):
             positions = torch.arange(S, device=dev)
         pos = positions.unsqueeze(0).expand(B, S) if positions.dim() == 1 \
             else positions
-
-        # embed (vocab rows; partial sum)
-        local = (input_ids >= self.v0) & (input_ids < self.v1)
-        embw = self._t("model.embed_tokens.weight",
-                       slice(self.v0, self.v1)).to(dev)
-        x = torch.zeros(B, S, self.cfg.hidden_size, dtype=self.dtype, device=dev)
-        rows = local
-        if rows.any():
-            x[rows] = torch.nn.functional.embedding(
-                input_ids[rows] - self.v0, embw)
-        x = tp_sum(x)
-
+        x = self._embed(input_ids)
         for li in range(self.cfg.num_hidden_layers):
             x = self._layer(li, x, pos)
+        return self._head(x)
 
-        h = self._rms(x, self._t("model.norm.weight").to(dev))
-        lhw = self._t("lm_head.weight", slice(self.v0, self.v1)).to(dev)
-        logits = torch.nn.functional.linear(h, lhw).float()
-        return _tp_gather_logits(logits, dim=-1)
-
-    def _layer(self, li, x, pos):
+    def _stage_layer(self, li):
+        """Read layer li's weights onto the device (one layer at a time)."""
         dev = self.device
         p = f"model.layers.{li}"
-        # --- attention (full-checkpoint weights sliced to this rank's heads;
-        # the qkv.split-on-weight here was dead code that never sliced) ---
         a = f"{p}.self_attn"
+        hd, qh, kvh, h0 = self.hd, self.qh, self.kvh, self.h0
+        W = {
+            "w_in": self._t(f"{p}.input_layernorm.weight").to(dev),
+            "qkv": self._qkv_w(a).to(dev),
+            "o": self._o_w(a).to(dev),
+            "sink": self._t(f"{a}.softmax_offset").to(dev)[h0:h0 + qh].clone(),
+            "qn": self._t(f"{a}.q_norm.weight").to(dev),
+            "kn": self._t(f"{a}.k_norm.weight").to(dev),
+            "w_post": self._t(f"{p}.post_attention_layernorm.weight").to(dev),
+        }
+        if li in self._mlp_only:
+            g, u = self._gated_w(f"{p}.mlp", (self.r0, self.r1))
+            d = self._down_w(f"{p}.mlp", (self.r0, self.r1))
+            W["dense"] = (g.to(dev), u.to(dev), d.to(dev))
+        else:
+            W["router"] = self._t(f"{p}.mlp.gate.weight").to(dev)
+            W["shared"] = tuple(
+                w.to(dev) for w in (
+                    *self._gated_w(f"{p}.mlp.shared_expert",
+                                   (self.sr0, self.sr1)),
+                    self._down_w(f"{p}.mlp.shared_expert",
+                                 (self.sr0, self.sr1))))
+            W["experts"] = []
+            for gid in self.keep:
+                g, u = self._gated_w(f"{p}.mlp.experts.{gid}")
+                d = self._down_w(f"{p}.mlp.experts.{gid}")
+                W["experts"].append((g.to(dev), u.to(dev), d.to(dev)))
+        return W
+
+    def _apply_layer(self, li, x, pos, W):
+        dev = self.device
+        p = f"model.layers.{li}"
         hd, qh, kvh = self.hd, self.qh, self.kvh
-        h0 = self.h0
-        r = self.rank
-        w_in = self._t(f"{p}.input_layernorm.weight").to(dev)
-        xn = self._rms(x, w_in)
-        qw = self._t(f"{a}.q_proj.weight",
-                     slice(h0 * hd, (h0 + qh) * hd))
-        kw = self._t(f"{a}.k_proj.weight",
-                     slice(r * kvh * hd, (r + 1) * kvh * hd))
-        vw = self._t(f"{a}.v_proj.weight",
-                     slice(r * kvh * hd, (r + 1) * kvh * hd))
-        qkv = torch.cat([qw, kw, vw], dim=0).to(dev)
-        ow = self._t(f"{a}.o_proj.weight",
-                     (slice(None), slice(h0 * hd, (h0 + qh) * hd))).to(dev)
-        sink = self._t(f"{a}.softmax_offset").to(dev)  # [all heads]
-        sink = sink[h0:h0 + qh]
+        sink, qn, kn = W["sink"], W["qn"], W["kn"]
 
-        qn = self._t(f"{a}.q_norm.weight").to(dev)
-        kn = self._t(f"{a}.k_norm.weight").to(dev)
-
-        t = x.shape[0] * x.shape[1]
+        # --- attention ---
+        xn = self._rms(x, W["w_in"])
         B, S = x.shape[0], x.shape[1]
-        qkv_o = torch.nn.functional.linear(xn, qkv)      # [B, S, q+2k]
+        t = B * S
+        qkv_o = torch.nn.functional.linear(xn, W["qkv"])  # [B, S, q+2k]
         q, k, v = qkv_o.split([qh * hd, kvh * hd, kvh * hd], dim=-1)
         q = self._rms(q.view(B, S, qh, hd), qn)
         k = self._rms(k.view(B, S, kvh, hd), kn)
@@ -984,55 +1080,46 @@ class StreamedFlintTeacher(nn.Module):
         attn = torch.nan_to_num(attn)
         out = torch.matmul(attn.to(v_.dtype), v_) \
             .permute(0, 2, 1, 3).reshape(B, S, qh * hd)
-        attn_out = torch.nn.functional.linear(out, ow)  # partial [B, S, H]
+        attn_out = torch.nn.functional.linear(out, W["o"])  # partial [B, S, H]
         x = x + tp_sum(attn_out)
 
         # --- mlp ---
-        w_post = self._t(f"{p}.post_attention_layernorm.weight").to(dev)
-        xn2 = self._rms(x, w_post)
+        xn2 = self._rms(x, W["w_post"])
         if li in self._mlp_only:
-            x = x + self._mlp_dense(f"{p}.mlp", xn2, self.r0, self.r1)
+            x = x + self._mlp_dense(xn2, W["dense"])
         else:
-            # router (replicated)
-            rw = self._t(f"{p}.mlp.gate.weight").to(dev)
+            rw = W["router"]
             logits_r = torch.nn.functional.linear(
                 xn2.reshape(t, -1), rw).float()
-            probs = torch.sigmoid(logits_r.reshape(x.shape[0], x.shape[1], -1)
-                                  .reshape(-1, rw.shape[0]))
+            probs = torch.sigmoid(logits_r.reshape(B, S, -1).reshape(-1,
+                                                                     rw.shape[0]))
             top_p, top_i = torch.topk(probs, self._top_k, dim=-1)
             top_p = top_p / top_p.sum(-1, keepdim=True)
             routed = torch.zeros_like(x)
-            for gid in self.keep:
+            for gid, (g, u, d) in zip(self.keep, W["experts"]):
                 sel = (top_i == gid)
                 if not sel.any():
                     continue
                 w = (top_p * sel).sum(-1)
                 rowsm = sel.any(-1)
-                ex = self._expert(f"{p}.mlp.experts.{gid}",
-                                  xn2.reshape(t, -1)[rowsm])
+                ex = self._expert(xn2.reshape(t, -1)[rowsm], g, u, d)
                 routed.reshape(t, -1)[rowsm] += ex * w[rowsm, None].to(x.dtype)
-            shared = self._mlp_dense(f"{p}.mlp.shared_expert", xn2,
-                                     self.sr0, self.sr1)
+            shared = self._mlp_dense(xn2, W["shared"])
             x = x + tp_sum(routed + shared)
         return x
 
-    def _mlp_dense(self, prefix, x, a0, a1):
-        dev = self.device
+    def _layer(self, li, x, pos):
+        return self._apply_layer(li, x, pos, self._stage_layer(li))
+
+    def _mlp_dense(self, x, w3):
+        g, u, d = w3
         t = x.shape[0] * x.shape[1]
-        g = self._t(f"{prefix}.gate_proj.weight", slice(a0, a1)).to(dev)
-        u = self._t(f"{prefix}.up_proj.weight", slice(a0, a1)).to(dev)
-        d = self._t(f"{prefix}.down_proj.weight",
-                    (slice(None), slice(a0, a1))).to(dev)
         h = torch.nn.functional.linear(x.reshape(t, -1), g)
         h = torch.nn.functional.silu(h) * torch.nn.functional.linear(
             x.reshape(t, -1), u)
         return torch.nn.functional.linear(h, d).view(x.shape)
 
-    def _expert(self, prefix, xr):
-        dev = self.device
-        g = self._t(f"{prefix}.gate_proj.weight").to(dev)
-        u = self._t(f"{prefix}.up_proj.weight").to(dev)
-        d = self._t(f"{prefix}.down_proj.weight").to(dev)
+    def _expert(self, xr, g, u, d):
         h = torch.nn.functional.silu(xr @ g.t()) * (xr @ u.t())
         return h @ d.t()
 
@@ -1101,9 +1188,9 @@ def presplit_flint_shards(ckpt_dir: str, out_root: str, world: int) -> list[str]
                         if name.endswith(".mlp.gate.weight"):
                             buf[name] = t  # router, full
                         elif name.endswith("gate_proj.weight"):
-                            u = sf.get_tensor(name.replace("gate_proj", "up_proj"))
-                            buf[name] = _torch.cat(
-                                [t[a0:a1], u[a0:a1]], dim=0).contiguous()
+                            # canonical: gate slice only; up rides separately
+                            # (whole) and the loaders slice it themselves
+                            buf[name] = t[a0:a1].contiguous()
                         elif name.endswith("down_proj.weight"):
                             buf[name] = t[:, a0:a1].contiguous()
                         else:

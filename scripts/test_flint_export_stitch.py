@@ -123,6 +123,10 @@ def main():
             "num_key_value_heads": cfg.num_key_value_heads,
             "num_experts": cfg.num_experts,
             "mlp_only_layers": cfg.mlp_only_layers,
+            "intermediate_size": cfg.intermediate_size,
+            "moe_intermediate_size": cfg.moe_intermediate_size,
+            "shared_expert_intermediate_size":
+                cfg.shared_expert_intermediate_size,
         }))
         from safetensors.torch import save_file
 
