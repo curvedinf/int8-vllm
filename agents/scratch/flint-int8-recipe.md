@@ -540,3 +540,31 @@ against layer.attn/layer.mlp on the same x. Then: g25-style NLL gate
 on the FIXED path, smoke, LAUNCH RUNG 1. Artifacts: /tmp/attn_ab.pt,
 /tmp/layer_ref_0.pt, /tmp/layer_sweep_tp4.pt; probes in agents/tmp/
 (layer_ref_check.py, sweep_capture.py, rank_sim_check.py).
+
+## TURN 12 (2026-11-07 12:1x): RNG ghost killed; attention A-vs-B STILL differs
+
+ids drawn FIRST (before teacher/layer creation) in one process; x
+verified BITWISE equal (rms 0.112). Verbatim-copied _apply_layer
+attention per rank vs LayerRef.attn on the same x:
+  A attn rms 0.0848 | B attn-sum 0.0920 | max|diff| 0.42
+  A mlp rms 0.0580 | B mlp-sum 0.0281 | max|diff| 2.06
+(the earlier "0.0039 attention match" probe had different actual inputs
+— RNG ordering; its result is VOID.)
+Both code blocks are textually identical (normed q/k verified equal;
+sink slice, mask, repeats, o-slicing all re-checked). Remaining
+suspects for the A-vs-B attention diff: (1) RmsNorm module vs _rms
+bit-level — compare normed q/k BITWISE in the same process (earlier
+probe: max|dq| 0.001 — but that probe is also suspect!); (2) the o_proj
+partial summation (compare per-rank out vs module's head-slices of
+`out` BEFORE o_proj); (3) GQA mapping: interleaved (h//rep) vs TILED
+(h%rep) — both A and B use interleaved HERE, but if the REAL model is
+TILED, per-rank presplit kv-head assignment (rank r -> kv-head r) is
+wrong for q-heads [8r..8r+8) — CHECK THE VENDOR: sglang RadixAttention
+GQA convention and the upstream flint kernels' kv-head index math
+(kvh*_GQA + eh in decode_attention.py = INTERLEAVED ✓ — so presplit is
+right; skip).
+NEXT (fresh session): single-process probe printing (a) bitwise normed
+q/k equality module-vs-teacher for rank0 heads 0-7, (b) module out
+head-slices vs teacher rank out, (c) attention probs row 0 head 0
+both paths. The first diverging tensor is THE bug. Then NLL gate ->
+smoke -> RUNG 1.
