@@ -187,10 +187,13 @@ class AttentionRef(nn.Module):
         k_ = k.permute(0, 2, 1, 3)
         v_ = v.permute(0, 2, 1, 3)
         scores = torch.matmul(q_, k_.transpose(-1, -2)).float()
-        # the sink is ONE VIRTUAL KEY in the softmax (upstream kernel:
-        # denom = sum(exp(s-m)) + exp(sink-m)); broadcasting it onto every
-        # key distorts the whole distribution (real sinks are +2..+10)
-        sink = self.sink.float()
+        # sink = ONE virtual key in the softmax denominator (upstream
+        # kernel semantics), never a broadcast bias on every key.
+        # The kernel compares sink_val*(LOG2E/softmax_scale_log2) — the
+        # sink is in RAW qk units; scores here are scaled by 1/sqrt(d),
+        # so the sink must be scaled identically (else it dominates the
+        # softmax ~sqrt(d)x too strongly and attention outputs collapse)
+        sink = self.sink.float() * self.scale
         finite = torch.isfinite(sink)
         sink_col = torch.where(finite, sink,
                                torch.full_like(sink, float("-inf"))
@@ -1225,9 +1228,11 @@ class StreamedFlintTeacher(nn.Module):
         v_ = v.permute(0, 2, 1, 3)
         scores = torch.matmul(q_, k_.transpose(-1, -2)).float()
         # sink = ONE virtual key in the softmax denominator (upstream
-        # kernel semantics), never a broadcast bias on every key
+        # kernel semantics); sink is in RAW qk units — scale like the
+        # scores (kernel: sink_val*(LOG2E/softmax_scale_log2))
         if _abl == "sinks":
             sink = torch.full_like(sink, float("-inf"))
+        sink = sink * (hd ** -0.5)
         sink_col = torch.where(torch.isfinite(sink), sink,
                                torch.full_like(sink, float("-inf"))
                                ).view(1, -1, 1, 1).expand(
