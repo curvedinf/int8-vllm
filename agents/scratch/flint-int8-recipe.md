@@ -670,3 +670,32 @@ vendor sglang wheel's attention forward (already unzipped at
 mine. NOTE the flat curve says probing MID layers was uninformative
 because hiddens never carry info — the bug is at or before layer 0's
 INPUT: embed lookup, positions, or the qkv projection feeding it.
+
+## TURN 17 (2026-11-07 ~14:4x): probe bugs fixed; the layer-0 anomaly
+
+1. nll_decay.py (and ALL capture probes) had tp_sum=identity (missing
+   _TP_STATE) — now set explicitly in the probe. REDUCED decay curve
+   STILL flat anti-informative: NLL 44@L0 -> 25@L48, rms 0.022 -> dips
+   0.009@L6 -> 2.8@L48.
+2. Sink-units fix (raw-qk, scaled by 1/sqrt(d) — kernel formula) is
+   CORRECT per the FA4 source but is a measured NO-OP: identical NLL
+   to 4 decimals. Real scaled-score maxima dwarf sinks (+10), so the
+   sink term underflows in my softmax either way. Sinks: CLOSED.
+3. THE anomaly: depth-0 (after layer 0 = no-rope full-attn + dense
+   MLP, ALL components and weights verified) SHRINKS the residual
+   (0.11 -> 0.022 rms) and produces anti-informative hiddens. The
+   attention+MLP increments must be ANTICORRELATED with the embed —
+   characteristic of misread o_proj/down_proj weights or a sign-flip,
+   yet bytes are verified...
+NEXT (fresh session, the one un-done oracle step): dump the serving
+vLLM model's LAYER-0 hidden on the SAME corpus window (in-process GT
+boot works; hook model.model.layers[0] forward output) and diff
+against sweep_states[0]. Serving NLL is also garbage (20.4) — if
+serving layer-0 MATCHES the teacher's, the bug is in something BOTH
+share that is NOT checkpoint bytes (e.g., HF checkpoint stores
+SOFTMAX-NEGATED or transposed o_proj convention, or tie/scaling in
+generation_config); if serving differs, the side with sane decay wins.
+Also cheap to try: SKIP attention entirely at L0 (identity attn) in
+the probe — if depth-0 NLL becomes ~12 (uniform-ish, informative
+embed), the corruption is inside the attention block; likewise skip
+MLP.
