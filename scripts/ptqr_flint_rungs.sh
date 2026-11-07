@@ -19,7 +19,7 @@ if (( RUNG > 1 )); then
   INIT=(--init_from "/home/curved/models/flint-ptqr-r$((RUNG - 1))")
 fi
 
-export ROCM_PATH=/opt/rocm LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH
+export ROCM_PATH=/opt/rocm LD_LIBRARY_PATH="/opt/rocm/lib:${LD_LIBRARY_PATH:-}"
 export PYTORCH_HIP_ALLOC_CONF=expandable_segments:True MALLOC_ARENA_MAX=2
 export OMP_NUM_THREADS=4
 
