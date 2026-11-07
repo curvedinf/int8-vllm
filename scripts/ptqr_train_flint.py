@@ -231,8 +231,13 @@ def main():
         # torch.device context: FlintRef's internal nn.Linears otherwise
         # default to CPU + kaiming init, materializing all 80GB of pages —
         # THE 54GB OOM (SIGUSR1 dump named nn.Linear.reset_parameters)
-        with torch.device("meta"), torch.dtype(torch.bfloat16):
-            student = FlintRef(cfg, device="meta")
+        _prev_dt = torch.get_default_dtype()
+        torch.set_default_dtype(torch.bfloat16)
+        try:
+            with torch.device("meta"):
+                student = FlintRef(cfg, device="meta")
+        finally:
+            torch.set_default_dtype(_prev_dt)
         _shard(student, world, rank, group=tp_group)  # shapes shrink to shard
         # materialize the shard directly on the GPU; the host never holds
         # the student (the entire host-OOM class dies here)
