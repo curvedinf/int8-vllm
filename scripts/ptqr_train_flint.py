@@ -199,7 +199,8 @@ def main():
         # host, so the skeleton IS the student (the streamed teacher is a
         # separate mmap-backed object; no copy needed)
         student = FlintRef(cfg, device="cpu")
-        load_flint_shards(student, args.model, world, rank)
+        _shard(student, world, rank, group=tp_group)  # shapes shrink to shard
+        load_flint_shards(student, args.model, world, rank)  # slices match
         from ptqr_train_target import (
             fake_quant_embedding_ as _fqe,
             replace_linears_with_ptqr as _swap,
@@ -210,7 +211,6 @@ def main():
         for m in student.modules():
             if m.__class__.__name__ == "AttentionRef":
                 m.kv_fake_quant_group = args.kv_group
-        _shard(student, world, rank, group=tp_group)
         student.to(device)
         _gc.collect()
         if wave == 0:
