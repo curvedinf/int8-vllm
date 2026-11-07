@@ -824,6 +824,11 @@ class StreamedFlintTeacher(nn.Module):
 
         from safetensors import safe_open
 
+        import sys as _sys
+        with open(f"/proc/{os.getpid()}/status") as _f:
+            _r = [l.split()[1] for l in _f if l.startswith("VmRSS")][0]
+        print(f"[SFT r{rank}] init-entry rss={int(_r)//1048576} GB",
+              file=_sys.stderr, flush=True)
         self.cfg, self.world, self.rank, self.device = cfg, world, rank, device
         self.dtype = dtype
         shard = os.path.join(ckpt_dir, f"rank{rank}.safetensors")
@@ -839,6 +844,10 @@ class StreamedFlintTeacher(nn.Module):
             self.weight_map = json.load(open(idx_path))["weight_map"]
         self.ckpt_dir = ckpt_dir
         self._handles: dict[str, object] = {}
+        with open(f"/proc/{os.getpid()}/status") as _f:
+            _r = [l.split()[1] for l in _f if l.startswith("VmRSS")][0]
+        print(f"[SFT r{rank}] init-weightmap-done rss={int(_r)//1048576} GB",
+              file=_sys.stderr, flush=True)
 
         # rank sharding plan (mirrors shard_flint_tp)
         V = cfg.vocab_size

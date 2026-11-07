@@ -27,6 +27,12 @@ Usage:
 
 from __future__ import annotations
 
+import os as _os0
+with open(f"/proc/{_os0.getpid()}/status") as _f0:
+    _r0 = [l.split()[1] for l in _f0 if l.startswith("VmRSS")][0]
+print(f"[BOOT pid={_os0.getpid()} rank={_os0.environ.get('RANK','?')}] "
+      f"rss={_r0}kB", flush=True)
+
 import argparse
 import copy
 import math
@@ -130,6 +136,15 @@ def main():
                    help="unquantized student control (teacher-vs-teacher)")
     args = p.parse_args()
 
+    def _rssm(tag):
+        with open(f"/proc/{os.getpid()}/status") as _f:
+            for _l in _f:
+                if _l.startswith("VmRSS"):
+                    print(f"[mem r{os.environ.get('RANK', 's')}] {tag}: "
+                          f"{int(_l.split()[1]) // 1048576} GB", flush=True)
+                    return
+
+    _rssm("post-parse")
     torch.manual_seed(0)
     device = "cuda:0" if torch.cuda.is_available() and not args.tiny else "cpu"
 
@@ -142,10 +157,12 @@ def main():
     tp_group = None
     if world > 1:
         import torch.distributed as dist
+        _rssm("pre-dist")
         dist.init_process_group("nccl" if device != "cpu" else "gloo")
         tp_group = dist.group.WORLD
         device = f"cuda:{local_rank}" if device != "cpu" else device
         torch.cuda.set_device(local_rank) if device != "cpu" else None
+        _rssm("post-dist")
 
     prm_frozen = False
     if args.tiny:
@@ -201,8 +218,21 @@ def main():
         # in-place PTQR swap: deepcopy of a 23GB skeleton OOM-kills the
         # host, so the skeleton IS the student (the streamed teacher is a
         # separate mmap-backed object; no copy needed)
-        student = FlintRef(cfg, device="cpu")
+        # meta-skeleton: an unsharded cpu skeleton materializes ~80GB of
+        # zero pages when the slicer reads them (the 54GB OOM class); on
+        # meta the shard math is shape-only, and to_empty materializes
+        # just the ~20GB shard.
+        student = FlintRef(cfg, device="meta")
         _shard(student, world, rank, group=tp_group)  # shapes shrink to shard
+        student.to_empty(device="cpu")
+        if student.rope is not None:  # plain attrs stay meta after to_empty
+            from ptqr_flint_model import Rope as _Rope
+            nr = _Rope(cfg.head_dim, cfg.max_position_embeddings,
+                       cfg.rope_theta, "cpu")
+            student.rope = nr
+            _nr = set(cfg.no_rope_layer_indices or [])
+            for _i, _layer in enumerate(student.layers):
+                _layer.attn.rope = None if _i in _nr else nr
         if args.rank_shards:
             from ptqr_flint_model import load_flint_rank_shard
             load_flint_rank_shard(
