@@ -1104,3 +1104,25 @@ path; run once. If rope is dead on serving, that IS the serving bug
 25.98 vs teacher 8.47.
 Also note: spawn method issue — heredoc scripts die under spawn;
 always run file-based scripts for vLLM.
+
+## TURN 36 (2026-11-07 ~20:4x): alignment bug in MY probe fixed; serving lead
+
+Teacher pairing was off-by-one in probes (row t predicts ids[t+1]; I
+paired lt[1:] with ids[1:] — corrected to lt[:-1]). Corrected:
+teacher first-63 NLL 10.13 vs serving 25.98 SAME targets (corr -0.20
+— near-independent outputs). Divergence confirmed; serving ~2.6x
+worse. Teacher full-window ~24.9 (bins 10.7 -> 30.8, content-driven).
+PROMPT_LOGPROBS RUN THROUGH PREFILL — the aiter kernel inspected
+(pa_decode_sparse) is the DECODE path. NEXT: read the PREFILL/extend
+kernel's sink math in ../aiter (unified_attention triton kernels,
+extend_attention.py; the prefill kernel folds sinks at line ~201
+`sink_ptr + query_offset_1` — VERIFY virtual-key semantics there).
+Primary serving hypothesis stays: sinks misapplied on prefill. Test
+lever: run serving with the softmax_offset tensors zeroed via a
+worker-side hook (fix the earlier sitecustomize: patch
+FlintDecoderLayer.__init__ to zero attn.softmax_offset AFTER
+construction — the checkpoint overwrites init values, so patch the
+module's own softmax_offset post-load like the load_weights wrapper
+did — but WITHOUT breaking the import registry: hook only when
+`VLLM_IS_WORKER` env set...). Compare NLL: if zeroing sinks fixes
+serving (drops toward 10-15), sinks/prefill is the bug.
