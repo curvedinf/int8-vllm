@@ -457,20 +457,31 @@ def main():
         if replaced:
             for m in replaced.values():
                 m.tau = tau
-        logits_s = student(x)
+        # chunked lm_head + loss: the full-vocab fp32 logits path peaked
+        # ~5 GB of transients at seq 2048 and OOM'd the backward
+        # (hipblasCreate ALLOC_FAILED, g19/g20); chunks keep one slice
+        # live at a time (the Qwen trainer's partial-grad pattern — the
+        # exact-sum form matches the old batchmean semantics)
+        h = student.forward_hidden(x).reshape(-1, student.cfg.hidden_size)
         if logits_t is None:
             with torch.no_grad():
                 logits_t = teacher(x)
-        ce = F.cross_entropy(
-            logits_s.float().reshape(-1, logits_s.shape[-1]), y.reshape(-1))
+        t_flat = logits_t.reshape(-1, logits_t.shape[-1]).float()
+        y_flat = y.reshape(-1)
+        n = y_flat.numel()
         T = args.distill_temperature
-        lp_s = F.log_softmax(logits_s.float() / T, dim=-1)
-        p_t = F.softmax(logits_t.float() / T, dim=-1)
-        kd = F.kl_div(
-            lp_s.reshape(-1, lp_s.shape[-1]), p_t.reshape(-1, p_t.shape[-1]),
-            reduction="batchmean") * (T * T)
-        loss = ce + args.distill_weight * kd
-        return loss, ce.detach(), kd.detach()
+        ce_sum = torch.zeros((), device=h.device)
+        kd_sum = torch.zeros((), device=h.device)
+        for j in range(0, n, args.logits_chunk):
+            sl = slice(j, j + args.logits_chunk)
+            lc = student.head(h[sl])
+            ce_sum = ce_sum + F.cross_entropy(lc, y_flat[sl],
+                                              reduction="sum")
+            lp = F.log_softmax(lc / T, dim=-1)
+            pt = F.softmax(t_flat[sl] / T, dim=-1)
+            kd_sum = kd_sum + F.kl_div(lp, pt, reduction="sum")
+        loss = (ce_sum + args.distill_weight * kd_sum) / n
+        return loss, (ce_sum / n).detach(), (kd_sum / n).detach()
 
     step = 0
     while step < args.max_steps:

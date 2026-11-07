@@ -307,10 +307,13 @@ class FlintRef(nn.Module):
             self.rope.sin = self.rope.sin.to(dev)
         return self
 
-    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor | None = None):
-        # input_ids: [B, S] (or [T] -> single sequence); logits [B, S, V] fp32
-        squeeze = input_ids.dim() == 1
-        ids = input_ids.unsqueeze(0) if squeeze else input_ids
+    def forward_hidden(self, input_ids: torch.Tensor,
+                       positions: torch.Tensor | None = None):
+        """Embed -> layers -> final norm. Returns h [B, S, H] (the head is
+        applied separately so the training loss can chunk the lm_head —
+        full-vocab fp32 logits at seq 2048 are ~1.2 GB x several
+        transients; chunking keeps the peak at one chunk)."""
+        ids = input_ids
         B, S = ids.shape
         if positions is None:
             positions = torch.arange(S, device=ids.device)
@@ -331,10 +334,20 @@ class FlintRef(nn.Module):
             x = self.embed(ids)
         for layer in self.layers:
             x = layer(x, positions)
-        h = self.final_norm(x)
+        return self.final_norm(x)
+
+    def head(self, h: torch.Tensor) -> torch.Tensor:
+        """h [.., H] -> full-vocab fp32 logits (vocab-parallel gather)."""
         logits = self.lm_head(h).float()
         if self._tp_world > 1:
             logits = _tp_gather_logits(logits, dim=-1)
+        return logits
+
+    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor | None = None):
+        # input_ids: [B, S] (or [T] -> single sequence); logits [B, S, V] fp32
+        squeeze = input_ids.dim() == 1
+        ids = input_ids.unsqueeze(0) if squeeze else input_ids
+        logits = self.head(self.forward_hidden(ids, positions))
         return logits.squeeze(0) if squeeze else logits
 
 
