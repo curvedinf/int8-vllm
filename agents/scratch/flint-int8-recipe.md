@@ -882,3 +882,19 @@ own NOTICE/README may state whether the HF safetensors need their
 sglang build; their serve scripts use THIS repo so weights should be
 right — but nothing else is left). If (a) shows agreement (expected),
 escalate to user with the evidence table.
+
+## TURN 25 (2026-11-07 ~18:0x): vendor kit README confirms assumptions
+
+sglang/README: serves THIS HF repo (revision-pinned to latest sha);
+"Flint weights loaded: 585 parameters matched the checkpoint";
+requires the fa4-learned-sink-fix ("fixes learned-sink
+normalization") — the PATCHED semantics, which we implement (and
+measured negligible). No special checkpoint convention documented.
+B300/H200 only, sglang 0.5.16, bf16. => weights + semantics should be
+right in our implementations; the mystery is NOT a documented serving
+convention.
+STATUS: all local and documented-external hypotheses exhausted. Next
+turn: (1) fix serving-dump keying for the final vector cosine; (2) if
+agreement holds, fetch upstream vLLM PR #62938 (Flint model) for any
+numerics notes; (3) then escalate to user with the full evidence
+table (four agreeing implementations, verified inputs, NLL 25-30).
