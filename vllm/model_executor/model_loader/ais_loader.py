@@ -85,13 +85,14 @@ def _iter_checkpoint_tensors(
     loader: DefaultModelLoader, source: DefaultModelLoader.Source
 ) -> Generator[tuple[str, str, SafetensorFile, object], None, None]:
     """Yield (prefixed name, file, index, spec) for one source."""
-    hf_folder, hf_weights_files, use_safetensors = loader._prepare_weights(
-        source.model_or_path,
-        source.subfolder,
-        source.revision,
-        source.fall_back_to_pt,
-        source.allow_patterns_overrides,
-    )
+    hf_folder, hf_weights_files, use_safetensors, _index_file = \
+        loader._prepare_weights(
+            source.model_or_path,
+            source.subfolder,
+            source.revision,
+            source.fall_back_to_pt,
+            source.allow_patterns_overrides,
+        )
     if not use_safetensors:
         raise FsGpuError(
             f"AIS loader requires safetensors checkpoints; "
@@ -522,11 +523,13 @@ class AisModelLoader(DefaultModelLoader):
             try:
                 self._read_plan = self._build_read_plan(model, model_config)
             except Exception as e:  # noqa: BLE001
+                import traceback
                 logger.warning(
                     "fs_gpu per-rank read plan unavailable (%s: %s); "
-                    "falling back to full-tensor reads.",
+                    "falling back to full-tensor reads.\n%s",
                     type(e).__name__,
                     e,
+                    traceback.format_exc(),
                 )
                 self._read_plan = None
         result = super().load_weights(model, model_config)
