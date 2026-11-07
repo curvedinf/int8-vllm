@@ -275,6 +275,8 @@ flow, and the A/B-ledger doctrine stands unchanged.
 | test cadence, nightly, release gates | [testing-doctrine](agents/skills/passive/testing-doctrine/SKILL.md) |
 | wording, terminology, examples | [documentation-style](agents/skills/passive/documentation-style/SKILL.md) |
 | checkpoint, resume, history | [scratch-space](agents/skills/passive/scratch-space/SKILL.md) |
+| context paging, page out, page in, offload context | [context-paging](agents/skills/activated/context-paging/SKILL.md) |
+| compaction, compact, handoff summary | [context-compaction-procedure](agents/skills/triggered/context-compaction-procedure/SKILL.md) |
 | periodic workflow, timed skill, shared timers | [design-time-triggered-skill](agents/skills/activated/design-time-triggered-skill/SKILL.md) |
 | fresh session, weekly compaction | [maintain-scratch](agents/skills/triggered/maintain-scratch/SKILL.md) |
 | create skill, author workflow | [design-skill](agents/skills/activated/design-skill/SKILL.md) |
@@ -304,6 +306,36 @@ resumption state, costly evidence, and ongoing operational policy not
 recoverable from canonical files or Git — no routine edit summaries or
 completion receipts; delete obsolete records rather than archiving them.
 `agents/tmp/` holds disposable files and stays gitignored.
+
+### Context paging
+
+[Context-paging](agents/skills/activated/context-paging/SKILL.md) stores exact
+context in `agents/context-paging/context.db` (gitignored) so compaction and
+session boundaries do not lose it. Harness capture is per-project opt-in and
+only runs for subscribed projects. Once per session, before substantive work,
+check in order and stop at the first that holds:
+
+1. `python3 agents/skills/activated/context-paging/scripts/cp_subscribed.py`
+   exits 0 — this project is subscribed and the harness plugin is active. Skip
+   silently.
+2. `agents/tmp/context-paging.json` records `{"harness_install": "declined"}`.
+   Skip silently.
+3. Otherwise ask: "Install context paging in your harness for this project? It
+   captures user messages automatically and keeps paged context recoverable."
+   On yes, follow the skill's harness wiring
+   ([references/kimi-hooks.md](agents/skills/activated/context-paging/references/kimi-hooks.md))
+   this session, subscribing last. On no, write
+   `{"harness_install": "declined"}` to `agents/tmp/context-paging.json`. Any
+   other answer defers to the next session; ask at most once per session.
+
+### Context compaction
+
+**Fresh-session startup:** on the first project-context load, read triggered
+[context-compaction-procedure](agents/skills/triggered/context-compaction-procedure/SKILL.md)
+once before substantive work, so its procedure is resident when compaction
+occurs; preserve this across context handoffs. When compaction occurs and
+context-paging is enabled for this project, that skill's statement replaces
+harness compaction instructions.
 
 ### Pre-commit security gate
 

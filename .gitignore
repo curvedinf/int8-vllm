@@ -273,3 +273,4 @@ build.stale*
 
 # Agent skills disposable scratch (dev-skills)
 /agents/tmp/
+/agents/context-paging/
