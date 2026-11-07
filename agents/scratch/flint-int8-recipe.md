@@ -187,3 +187,22 @@ student unfreeze after deepcopy; autograd-aware TP gather (grad scatter).
 Full-run blockers remaining: layer-streamed teacher (20GB/rank bf16 x4
 OOMs 61GB host + won't fit 32GB MI100 alongside student), then rung
 ladder + gates.
+
+## FULL-EXPERT RUNG-0 DEBUG LEDGER (2026-11-07 03:4x, near-green)
+
+The full-expert streamed TP4 run now COMPLETES the entire build phase on
+GPU (swap #6208 at 6.6G alloc — masters freed as replaced). Fix trail
+(all committed): torch.device(meta) ctx for skeleton (else CPU kaiming
+materializes 80G); set_default_dtype(bf16) (meta ctx alone = fp32 shard
+37G); loader up_proj/sink whole-tensor slices by rank offset (presplit
+asymmetry); replace_linears_with_ptqr collects (parent,attr) targets
+(list(named_modules) pinned every old linear: old+new masters 37G).
+SIGUSR1 faulthandler armed in the trainer for future stack dumps.
+
+REMAINING (next session, one bug): first training forward fails
+"mat1 and mat2 shapes cannot be multiplied (1024x2048 and 256x2048)" —
+mat2 256x2048 is the ROUTER-shaped tensor at seq 1024; not the streamed
+teacher (it uses F.linear); inspect MoeRef.forward / PTQRLinear grouped
+path on the real cfg (tiny + 4-expert smokes pass; only full 256-expert
+cfg + real shapes hit it). Probe: run 1 fwd on rank0 solo after build
+with student.cpu() copy to inspect per-module weight shapes vs cfg.
