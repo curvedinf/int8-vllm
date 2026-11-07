@@ -617,3 +617,29 @@ of a different comm) — CHECK the actual x each rank carries AFTER
 layer 0 across ranks (they must be IDENTICAL post-reduce; if they
 already differ pre-reduce in composition, the bug is upstream of the
 reduce).
+
+## TURN 15 (2026-11-07 13:3x): dense-tp_sum A/B + the real remaining suspect
+
+Capture-harness artifact identified: sweep_capture*.py never set
+_TP_STATE, so ALL capture-script sweeps ran with tp_sum=IDENTITY
+(rank3 zeros = no ids in its vocab range). The in-trainer sweep DOES
+reduce (student's shard call sets _TP_STATE). So the A-vs-C 2.5x was
+my harness's artifact — BUT the missing dense-tp_sum was still a real
+trainer bug (fixed; toggle FLINT_NO_DENSE_SUM=1 kept for A/B).
+
+Clean A/B (--data_seed 123, identical windows, kd_cache 2):
+  OLD (no dense reduce): w0 NLL 10.00 top1 2.5% | w1 9.14 top1 4.3%
+  NEW (dense reduced):   w0 NLL 27.64 top1 0.1% | w1 10.29 top1 1.4%
+The fix made it WORSE — and both remain garbage (uniform = 11.9).
+Dense layers are 2/49; the dominant surface is the 47 MoE layers.
+=> The remaining bug is in the MoE layer path (or affects everything
+equally: e.g., qkv GEMM staging, rope tables on real positions, or
+the residual composition). NEXT (fresh session): per-layer NLL probe —
+teacher sweep_states through an EXIT at EVERY layer boundary on a
+natural-text window, computing per-layer "hidden->lm_head" NLL decay
+to find the first layer where predictability collapses; also A/B the
+MoE branch (replace routed+shared with shared-only / routed-only) —
+one of them should dominate; and verify the shared expert's gate/up
+slices in the presplit against the full ckpt (only rank0 L2 verified
+so far). Serving-side oracle (vLLM) still available for hidden-dump
+comparison if needed.
