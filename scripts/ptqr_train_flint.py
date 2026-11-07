@@ -186,16 +186,25 @@ def main():
 
     from ptqr_flint_model import shard_flint_tp as _shard
     if args.teacher_stream and world > 1:
-        # student needs a resident source: build an unsharded skeleton with
-        # real weights streamed from the same mmap (tiny CPU peak: one
-        # tensor at a time), then PTQR-swap and shard it
+        # student needs a resident source. A full sharded skeleton is
+        # ~20GB bf16/rank; four concurrent builds OOM the 61GB host (the
+        # SIGKILL class), so builds run staggered two ranks at a time and
+        # land the finished student on the GPU before the next pair.
         from ptqr_flint_model import load_flint_shards
+        import gc as _gc
+        wave = rank // 2
+        if wave == 1:
+            dist.barrier(group=tp_group)
         skeleton = FlintRef(cfg, device="cpu")
         load_flint_shards(skeleton, args.model, world, rank)
         student, replaced = build_student(skeleton, args.weight_group,
                                           args.kv_group)
         _shard(student, world, rank, group=tp_group)
+        student.to(device)
         del skeleton
+        _gc.collect()
+        if wave == 0:
+            dist.barrier(group=tp_group)
     elif args.no_ptqr:
         student, replaced = copy.deepcopy(teacher), {}
     else:
