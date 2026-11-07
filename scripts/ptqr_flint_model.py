@@ -859,11 +859,16 @@ class StreamedFlintTeacher(nn.Module):
                 _hlen = _struct.unpack("<Q", _f.read(8))[0]
                 _hdr = json.loads(_f.read(_hlen))
             _base = 8 + _hlen
+            _dts = {"BF16": torch.bfloat16, "F16": torch.float16,
+                    "F32": torch.float32, "I64": torch.int64,
+                    "I32": torch.int32}
+            self._tmeta: dict[str, tuple] = {}
             for _n, _m in _hdr.items():
                 if _n == "__metadata__":
                     continue
                 self._toff[_n] = (_base + _m["data_offsets"][0],
                                   _base + _m["data_offsets"][1])
+                self._tmeta[_n] = (tuple(_m["shape"]), _dts[_m["dtype"]])
             self._fd = os.open(shard, os.O_RDONLY)
         with open(f"/proc/{os.getpid()}/status") as _f:
             _r = [l.split()[1] for l in _f if l.startswith("VmRSS")][0]
@@ -895,7 +900,29 @@ class StreamedFlintTeacher(nn.Module):
         self._top_k = cfg.num_experts_per_tok
         self._V = V
 
+    def _pread_tensor(self, name: str) -> torch.Tensor:
+        """Big sequential read()s (NOT mmap faults — under a saturated page
+        cache those degrade to page-by-page direct reclaim; measured 2 MB/s
+        vs 553 MB/s streaming). 16 MB chunks, zero-copy frombuffer."""
+        st, en = self._toff[name]
+        shape, dt = self._tmeta[name]
+        n = en - st
+        buf = bytearray(n)
+        got = 0
+        while got < n:
+            b = os.pread(self._fd, min(1 << 24, n - got), st + got)
+            if not b:
+                raise EOFError(f"short pread {name}: {got}/{n}")
+            buf[got:got + len(b)] = b
+            got += len(b)
+        return torch.frombuffer(buf, dtype=dt).reshape(shape)
+
     def _t(self, name: str, sl=None) -> torch.Tensor:
+        if self._fd is not None and name in self._toff:
+            t = self._pread_tensor(name)
+            if t.dtype != self.dtype:
+                t = t.to(self.dtype)
+            return t[sl] if sl is not None else t
         f = self.weight_map[name]
         h = self._handles.get(f)
         if h is None:
