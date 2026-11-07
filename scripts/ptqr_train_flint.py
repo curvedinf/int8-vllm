@@ -196,6 +196,9 @@ def main():
                    help="stage-replay: sweep the streamed teacher once over "
                         "this many train batches and replay their logits "
                         "(0 = live teacher per step — ~320 GB/step of IO)")
+    p.add_argument("--data_seed", type=int, default=None,
+                   help="seed the dataloader shuffle for reproducible "
+                        "windows (A/B comparisons)")
     p.add_argument("--n_experts_keep", type=int, default=0,
                    help="smoke only: keep the first N experts per MoE layer "
                         "(0 = all). Validates real-checkpoint wiring without "
@@ -396,6 +399,8 @@ def main():
 
     data_path = os.path.join(args.data_dir, args.data_name)
     val_path = os.path.join(args.data_dir, args.val_name)
+    if args.data_seed is not None:
+        torch.manual_seed(args.data_seed)   # deterministic shuffle windows
     train_iter = build_dataloader(data_path, args.seq_len, args.batch_size,
                                   tiny=args.tiny, tiny_vocab=teacher.cfg.vocab_size)
     val_iter = build_dataloader(val_path, args.seq_len, args.batch_size,

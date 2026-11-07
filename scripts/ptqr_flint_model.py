@@ -1264,10 +1264,11 @@ class StreamedFlintTeacher(nn.Module):
         if li in self._mlp_only:
             mlp_part = self._mlp_dense(xn2, W["dense"])
             # dense-MLP partials MUST all-reduce (each rank holds one
-            # intermediate slice; missing this left layers 0-1 with a
-            # quarter of the MLP and rank-divergent residuals — the
-            # layer-0 2.5x divergence)
-            x = x + tp_sum(mlp_part)
+            # intermediate slice); FLINT_NO_DENSE_SUM=1 disables for A/B
+            if os.environ.get("FLINT_NO_DENSE_SUM"):
+                x = x + mlp_part
+            else:
+                x = x + tp_sum(mlp_part)
         else:
             rw = W["router"]
             logits_r = torch.nn.functional.linear(
