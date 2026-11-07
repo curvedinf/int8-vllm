@@ -511,3 +511,32 @@ attn math manually on 1 GPU). The layer-2 compare needs exits fix
 (capture used [0,2]; compare indexed wrongly once — rerun with the
 saved files). Then fix, re-run g25 NLL gate (target 2-4), smoke, and
 LAUNCH RUNG 1 (scripts/ptqr_flint_rungs.sh 1).
+
+## LAYER-0 BISECT STATE (turn 11, 2026-11-07 12:0x) — contradiction to resolve
+
+Sim bugs fixed along the way: (1) per-rank _embed partials must be
+SUMMED before the layer (tp_sum=identity in sims); (2) sim must sum
+LAYER INCREMENTS (_apply_layer(x) - x), not outputs (residual 4x).
+
+VERIFIED MATCHING (same-process, same inputs): embed exact; normed q/k
+per rank vs full (rounding); ATTENTION A vs B-per-rank-sum max 0.0039;
+MLP A vs B-per-rank-sum max 0.0078; LayerRef module == hand-compose
+==bitwise; module-attn == hand-attn ==bitwise in-process.
+
+CONTRADICTION: A layer-out rms 0.0258 (attnA rms 0.0848, mlpA rms
+0.0580 — parts cancel) vs B increment-sum rms 0.109/hB 0.0607; and
+the C (4-rank sweep capture) rms 0.0646. If both component matches
+hold, hB MUST equal hA — measured max|hA-hB| 2.20. ALSO: two probes
+disagreed on A-attention rms (0.0920 vs 0.0848) with "identical"
+inputs — one external reimplementation is lying (suspect the first
+attn probe's x: it used xs_sum; today's used F.embedding — embed
+verified equal, yet outputs differed => one probe's inputs actually
+differed; most likely RNG: probe ORDER of teacher-creation vs randint).
+
+NEXT (fresh session, ~5 min): copy _apply_layer's body into a probe
+script verbatim and print per-rank attn_partial/mlp_partial rms
+INSIDE the real code path (no external reimplementation), then diff
+against layer.attn/layer.mlp on the same x. Then: g25-style NLL gate
+on the FIXED path, smoke, LAUNCH RUNG 1. Artifacts: /tmp/attn_ab.pt,
+/tmp/layer_ref_0.pt, /tmp/layer_sweep_tp4.pt; probes in agents/tmp/
+(layer_ref_check.py, sweep_capture.py, rank_sim_check.py).
