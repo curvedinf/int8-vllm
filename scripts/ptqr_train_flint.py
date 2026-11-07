@@ -116,6 +116,9 @@ def main():
     p.add_argument("--eval_steps", type=int, default=10)
     p.add_argument("--save_every", type=int, default=50)
     p.add_argument("--tiny", action="store_true")
+    p.add_argument("--rank_shards", default="",
+                   help="dir of presplit per-rank safetensors (rankN.safetensors); "
+                        "student build reads only this rank's file")
     p.add_argument("--teacher_stream", action="store_true",
                    help="layer-streamed mmap teacher (full-expert runs; "
                         "no resident teacher anywhere)")
@@ -200,7 +203,13 @@ def main():
         # separate mmap-backed object; no copy needed)
         student = FlintRef(cfg, device="cpu")
         _shard(student, world, rank, group=tp_group)  # shapes shrink to shard
-        load_flint_shards(student, args.model, world, rank)  # slices match
+        if args.rank_shards:
+            from ptqr_flint_model import load_flint_rank_shard
+            load_flint_rank_shard(
+                student, os.path.join(args.rank_shards,
+                                     f"rank{rank}.safetensors"))
+        else:
+            load_flint_shards(student, args.model, world, rank)
         from ptqr_train_target import (
             fake_quant_embedding_ as _fqe,
             replace_linears_with_ptqr as _swap,

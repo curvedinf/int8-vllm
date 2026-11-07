@@ -1081,3 +1081,72 @@ def presplit_flint_shards(ckpt_dir: str, out_root: str, world: int) -> list[str]
         save_file(buf, out, metadata={"format": "pt"})
         buf.clear()
     return outs
+
+
+def load_flint_rank_shard(model: FlintRef, shard_path: str,
+                          dtype=torch.bfloat16) -> None:
+    """Load a presplit per-rank shard (original names, slices pre-applied)
+    into a skeleton already shrunk by shard_flint_tp. Pure put-by-name."""
+
+    from safetensors import safe_open
+
+    def put(path, t):
+        node = model
+        for part in path.split("."):
+            node = getattr(node, part)
+        assert node.shape == t.shape, f"{path}: {node.shape} vs {t.shape}"
+        node.data.copy_(t.to(node.dtype))
+
+    with safe_open(shard_path, framework="pt", device="cpu") as sf:
+        for name in sf.keys():
+            t = sf.get_tensor(name).to(dtype)
+            if name == "model.embed_tokens.weight":
+                put("embed.weight", t)
+            elif name == "lm_head.weight":
+                put("lm_head.weight", t)
+            elif name == "model.norm.weight":
+                put("final_norm.weight", t)
+            elif ".self_attn." in name:
+                li = int(name.split(".")[2])
+                a = f"layers.{li}.attn"
+                if name.endswith("q_proj.weight"):
+                    put(f"{a}.qkv.weight", t)
+                elif name.endswith("o_proj.weight"):
+                    put(f"{a}.o.weight", t)
+                elif name.endswith("q_norm.weight"):
+                    put(f"{a}.q_norm.weight", t)
+                elif name.endswith("k_norm.weight"):
+                    put(f"{a}.k_norm.weight", t)
+                elif name.endswith("softmax_offset"):
+                    put(f"{a}.sink", t)
+            elif ".experts." in name:
+                li = int(name.split(".")[2])
+                e = int(name.split(".experts.")[1].split(".")[0])
+                local = e // _TP_STATE["world"]
+                tgt = f"layers.{li}.mlp.experts.{local}"
+                if name.endswith("gate_proj.weight"):
+                    u = sf.get_tensor(name.replace("gate_proj", "up_proj"))
+                    put(f"{tgt}.gate_up.weight", torch.cat([t, u], dim=0))
+                elif name.endswith("down_proj.weight"):
+                    put(f"{tgt}.down.weight", t)
+            elif ".mlp." in name or ".shared_expert." in name:
+                li = int(name.split(".")[2])
+                dense = li in (model.cfg.mlp_only_layers or [])
+                if name.endswith("mlp.gate.weight"):
+                    put(f"layers.{li}.mlp.router.weight", t)
+                elif name.endswith("gate_proj.weight"):
+                    if dense:
+                        tgt = f"layers.{li}.mlp"
+                    else:
+                        tgt = f"layers.{li}.mlp.shared"
+                    u = sf.get_tensor(name.replace("gate_proj", "up_proj"))
+                    put(f"{tgt}.gate_up.weight", torch.cat([t, u], dim=0))
+                elif name.endswith("down_proj.weight"):
+                    tgt = f"layers.{li}.mlp" if dense \
+                        else f"layers.{li}.mlp.shared"
+                    put(f"{tgt}.down.weight", t)
+            elif name.endswith("input_layernorm.weight"):
+                put(f"layers.{int(name.split('.')[2])}.norm1.weight", t)
+            elif name.endswith("post_attention_layernorm.weight"):
+                put(f"layers.{int(name.split('.')[2])}.norm2.weight", t)
+            del t
