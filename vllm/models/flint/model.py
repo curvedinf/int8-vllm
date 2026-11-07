@@ -733,6 +733,7 @@ class FlintModel(nn.Module):
             )
             residual = None
         _dump = os.environ.get("VLLM_FLINT_HIDDEN_DUMP")
+        _want = int(os.environ.get("VLLM_FLINT_HIDDEN_TOKENS", "0") or 0)
         _do = bool(_dump) and not getattr(self, "_hidden_dumped", False)
         if _do:
             try:
@@ -748,6 +749,9 @@ class FlintModel(nn.Module):
                     continue  # capture pass: host sync / save not allowed
                 _full = (hidden_states if residual is None
                          else hidden_states + residual)
+                if _want and _full.shape[0] != _want:
+                    _do = False  # dummy run for another batch size
+                    continue
                 if float(_full.abs().max()) == 0.0:
                     _do = False  # dummy/warmup step (zero inputs)
                 else:

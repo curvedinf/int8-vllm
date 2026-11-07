@@ -1415,3 +1415,25 @@ Meanwhile W=1024/UA reconfirmed 1.39 and teacher stays at 10.09 for the
 same targets (matched first-63 of the 1024 window: serving 4.69,
 teacher 10.09), so the teacher is definitively the wrong side of the
 gap and the per-layer diff is the way to localize it.
+
+## TURN 52 (2026-11-07 ~23:3x): TEACHER BUG FOUND — the sink column was masked out
+
+Per-layer hidden comparison (serving dump vs teacher sweep_states, same
+64 ids) localised it: serving L0 matched an independent CPU fp32
+reference of the *serving* math almost exactly (corr 0.9997, diff
+4.8e-4), while the teacher's L0 matched that same reference computed
+with **sinks disabled** (teacher L0 rms 0.02555 == ref-nosink 0.02554;
+debug run: attn_partial rms 0.05565 == my sink-masked per-rank
+computation 0.05564).
+Root cause: `_apply_layer` builds the attention mask as
+"True == masked" then appends `mask.new_ones(S, 1)` for the sink column
+— i.e. the virtual sink key is masked to -inf in every layer. The
+single-process `AttentionRef` uses the opposite (allowed) convention and
+is correct. Introduced in 5790e5922b while reworking sink semantics.
+Sinks in this checkpoint are large (L0 -9..9.9, mean 3.7; L20 mean 5.3),
+so the teacher's attention was wrong at every layer -> NLL 10.09 vs
+serving 4.66. Fix: append `new_zeros` (sink allowed); `dead` still masks
+non-finite sinks. Teacher NLL re-measure in flight; expect ~4.7.
+Note the earlier 0.107-rms "teacher" files were the FLINT_ABLATE=sinks
+runs, where sink=-inf makes `dead` all-True and zeroes *all* attention —
+not a valid sink ablation anymore.

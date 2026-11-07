@@ -1271,7 +1271,7 @@ class StreamedFlintTeacher(nn.Module):
         if self._layer_types[li] == "sliding_attention" and _abl != "window":
             mask = mask | (qi - ki >= self._window)
         mask = torch.cat(
-            [mask, mask.new_ones(S, 1)], dim=-1)[None, None]
+            [mask, mask.new_zeros(S, 1)], dim=-1)[None, None]
         dead = (~torch.isfinite(sink)).view(1, -1, 1, 1)
         attn = torch.softmax(
             scores.masked_fill(mask | dead, float("-inf")), dim=-1)
