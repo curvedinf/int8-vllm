@@ -1171,3 +1171,22 @@ write, bypasses AITER UA) in flight (gt_lp9). If it lands ~10 =>
 AITER UA is the serving bug; ~26 => the bug is in the model/loader
 path shared with UA. ALSO: goal extended with Qwen27B + Bolt full
 quality checks (see turn-38 entry) — REQUIRED before finishing.
+
+## TURN 40 (2026-11-08 ~00:2x): BREAKTHROUGH — AITER UA IS THE SERVING BUG
+
+Serving with VLLM_FLINT_SDPA=1 (plain masked attention, windows+sinks,
+no KV write, bypasses AITER UA): matched-window NLL **4.74** vs 25.98
+with UA. Near-healthy! => the model/loader/ROCm port are CORRECT; the
+AITER unified-attention path on this model (GQA kvh=1/rank, window
+513, sinks, block 64, gfx908) is badly broken. Graphs/chunking were
+already exonerated (eager 25.73).
+ALSO: serving-SDPA 4.74 < teacher 10.13 on the same targets => the
+TEACHER has its own ~2x gap to chase (smaller, real).
+NEXT: (1) UA bug hunt: candidates = sink handling combined with
+window, GQA head mapping at kvh=1, block-table/KV layout; probe by
+disabling components (UA without sinks via zeroed offsets; UA without
+window by pretending full_attention for all layers via cfg patch) —
+each a serving run; OR diff UA vs SDPA outputs layer-0 directly
+(hidden hook, single prefill). (2) teacher gap (10 vs 4.7):
+attention-vs-next suspects. (3) Qwen27B+Bolt quality checks remain
+REQUIRED before finishing.
