@@ -1126,3 +1126,25 @@ module's own softmax_offset post-load like the load_weights wrapper
 did — but WITHOUT breaking the import registry: hook only when
 `VLLM_IS_WORKER` env set...). Compare NLL: if zeroing sinks fixes
 serving (drops toward 10-15), sinks/prefill is the bug.
+
+## TURN 37 (2026-11-07 ~21:0x): prefill sink math = virtual-key (correct)
+
+aiter unified-attention PREFILL kernel (used by prompt_logprobs):
+M initialized to sink*log2(e), L=1.0 — the standard flash virtual-key
+init, semantically correct; q-head indexing (kv_head*GQA+within)
+correct. SINKS EXONERATED FOR SERVING TOO. Serving 26-vs-teacher-10
+gap remains unexplained; candidates now: UA itself on this model
+(GQA/window/KV-write path), the block-table/KV cache layout, or
+chunked-prefill window semantics (chunk boundaries + SWA mask per
+chunk). NEXT SESSION, with fresh budget: (1) serving with
+`--enforce-eager` and chunked-prefill DISABLED (single-shot prefill;
+rules out chunked-prefill window bugs — max_num_batched_tokens >=
+1024); (2) if still 26: swap UA for a plain causal attention
+implementation inside the fork model def for a one-off test (hack
+the model's forward to use F.scaled_dot_product_attention with
+explicit masks, no KV cache — pure-training-mode forward); the whole
+serving-vs-teacher delta is then pinned to UA or model semantics in
+ONE run. (3) Then the teacher gate (8-25 by content; needs 2-4) and
+launch rung 1.
+STATE: all code committed; probes in agents/tmp (gitignored);
+serving lp saved /tmp/serving_lp{,_fp32rope}.pt; teacher /tmp/teacher_lp.pt.
