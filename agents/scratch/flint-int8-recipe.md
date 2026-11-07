@@ -1190,3 +1190,22 @@ each a serving run; OR diff UA vs SDPA outputs layer-0 directly
 (hidden hook, single prefill). (2) teacher gap (10 vs 4.7):
 attention-vs-next suspects. (3) Qwen27B+Bolt quality checks remain
 REQUIRED before finishing.
+
+## TURN 41 (2026-11-08 ~00:5x): UA toggles inert — structural bug
+
+NOSINK: 25.982864781031534 (bitwise == default). NOWIN: same bitwise.
+EXPLANATIONS: window toggle inert because the window is 64 tokens < 513
+— windows never bind at this length (test must use a longer window);
+sinks toggle inert because sink terms underflow numerically (as
+measured everywhere). SDPA still 4.74 on the same 64 tokens => the
+UA-vs-direct divergence at 64 tokens is STRUCTURAL: candidate = the
+KV-cache write/read path inside UA prefill (auto=bf16 cache), GQA
+kvh=1/rank mapping, or o_proj RowParallel under UA's layout — NOT
+sinks/window. Read: UA backend DOES accept both (supports_sink True;
+window_size wired at 3 call sites).
+NEXT: (1) UA prompt_logprobs on a 1024-token window vs SDPA on the
+same 1024 (windows bind >=513; two runs) — if they AGREE at 1024, the
+bug is a single-block/64-token UA path (still fatal); if UA stays bad,
+bisect the KV write: run with kv_cache_dtype bf16 explicitly, and
+probe `attn` cache tensors after a prefill (hook). (2) teacher gap
+(10 vs 4.7) continues. (3) Qwen27B+Bolt checks REQUIRED before finish.
