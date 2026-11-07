@@ -195,13 +195,23 @@ def main():
         wave = rank  # one rank at a time: a single 20GB skeleton + overhead
         if wave > 0:
             dist.barrier(group=tp_group)
-        skeleton = FlintRef(cfg, device="cpu")
-        load_flint_shards(skeleton, args.model, world, rank)
-        student, replaced = build_student(skeleton, args.weight_group,
-                                          args.kv_group)
+        # in-place PTQR swap: deepcopy of a 23GB skeleton OOM-kills the
+        # host, so the skeleton IS the student (the streamed teacher is a
+        # separate mmap-backed object; no copy needed)
+        student = FlintRef(cfg, device="cpu")
+        load_flint_shards(student, args.model, world, rank)
+        from ptqr_train_target import (
+            fake_quant_embedding_ as _fqe,
+            replace_linears_with_ptqr as _swap,
+        )
+        replaced = _swap(student, group=args.weight_group,
+                         skip=_collect_skip_names(student))
+        _fqe(student.embed)
+        for m in student.modules():
+            if m.__class__.__name__ == "AttentionRef":
+                m.kv_fake_quant_group = args.kv_group
         _shard(student, world, rank, group=tp_group)
         student.to(device)
-        del skeleton
         _gc.collect()
         if wave == 0:
             dist.barrier(group=tp_group)
