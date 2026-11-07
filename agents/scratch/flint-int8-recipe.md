@@ -1041,3 +1041,20 @@ different quickly). If matched: both broken the same way, and the
 only remaining target is upstream TP=1 numerical comparison (user
 GPU help). If different: the fallback path is the serving bug and the
 teacher needs the same fix.
+
+## TURN 33 (2026-11-07 ~19:2x): matched-window oracle — SERVING SIDE DONE
+
+Serving matched-window (64 corpus tokens, prompt_logprobs):
+**SERVING NLL = 25.98** (upstream-vLLM-on-fork-ROCm). Teacher side
+stuck: agents/tmp/teacher_lp.py faults 3/3 (HSA_STATUS_EXCEPTION in
+an index kernel, S=64-specific; repeat_probe with S=1024 on the SAME
+sweep path runs fine — probe-harness issue, likely the final
+advanced-indexing line or an S=64 edge; add staged prints / reuse
+repeat_probe structure to fix (~10 min next session)). Comparison
+script ready (reads /tmp/serving_lp.pt + /tmp/teacher_lp.pt).
+Once teacher NLL on the same window lands: ~26 => both broken
+identically (only upstream TP=1 oracle remains); <<26 or >>26 =>
+localize. Also earlier insight from serving lp run: LLM.generate
+takes token ids POSITIONALLY ([ids.tolist()], sp) — the old
+prompt_token_ids kwarg was the cause of several 'engine core exited'
+false alarms (engine was fine; my script threw).
