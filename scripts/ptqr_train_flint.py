@@ -192,8 +192,8 @@ def main():
         # land the finished student on the GPU before the next pair.
         from ptqr_flint_model import load_flint_shards
         import gc as _gc
-        wave = rank // 2
-        if wave == 1:
+        wave = rank  # one rank at a time: a single 20GB skeleton + overhead
+        if wave > 0:
             dist.barrier(group=tp_group)
         skeleton = FlintRef(cfg, device="cpu")
         load_flint_shards(skeleton, args.model, world, rank)
