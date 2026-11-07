@@ -73,9 +73,14 @@ if current_platform.is_rocm():
     from vllm.model_executor.layers.activation import SiluAndMul
     from vllm.model_executor.layers.layernorm import RMSNorm
 
-    _silu_and_mul_op = SiluAndMul()
+    _silu_and_mul_op = None
 
     def silu_and_mul(x):
+        # CustomOp instances must be created inside model init/forward
+        # (config context) — never at module import
+        global _silu_and_mul_op
+        if _silu_and_mul_op is None:
+            _silu_and_mul_op = SiluAndMul()
         return _silu_and_mul_op(x)
 else:
     from .ops.norm import RMSNorm, silu_and_mul
