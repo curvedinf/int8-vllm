@@ -224,11 +224,13 @@ def main():
         # just the ~20GB shard.
         student = FlintRef(cfg, device="meta")
         _shard(student, world, rank, group=tp_group)  # shapes shrink to shard
-        student.to_empty(device="cpu")
+        # materialize the shard directly on the GPU; the host never holds
+        # the student (the entire host-OOM class dies here)
+        student.to_empty(device=device)
         if student.rope is not None:  # plain attrs stay meta after to_empty
             from ptqr_flint_model import Rope as _Rope
             nr = _Rope(cfg.head_dim, cfg.max_position_embeddings,
-                       cfg.rope_theta, "cpu")
+                       cfg.rope_theta, device)
             student.rope = nr
             _nr = set(cfg.no_rope_layer_indices or [])
             for _i, _layer in enumerate(student.layers):
@@ -251,8 +253,7 @@ def main():
             if m.__class__.__name__ == "AttentionRef":
                 m.kv_fake_quant_group = args.kv_group
         _rssm("post-swap")
-        student.to(device)
-        _rssm("post-todevice")
+        _rssm("post-todevice")  # already on device since to_empty
         _gc.collect()
         if wave == 0:
             dist.barrier(group=tp_group)

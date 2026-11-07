@@ -366,7 +366,7 @@ def load_flint_state(model: FlintRef, ckpt_dir: str, strict: bool = True) -> Non
         for part in path.split("."):
             node = getattr(node, part)
         assert node.shape == t.shape, f"{path}: {node.shape} vs {t.shape}"
-        node.data.copy_(t.to(node.dtype))
+        node.data.copy_(t.to(device=node.device, dtype=node.dtype))
 
     seen = set()
     for hf, ref in _HF_MAP:
