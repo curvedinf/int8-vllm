@@ -938,3 +938,21 @@ NEXT (concrete, next session): teacher run with FP32 residual stream
 already) + fp32 lm_head — rerun repeat_probe (target: cycle acc
 >90%) and NLL gate. This is the first hypothesis matching the
 collapse signature that was NOT yet tested.
+
+## TURN 29 (2026-11-07 ~19:0x): FP32 residual — dead; investigation terminal
+
+FLINT_FP32 teacher (fp32 residual stream, fp32 staged weights, fp32
+lm_head — exactly the PR's reference numerics): repeat-probe cycle
+acc 16.6% vs 15.9% bf16. Numerics eliminated. EVERY hypothesis now
+measured-dead: norms, sinks (units+rescale+values), rope (tables,
+assignment, theta), window, GQA mapping, router, shared expert, BOS,
+dense-MLP reduce, fp32 accumulation. Four implementations agree;
+inputs byte-verified vs HF (the exact bytes the vendor serves); all
+documented conventions cross-checked. Remaining unknown requires
+EXTERNAL info: upstream PR #62938 review discussion, RecursiveSI
+contact, or a reference GPU environment (B300/H200+sglang) to compare
+per-layer hiddens. Web search quota-blocked (HTTP 403) this session.
+Reproduction: agents/tmp/repeat_probe.py (4 GPU, 6 min, acc 16%).
+Deliverables ready: trainer+KD-cache, exporter, draft port/cache/
+trainer, AIS fix, booting Flint ROCm serving path, rung ladder —
+all committed; ladder unblocks on the teacher NLL gate.
