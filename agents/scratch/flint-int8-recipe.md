@@ -863,3 +863,22 @@ verified inputs suggests either the HF weights need a not-public
 serving recipe, or something in the config semantics (e.g.
 softmax_type "learnable" has additional machinery beyond the sink
 vector — check HF config docs/upstream PR #62938 discussion).
+
+## TURN 24 (2026-11-07 ~17:5x): sink-rescale CLOSED numerically
+
+FLINT_DBG_SCORES at L2 (real window, rank 0): per-head score max
+min 2.0 / mean 21.6 / max 44.0 vs raw sinks 0.61-5.81 (scaled
+0.05-0.52). Sinks are NEGLIGIBLE in the softmax denominator; the FA4
+patch's output rescale is a no-op here. Sink machinery: FULLY closed.
+ALL self-testable hypotheses now exhausted. Standing evidence: four
+implementations (teacher, LayerRef, fork-ROCm-vLLM, vendor-semantics)
+agree numerically (collapse L0-2 signatures identical); inputs
+byte-verified vs HF; every component cross-checked against vendor
+source; NLL depth-48 ~25-30 (worse than uniform). REMAINING: (a)
+serving-vector cosine with last-forward-keyed dump (mechanical fix);
+(b) external: upstream vLLM PR #62938 discussion / RecursiveSI
+confirmation of the HF checkpoint's serving convention (the vendor's
+own NOTICE/README may state whether the HF safetensors need their
+sglang build; their serve scripts use THIS repo so weights should be
+right — but nothing else is left). If (a) shows agreement (expected),
+escalate to user with the evidence table.

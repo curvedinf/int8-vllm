@@ -1233,6 +1233,13 @@ class StreamedFlintTeacher(nn.Module):
         if _abl == "sinks":
             sink = torch.full_like(sink, float("-inf"))
         sink = sink * (hd ** -0.5)
+        if os.environ.get("FLINT_DBG_SCORES") and li == int(
+                os.environ["FLINT_DBG_SCORES"]) and self.rank == 0:
+            mx = scores.amax(dim=-1)
+            print(f"[scores L{li}] head-max: min {mx.min():.2f} "
+                  f"mean {mx.mean():.2f} max {mx.max():.2f} | raw sinks "
+                  f"{W['sink'].min():.2f}..{W['sink'].max():.2f} "
+                  f"scaled {sink.min():.2f}..{sink.max():.2f}", flush=True)
         sink_col = torch.where(torch.isfinite(sink), sink,
                                torch.full_like(sink, float("-inf"))
                                ).view(1, -1, 1, 1).expand(
@@ -1252,7 +1259,7 @@ class StreamedFlintTeacher(nn.Module):
         out = torch.matmul(attn[..., :S].to(v_.dtype), v_) \
             .permute(0, 2, 1, 3).reshape(B, S, qh * hd)
         attn_out = torch.nn.functional.linear(out, W["o"])  # partial [B, S, H]
-        if li == 0 and os.environ.get("FLINT_SKIP0") == "attn":
+        if li == 0 and os.environ.get("FLINT_SKIP0") in ("attn", "both"):
             attn_out = torch.zeros_like(attn_out)  # bisect: skip L0 attn
         _dbg = os.environ.get("FLINT_DBG_LAYER")
         if _dbg is not None and li == int(_dbg):
@@ -1270,7 +1277,7 @@ class StreamedFlintTeacher(nn.Module):
         xn2 = self._rms(x, W["w_post"])
         if li in self._mlp_only:
             mlp_part = self._mlp_dense(xn2, W["dense"])
-            if li == 0 and os.environ.get("FLINT_SKIP0") == "mlp":
+            if li == 0 and os.environ.get("FLINT_SKIP0") in ("mlp", "both"):
                 mlp_part = torch.zeros_like(mlp_part)  # bisect: skip L0 mlp
             # dense-MLP partials MUST all-reduce (each rank holds one
             # intermediate slice); FLINT_NO_DENSE_SUM=1 disables for A/B
