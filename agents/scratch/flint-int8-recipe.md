@@ -371,3 +371,28 @@ divergence in ONE pass. g24 run artifacts: /tmp/ptqr_g24.log,
 smoke kdcache at /home/curved/models/ptqr_flint_smoke/kdcache.
 Commits: 9137322454 (pread), 4ecde2103a (warm), 3d74854956 (ledger),
 chunked-loss + eval-list + norm 5790e5922b-adjacent chain; see git log.
+
+## GROUND-TRUTH GATE (turn 4, 2026-11-07 ~08:0x) — AIS fixed, boot hang next
+
+- AIS per-rank read plan ROOT-CAUSED + FIXED (commit af1f3fb591):
+  _iter_checkpoint_tensors unpacked 3 values from the fork's 4-tuple
+  _prepare_weights return -> always fell back to full-tensor reads
+  (4x80GB thrash, 8 min/shard). Now 43 s/shard (15 shards ~10 min),
+  first boot writes the repack cache (~/.cache/vllm/ais_repack).
+- GT4 (first upstream-vLLM Flint boot on the ROCm port): loads clean,
+  dies at determine_available_memory — a WORKER HUNG during KV-cache
+  profiling forward; engine shm_broadcast timed out ("cancelled"). No
+  worker traceback surfaced. NEXT: (a) compare boot env/knobs with
+  scripts/serve_recipe_qwen38.sh (the same stack boots daily there —
+  JIT warmup / timeouts / max_num_seqs interplay); (b) suspect the
+  eager qk-norm+RoPE -> unified_attention_with_output profile call
+  (sinks+SWA on gfx908 UA — first exercise; VLLM_ROCM_USE_AITER_*
+  set) or cold aiter JIT exceeding the init RPC timeout — retry once
+  with longer timeout env (see VllmConfig/RPC timeout knobs) and
+  enforce_eager to bisect compile vs kernel hang; (c) if UA+sinks is
+  the hang, temporarily boot with the non-UA Triton attention path to
+  isolate. GT script: scripts/flint_groundtruth.py (log /tmp/
+  flint_gt4.log). GPUs were cleaned after the failed boot.
+- Reminder: teacher NLL still 13.8 (norm + sink fixes landed); the GT
+  generation remains the decisive reference for the remaining trainer
+  semantic bugs.
