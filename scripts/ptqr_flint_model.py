@@ -101,15 +101,15 @@ class Rope:
         self.head_dim = head_dim
 
     def apply(self, q: torch.Tensor, k: torch.Tensor, positions: torch.Tensor):
-        # q, k: [tokens, heads, head_dim]
-        cos = self.cos[positions].to(q.dtype)  # [tokens, hd/2]
-        sin = self.sin[positions].to(q.dtype)
-        cos = cos[:, None, :]
-        sin = sin[:, None, :]
+        # q, k: [tokens, heads, head_dim]; fp32 rotation from fp32 tables
+        cos = self.cos[positions].to(torch.float32)[:, None, :]
+        sin = self.sin[positions].to(torch.float32)[:, None, :]
 
         def rot(x):
-            x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2:]
-            return torch.cat((x1 * cos - x2 * sin, x1 * sin + x2 * cos), dim=-1)
+            xf = x.float()
+            x1, x2 = xf[..., : x.shape[-1] // 2], xf[..., x.shape[-1] // 2:]
+            return torch.cat((x1 * cos - x2 * sin, x1 * sin + x2 * cos),
+                             dim=-1).to(x.dtype)
 
         return rot(q), rot(k)
 
@@ -117,12 +117,16 @@ class Rope:
         # q, k: [B, S, H, hd]; positions: [B, S]. The fp32 tables ride the
         # module .to(device); index on the tables' own device, then move.
         pos = positions.to(self.cos.device)
-        cos = self.cos[pos].to(device=q.device, dtype=q.dtype)[:, :, None, :]
-        sin = self.sin[pos].to(device=k.device, dtype=k.dtype)[:, :, None, :]
+        cos = self.cos[pos].to(device=q.device, dtype=torch.float32)[
+            :, :, None, :]
+        sin = self.sin[pos].to(device=k.device, dtype=torch.float32)[
+            :, :, None, :]
 
         def rot(x):
-            x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2:]
-            return torch.cat((x1 * cos - x2 * sin, x1 * sin + x2 * cos), dim=-1)
+            xf = x.float()
+            x1, x2 = xf[..., : x.shape[-1] // 2], xf[..., x.shape[-1] // 2:]
+            return torch.cat((x1 * cos - x2 * sin, x1 * sin + x2 * cos),
+                             dim=-1).to(x.dtype)
 
         return rot(q), rot(k)
 
@@ -1223,13 +1227,17 @@ class StreamedFlintTeacher(nn.Module):
         elif _abl == "norope_invert":
             do_rope = not do_rope
         if do_rope:
-            cos = self.cos[pos].to(dev, q.dtype)[:, :, None, :]
-            sin = self.sin[pos].to(dev, q.dtype)[:, :, None, :]
+            # rotate in fp32 from the fp32 table, cast back — the deployed
+            # model path and ops/norm.py both use fp32 tables; rounding
+            # cos/sin to bf16 first was a teacher-only deviation.
+            cos = self.cos[pos].to(dev, torch.float32)[:, :, None, :]
+            sin = self.sin[pos].to(dev, torch.float32)[:, :, None, :]
 
             def rot(z):
-                z1, z2 = z[..., :hd // 2], z[..., hd // 2:]
+                zf = z.float()
+                z1, z2 = zf[..., :hd // 2], zf[..., hd // 2:]
                 return torch.cat((z1 * cos - z2 * sin,
-                                  z1 * sin + z2 * cos), -1)
+                                  z1 * sin + z2 * cos), -1).to(z.dtype)
             q, k = rot(q), rot(k)
         rep = qh // kvh
         k = k.repeat_interleave(rep, dim=2)
@@ -1271,6 +1279,8 @@ class StreamedFlintTeacher(nn.Module):
         out = torch.matmul(attn[..., :S].to(v_.dtype), v_) \
             .permute(0, 2, 1, 3).reshape(B, S, qh * hd)
         attn_out = torch.nn.functional.linear(out, W["o"])  # partial [B, S, H]
+        if _abl == "attn_zero":   # bisect: attention contribution = 0
+            attn_out = torch.zeros_like(attn_out)
         if li == 0 and os.environ.get("FLINT_SKIP0") in ("attn", "both"):
             attn_out = torch.zeros_like(attn_out)  # bisect: skip L0 attn
         _dbg = os.environ.get("FLINT_DBG_LAYER")

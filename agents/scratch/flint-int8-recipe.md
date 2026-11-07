@@ -1367,3 +1367,20 @@ healthy at 4.74. FIX: flint's ROCm eager branch now calls
 `unified_attention_with_output` (guarded by
 `forward_includes_kv_cache_update`), passing the returned dep through.
 This closes the whole serving saga (turns 34-46). Verification run next.
+
+## TURN 49 (2026-11-07 ~22:2x): SERVING FIXED — NLL 4.66 on the production UA path
+
+After the unified_kv_cache_update fix, the same 64-token probe (UA
+backend, vLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1, no debug branch):
+**SERVING NLL 4.6588** (was 25.9829) — matches the SDPA reference branch
+(4.74) and the healthy band. The KV-cache write was the entire serving
+saga: zero cache -> V=0 -> zero attention output; every backend and
+toggle was inert because of it. Sanity from the instrumented run: the
+profile-run forward legitimately reports attn_metadata=None and
+out_absmax=0.0 (expected for the dummy profile pass), so the DBG_OUT
+probe must gate on metadata presence to be useful for real forwards —
+fixed next use. Also this run's `[dbgout]` lines came from TP0-TP3
+profile passes (4 lines for layer 0), not the generate step.
+Follow-ups queued: W=1024 long-window run (UA previously hung there),
+teacher re-measure with fp32-table rope (10.18 -> ? expected ~4.7),
+then the KD gate and rung ladder.
