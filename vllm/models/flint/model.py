@@ -386,7 +386,8 @@ class FlintAttention(nn.Module):
                 attn_output.view(num_tokens, self.num_heads, self.head_dim),
                 self.attn.layer_name,
             )
-            output, _ = self.o_proj(attn_output)
+            output, _ = self.o_proj(
+                attn_output.view(num_tokens, self.num_heads * self.head_dim))
             return output
         k_cache, v_cache, layer_slots = self._cache_views()
         plan = self._decode_plan() if self.flint_decode else None
