@@ -273,13 +273,31 @@ concurrent ranks) is the problem. Fixes landed in sequence:
    precompute GREEN. _precache now does ONE sweep per split (chunking
    re-staged every layer per chunk — 4-chunking would have cost 5x on
    rung 1's 20 batches).
-g19 post-cache crash: hipblasCreate ALLOC_FAILED in the BACKWARD
-(dy @ wq) on rank3 — smoke lacked
-PYTORCH_HIP_ALLOC_CONF=expandable_segments:True (rungs.sh has it;
-the 19.1G fragmented build needs it). g20 rerun with it. If OOM
-persists at seq 2048: port the Qwen trainer's chunked lm_head+loss
-path (logits_chunk arg exists, unused in one_batch; the Qwen program
-bounded head memory via 16 partial-grad chunks).
+g20 (expandable_segments): KD precompute GREEN and FASTER ("cached 4
+train + 10 val in 323s"); crash moved to the SAME place —
+loss.backward() hipblasCreate ALLOC_FAILED on rank3 (the rank deepest
+into backward). Genuine backward-peak memory pressure (18.7G masters +
+fwd activations + fp32 logits/KD transients + per-linear wq recompute).
+NEXT (exact fix): port the Qwen trainer's chunked lm_head+loss into
+one_batch — FlintRef needs a hidden-state accessor (split forward into
+forward_hidden -> h [B,S,H] + head(h)); then per-256-token chunks:
+head(h[chunk]) -> CE + KLD vs cached teacher chunk -> backward the
+chunk immediately (grads accumulate; lm_head grads deferred-apply
+already supports it) — this is the Qwen "16 partial grads per step"
+pattern (ptqr_train_target one_batch/loss chunking; logits_chunk arg
+exists unused). Also chunk the KD p_t upcast. Re-smoke at seq 1024
+(3 steps + eval + save), then LAUNCH RUNG 1: scripts/ptqr_flint_rungs.sh 1
+(60 steps @1e-5, seq 2048, kd_cache 20 → ONE sweep ≈ 10-15 min, save/
+eval every 20; rungs 2-3 chain via --init_from). Then draft cache
+(243 seqs) + draft PTQR on spare GPU headroom during the ladder; then
+engine extras + serve recipe C8 (fork Flint ROCm path exists: sinks/
+SWA on unified attention, eager qk-norm+rope — commit 8ce35980d1;
+remaining: MoE int8 route, GPTQ loader wiring, serve script).
+
+Env for ALL trainer runs: PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
+ROCM_PATH=/opt/rocm LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH
+MALLOC_ARENA_MAX=2 PYTHONPATH=$PWD/scripts:$PWD. Smoke cmd pattern in
+/tmp/ptqr_g20.log header. Ports cycled to 29896; next 29897+.
 
 Draft port committed (a99b184ccf): ptqr_flint_draft_cache.py (sweep_
 states, exits from the DRAFT's dflash_config) + ptqr_train_draft_
