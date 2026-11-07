@@ -1058,3 +1058,26 @@ localize. Also earlier insight from serving lp run: LLM.generate
 takes token ids POSITIONALLY ([ids.tolist()], sp) — the old
 prompt_token_ids kwarg was the cause of several 'engine core exited'
 false alarms (engine was fine; my script threw).
+
+## TURN 34 (2026-11-07 ~19:4x): MATCHED-CONTENT DIVERGENCE FOUND
+
+Teacher (causal: first-63 of a 1024 window == a 64-token prompt):
+NLL 8.47. Serving on the same 64 ids: 25.98. SAME contexts, SAME
+targets => the fork's serving ROCm path is BADLY WRONG and the
+teacher is much closer to correct. ("engine core exited" before was
+my prompt_token_ids kwarg bug — generate() takes ids positionally.)
+Teacher full-window levels: window@0 NLL 25.1 (bins 10->31 rising,
+looked positional), window@100000 NLL 28.2 (bins 34..20..31
+non-monotonic) => the rise is CONTENT, not position. Teacher absolute
+level varies 8.5-31 by content; still unhealthy vs 2-4 target.
+THE PAIRING for future work: teacher = training data generator;
+serving = deployment path; they MUST agree. Teacher is 3x better;
+serving has its own bug (candidate: the ROCm eager path's rotary
+rounding — vLLM rotary rounds cos/sin to bf16 (documented in
+qk_norm_rope.py!) while the reference kernel uses fp32 tables; my
+teacher uses fp32 tables) — PLUS maybe more.
+NEXT: (1) serving-side fix: swap the eager `self.rotary_emb(...)`
+call in the ROCm path for an fp32-table rotary (match the reference
+kernel's numerics); re-run matched-window serving NLL (target: drop
+toward 8-10 and beyond). (2) teacher-side: chase 8.5->2-4 (per-token
+analysis on window-1 head; compare vs fp32-residual/other flags).
