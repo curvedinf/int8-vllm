@@ -845,6 +845,25 @@ class StreamedFlintTeacher(nn.Module):
             self.weight_map = json.load(open(idx_path))["weight_map"]
         self.ckpt_dir = ckpt_dir
         self._handles: dict[str, object] = {}
+        # byte ranges per tensor (presplit single file) for layer-range
+        # fadvise prefetch: mmap tensor reads page-fault small semi-random
+        # chunks (measured 2.3 MB/s crawl, 4 concurrent ranks); sequential
+        # device reads do 553 MB/s — WILLNEED turns staging into those.
+        self._fd = None
+        self._toff: dict[str, tuple[int, int]] = {}
+        if self.presplit:
+            import struct as _struct
+
+            with open(shard, "rb") as _f:
+                _hlen = _struct.unpack("<Q", _f.read(8))[0]
+                _hdr = json.loads(_f.read(_hlen))
+            _base = 8 + _hlen
+            for _n, _m in _hdr.items():
+                if _n == "__metadata__":
+                    continue
+                self._toff[_n] = (_base + _m["data_offsets"][0],
+                                  _base + _m["data_offsets"][1])
+            self._fd = os.open(shard, os.O_RDONLY)
         with open(f"/proc/{os.getpid()}/status") as _f:
             _r = [l.split()[1] for l in _f if l.startswith("VmRSS")][0]
         print(f"[SFT r{rank}] init-weightmap-done rss={int(_r)//1048576} GB",
@@ -896,6 +915,36 @@ class StreamedFlintTeacher(nn.Module):
     # --- weight getters. presplit rank files pre-apply this rank's slices
     # AND fuse qkv (k/v folded into the q_proj entry) and gate|up (up folded
     # into the gate_proj entry); the full-checkpoint path slices here. ---
+    def _prefetch_layer(self, li: int):
+        """Sequentially prefetch layer li's tensors (fadvise WILLNEED).
+        Per-tensor calls: expert tensors for this rank are interleaved in
+        the file with other ranks', so one big range would read ~4x."""
+        if self._fd is None or li >= self.cfg.num_hidden_layers:
+            return
+        import posix
+
+        p = f"model.layers.{li}"
+        a = f"{p}.self_attn"
+        names = [f"{p}.input_layernorm.weight", f"{a}.q_proj.weight",
+                 f"{a}.o_proj.weight", f"{a}.softmax_offset",
+                 f"{a}.q_norm.weight", f"{a}.k_norm.weight",
+                 f"{p}.post_attention_layernorm.weight"]
+        if li in self._mlp_only:
+            names += [f"{p}.mlp.{t}_proj.weight"
+                      for t in ("gate", "up", "down")]
+        else:
+            names.append(f"{p}.mlp.gate.weight")
+            names += [f"{p}.mlp.shared_expert.{t}_proj.weight"
+                      for t in ("gate", "up", "down")]
+            for gid in self.keep:
+                names += [f"{p}.mlp.experts.{gid}.{t}_proj.weight"
+                          for t in ("gate", "up", "down")]
+        for n in names:
+            r = self._toff.get(n)
+            if r is not None:
+                os.posix_fadvise(self._fd, r[0], r[1] - r[0],
+                                 posix.POSIX_FADV_WILLNEED)
+
     def _qkv_w(self, a):
         if self.presplit:
             return self._t(f"{a}.q_proj.weight")
@@ -945,6 +994,7 @@ class StreamedFlintTeacher(nn.Module):
 
     def _embed(self, input_ids):
         dev = self.device
+        input_ids = input_ids.to(dev)
         B, S = input_ids.shape
         local = (input_ids >= self.v0) & (input_ids < self.v1)
         embw = self._t("model.embed_tokens.weight",
@@ -980,7 +1030,9 @@ class StreamedFlintTeacher(nn.Module):
             poss.append(torch.arange(S, device=dev).unsqueeze(0)
                         .expand(b.shape[0], S))
         caps = [[] for _ in batches]
+        self._prefetch_layer(0)
         for li in range(self.cfg.num_hidden_layers):
+            self._prefetch_layer(li + 1)   # prefetch-ahead while computing
             W = self._stage_layer(li)
             for i in range(len(xs)):
                 xs[i] = self._apply_layer(li, xs[i], poss[i], W)
@@ -1005,7 +1057,9 @@ class StreamedFlintTeacher(nn.Module):
             xs.append(self._embed(b))
             poss.append(torch.arange(S, device=dev).unsqueeze(0)
                         .expand(b.shape[0], S))
+        self._prefetch_layer(0)
         for li in range(self.cfg.num_hidden_layers):
+            self._prefetch_layer(li + 1)   # prefetch-ahead while computing
             W = self._stage_layer(li)
             for i in range(len(xs)):
                 xs[i] = self._apply_layer(li, xs[i], poss[i], W)
