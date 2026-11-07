@@ -912,3 +912,15 @@ teacher at L0/L48; (3) fetch vLLM PR #62938 for numerics notes;
 (4) escalate to user with evidence table if agreement holds. All
 other deliverables (trainer/KD-cache/exporter/draft/AIS/serving-boot/
 ladder) are committed and ready.
+
+## TURN 27 (2026-11-07 ~18:4x): repetition probe — DECISIVE negative
+
+8-token random pattern x128 periods (1024 tokens): top-1 cycle acc
+after 2+ periods = 15.9% (chance 1/150k; "wrong-position pattern
+token" = 12.5%). The teacher stack cannot track a period-8 cycle —
+deep model-wide corruption, not distribution shift. Combined with:
+four agreeing implementations, byte-verified inputs, vendor-confirmed
+weights+semantics, every component verified — this is beyond local
+hypothesis space. FINAL PATH: (1) serving vector cosine (mechanical),
+(2) vLLM PR #62938, (3) escalate. agents/tmp/repeat_probe.py is the
+cleanest single reproduction (any environment, 4 GPUs, 6 min).
