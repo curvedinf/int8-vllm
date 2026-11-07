@@ -1437,3 +1437,19 @@ non-finite sinks. Teacher NLL re-measure in flight; expect ~4.7.
 Note the earlier 0.107-rms "teacher" files were the FLINT_ABLATE=sinks
 runs, where sink=-inf makes `dead` all-True and zeroes *all* attention —
 not a valid sink ablation anymore.
+
+## TURN 53 (2026-11-07 ~23:3x): TEACHER CLOSED — 4.6586 vs serving 4.6588
+
+After allowing the sink virtual key, the teacher on the same 64-token
+window: **NLL 4.6586**. Serving (UA + KV-write fix): **4.6588**. The
+0.0002 delta is bf16 GEMM ordering. The teacher == serving now, so:
+- the KD data generator is correct (this was the blocker for the ladder),
+- the earlier "teacher gap" was entirely the masked sink column,
+- sink values are essential; the `sinks` ablation now means "sink column
+  -inf" and is a valid on/off switch again.
+Serving status recap: 4.66 @64 tokens, 1.39 @1024 tokens, UA backend,
+FP32 mamba N/A (no mamba in flint), int8 KV not yet enabled for flint.
+NEXT: rung 1 of scripts/ptqr_flint_rungs.sh (60 steps, lr 1e-5), KD gate
+(KLD + greedy agreement vs the bf16 teacher), then rung 2/3, draft PTQR,
+int8 engine surfaces, recipe + publish, and the Qwen27B/Bolt quality
+checks required by the objective.
