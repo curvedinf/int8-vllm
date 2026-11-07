@@ -396,3 +396,33 @@ chunked-loss + eval-list + norm 5790e5922b-adjacent chain; see git log.
 - Reminder: teacher NLL still 13.8 (norm + sink fixes landed); the GT
   generation remains the decisive reference for the remaining trainer
   semantic bugs.
+
+## INPUTS FULLY VERIFIED + SERVING ALSO GARBAGE (turn 6, 2026-11-07 09:0x)
+
+Boot chain fixed through GT11 (commits af1f3fb591..): AIS 4-tuple unpack
+(fast loads, 43s/shard + repack cache), flint ops/norm Triton kernel
+register-alloc failure on gfx908 -> standard fork RMSNorm/SiluAndMul,
+eager path o_proj 3D-flatten, NCCL int8 AllGather needs
+NCCL_ALGO=Ring NCCL_PROTO=Simple (production pins). GT11 BOOTS AND
+GENERATES END-TO-END — but word salad, SERVING prompt NLL 20.4 on
+chat-templated text.
+
+Inputs verified byte-identical to HF: config.json (field-by-field),
+tokenizer.json (sha256 match), weights (q_proj tensor byte-verified via
+HF range-request), presplit rank0 content (all tensor classes equal to
+full ckpt slices), corpus tokens decode to clean English. => BOTH the
+upstream serving path (fork ROCm port) AND my streamed teacher produce
+~uniform logits from verified inputs.
+
+sglang/fa4-learned-sink-fix.patch (fetched from the HF repo) CONFIRMS
+the sink semantics: virtual key in the softmax denominator, POST-scale
+units (exp(sink) vs exp(qk*scale)) — matches my post-fix teacher. The
+sglang bug it fixed was a missing O-rescale, not semantics.
+
+GT12 in flight: VLLM_ATTENTION_BACKEND=TRITON_ATTN (no sink support ->
+effectively sink-less) to bisect whether the serving garbage lives in
+the fork's AITER-UA sink/SWA path. If TRITON_ATTN is coherent-ish =>
+fix UA sink path; teacher's remaining bug (NLL 13.8) is separate but
+likely the same area. Teacher candidates left: none by inspection —
+if GT12 implicates sinks, re-audit how the FORK UA consumes sinks vs
+the reference and mirror whatever divergence exists in the teacher.
