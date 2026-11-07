@@ -396,7 +396,7 @@ class FlintAttention(nn.Module):
                 q = _rot_fp32(q)
                 k = _rot_fp32(k)
             attn_output = torch.empty_like(q)
-            if os.environ.get("VLLM_FLINT_SDPA"):
+            if os.environ.get("VLLM_FLINT_SDPA") and num_tokens <= 4096:
                 # DEBUG ONLY (UA isolation): plain flash-style attention,
                 # no KV-cache write. Windows + sinks applied explicitly.
                 qh = self.num_heads // self.num_kv_heads
