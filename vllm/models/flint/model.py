@@ -739,17 +739,24 @@ class FlintModel(nn.Module):
                 _do = get_forward_context().attn_metadata is not None
             except Exception:  # noqa: BLE001 - debug only
                 _do = False
+        _saved = 0
         for _li, layer in enumerate(
                 self.layers[self.start_layer : self.end_layer]):
             hidden_states, residual = layer(positions, hidden_states, residual)
             if _do:
-                import torch.distributed as _dist
-                if not _dist.is_initialized() or _dist.get_rank() == 0:
-                    _full = (hidden_states if residual is None
-                             else hidden_states + residual)
-                    torch.save(_full.detach().float().cpu(),
-                               f"{_dump}.{_li}.pt")
-        if _do:
+                if torch.cuda.is_current_stream_capturing():
+                    continue  # capture pass: host sync / save not allowed
+                _full = (hidden_states if residual is None
+                         else hidden_states + residual)
+                if float(_full.abs().max()) == 0.0:
+                    _do = False  # dummy/warmup step (zero inputs)
+                else:
+                    import torch.distributed as _dist
+                    if not _dist.is_initialized() or _dist.get_rank() == 0:
+                        torch.save(_full.detach().float().cpu(),
+                                   f"{_dump}.{_li}.pt")
+                        _saved += 1
+        if _saved:
             self._hidden_dumped = True
         if self.end_layer != len(self.layers):
             return IntermediateTensors(

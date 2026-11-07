@@ -1397,3 +1397,21 @@ tokens (fp32 rope + raw sinks, both corrections in) and ~10.1 for the
 first 63 of a 1024 window, vs serving 4.66/1.39. Teacher hidden-state
 dump (sweep_states, exits=0..48) running now; serving hidden dump next;
 per-layer RMS/corr comparison will name the first divergent layer.
+
+## TURN 51 (2026-11-07 ~23:0x): hidden-dump probes iterated; teacher gap still open
+
+Three probe iterations for the serving hidden-state dump (VLLM_FLINT_HIDDEN_DUMP):
+(1) first attempt captured vLLM's zero-input warmup step (256 rows,
+all-zero hidden states — the profile/warmup really does run with zero
+inputs, which is why every layer's output is exactly 0 there);
+(2) zero-check without a capture guard crashed in
+profile_cudagraph_memory ("operation not permitted when stream is
+capturing" on the host sync);
+(3) fixing that consumed the dump flag on a capture pass (flag set even
+though no save happened), so nothing was written.
+Final probe: skip captures, zero-check for dummy steps, and set the
+"dumped" flag only when a save actually happened. Run in flight.
+Meanwhile W=1024/UA reconfirmed 1.39 and teacher stays at 10.09 for the
+same targets (matched first-63 of the 1024 window: serving 4.69,
+teacher 10.09), so the teacher is definitively the wrong side of the
+gap and the per-layer diff is the way to localize it.
