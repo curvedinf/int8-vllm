@@ -1268,3 +1268,22 @@ logit units and must NOT be scaled again. Serving-SDPA appends the raw
 sink (match), teacher scales it (suspect). Teacher ablation
 (FLINT_ABLATE=sinks) queued to test whether this closes the 10.13->4.74
 teacher gap.
+
+## TURN 45 (2026-11-07 ~22:0x): SCHEDULER REGRESSION found by the flint probe — fixed
+
+The TRITON_ATTN serving run crashed at the first schedule step:
+`AttributeError: 'AsyncScheduler' object has no attribute 'skipped_waiting'`
+(scheduler.py:_prioritize_cached_waiter -> self.skipped_waiting). This is
+the v0.33.0 upstream merge vs fork commit d01e4a253e ("bounded cached-turn
+admission"): upstream 42dbe4578c reworked `skipped_waiting` into
+`kv_holding_waiting` (queue) + `deferred_waiting` (set) but the fork's
+prefix-fair-admission helper still read the removed attribute. It fires
+whenever `VLLM_GFX908_PREFIX_FAIR_ADMISSION=1` (the serve scripts' default)
+and the FCFS head is a cold prompt > 3*block_size (48 tokens) — i.e. every
+qwen38/Bolt first prompt, and every flint probe.
+Fix: `other = self.waiting if queue is self.kv_holding_waiting else
+self.kv_holding_waiting` in scheduler.py; the fork profiler
+(vllm/profiler/lifecycle.py) had the same stale attribute, updated to
+`kv_holding_waiting`/`deferred_waiting`. Re-ran the flint TRITON_ATTN
+probe with PREFIX_FAIR=1 + SHORT_PREFILL_COHORT=1 explicitly to exercise
+the fixed path (result below when it lands).

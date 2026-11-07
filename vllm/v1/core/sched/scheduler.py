@@ -622,7 +622,9 @@ class Scheduler(SchedulerInterface):
         # Deferred cold lookups otherwise outrank every regular waiter. Search
         # both queues with one shared scan bound, not just the selected queue.
         other = (
-            self.waiting if queue is self.skipped_waiting else self.skipped_waiting
+            self.waiting
+            if queue is self.kv_holding_waiting
+            else self.kv_holding_waiting
         )
         candidates = (
             (source, candidate)

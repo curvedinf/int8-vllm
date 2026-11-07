@@ -183,12 +183,12 @@ def _metadata(name, args, result=None):
         scheduler = args[0]
         data["scheduled"] = result.num_scheduled_tokens
         data["ready_waiting"] = len(scheduler.waiting)
-        data["deferred_waiting"] = len(scheduler.skipped_waiting)
-        data["waiting"] = len(scheduler.waiting) + len(scheduler.skipped_waiting)
+        data["deferred_waiting"] = len(scheduler.deferred_waiting)
+        data["waiting"] = len(scheduler.waiting) + len(scheduler.kv_holding_waiting)
         data["running"] = len(scheduler.running)
         data["waiting_states"] = {
             req.request_id: req.status.name
-            for req in (*scheduler.waiting, *scheduler.skipped_waiting)}
+            for req in (*scheduler.waiting, *scheduler.kv_holding_waiting)}
         data["requests"] = {
             key: {"prompt": req.num_prompt_tokens,
                   "computed_after_schedule": req.num_computed_tokens,
