@@ -1115,6 +1115,10 @@ def load_flint_rank_shard(model: FlintRef, shard_path: str,
         assert node.shape == t.shape, f"{path}: {node.shape} vs {t.shape}"
         node.data.copy_(t.to(node.dtype))
 
+    w = _TP_STATE["world"]
+    r = _TP_STATE["rank"]
+    qh = model.cfg.num_attention_heads // w
+
     with safe_open(shard_path, framework="pt", device="cpu") as sf:
         for name in sf.keys():
             t = sf.get_tensor(name).to(dtype)
@@ -1136,7 +1140,9 @@ def load_flint_rank_shard(model: FlintRef, shard_path: str,
                 elif name.endswith("k_norm.weight"):
                     put(f"{a}.k_norm.weight", t)
                 elif name.endswith("softmax_offset"):
-                    put(f"{a}.sink", t)
+                    h0 = r * qh
+                    put(f"{a}.sink",
+                        t[h0:h0 + qh] if t.shape[0] != qh else t)
             elif ".experts." in name:
                 li = int(name.split(".")[2])
                 e = int(name.split(".experts.")[1].split(".")[0])
