@@ -321,11 +321,17 @@ def replace_linears_with_ptqr(model: nn.Module, group: int = 128,
     replaced: dict[str, PTQRLinear] = {}
     _n = 0
     import os as _os
-    for name, module in list(model.named_modules()):
-        for child_name, child in list(module.named_children()):
+    # collect (parent, attr) pairs WITHOUT materializing module lists: a
+    # list(model.named_modules()) pins every old linear (and its weights)
+    # for the whole swap — old+new bf16 masters coexist and OOM 32G GPUs.
+    targets = []
+    for name, module in model.named_modules():
+        for child_name, child in module.named_children():
             full = f"{name}.{child_name}" if name else child_name
             if full in skip or not isinstance(child, nn.Linear):
                 continue
+            targets.append((name, module, child_name, full))
+    for name, module, child_name, full in targets:
             if mem_probe and _n % 64 == 0 and "cuda" in str(next(
                     model.parameters()).device):
                 print(f"[swap #{_n}] cuda alloc="
