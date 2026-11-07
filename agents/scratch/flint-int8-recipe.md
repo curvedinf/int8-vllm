@@ -924,3 +924,17 @@ weights+semantics, every component verified — this is beyond local
 hypothesis space. FINAL PATH: (1) serving vector cosine (mechanical),
 (2) vLLM PR #62938, (3) escalate. agents/tmp/repeat_probe.py is the
 cleanest single reproduction (any environment, 4 GPUs, 6 min).
+
+## TURN 28 (2026-11-07 ~18:5x): upstream PR 62938 — FP32 RESIDUAL clue
+
+PR numerics notes: "FP32 fused add + RMSNorm, rounded once. FP32
+gate/up for the routed experts. FP32 RoPE table, BF16 router logits.
+Untied LM head produces FP32 logits." My teacher keeps the residual
+stream in BF16 — with early-layer residual rms collapsing to
+0.001-0.005, bf16 accumulation/adds there may catastrophically
+cancel (8-bit mantissa at 1e-3 scale vs per-layer increments).
+NEXT (concrete, next session): teacher run with FP32 residual stream
+(_apply_layer keeps x fp32; weights upcast per-GEMM; _rms fp32
+already) + fp32 lm_head — rerun repeat_probe (target: cycle acc
+>90%) and NLL gate. This is the first hypothesis matching the
+collapse signature that was NOT yet tested.
