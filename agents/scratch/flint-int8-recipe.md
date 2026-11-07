@@ -956,3 +956,33 @@ Reproduction: agents/tmp/repeat_probe.py (4 GPU, 6 min, acc 16%).
 Deliverables ready: trainer+KD-cache, exporter, draft port/cache/
 trainer, AIS fix, booting Flint ROCm serving path, rung ladder —
 all committed; ladder unblocks on the teacher NLL gate.
+
+## TURN 30 (2026-11-07 ~19:1x): links processed — reference VALIDATED
+
+User links: vllm blog + PRs 63957 (glm47 parser fix) / 63986
+(silu_and_mul TP-shard crash fix). Key facts: (1) WoosukKwon
+validated BF16 RecursiveSI/flint at GSM8K 0.952 on ONE GB200, TP=1,
+Flint-kernel path => weights + reference semantics PROVEN GOOD.
+(2) Flint kernels target single Blackwell GPU; other configs fall
+back to vLLM stock layers (the fallback is NOT what was validated).
+(3) My tree's flint ops/* + configs.py are BYTE-IDENTICAL to
+upstream main; model.py differs only in my ROCm port lines.
+=> The mystery narrows to THE unexplained in-process contradiction
+from turn 14: LayerRef(world=1, full ckpt) L0 rms 0.0258 vs teacher
+(TP4 presplit sweep) L0 rms 0.0646 — 2.5x, same ids, same process,
+components hand-verified matching (attn 0.0039, mlp 0.0078) yet
+compositions differ. tp_sums are increment-only (verified by code
+reading). THIS is the bug: something in the TP4 sweep path makes the
+L0 composition wrong despite correct components — prime suspects:
+(a) NCCL all-reduce touching x-carrying tensors somewhere (the _embed
+reduce? double-count when combined with _apply_layer reduces), (b)
+presplit staging aliasing (_pread frombuffer views shared between
+ranks? no — per-process files), (c) the dbg runs themselves ran
+unreduced in capture scripts (known artifact — the 2.5x WAS from
+sweep_capture2 which sets _TP_STATE... VERIFY: that script created
+teachers directly WITHOUT shard_flint_tp — _TP_STATE set? The script
+did NOT call _TP_STATE.update!! => the 'in-process divergence' test
+itself ran UNREDUCED = artifact!! The REAL never-done test: teacher
+TP4 with _TP_STATE correctly set vs LayerRef world=1, same process.
+NEXT SESSION: rerun sweep_capture2 with _TP_STATE.update(world=4)
+after teacher creation; expect A==C; then NLL gate directly.
