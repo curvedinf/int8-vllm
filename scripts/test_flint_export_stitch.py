@@ -98,10 +98,8 @@ def main():
                 ref[f"{h}.mlp.down_proj.weight"] = sd[f"{p}.mlp.down.weight"]
             else:
                 ref[f"{h}.mlp.gate.weight"] = sd[f"{p}.mlp.router.weight"]
-                for pre, dst in ((f"{p}.mlp.shared.", f"{h}.shared_expert."),
-                                 (None, None)):
-                    if pre is None:
-                        continue
+                for pre, dst in ((f"{p}.mlp.shared.",
+                                  f"{h}.mlp.shared_expert."),):
                     gu = sd[pre + "gate_up.weight"]
                     ref[dst + "gate_proj.weight"] = gu[: gu.shape[0] // 2]
                     ref[dst + "up_proj.weight"] = gu[gu.shape[0] // 2:]

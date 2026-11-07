@@ -104,9 +104,10 @@ def main():
             plan.append((f"layers.{n}.mlp.router.weight",
                          f"model.layers.{n}.mlp.gate.weight", "param"))
             plan.append((f"layers.{n}.mlp.shared.gate_up",
-                         f"model.layers.{n}.shared_expert", "gated"))
+                         f"model.layers.{n}.mlp.shared_expert", "gated"))
             plan.append((f"layers.{n}.mlp.shared.down",
-                         f"model.layers.{n}.shared_expert.down_proj", "col"))
+                         f"model.layers.{n}.mlp.shared_expert.down_proj",
+                         "col"))
             for e in range(cfg["num_experts"]):
                 r = e % args.world
                 loc = e // args.world

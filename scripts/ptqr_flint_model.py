@@ -399,16 +399,16 @@ def load_flint_state(model: FlintRef, ckpt_dir: str, strict: bool = True) -> Non
         else:
             set_param(f"{mlp}.router.weight", tensors[f"{p}.mlp.gate.weight"])
             set_param(f"{mlp}.shared.gate_up.weight", torch.cat([
-                tensors[f"{p}.shared_expert.gate_proj.weight"],
-                tensors[f"{p}.shared_expert.up_proj.weight"]], dim=0))
+                tensors[f"{p}.mlp.shared_expert.gate_proj.weight"],
+                tensors[f"{p}.mlp.shared_expert.up_proj.weight"]], dim=0))
             set_param(f"{mlp}.shared.down.weight",
-                      tensors[f"{p}.shared_expert.down_proj.weight"])
+                      tensors[f"{p}.mlp.shared_expert.down_proj.weight"])
             for e in range(cfg.num_experts):
                 set_param(f"{mlp}.experts.{e}.gate_up.weight", torch.cat([
-                    tensors[f"{p}.experts.{e}.gate_proj.weight"],
-                    tensors[f"{p}.experts.{e}.up_proj.weight"]], dim=0))
+                    tensors[f"{p}.mlp.experts.{e}.gate_proj.weight"],
+                    tensors[f"{p}.mlp.experts.{e}.up_proj.weight"]], dim=0))
                 set_param(f"{mlp}.experts.{e}.down.weight",
-                          tensors[f"{p}.experts.{e}.down_proj.weight"])
+                          tensors[f"{p}.mlp.experts.{e}.down_proj.weight"])
     if strict:
         missing = [k for k in ("model.embed_tokens.weight", "lm_head.weight")
                    if k not in tensors]
@@ -923,17 +923,23 @@ class StreamedFlintTeacher(nn.Module):
     def _layer(self, li, x, pos):
         dev = self.device
         p = f"model.layers.{li}"
-        # --- attention ---
+        # --- attention (full-checkpoint weights sliced to this rank's heads;
+        # the qkv.split-on-weight here was dead code that never sliced) ---
         a = f"{p}.self_attn"
-        qw = self._t(f"{a}.q_proj.weight")
-        kw = self._t(f"{a}.k_proj.weight")
-        vw = self._t(f"{a}.v_proj.weight")
-        qkv = torch.cat([qw, kw, vw], dim=0).to(dev)
         hd, qh, kvh = self.hd, self.qh, self.kvh
         h0 = self.h0
-        qs, ks, vs = qkv.shape[0] // (qh + 2 * kvh) // hd, qh * hd, kvh * hd
-        q, k, v = qkv.split([qh * hd, kvh * hd, kvh * hd], dim=0)
-        ow = self._t(f"{a}.o_proj.weight").to(dev)
+        r = self.rank
+        w_in = self._t(f"{p}.input_layernorm.weight").to(dev)
+        xn = self._rms(x, w_in)
+        qw = self._t(f"{a}.q_proj.weight",
+                     slice(h0 * hd, (h0 + qh) * hd))
+        kw = self._t(f"{a}.k_proj.weight",
+                     slice(r * kvh * hd, (r + 1) * kvh * hd))
+        vw = self._t(f"{a}.v_proj.weight",
+                     slice(r * kvh * hd, (r + 1) * kvh * hd))
+        qkv = torch.cat([qw, kw, vw], dim=0).to(dev)
+        ow = self._t(f"{a}.o_proj.weight",
+                     (slice(None), slice(h0 * hd, (h0 + qh) * hd))).to(dev)
         sink = self._t(f"{a}.softmax_offset").to(dev)  # [all heads]
         sink = sink[h0:h0 + qh]
 
@@ -941,46 +947,56 @@ class StreamedFlintTeacher(nn.Module):
         kn = self._t(f"{a}.k_norm.weight").to(dev)
 
         t = x.shape[0] * x.shape[1]
-        x2 = x.reshape(t, -1)
-        qkv_o = torch.nn.functional.linear(x2, qkv)
+        B, S = x.shape[0], x.shape[1]
+        qkv_o = torch.nn.functional.linear(xn, qkv)      # [B, S, q+2k]
         q, k, v = qkv_o.split([qh * hd, kvh * hd, kvh * hd], dim=-1)
-        q = self._rms(q.view(t, qh, hd), qn)
-        k = self._rms(k.view(t, kvh, hd), kn)
+        q = self._rms(q.view(B, S, qh, hd), qn)
+        k = self._rms(k.view(B, S, kvh, hd), kn)
         if li not in self._no_rope:
-            cos = self.cos[pos].to(dev, q.dtype)[:, :, None, :].reshape(-1, 1, hd // 2)
-            sin = self.sin[pos].to(dev, q.dtype)[:, :, None, :].reshape(-1, 1, hd // 2)
+            cos = self.cos[pos].to(dev, q.dtype)[:, :, None, :]
+            sin = self.sin[pos].to(dev, q.dtype)[:, :, None, :]
+
             def rot(z):
                 z1, z2 = z[..., :hd // 2], z[..., hd // 2:]
-                return torch.cat((z1 * cos - z2 * sin, z1 * sin + z2 * cos), -1)
+                return torch.cat((z1 * cos - z2 * sin,
+                                  z1 * sin + z2 * cos), -1)
             q, k = rot(q), rot(k)
         rep = qh // kvh
-        k = k.repeat_interleave(rep, dim=1)
-        v = v.view(t, kvh, hd).repeat_interleave(rep, dim=1)
-        scores = torch.einsum("thd,thd->hqk",
-                              q * (hd ** -0.5), k).float().view(t, qh, t)
+        k = k.repeat_interleave(rep, dim=2)
+        v = v.view(B, S, kvh, hd).repeat_interleave(rep, dim=2)
+        # batched attention: causal/window masks are PER SEQUENCE — flattening
+        # B*S into one axis leaks attention across batch rows (B>1 bug)
+        q_ = (q * (hd ** -0.5)).permute(0, 2, 1, 3)       # [B, qh, S, hd]
+        k_ = k.permute(0, 2, 1, 3)
+        v_ = v.permute(0, 2, 1, 3)
+        scores = torch.matmul(q_, k_.transpose(-1, -2)).float()
         scores = scores + torch.where(torch.isfinite(sink), sink,
                                       torch.zeros_like(sink)).view(1, -1, 1, 1)
-        qi = torch.arange(t, device=dev)[:, None]
-        ki = torch.arange(t, device=dev)[None, :]
+        qi = torch.arange(S, device=dev)[:, None]
+        ki = torch.arange(S, device=dev)[None, :]
         mask = ki > qi
         if self._layer_types[li] == "sliding_attention":
             mask = mask | (qi - ki >= self._window)
-        mask = mask[None].expand(qh, -1, -1)
-        dead = ~torch.isfinite(sink).view(-1, 1, 1)
+        mask = mask[None, None]
+        dead = (~torch.isfinite(sink)).view(1, -1, 1, 1)
         attn = torch.softmax(
             scores.masked_fill(mask | dead, float("-inf")), dim=-1)
         attn = torch.nan_to_num(attn)
-        out = torch.einsum("hqk,khd->qhd", attn, v).reshape(t, qh * hd)
-        attn_out = torch.nn.functional.linear(out, ow)  # partial
-        x = x + tp_sum(attn_out).view(x.shape)
+        out = torch.matmul(attn.to(v_.dtype), v_) \
+            .permute(0, 2, 1, 3).reshape(B, S, qh * hd)
+        attn_out = torch.nn.functional.linear(out, ow)  # partial [B, S, H]
+        x = x + tp_sum(attn_out)
 
         # --- mlp ---
+        w_post = self._t(f"{p}.post_attention_layernorm.weight").to(dev)
+        xn2 = self._rms(x, w_post)
         if li in self._mlp_only:
-            x = x + self._mlp_dense(f"{p}.mlp", x, self.r0, self.r1)
+            x = x + self._mlp_dense(f"{p}.mlp", xn2, self.r0, self.r1)
         else:
             # router (replicated)
             rw = self._t(f"{p}.mlp.gate.weight").to(dev)
-            logits_r = torch.nn.functional.linear(x.reshape(t, -1), rw).float()
+            logits_r = torch.nn.functional.linear(
+                xn2.reshape(t, -1), rw).float()
             probs = torch.sigmoid(logits_r.reshape(x.shape[0], x.shape[1], -1)
                                   .reshape(-1, rw.shape[0]))
             top_p, top_i = torch.topk(probs, self._top_k, dim=-1)
@@ -993,9 +1009,9 @@ class StreamedFlintTeacher(nn.Module):
                 w = (top_p * sel).sum(-1)
                 rowsm = sel.any(-1)
                 ex = self._expert(f"{p}.mlp.experts.{gid}",
-                                  x.reshape(t, -1)[rowsm])
+                                  xn2.reshape(t, -1)[rowsm])
                 routed.reshape(t, -1)[rowsm] += ex * w[rowsm, None].to(x.dtype)
-            shared = self._mlp_dense(f"{p}.mlp.shared_expert", x,
+            shared = self._mlp_dense(f"{p}.mlp.shared_expert", xn2,
                                      self.sr0, self.sr1)
             x = x + tp_sum(routed + shared)
         return x
