@@ -1347,3 +1347,23 @@ type, out_absmax, q_absmax on the first forward of each layer) run in
 flight to confirm.
 Teacher remaining gap (10.18 vs SDPA-serving 4.74) is still open and
 SEPARATE; `attn_zero` bounds the serving side, not the teacher.
+
+## TURN 48 (2026-11-07 ~22:2x): ROOT CAUSE — missing unified_kv_cache_update
+
+vLLM declares `forward_includes_kv_cache_update = False` for UA, Triton
+and ROCm backends alike (rocm_aiter_unified_attn.py:161, triton_attn.py:415,
+rocm_attn.py:200). The KV write is therefore a SEPARATE op:
+`Attention.forward` calls `unified_kv_cache_update(key, value, layer_name)`
+(attention.py:555) which invokes `impl.do_kv_cache_update(...)`; only then
+does `unified_attention_with_output` read the cache. My ROCm port called
+only the attention helper (the comment claiming "UA owns the KV write" was
+wrong — UA writes nothing in its forward; it has a separate
+`do_kv_cache_update` at rocm_aiter_unified_attn.py:1492). So every
+cache-based path read an all-zero cache: V=0 => attention output 0 =>
+byte-identical logits for every backend, every sink/window/eager toggle
+inert, SDPA (which bypasses the cache and computes from raw q/k/v)
+healthy at 4.74. FIX: flint's ROCm eager branch now calls
+`unified_kv_cache_update(k, v, self.attn.layer_name)` before
+`unified_attention_with_output` (guarded by
+`forward_includes_kv_cache_update`), passing the returned dep through.
+This closes the whole serving saga (turns 34-46). Verification run next.

@@ -25,6 +25,7 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import (
     unified_attention_with_output,
+    unified_kv_cache_update,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
 from vllm.model_executor.layers.linear import (
@@ -328,10 +329,11 @@ class FlintAttention(nn.Module):
             sinks=(None if os.environ.get("VLLM_FLINT_NOSINK")
                    else self.softmax_offset),
         )
-        # ROCm (gfx908 int8 fork): no FlashInfer. The AITER unified-attention
-        # backend owns the KV-cache write (int8_block_g{G} quantized), sinks,
-        # and per-layer sliding windows; the fused qk-norm/rope/cache-write and
-        # Flint decode kernels stay off and the eager fallback below runs.
+        # ROCm (gfx908 int8 fork): no FlashInfer. The attention backend
+        # computes sinks and per-layer sliding windows, the separate
+        # unified_kv_cache_update op writes the (int8_block_g{G} quantized)
+        # cache, and the fused qk-norm/rope/cache-write and Flint decode
+        # kernels stay off so the eager fallback below runs.
         self._flashinfer_path = False
         if not current_platform.is_rocm():
             # The fused kernel writes the KV cache itself (in the FlashInfer
@@ -443,6 +445,19 @@ class FlintAttention(nn.Module):
                 attn_output.view(num_tokens, self.num_heads,
                                  self.head_dim).copy_(out)
             else:
+                # vLLM backends declare forward_includes_kv_cache_update
+                # False (UA, Triton, ROCm alike): the cache write is the
+                # separate unified_kv_cache_update op that Attention.forward
+                # calls before attention. Skipping it left an all-zero
+                # cache and zero attention output (matched-window NLL 25.98;
+                # a zero-attention teacher ablation gives 26.44).
+                kv_dep = None
+                if not self.attn.attn_backend.forward_includes_kv_cache_update:
+                    kv_dep = unified_kv_cache_update(
+                        k.view(num_tokens, self.num_kv_heads, self.head_dim),
+                        v.view(num_tokens, self.num_kv_heads, self.head_dim),
+                        self.attn.layer_name,
+                    )
                 unified_attention_with_output(
                     q.view(num_tokens, self.num_heads, self.head_dim),
                     k.view(num_tokens, self.num_kv_heads, self.head_dim),
@@ -450,6 +465,7 @@ class FlintAttention(nn.Module):
                     attn_output.view(num_tokens, self.num_heads,
                                      self.head_dim),
                     self.attn.layer_name,
+                    kv_cache_dummy_dep=kv_dep,
                 )
             if os.environ.get("VLLM_FLINT_DBG_OUT") and not getattr(
                     self, "_dbg_out_done", False):
