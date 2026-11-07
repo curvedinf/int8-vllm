@@ -730,3 +730,24 @@ BOTH set (skip attn AND mlp) run once: if depth0 NLL == embed-only
 maybe hiddens only become predictive after MORE context/the full
 stack, and the true end-to-end NLL ~25-30 IS the bug surface);
 (2) serving-model hidden dump at depths 0,1,2,48 vs sweep_states.
+
+## TURN 19 (2026-11-07 ~15:3x): flat curve is BASELINE, not the bug
+
+Skip-BOTH L0 control: depth0 NLL 47.05 == CPU embed+finalnorm+head
+baseline (47.04) — the flat ~44-47 decay curve is just the embed
+readout baseline (mid-layer probes are UNINFORMATIVE-BY-BASELINE in
+this arch). NOT diagnostic. Rope table verified numerically OK (exact
+<=1024; 1e-3 fp32 noise only at pos 100k).
+THE REAL SIGNAL: depth-48 NLL 24.9 vs uniform 11.9 vs expected ~2.5 —
+the full stack actively destroys next-token info. Residual rms growth
+0.11->2.8 looks healthy. Everything per-component verified.
+=> NEXT (fresh session): serving-model hidden dump at depth 48 (and
+0,1,2) on the SAME window vs sweep_states — the last un-done
+differential. If they MATCH, the bug is shared and upstream-of-both
+(e.g., a checkpoint interpretation both get wrong — try transposed
+o_proj/down_proj conventions [verified shapes forbid it], negative
+sink sign, k_norm applied post-rope, or a Qwen3-style ATTENTION
+OUTPUT scaling). If they DIFFER, the saner side wins and localizes.
+ALSO: quick corpus sanity — feed the teacher a MEMORABLE sentence and
+greedy-argmax a few tokens (is ANY local structure predicted? e.g.
+repeated headers) to see whether SOME contexts work.
