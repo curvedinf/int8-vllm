@@ -294,10 +294,47 @@ engine extras + serve recipe C8 (fork Flint ROCm path exists: sinks/
 SWA on unified attention, eager qk-norm+rope — commit 8ce35980d1;
 remaining: MoE int8 route, GPTQ loader wiring, serve script).
 
-Env for ALL trainer runs: PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
-ROCM_PATH=/opt/rocm LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH
-MALLOC_ARENA_MAX=2 PYTHONPATH=$PWD/scripts:$PWD. Smoke cmd pattern in
-/tmp/ptqr_g20.log header. Ports cycled to 29896; next 29897+.
+## QUALITY BLOCKER (2026-11-07 08:0x) — trainer semantics vs real ckpt
+
+g22: the FULL PIPELINE IS GREEN mechanically (KD cache 302s incl warm;
+step 0 trains: loss 92.48 ce 74.75 kd 8.86 all ranks identical; cached
+eval works: kld 30.3; per-rank checkpoint save works). BUT teacher_nll
+85.6 — the TEACHER's own logits are garbage: row0 max -14.3 min -221
+std 20, top1 acc 0 at any lag (probe on kdcache/train_0.pt). Even
+uniform logits would give NLL ~11.9. The earlier 4-expert smoke
+(resident teacher from FULL ckpt, loss 323) was the same class —
+so the bug is in FlintRef/StreamedFlintTeacher SEMANTICS on the real
+checkpoint, NOT in streaming. The tiny-config checks were CIRCULAR:
+teacher vs resident implement the same (wrong) semantics, and tiny
+sinks are ZEROS (init) — the sink path was never exercised.
+
+DECISIVE GATE (next session, do FIRST): ground-truth the trainer
+forward against UPSTREAM vLLM Flint (merged v0.33.0 model.py) on the
+real checkpoint — TP4 offline LLM generate (37-token prompt): coherent
+text ⇒ serving path right + trainer semantics wrong. Then diff layer
+outputs: run the serving model's first N layers vs FlintRef on the
+same ids (or bisect per-layer hidden norms in a sweep_states pass
+looking for the explosion point — layer-0 output norm vs expected).
+
+Audit list (real-vs-tiny differences, in suspicion order):
+1. sinks: real learned values (tiny zeros); check sink INDEXING by
+   head under TP (kv-head-group order) and add-point (scores post-scale
+   pre-mask matches the CUDA kernel's virtual-key semantics — verified
+   in form, NOT in the real values' scale: are softmax_offset values
+   sane? print them from the ckpt).
+2. layer_types/no_rope lists: 14 full-attn layers = no_rope indices
+   [0,1,5,9,...,48]; verify against config exactly.
+3. dense layers [0,1] vs MoE; inter 6144; shared 1024; moe 512.
+4. router: sigmoid + top6 renorm (norm_topk_prob).
+5. rope theta 1e4, tables [262144, 64] fp32; hd 128; 32Q/4KV.
+6. embed/lm vocab slicing + gather.
+7. q/k norm per-head [128] pre-rope.
+Also print real softmax_offset stats + a real config cross-check
+(load_flint_config vs the HF config.json keys — esp. any field the
+SimpleNamespace misses, e.g. attention_bias, tie_word_embeddings).
+
+Everything else is in place: once semantics are fixed + smoke re-runs,
+launch rung 1 (scripts/ptqr_flint_rungs.sh 1).
 
 Draft port committed (a99b184ccf): ptqr_flint_draft_cache.py (sweep_
 states, exits from the DRAFT's dflash_config) + ptqr_train_draft_
