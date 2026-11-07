@@ -643,3 +643,30 @@ one of them should dominate; and verify the shared expert's gate/up
 slices in the presplit against the full ckpt (only rank0 L2 verified
 so far). Serving-side oracle (vLLM) still available for hidden-dump
 comparison if needed.
+
+## TURN 16 (2026-11-07 ~14:0x): NLL-DECAY CURVE (agents/tmp/nll_decay.py)
+
+Teacher sweep_states, exits at ALL 49 layer boundaries, natural-text
+window (corpus[:1025]), rank-0 final-norm+lm_head at each depth:
+NLL ~46-48 FLAT at every depth (uniform = 11.9 — hiddens are
+ANTI-informative from layer 0), rms 0.099@L0 -> 0.559@L48 (residual
+barely grows; last 6 layers do the only writing: NLL 51->30, rms
+0.25->0.56). Depth-48 NLL 30 on this window (window-dependent 9-30).
+INTERPRETATION: hiddens carry ~no token info from the very first
+layer, and true tokens get LARGE NEGATIVE logits — sign/inversion-
+class error affecting everything, not a per-layer MoE bug. Since
+attention semantics + all weight slices are verified, the prime
+remaining suspects are SHARED-BY-BOTH-paths assumptions: (1) the
+fused qkv ROW ORDER (q|k|v assumed; HF could store interleaved per-
+head q/k/v — CHECK by verifying qkv block structure: q rows should
+have per-head norm-scale patterns matching q_norm); (2) rope table
+INDEXING on real positions (cos built for max_pos 262144; verify a
+few rotations numerically vs formula); (3) embed row order. NEXT
+(fresh session): (a) in-process serving-model per-layer hidden dump
+on the SAME window vs sweep_states (the serving boot works; A/B at
+layer 0-2 localizes shared-vs-unique bugs); (b) if shared: dump the
+vendor sglang wheel's attention forward (already unzipped at
+/tmp/flint_sglang_src) for the qkv split order and rope details vs
+mine. NOTE the flat curve says probing MID layers was uninformative
+because hiddens never carry info — the bug is at or before layer 0's
+INPUT: embed lookup, positions, or the qkv projection feeding it.
