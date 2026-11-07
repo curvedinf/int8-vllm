@@ -1005,3 +1005,19 @@ TP4, same sharding, in one job — if THEY differ, the bug is in my
 teacher's sweep/staging; if equal, both share a semantic divergence
 from upstream that survived inspection). (d) is runnable NOW and is
 the next session's first action.
+
+## TURN 31 (2026-11-07 ~19:3x): staging A/B in flight
+
+agents/tmp/decisive_ab.py (rewritten): two StreamedFlintTeachers in
+one 4-rank job — t(presplit+pread) vs t2(FULL-ckpt mmap path), same
+ids (seed 7, 64 tok), _TP_STATE set, per-layer [0,1,2,48] state
+compare printed + /tmp/decisive.pt. First attempt (resident
+load_flint_shards) died on a known full-ckpt indexing quirk
+(experts.91.up_proj). The t2 sweep uses the mmap full-tensor path =
+known slow crawl (each rank reads every tensor; ~10-20 min for one
+64-tok batch) — run is in flight without timeout (bash-0ffc4lhb),
+verdict lands in /tmp/decisive2.log. INTERPRETATION GUIDE: presplit
+!= full => pread/staging bug (fix, re-gate NLL); equal => staging
+fine, divergence is in shared _apply_layer semantics vs upstream —
+then the comparison target is upstream-on-NVIDIA (user help) since
+fork serving (stock-layer TP4 path) is unvalidated upstream anyway.
