@@ -751,3 +751,23 @@ OUTPUT scaling). If they DIFFER, the saner side wins and localizes.
 ALSO: quick corpus sanity — feed the teacher a MEMORABLE sentence and
 greedy-argmax a few tokens (is ANY local structure predicted? e.g.
 repeated headers) to see whether SOME contexts work.
+
+## TURN 20 (2026-11-07 ~16:1x): serving hidden dump — API absent; pivot
+
+return_hidden_states does NOT exist in this fork's v1 engine
+(SamplingParams rejects it; AuxOutputConfig only routes experts).
+PIVOT for the serving-vs-teacher differential: use the sitecustomize
+import-hook (agents/tmp/worker_patch/sitecustomize.py — imports OK
+standalone; the earlier boot failure was the hook breaking vllm's
+registry import ordering — fix by hooking AFTER first model use
+instead: patch FlintDecoderLayer.forward inside the hook to (a) print
+per-layer hidden rms for the first forward, (b) torch.save layer
+0/1/2/48 hiddens to /tmp/serving_states_r{rank}.pt on the LAST
+prefill chunk — then compare vs /tmp/teacher_states_r0.pt (teacher
+capture of exits [0,1,2,48] on the same window already wired in
+agents/tmp/nll_decay.py, NOT yet run — run it first, 4-rank, ~6 min).
+Teacher logits on this window: NLL 24.9 (depth 48). Compare per-layer
+rms AND state vectors; first divergent layer = the bug (or shared
+garbage => checkpoint-interpretation class).
+The GT hidden script (scripts/flint_gt_hidden.py) kept for when the
+hook dump works.
