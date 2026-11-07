@@ -188,7 +188,7 @@ Full-run blockers remaining: layer-streamed teacher (20GB/rank bf16 x4
 OOMs 61GB host + won't fit 32GB MI100 alongside student), then rung
 ladder + gates.
 
-## FULL-EXPERT RUNG-0 DEBUG LEDGER (2026-11-07 03:4x, near-green)
+## FULL-EXPERT RUNG-0 DEBUG LEDGER (2026-11-07, CLOSED)
 
 The full-expert streamed TP4 run now COMPLETES the entire build phase on
 GPU (swap #6208 at 6.6G alloc — masters freed as replaced). Fix trail
@@ -199,10 +199,27 @@ asymmetry); replace_linears_with_ptqr collects (parent,attr) targets
 (list(named_modules) pinned every old linear: old+new masters 37G).
 SIGUSR1 faulthandler armed in the trainer for future stack dumps.
 
-REMAINING (next session, one bug): first training forward fails
-"mat1 and mat2 shapes cannot be multiplied (1024x2048 and 256x2048)" —
-mat2 256x2048 is the ROUTER-shaped tensor at seq 1024; not the streamed
-teacher (it uses F.linear); inspect MoeRef.forward / PTQRLinear grouped
-path on the real cfg (tiny + 4-expert smokes pass; only full 256-expert
-cfg + real shapes hit it). Probe: run 1 fwd on rank0 solo after build
-with student.cpu() copy to inspect per-module weight shapes vs cfg.
+FORWARD SHAPE BUG (g10/g11, root-caused 2026-11-07 ~03:35): "mat1 and
+mat2 shapes cannot be multiplied (1024x2048 and 256x2048)" at the FIRST
+qkv forward. PTQR_SHAPE_AUDIT=1 dump (trainer env flag, writes
+/tmp/ptqr_audit_rN.txt pre-loop) showed ALL 6213 PTQRLinears with
+w=(2048,256) s=(2048,2) — every swapped linear cloned ONE tensor:
+layers.48.mlp.shared.down (the last nn.Linear visited by the collection
+loop). Cause: commit 70e81e70ff dropped `child` from the collected
+targets but left `child.weight` in the swap loop — `child` was a stale
+loop-leak binding. The 4-expert rung-0 smoke passed only because it
+predates that commit. Fix: `child = getattr(module, child_name)` in the
+swap loop. Also fixed en passant: presplit gate_up cat used `u[g:]`
+(empty slice — files on disk carry gate-only entries; the loader
+re-fetches up itself, so no regeneration needed); shard_flint_tp qkv
+PTQR branch fell through to a redundant second weight assignment (now
+properly else-scoped); save_ptqr_checkpoint vocab_range now takes
+vocab_size override (Flint shrinks lm_head rows in place; derived range
+was 4x off for export stitching). Trainer now has eval_kld_flint
+(tau=0 held-out KLD + teacher NLL, token-chunked) and
+save_ptqr_checkpoint wiring (save_every + final).
+
+Status: g12 (full-expert rung-0, 3 steps, seq 1024, --rank_shards) —
+audit shapes verified correct (qkv [1280,2048], 3107x2048/3008x512/
+49x1024/47x256/2x1536 class counts all match); 3-step green check
+pending at ledger-write time.

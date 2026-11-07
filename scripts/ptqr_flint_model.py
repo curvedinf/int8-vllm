@@ -530,11 +530,11 @@ def shard_flint_tp(model: FlintRef, world: int, rank: int, group=None) -> None:
             qkv_w = att.qkv.weight.data
             q, k, v = qkv_w.split(
                 [att.q_size, att.kv_size, att.kv_size], dim=0)
-        att.qkv.weight = nn.Parameter(torch.cat([
-            q[h0 * att.head_dim:(h0 + qh) * att.head_dim],
-            k[rank * kvh * att.head_dim:(rank + 1) * kvh * att.head_dim],
-            v[rank * kvh * att.head_dim:(rank + 1) * kvh * att.head_dim],
-        ], dim=0).contiguous())
+            att.qkv.weight = nn.Parameter(torch.cat([
+                q[h0 * att.head_dim:(h0 + qh) * att.head_dim],
+                k[rank * kvh * att.head_dim:(rank + 1) * kvh * att.head_dim],
+                v[rank * kvh * att.head_dim:(rank + 1) * kvh * att.head_dim],
+            ], dim=0).contiguous())
         att.num_heads, att.num_kv = qh, kvh
         att.q_size, att.kv_size = qh * att.head_dim, kvh * att.head_dim
         att.sink = nn.Parameter(att.sink.data[h0:h0 + qh].clone())
@@ -1086,9 +1086,8 @@ def presplit_flint_shards(ckpt_dir: str, out_root: str, world: int) -> list[str]
                             buf[name] = t  # router, full
                         elif name.endswith("gate_proj.weight"):
                             u = sf.get_tensor(name.replace("gate_proj", "up_proj"))
-                            g = t.shape[0]
                             buf[name] = _torch.cat(
-                                [t[:g][a0:a1], u[g:][a0:a1]], dim=0).contiguous()
+                                [t[a0:a1], u[a0:a1]], dim=0).contiguous()
                         elif name.endswith("down_proj.weight"):
                             buf[name] = t[:, a0:a1].contiguous()
                         else:

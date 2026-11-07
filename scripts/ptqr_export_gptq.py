@@ -40,7 +40,8 @@ def _is_row_parallel(name: str) -> bool:
 def load_rank_shards(ckpt_dir: Path, step: int, world: int):
     shards = []
     for r in range(world):
-        p = ckpt_dir / f"ptqr_target_step{step}_rank{r}.pt"
+        suffix = f"_rank{r}" if world > 1 else ""
+        p = ckpt_dir / f"ptqr_target_step{step}{suffix}.pt"
         if not p.exists():
             raise FileNotFoundError(p)
         # mmap keeps the shards file-backed (page cache) — the eager load

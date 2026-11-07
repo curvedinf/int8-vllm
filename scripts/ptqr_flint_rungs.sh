@@ -7,6 +7,7 @@ cd "$(dirname "$0")/.."
 RUNG="${1:?usage: ptqr_flint_rungs.sh <rung> [args...]}"
 shift || true
 MODEL=/home/curved/models/flint-bf16
+SHARDS=/home/curved/models/flint-bf16-rankshards
 DATA=/home/curved/SDGraft/data
 OUT=/home/curved/models/flint-ptqr-r${RUNG}
 STEPS=(60 120 200)
@@ -20,6 +21,7 @@ export OMP_NUM_THREADS=4
 exec .venv/bin/python -m torch.distributed.run --nproc_per_node=4 \
   --master_port=2984${RUNG} scripts/ptqr_train_flint.py \
   --model "${MODEL}" --teacher_stream \
+  --rank_shards "${SHARDS}" \
   --data_dir "${DATA}" --data_name flint_longctx/train_tokens.pt \
   --val_name flint_longctx/val_tokens.pt \
   --seq_len 2048 --batch_size 1 \

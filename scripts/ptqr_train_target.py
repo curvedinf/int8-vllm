@@ -337,6 +337,11 @@ def replace_linears_with_ptqr(model: nn.Module, group: int = 128,
                 print(f"[swap #{_n}] cuda alloc="
                       f"{torch.cuda.memory_allocated()/2**30:.1f}G",
                       flush=True)
+            # re-fetch the child: `child` from the collection loop is a
+            # stale binding (the last visited child), which once made every
+            # PTQRLinear clone one shared weight ([2048,256] everywhere —
+            # the full-expert forward shape bug)
+            child = getattr(module, child_name)
             is_head = child_name == "lm_head"
             pq = PTQRLinear(child.weight,
                             group=child.weight.shape[1] if is_head else group,
@@ -1633,18 +1638,22 @@ def main():
 
 
 def save_ptqr_checkpoint(model, replaced, out_dir: Path, step: int, args,
-                         rank: int = 0, world: int = 1):
+                         rank: int = 0, world: int = 1,
+                         vocab_size: int | None = None):
     """Save this rank's shard of masters + scales (stripped-key form).
 
     Under TP each rank holds only its slices; the export step (Phase 3)
     stitches using the deterministic shard geometry (attention/GDN adapters +
     the MLP/vocab ranges recomputed from config). The vocab/intermediate
     ranges are recorded here so stitching never has to guess.
+    vocab_size: FULL vocab when the live lm_head is row-shrunk (Flint shard
+    shrinks lm_head rows in place; deriving it from lm_head then records a
+    range over the per-rank rows — 4x off, corrupting export stitching).
     """
     sd = model.state_dict()
     remap = { (k[len("model."):] if k.startswith("model.") else k): v
               for k, v in sd.items() }
-    vocab = model.lm_head.weight.shape[0]
+    vocab = vocab_size or model.lm_head.weight.shape[0]
     ckpt = {"model_state_dict": remap, "step": step, "rank": rank, "world": world,
             "vocab_range": _vocab_ranges(vocab, world)[rank] if world > 1 else (0, vocab),
             "args": {a: getattr(args, a) for a in

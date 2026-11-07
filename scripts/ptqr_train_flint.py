@@ -41,9 +41,11 @@ try:
 except (AttributeError, ValueError):
     pass
 import copy
+import itertools
 import math
 import os
 import sys
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -64,6 +66,7 @@ from ptqr_train_target import (  # noqa: E402
     fake_quant_embedding_,
     kv_block_quant_fake,
     replace_linears_with_ptqr,
+    save_ptqr_checkpoint,
 )
 
 # Modules never quantized (bf16 exceptions per Qwen/Bolt findings + norms):
@@ -103,6 +106,47 @@ def _apply_kv_fake(att, k: torch.Tensor) -> torch.Tensor:
     if g is None:
         return k
     return kv_block_quant_fake(k, group=g)
+
+
+@torch.no_grad()
+def eval_kld_flint(student, teacher, val_iter, steps: int, chunk: int = 256):
+    """Held-out KLD vs the BF16 teacher at tau=0 (the judge metric).
+
+    Flint variant of eval_kld: FlintRef returns full fp32 logits directly,
+    so KLD/teacher-NLL run chunked over tokens (vocab 150144 makes a full
+    [S, V] fp32 pair ~2.4 GB; chunks keep the transient at ~0.6 GB).
+    """
+    taus = [(m, m.tau) for m in student.modules()
+            if m.__class__.__name__ == "PTQRLinear"]
+    for m, _ in taus:
+        m.tau = 0.0
+    was_training = student.training
+    student.eval()
+    kl_sum = 0.0
+    lm_sum = 0.0
+    n_tok = 0
+    for x, y in itertools.islice(val_iter, steps):
+        x, y = x.cuda(), y.cuda()
+        logits_s = student(x).float()
+        logits_t = teacher(x).float()
+        y_flat = y.reshape(-1)
+        s_flat = logits_s.reshape(-1, logits_s.shape[-1])
+        t_flat = logits_t.reshape(-1, logits_t.shape[-1])
+        for j in range(0, y_flat.numel(), chunk):
+            sl = slice(j, j + chunk)
+            lp_s = F.log_softmax(s_flat[sl], dim=-1)
+            p_t = F.softmax(t_flat[sl], dim=-1)
+            kl_sum += F.kl_div(lp_s, p_t, reduction="sum").item()
+            lm_sum += F.cross_entropy(
+                t_flat[sl], y_flat[sl], reduction="sum").item()
+        n_tok += y_flat.numel()
+    if was_training:
+        student.train()
+    for m, t in taus:
+        m.tau = t
+    if n_tok == 0:
+        return float("nan"), float("nan")
+    return kl_sum / n_tok, lm_sum / n_tok
 
 
 def main():
@@ -295,6 +339,21 @@ def main():
         attach_weight_sgd_hooks(replaced, lr=args.lr,
                                 scale_lr=args.lr * args.scale_lr_mult)
 
+    if os.environ.get("PTQR_SHAPE_AUDIT"):
+        # full-expert forward shape-bug hunt: dump every linear-ish module's
+        # weight shape so a wrong-shaped master is visible pre-forward
+        r = dist.get_rank() if dist.is_initialized() else 0
+        with open(f"/tmp/ptqr_audit_r{r}.txt", "w") as f:
+            f.write(f"cfg: {vars(student.cfg)}\n")
+            f.write(f"n_lin: {n_lin}\n")
+            for n, m in student.named_modules():
+                cn = m.__class__.__name__
+                if cn == "PTQRLinear":
+                    f.write(f"{n} PTQR w={tuple(m.weight.shape)} "
+                            f"s={tuple(m.scale.shape)} g={m.group}\n")
+                elif hasattr(m, "weight"):
+                    f.write(f"{n} {cn} w={tuple(m.weight.shape)}\n")
+
     data_path = os.path.join(args.data_dir, args.data_name)
     val_path = os.path.join(args.data_dir, args.val_name)
     train_iter = build_dataloader(data_path, args.seq_len, args.batch_size,
@@ -335,10 +394,25 @@ def main():
             if step % 10 == 0:
                 print(f"step {step:4d} tau {tau:.4f} loss {loss.item():.4f} "
                       f"ce {ce.item():.4f} kd {kd.item():.4f}", flush=True)
+            if val_iter is not None and args.eval_every and \
+                    step % args.eval_every == 0:
+                kld, lm = eval_kld_flint(student, teacher, val_iter,
+                                         args.eval_steps)
+                if rank == 0:
+                    print(f"eval step {step:4d} kld {kld:.6f} "
+                          f"teacher_nll {lm:.4f}", flush=True)
+            if args.save_every and step % args.save_every == 0:
+                save_ptqr_checkpoint(student, replaced, Path(args.out_dir),
+                                     step, args, rank=rank, world=world,
+                                     vocab_size=teacher.cfg.vocab_size)
             step += 1
             student.zero_grad(set_to_none=True)
 
     os.makedirs(args.out_dir, exist_ok=True)
+    if replaced and step % args.save_every != 0:
+        save_ptqr_checkpoint(student, replaced, Path(args.out_dir), step,
+                             args, rank=rank, world=world,
+                             vocab_size=teacher.cfg.vocab_size)
     torch.save({"step": step, "cfg": vars(teacher.cfg) if not args.tiny else {}},
                os.path.join(args.out_dir, "train_meta.pt"))
     print("PTQR flint trainer run complete ->", args.out_dir)
