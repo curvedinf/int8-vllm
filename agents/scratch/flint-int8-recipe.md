@@ -1299,3 +1299,27 @@ removed the extra 1/sqrt(hd) on the sink in both `AttentionRef` and
 `StreamedFlintTeacher._apply_layer` (kernel folds raw `sink*log2e` into
 the scaled logits); re-measure queued. Next: SDPA+NOSINK A/B to prove
 sink essentiality.
+
+## TURN 46 (2026-11-07 ~22:0x): TRITON_ATTN == UA BITWISE — corruption is backend-independent
+
+With the scheduler fix, `attention_backend="TRITON_ATTN"` booted cleanly
+("Using TRITON_ATTN backend (selected via --attention-backend)",
+rocm.py:889; PREFIX_FAIR=1 + SHORT_PREFILL_COHORT=1 exercised) and the
+matched-window NLL is **25.982864781031534 — bitwise identical to UA**
+(and to the older UA NOSINK/NOWIN runs). Two different attention kernels
+producing bit-identical logits means the attention output is not
+reaching the computation at all: `attn_output = torch.empty_like(q)`
+filled by `unified_attention_with_output` is the prime suspect (impl
+dispatch is by `self.attn.impl`, so the backend label does change);
+SDPA (which computes `out` itself and copies into attn_output) is the
+only branch that gives healthy numbers (4.74). Same signature explains
+every previous bitwise-inert toggle (NOSINK/NOWIN/eager/chunking).
+NEXT: teacher ablation `FLINT_ABLATE=attn_zero` (all attention
+contributions zeroed) — if it lands ~25.98 on the same window, the
+serving helper call is effectively returning zeros; then instrument
+`attn_output.abs().max()` right after `unified_attention_with_output`
+in the model (env-gated) to confirm and locate the real culprit.
+Also: env-injection mystery resurfaces — `VLLM_BOLT_SHORT_PREFILL_COHORT`
+and `VLLM_GFX908_PREFIX_FAIR_ADMISSION` were SET in engine workers even
+though the launching shell had no VLLM_* vars; same class as the open
+`VLLM_GFX908_RESIDUAL_INT8` mystery in upstream-v0330-merge.md.
