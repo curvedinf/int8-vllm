@@ -1148,3 +1148,16 @@ ONE run. (3) Then the teacher gate (8-25 by content; needs 2-4) and
 launch rung 1.
 STATE: all code committed; probes in agents/tmp (gitignored);
 serving lp saved /tmp/serving_lp{,_fp32rope}.pt; teacher /tmp/teacher_lp.pt.
+
+## TURN 38 (2026-11-08): GOAL EXTENDED — Qwen27B + Bolt quality checks
+
+New user requirement: "full quality checks on Qwen 27B and Bolt
+configured according to the recipes before finishing." Scope to be
+derived from docs/recipes/README.md (the canonical baseline) — see
+next turns; likely: boot each recipe's serve script, run its
+coherence + acceptance/KLD gates, record results (ledger rows
+per the A/B doctrine). Do NOT finish the goal without this.
+Also this turn: VLLM_FLINT_SDPA debug branch added (plain masked
+attention, no KV write — isolates AITER UA vs model semantics);
+import os fixed (worker NameError); eager/no-chunked-prefill serving
+rerun in flight (gt_lp8).
