@@ -1252,6 +1252,8 @@ class StreamedFlintTeacher(nn.Module):
         out = torch.matmul(attn[..., :S].to(v_.dtype), v_) \
             .permute(0, 2, 1, 3).reshape(B, S, qh * hd)
         attn_out = torch.nn.functional.linear(out, W["o"])  # partial [B, S, H]
+        if li == 0 and os.environ.get("FLINT_SKIP0") == "attn":
+            attn_out = torch.zeros_like(attn_out)  # bisect: skip L0 attn
         _dbg = os.environ.get("FLINT_DBG_LAYER")
         if _dbg is not None and li == int(_dbg):
             ar = attn_out.float().pow(2).mean().sqrt().item()
@@ -1268,6 +1270,8 @@ class StreamedFlintTeacher(nn.Module):
         xn2 = self._rms(x, W["w_post"])
         if li in self._mlp_only:
             mlp_part = self._mlp_dense(xn2, W["dense"])
+            if li == 0 and os.environ.get("FLINT_SKIP0") == "mlp":
+                mlp_part = torch.zeros_like(mlp_part)  # bisect: skip L0 mlp
             # dense-MLP partials MUST all-reduce (each rank holds one
             # intermediate slice); FLINT_NO_DENSE_SUM=1 disables for A/B
             if os.environ.get("FLINT_NO_DENSE_SUM"):

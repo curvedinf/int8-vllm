@@ -699,3 +699,34 @@ Also cheap to try: SKIP attention entirely at L0 (identity attn) in
 the probe — if depth-0 NLL becomes ~12 (uniform-ish, informative
 embed), the corruption is inside the attention block; likewise skip
 MLP.
+
+## TURN 18 (2026-11-07 ~15:1x): skip-bisect + embed/head exonerated
+
+FLINT_SKIP0 bisect (exits [0,1], natural window, reduced):
+  skip L0 attention: depth0 NLL 46.9 rms 0.109 (=embed+MLP only)
+  skip L0 MLP:       depth0 NLL 45.8 rms 0.061
+  => BOTH components individually skippable and NLL stays ~46:
+     neither block alone causes it; the anti-informativeness appears
+     as soon as ANY trained transform touches the embed.
+CPU probes (no GPU needed): raw embed -> lm_head NLL 12.85 (sane,
+~uniform — embed/lm_head alignment FINE, cos(embed,lm rows) ~0 as
+expected untied); embed + final-norm(w*x) -> NLL 47.0; (1+w) -> 110.
+Norm weight stats: final-norm w in [0.007,1.77] mean 0.71; L0
+input_layernorm w in [1.2,11.3] mean 4.25 (gains >1 — plausible
+trained, but high). mid-layer hiddens through final-norm+head giving
+44+ at EVERY depth remains the signature.
+=> The remaining space: something EVERY layer does. Per-layer:
+rmsnorm(w*x verified vs kernel), attn (verified vs vendor+kernel),
+rope (neox, theta 1e4, tables built fresh — VERIFY numerically vs
+formula on a few positions!), mlp/moe (verified). NEXT (fresh):
+(1) numeric rope-table check (cos/sin vs closed form at pos 0,1,513,
+1024) — a wrong inv_freq (e.g., computed with float32 arange bug or
+262144-length truncation) corrupts EVERY sliding layer while no-rope
+full-attn layers 0/1 should then be CLEAN — but depth-0 NLL 44
+contradicts... unless the anomaly at L0 is different: with FLINT_SKIP0
+BOTH set (skip attn AND mlp) run once: if depth0 NLL == embed-only
+(47) then layer 0 was NEVER the problem and the flat curve is just
+"uninformative hiddens" at all depths (which changes interpretation:
+maybe hiddens only become predictive after MORE context/the full
+stack, and the true end-to-end NLL ~25-30 IS the bug surface);
+(2) serving-model hidden dump at depths 0,1,2,48 vs sweep_states.
