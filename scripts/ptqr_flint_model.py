@@ -826,8 +826,17 @@ class StreamedFlintTeacher(nn.Module):
 
         self.cfg, self.world, self.rank, self.device = cfg, world, rank, device
         self.dtype = dtype
-        idx_path = os.path.join(ckpt_dir, "model.safetensors.index.json")
-        self.weight_map = json.load(open(idx_path))["weight_map"]
+        shard = os.path.join(ckpt_dir, f"rank{rank}.safetensors")
+        if os.path.exists(shard):  # presplit dir: single-file weight map
+            from safetensors import safe_open as _so
+
+            with _so(shard, framework="pt", device="cpu") as _sf:
+                names = list(_sf.keys())
+            self.weight_map = {n: f"rank{rank}.safetensors" for n in names}
+        else:
+            idx_path = os.path.join(ckpt_dir,
+                                    "model.safetensors.index.json")
+            self.weight_map = json.load(open(idx_path))["weight_map"]
         self.ckpt_dir = ckpt_dir
         self._handles: dict[str, object] = {}
 
