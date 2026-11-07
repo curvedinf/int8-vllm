@@ -267,7 +267,7 @@ def main():
             replace_linears_with_ptqr as _swap,
         )
         replaced = _swap(student, group=args.weight_group,
-                         skip=_collect_skip_names(student))
+                         skip=_collect_skip_names(student), mem_probe=True)
         _fqe(student.embed)
         for m in student.modules():
             if m.__class__.__name__ == "AttentionRef":

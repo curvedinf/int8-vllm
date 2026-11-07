@@ -309,7 +309,8 @@ class PTQRLinear(nn.Module):
 
 
 def replace_linears_with_ptqr(model: nn.Module, group: int = 128,
-                              skip: set[str] | None = None) -> dict[str, PTQRLinear]:
+                              skip: set[str] | None = None,
+                              mem_probe: bool = False) -> dict[str, PTQRLinear]:
     """Swap every nn.Linear (except skipped names) for a PTQRLinear.
 
     The untied LM head gets the DEPLOYED per-channel contract (one scale per
@@ -318,11 +319,18 @@ def replace_linears_with_ptqr(model: nn.Module, group: int = 128,
     """
     skip = skip or set()
     replaced: dict[str, PTQRLinear] = {}
+    _n = 0
+    import os as _os
     for name, module in list(model.named_modules()):
         for child_name, child in list(module.named_children()):
             full = f"{name}.{child_name}" if name else child_name
             if full in skip or not isinstance(child, nn.Linear):
                 continue
+            if mem_probe and _n % 64 == 0 and "cuda" in str(next(
+                    model.parameters()).device):
+                print(f"[swap #{_n}] cuda alloc="
+                      f"{torch.cuda.memory_allocated()/2**30:.1f}G",
+                      flush=True)
             is_head = child_name == "lm_head"
             pq = PTQRLinear(child.weight,
                             group=child.weight.shape[1] if is_head else group,
@@ -330,6 +338,7 @@ def replace_linears_with_ptqr(model: nn.Module, group: int = 128,
             pq.quant_input = True
             setattr(module, child_name, pq)
             replaced[full] = pq
+            _n += 1
     return replaced
 
 
