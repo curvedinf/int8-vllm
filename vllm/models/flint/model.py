@@ -732,8 +732,25 @@ class FlintModel(nn.Module):
                 else self.embed_input_ids(input_ids)
             )
             residual = None
-        for layer in self.layers[self.start_layer : self.end_layer]:
+        _dump = os.environ.get("VLLM_FLINT_HIDDEN_DUMP")
+        _do = bool(_dump) and not getattr(self, "_hidden_dumped", False)
+        if _do:
+            try:
+                _do = get_forward_context().attn_metadata is not None
+            except Exception:  # noqa: BLE001 - debug only
+                _do = False
+        for _li, layer in enumerate(
+                self.layers[self.start_layer : self.end_layer]):
             hidden_states, residual = layer(positions, hidden_states, residual)
+            if _do:
+                import torch.distributed as _dist
+                if not _dist.is_initialized() or _dist.get_rank() == 0:
+                    _full = (hidden_states if residual is None
+                             else hidden_states + residual)
+                    torch.save(_full.detach().float().cpu(),
+                               f"{_dump}.{_li}.pt")
+        if _do:
+            self._hidden_dumped = True
         if self.end_layer != len(self.layers):
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}

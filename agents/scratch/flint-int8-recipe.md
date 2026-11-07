@@ -1384,3 +1384,16 @@ profile passes (4 lines for layer 0), not the generate step.
 Follow-ups queued: W=1024 long-window run (UA previously hung there),
 teacher re-measure with fp32-table rope (10.18 -> ? expected ~4.7),
 then the KD gate and rung ladder.
+
+## TURN 50 (2026-11-07 ~22:3x): 1024-token UA works — NLL 1.39 (hang gone)
+
+Same fixed stack, W=1024 prompt: **SERVING NLL 1.3898**, no hang (UA at
+1024 previously stalled >15 min at 0% prefill on the zero-cache path).
+64-token 4.66 / 1024-token 1.39 are healthy levels; window 513 and
+block-64 cache paths are exercised. The serving saga (turns 34-49) is
+closed: one missing `unified_kv_cache_update` call.
+Remaining: the TEACHER is now the odd one out — 10.09 at the same 64
+tokens (fp32 rope + raw sinks, both corrections in) and ~10.1 for the
+first 63 of a 1024 window, vs serving 4.66/1.39. Teacher hidden-state
+dump (sweep_states, exits=0..48) running now; serving hidden dump next;
+per-layer RMS/corr comparison will name the first divergent layer.
