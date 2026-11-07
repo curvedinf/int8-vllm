@@ -8,6 +8,7 @@ sliding-window/full attention (full layers use no RoPE), dense SwiGLU MLPs on
 ungated shared expert.
 """
 
+import os
 from collections.abc import Iterable
 
 import torch
