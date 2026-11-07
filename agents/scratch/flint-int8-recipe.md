@@ -426,3 +426,42 @@ fix UA sink path; teacher's remaining bug (NLL 13.8) is separate but
 likely the same area. Teacher candidates left: none by inspection —
 if GT12 implicates sinks, re-audit how the FORK UA consumes sinks vs
 the reference and mirror whatever divergence exists in the teacher.
+
+## MEASUREMENT BUG FOUND + VENDOR REFERENCE (turn 8, 2026-11-07 10:2x)
+
+CRITICAL: build_dataloader SHUFFLES UNSEEDED — every standalone teacher-
+NLL probe compared cached logits against a DIFFERENT random window. All
+pre-g25 NLL numbers were INVALID. Fixed: _precache now stores {"logits",
+"y"} per batch (training pairing was always correct). g25 re-measured:
+teacher NLL 10.9999, top1 3.2% — STILL broken (healthy ~2-4/>25%).
+
+Vendor oracle: RecursiveSI/flint ships sglang/flint_sglang-0.1.4 wheel
+(unzipped at /tmp/flint_sglang_src — source-only, no install). Its
+model.py CONFIRMS every semantic I implemented: standard RMSNorm
+(Qwen3Moe base), qk-norm -> rope(unless skip_rope = layer in
+no_rope_layer_indices) -> attention w/ sinks; sigmoid top-6
+(scores+bias, bias zeros when absent) renormalize; ungated shared
+expert added AFTER routed output; window = config-1 in sglang units ==
+my inclusive-513 mask. Nothing left to misread by inspection.
+
+Presplit files FULLY re-verified byte-exact (lm_head/embed/final_norm +
+qkv/o for L0,1,25,48 across all 4 ranks). Serving garbage (NLL 20.4)
+is deterministic across backends; sink-dead test still pending (needs
+worker-side patch — sitecustomize import hook broke boot (registry
+ordering); GT script now has a generic recursive module search, but TP
+workers are separate processes even with V1 multiprocessing off).
+
+HYPOTHESES (ranked, next session):
+1. Both impls derive from the same READING — but vendor matches that
+   reading, so a shared misreading is unlikely now. Instead suspect
+   REAL-SCALE mechanics the tiny checks can't see: per-rank kvh=1 GQA
+   repeat, window 513, real sink VALUES in the virtual-key cat, or the
+   sweep's tp_sum ordering at 4 ranks with real shapes.
+2. Teacher ablation sweep (cheap, one 12-min GPU cycle each): disable
+   sinks / window / rope / invert no_rope; watch NLL. A collapse to
+   ~3-5 localizes the broken primitive.
+3. Serving-side per-layer hidden dump (in-process mode works; GT15
+   reached generation) vs teacher sweep_states on the same ids — first
+   diverging layer pinpoints the shared bug.
+4. Check chunked prefill/window interaction in serving (UA prefill
+   window semantics) separately if teacher-side ablation finds nothing.
