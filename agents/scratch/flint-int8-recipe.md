@@ -771,3 +771,25 @@ rms AND state vectors; first divergent layer = the bug (or shared
 garbage => checkpoint-interpretation class).
 The GT hidden script (scripts/flint_gt_hidden.py) kept for when the
 hook dump works.
+
+## TURN 21 (2026-11-07 ~16:5x): serving-vs-teacher FIRST differential
+
+Worker-side serving dump WORKED at runtime ([serve L] prints): layer
+rms L0 0.0202 / L1 0.0042 / L2 0.0011 — the serving model's residual
+COLLAPSES through the dense layers almost exactly like the teacher's
+(0.0227 / 0.0069 / 0.0056). Two independent implementations agree on
+the collapse => either REAL model behavior (residual shrinks by
+design; last layers rebuild to 2.8) or a misread BOTH share. The
+saved state files came out near-zero (hook save raced dummy-run /
+graph capture overwrites) — vector-level cos/diff INCONCLUSIVE; redo
+the save keyed on the LAST forward only (flag off after first real
+prefill; skip dummy runs by checking input_ids sum or a capture count
+> 3).
+NEXT: fix the dump capture; if vectors then MATCH (cos>0.9) the two
+impls agree numerically and the bug is shared-and-upstream (top
+candidate: BOTH read layernorm weights correctly but the true model
+divides the residual by something — e.g. per-layer residual scaling
+or embed*sqrt(d) init convention — CHECK the vendor wheel's
+FlintDecoderLayer.forward residual line). If they DIVERGE at L0
+already, wire the LayerRef single-process L0 (verified equivalent
+hand-math) as the tiebreaker.
