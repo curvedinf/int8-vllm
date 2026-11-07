@@ -1150,6 +1150,10 @@ def load_flint_rank_shard(model: FlintRef, shard_path: str,
             elif ".mlp." in name or ".shared_expert." in name:
                 li = int(name.split(".")[2])
                 dense = li in (model.cfg.mlp_only_layers or [])
+                inter = (model.cfg.intermediate_size if dense
+                         else model.cfg.shared_expert_intermediate_size)
+                a0 = _TP_STATE["rank"] * inter // _TP_STATE["world"]
+                a1 = (_TP_STATE["rank"] + 1) * inter // _TP_STATE["world"]
                 if name.endswith("mlp.gate.weight"):
                     put(f"layers.{li}.mlp.router.weight", t)
                 elif name.endswith("gate_proj.weight"):
@@ -1158,7 +1162,10 @@ def load_flint_rank_shard(model: FlintRef, shard_path: str,
                     else:
                         tgt = f"layers.{li}.mlp.shared"
                     u = sf.get_tensor(name.replace("gate_proj", "up_proj"))
-                    put(f"{tgt}.gate_up.weight", torch.cat([t, u], dim=0))
+                    if u.shape[0] != a1 - a0:  # presplit stored up unsliced
+                        u = u[a0:a1]
+                    put(f"{tgt}.gate_up.weight",
+                        torch.cat([t[:a1 - a0], u], dim=0))
                 elif name.endswith("down_proj.weight"):
                     tgt = f"layers.{li}.mlp" if dense \
                         else f"layers.{li}.mlp.shared"
