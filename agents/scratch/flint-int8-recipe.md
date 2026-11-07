@@ -1453,3 +1453,17 @@ NEXT: rung 1 of scripts/ptqr_flint_rungs.sh (60 steps, lr 1e-5), KD gate
 (KLD + greedy agreement vs the bf16 teacher), then rung 2/3, draft PTQR,
 int8 engine surfaces, recipe + publish, and the Qwen27B/Bolt quality
 checks required by the objective.
+
+## TURN 54 (2026-11-07 ~23:4x): RUNG 1 LAUNCHED
+
+`scripts/ptqr_flint_rungs.sh 1` running (60 steps, lr 1e-5, seq 2048,
+kd_cache 20 default, save/eval every 20, out models/flint-ptqr-r1).
+First launch died instantly on `set -u` + unset LD_LIBRARY_PATH (script
+bug, fixed: `${LD_LIBRARY_PATH:-}`); second was killed by the 600s
+background-tool timeout mid-KD-save (15/20 files written); third runs
+with no timeout. KD precache shape: 20 train + eval_steps val teacher
+sweeps (one sweep each, seq 2048), rank 0 spills ~615 MB/batch files
+(12.3 GB), teacher shard warm 107 s. Eval prints
+`eval step N kld ... lm ...` — that KLD vs the bf16 teacher is the
+rung-1 gate. After rung 1: rungs 2/3 chain via --init_from, then export
++ serving KLD/acceptance gates, then the draft.
