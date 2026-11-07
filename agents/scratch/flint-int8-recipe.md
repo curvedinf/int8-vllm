@@ -1021,3 +1021,23 @@ verdict lands in /tmp/decisive2.log. INTERPRETATION GUIDE: presplit
 fine, divergence is in shared _apply_layer semantics vs upstream —
 then the comparison target is upstream-on-NVIDIA (user help) since
 fork serving (stock-layer TP4 path) is unvalidated upstream anyway.
+
+## TURN 32 (2026-11-07 ~19:5x): PRESPLIT STAGING BITWISE-CLEAN
+
+decisive_ab.py (layer-0-only, same 4-rank job, _TP_STATE set):
+presplit+pread teacher vs full-checkpoint+mmap teacher, layer 0 on
+64 seed-7 tokens => max|d| 0.00000, rms 0.03022 both. Staging paths
+and presplit files FULLY exonerated. The teacher is self-consistent;
+the divergence from upstream's validated path (TP=1 + Flint kernels,
+GSM8K 0.952) is consequently in EITHER (a) my reimplementation's
+semantics (survived every inspection) or (b) TP=4 vs TP=1 itself —
+notably the stock-layer TP>1 fallback was NEVER validated upstream
+(PR 63986 fixed a startup crash for TP4/TP8 only later; the fallback
+path may be untested/broken upstream). Next session: run the fork's
+serving on the SAME 64 ids at TP4 and compare ITS prompt logprobs to
+the teacher's (already-measured serving NLL ~20 vs teacher ~25 on
+different windows — a matched-window comparison settles shared-vs-
+different quickly). If matched: both broken the same way, and the
+only remaining target is upstream TP=1 numerical comparison (user
+GPU help). If different: the fallback path is the serving bug and the
+teacher needs the same fix.
