@@ -321,9 +321,12 @@ class FlintAttention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
-            per_layer_sliding_window=config.sliding_window if is_sliding else None,
+            per_layer_sliding_window=(
+                None if os.environ.get("VLLM_FLINT_NOWIN")
+                else (config.sliding_window if is_sliding else None)),
             prefix=f"{prefix}.attn",
-            sinks=self.softmax_offset,
+            sinks=(None if os.environ.get("VLLM_FLINT_NOSINK")
+                   else self.softmax_offset),
         )
         # ROCm (gfx908 int8 fork): no FlashInfer. The AITER unified-attention
         # backend owns the KV-cache write (int8_block_g{G} quantized), sinks,
