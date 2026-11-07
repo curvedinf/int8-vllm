@@ -828,3 +828,38 @@ REMAINING HYPOTHESES (ordered):
    TEACHER was NEVER tested on BOS-prefixed natural text!! NEXT (2-min
    CPU probe): prepend 150000 (bos) to the window in nll_decay and
    rerun the NLL at depth 48. ALSO try a repeated-pattern string.
+
+## TURN 23 (2026-11-07 ~17:3x): BOS probe — no effect
+
+FLINT_BOS=150000 window: depth0/1/2 NLL 43.97/45.78/47.84 ==
+BOS-less (43.9/45.5/47.8). BOS not transformative (depth-48 line
+didn't print — probe ended early; early depths identical anyway).
+HYPOTHESIS LIST after 23 turns (all components verified vs vendor
+wheel; weights/config/tokenizer byte-verified vs HF; both my impls
+AND upstream-vLLM-on-this-fork produce garbage that AGREE with each
+other): the divergence must be in a convention ALL FOUR readers share.
+Remaining un-verified conventions: (a) qkv fused ROW ORDER inside
+q_proj? — no, separate tensors; (b) WINDOW SEMANTICS on SWA layers
+(mask inclusive/exclusive — off-by-ones degrade not destroy);
+(c) THE CHECKPOINT ITSELF may require sglang's fa4-learned-sink-fix
+patch semantics — i.e., the HF WEIGHTS were TRAINED/EXPORTED with a
+sink convention that ONLY the patched FA4 kernel implements (the
+vendor SHIPS the patch as REQUIRED: "not in any SGLang release" —
+maybe the sinks need the rescale form on the OUTPUT side: attn_out
+*= sink_rescale = exp(old_max - new_max) — a per-head OUTPUT SCALE I
+never applied!). THE SINK RESCALE AFFECTS OUTPUTS even when the sink
+term itself underflows: attn_out must be multiplied by
+exp(max(scores) - max(max(scores), sink)) when sink > score-max.
+With sinks (+2..+10 RAW units = +0.2..+0.9 scaled) vs score maxima
+~30-50, sink < max => rescale = 1 — no effect. VERDICT: not it
+either, UNLESS score maxima are small in trained nets (recheck
+actual score max stats, not assumed).
+NEXT SESSION: (1) dump actual per-head score maxima + sink values
+co-located (one layer, one window) to settle the sink-rescale
+question numerically; (2) fix the serving dump capture (last-forward
+keying) and get the L0/L48 vector cosine; (3) if both still agree and
+stay garbage, escalate to the user: four agreeing implementations on
+verified inputs suggests either the HF weights need a not-public
+serving recipe, or something in the config semantics (e.g.
+softmax_type "learnable" has additional machinery beyond the sink
+vector — check HF config docs/upstream PR #62938 discussion).
