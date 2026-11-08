@@ -2066,3 +2066,30 @@ GEMM inventory for the retune (from the dispatch code):
   per chunk. This is the primary retune target (47 layers x 2 calls/step).
 - The warning seen at boot ("not found tuned config in a8w8_tuned_gemm.csv
   ... will use default config") is the CK path missing Flint shapes.
+
+## TURN 73 (2026-11-08 ~20:2x): MOE QUANT FUSION + GEMM TUNE (slice 2)
+
+Per-layer MoE breakdown at M=96 (decode) before the change: routing 337 us,
+input quant 106 us, gate_up 293-345 us, silu+mul 23 us, silu+quant 104 us,
+down 177 us -> full _run 1114 us; x47 layers ~52 ms of the ~90 ms step.
+
+Changes (commit 64b6bcc483):
+- `group_quant_rn` (one Triton pass per 128-group) replaces the eager
+  torch quant chain: 103 -> 35 us.
+- `silu_mul_quant_rn` fuses SiLU*up + quant (strided views handled):
+  127 -> 40 us; int8 values match the old path (1-ulp fp32 scales from
+  HIP fast division; q flips 0.013% of elements).
+- gate_up tuned config (block_n=256, warps=8, stages=2, group_m=1)
+  from scripts/tune_flint_moe_gemm.py: 293 -> 253 us (-14%). The down
+  kernel's block_n=32 shrink is load-bearing; forcing 256 faults
+  (hipErrorIllegalAddress), so only leaf knobs are candidates there.
+Full _run 1114 -> 862 us (-23%).
+
+Workload impact (first run per boot; repeats hit the prefix cache, so
+A/B only on cold runs):
+- steady C12 2048/256: 188.9 -> **212.7 output tok/s** (+12.6%),
+  TTFT 7.60 -> 6.93 s, TPOT 69.3 -> 57.8 ms.
+- staggered 6+6 delay 2.0 s: 350.0 -> **456.3 tok/s** (+30.4%),
+  wall 8.78 -> 6.73 s, TPOT 89.7 -> 77.3 ms.
+Next: the routing build (337 us/layer, 15.8 ms/step) is the largest
+remaining fixed cost; then dense CK tuning and the norm/AR fusions.

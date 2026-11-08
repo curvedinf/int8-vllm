@@ -9,6 +9,10 @@ Workloads (token-id prompts, ignore_eos, greedy):
 Streams SSE so TTFT and per-token latency are measured per request.
 Reports aggregate output/prompt throughput and per-wave TTFT/TPOT.
 
+NOTE: prompts are deterministic per --seed, and the recipe enables prefix
+caching. Run each measurement once per server boot (or vary --seed) when
+comparing configurations; repeats with the same seed measure the cache.
+
 Usage:
   .venv/bin/python scripts/bench_flint_workloads.py steady --n 12
   .venv/bin/python scripts/bench_flint_workloads.py staggered --delay 2.0
