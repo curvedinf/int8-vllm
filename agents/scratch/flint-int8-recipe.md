@@ -1954,3 +1954,50 @@ grouped a8w8-blockscale MoE, int8 KV).
   Recorded as a coherence regression to investigate (candidates: the
   empty-think template convention vs the merged engine's template
   rendering; presence penalty path is untouched upstream code).
+
+## TURN 70 (2026-11-08 ~10:4x-11:4x): INT8 PTQR DRAFT + RECIPE + AIS
+
+Draft PTQR export (`scripts/ptqr_export_flint_draft.py`) — first run
+asserted on intentionally-removed `.weight` keys; the sanity check now
+allows exactly the 35 GPTQ-replaced names and asserts qweight/qzeros/
+scales exist. Export audit: 35 GPTQ linears mean dequant err 0.66 %
+(worst 0.70 %, same class as the target export), 12 bf16-grid surfaces
+0.16 %, 34 untouched tensors byte-identical to the bf16 draft
+(151 tensors, 518 MB).
+
+Draft acceptance gate (same random C8 protocol, TP4, int8 KV, NS=7,
+`vllm bench serve` 32 in/128 out, 16 reqs @ C8):
+- bf16 draft baseline: acceptance length **2.27** (rate 18.21 %),
+  TPOT 30.06 ms.
+- int8 PTQR draft: acceptance length **2.25** (rate 17.93 %),
+  TPOT 30.02 ms.
+Delta -0.02 length / -0.28 pp -> PASS (Qwen draft doctrine is +-1 pt).
+Coherent chat replies with the int8 draft.
+
+Serve recipe `scripts/serve_recipe_flint.sh` (peer to qwen38/bolt):
+TP4, C8, bf16 compute, max-model-len 262144, int8_block_g128 KV on
+target AND draft, DFlash2 NS=7, FULL_DECODE_ONLY graphs, AITER W8A8
+dense + gfx908 a8w8-blockscale experts, CUSTOM AR, reasoning parser
+qwen3, host-only API key check like the other recipes. Contract lines
+verified in the boot log: AITER unified attention, "gfx908 routed
+experts: GPTQ int8-group -> AITER grouped a8w8-blockscale (W8A8)",
+int8 KV, EAGLE3 aux layers (6,16,27,37,47), capture 100 %,
+4.36 M KV tokens (16.7x at 262k).
+
+Recipe C8 numbers (int8 target + int8 draft, random corpus):
+- 32 in / 256 out, 64 reqs @ C8: output **261.1 tok/s**, 1.02 req/s,
+  TTFT 627 ms, TPOT 27.16 ms, acceptance length 2.49 (21.3 %).
+  (Target only, same box: 171.7 tok/s -> the draft is +52 %.)
+- 2048 in / 64 out, 16 reqs @ C8: TTFT 6.20 s (~5.3k prefill tok/s),
+  TPOT 44.08 ms, acceptance length 1.67.
+
+AIS on this export is FIXED: the reported `hipFileRead InvalidValue`
+came from a stale/partial repack cache directory. Cleared it; the raw
+38.50 GiB byte gate PASSES (109,620 chunks, scripts/fs_gpu_weightcheck.py)
+and both the target and the int8 draft now load through AIS
+(`VLLM_FS_GPU=auto` is the recipe default). First boot writes the
+per-rank repack cache (41 GiB, ~15 min); later boots are HIT
+(weight load 267-283 s). Draft cache 1.1 GiB.
+Also registered `VLLM_GFX908_MOE_A8W8` in vllm/envs.py (removes the
+"unknown env var" warning) and added the one-time W8A8-expert log line
+so the startup report names the expert kernel.
