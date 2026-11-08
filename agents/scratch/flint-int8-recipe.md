@@ -1824,3 +1824,21 @@ experts for graphed serving and the W8A8 experts for eager serving
 Priorities now: (1) Qwen27B + Bolt recipe quality checks (explicit
 objective requirement, GPU-only), (2) draft PTQR, (3) flint serve recipe
 C8 + publish.
+
+## TURN 68 (2026-11-08 ~05:2x): Qwen 27B recipe QA (explicit objective requirement)
+
+Stack gates: test_int8_kv_micro PASS (prefill/decode/mixed/non-causal
+rows); battery_gfx908 **4 PASS 0 FAIL**.
+Boot: scripts/serve_recipe_qwen38.sh start (VLLM_API_KEY fallback; the
+/etc/llama key file is not readable). Startup contract printed:
+PTQR target+DFlash2 GS128; AITER W8A8/UA/custom-AR; INT8-G128 KV/fp32
+Mamba/quant-out; TP4/C6; CPU KV tier 12 GiB. Health 200; coherence OK
+("The capital of France is Paris.").
+KLD gate (kld_probe_v2 capture vs the archived SPEC_BF16 reference dump):
+median 0.016611, mean 1.6708, p95 11.11, greedy agree 30/52, 52/52
+prompts ok. CAVEAT: SPEC_BF16.npz is a 2026-09-01 capture from the
+pre-merge engine; the recorded R10S60 gate value was median 0.00694 /
+42-of-52 on same-era captures. The fresh number may be engine drift in
+the reference path or a real regression — needs a fresh same-era bf16
+reference capture to attribute (no bf16 qwen checkpoint found under
+models/ yet). 500-case soak running.
