@@ -1695,3 +1695,23 @@ v2 sink repair verified: all 49 `self_attn.softmax_offset` tensors are
 now [32] and bit-identical to the HF checkpoint (0.0 max diff). New boot
 with bf16 KV in flight; this is the first faithful int8 export of the
 rung-1 (step-40) PTQR payload.
+
+## TURN 63 (2026-11-08 ~04:0x): INT8 EXPORT HEALTHY — serving-gate KLD 0.0095
+
+With both export bugs fixed (experts by holding rank; sinks concatenated
+across head shards), the rung-1 step-40 int8 payload measures at the
+serving gate on the 1024-token val window (bf16 KV):
+
+  variant                      median KLD  mean   top1 agree  coverage  NLL(cov)
+  bf16 flint (probe floor)     0.005459    0.0404  92.6%       73.61%    1.6998
+  int8 rung-1 step40           0.009465    0.0572  90.3%       73.70%    1.7196
+
+i.e. the int8 weight stack costs ~0.004 median KLD over the serving bf16
+floor and keeps top-1 agreement within 2.3 pt — quantization-noise scale,
+well inside the qwen band (deployed GPTQ 0.0110, PTQR 0.0069 on their
+probe). The in-loop KLD (0.081 -> 0.174) was a misleading metric, as in
+the qwen program. Export lineage fixed: v2 dir + in-place sink repair =
+current faithful artifact (models/Flint-GPTQ-INT8-W8A8-GS128-PTQR-r1s40-v2).
+Remaining blockers for the recipe: int8_block_g128 KV fault on flint
+(UA, kvh=1), W8A8 for the routed experts (currently TRITON WNA16),
+then the draft, serve recipe at C8, and the Qwen/Bolt QA.
