@@ -1862,3 +1862,12 @@ Qwen bf16-reference recapture notes (2026-11-08 ~06:1x-06:4x):
   never shows this). Re-capturing with SPECOFF=1 (target-only reference)
   and the same int8 KV dtype; archive note: SPEC_BF16.npz from Sep 1 was
   a bf16 target + bf16 draft capture.
+
+Fresh-reference KLD attempt 1 (PTQR spec-on capture vs bf16 no-spec
+reference): median 0.0214, 29/52 — NOT apples-to-apples (the reference
+path was generated without spec decode, so the probe compares across
+different trajectories; the archived 0.0069/42-of-52 came from
+same-config captures). Capturing the PTQR target with SPECOFF=1 for a
+clean target-only comparison; also note the bf16 target + int8 draft NaN
+logprobs at 256-token generations is a real spec-path finding worth
+keeping (deployed PTQR target has never shown it).
