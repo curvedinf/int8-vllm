@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from copy import deepcopy
 from typing import Any
 
@@ -236,6 +237,23 @@ class AutoGPTQConfig(QuantizationConfig):
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
         if isinstance(layer, RoutedExperts):
+            from vllm.platforms.rocm import on_gfx908
+
+            if (
+                on_gfx908()
+                and os.environ.get("VLLM_GFX908_MOE_A8W8", "1") == "1"
+                and self.quant_type.size_bits == 8
+                and int(self.group_size) > 0
+                and int(self.group_size) % 128 == 0
+            ):
+                from vllm.model_executor.layers.quantization.gptq_moe_a8w8 import (  # noqa: E501
+                    A8W8BlockscaleMoEMethod,
+                )
+                moe_method = get_moe_quant_method(
+                    self, layer, prefix, A8W8BlockscaleMoEMethod
+                )
+                if moe_method is not None:
+                    return moe_method
             from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 
             if not check_moe_marlin_supports_layer(

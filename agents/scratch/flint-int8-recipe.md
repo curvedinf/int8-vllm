@@ -1787,3 +1787,21 @@ Next: FusedMoEExperts subclass + GPTQ-int8-group quant-method branch to
 load/shard/run this in the fork (weights currently arrive as GPTQ
 qweight/scales; conversion to [E,K,N] int8 + [E,K/128,N] scales is a
 per-expert unpack identical to the dense AiterW8A16 repack).
+
+## TURN 67 (2026-11-08 ~04:5x): W8A8 MoE integration written
+
+`vllm/model_executor/layers/quantization/gptq_moe_a8w8.py`:
+A8W8BlockscaleMoEMethod (AutoGPTQMoEMethod subclass for gfx908 GPTQ
+int8-group routed experts). It bypasses AutoGPTQMoEMethod.__init__ (the
+WNA16 oracle rejects int8-group configs on ROCm — "No WNA16 MoE backend
+supports the deployment configuration"), reuses the parent's
+create_weights (GPTQ packed [E,K//4,N] int32 + [E,K/G,N] scales), and in
+process_weights_after_loading unpacks to [E,K,N] int8 + fp32 scales.
+apply(): builds aiter RoutingData from topk ids/weights by scattering
+log(w) into a [M,E] logits matrix and calling aiter's fused routing()
+(host-loop-free, CUDA-graph safe; routing_torch's block_pid_map loop is
+not), quantizes activations per row/128K, runs the grouped gate_up GEMM
+with gather + torch silu(gate)*up, quantizes the intermediate, runs down
+with scatter + gammas=gate_scal. Hooked in AutoGPTQConfig.get_quant_method
+for RoutedExperts when on_gfx908() + int8 + G%128==0
+(VLLM_GFX908_MOE_A8W8=0 disables). Boot probe in flight.
