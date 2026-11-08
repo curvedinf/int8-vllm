@@ -1904,3 +1904,11 @@ Verified: Bolt boots (weights 8.07 GiB/rank in 22 s, CPU KV tier, GS128
 shared/routed overlap, prefix-cache geometry, mixed-load prefill), health
 200, coherent reply. Gates running: 52-prompt quality probe, 500-case
 soak, 28k retrieval/prefix replay.
+
+Bolt gates (2026-11-08): 52-prompt quality probe **PASS 52/52**
+(coherence + finite logprobs, logs/bolt-quality.json). 28k retrieval
+(28,067 prompt tokens): cold 32.4 s, created_cache 28,064 tokens ->
+"ORCHID CEDAR 4829"; prefix replay 1.95 s with cached_tokens 28,064 and
+the IDENTICAL answer ✓ (the optional /reset_prefix_cache step 404s
+because the diagnostic endpoint needs VLLM_SERVER_DEV_MODE=1, which the
+recipe says not to enable in production). 500-case soak running.
