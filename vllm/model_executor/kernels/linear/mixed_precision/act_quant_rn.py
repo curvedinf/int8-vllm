@@ -13,6 +13,7 @@ Selected per process via ``VLLM_GFX908_ACT_QUANT=round`` in
 import torch
 import triton
 import triton.language as tl
+from triton.language.extra import libdevice
 
 
 @triton.jit

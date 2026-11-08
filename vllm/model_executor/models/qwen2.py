@@ -29,6 +29,8 @@ from collections.abc import Iterable
 from itertools import islice
 from typing import Any
 
+import os
+
 import torch
 from torch import nn
 from transformers import Qwen2Config
@@ -117,7 +119,25 @@ class Qwen2MLP(nn.Module):
             mid = projection(self.gate_up_proj, x, activation="silu_mul")
             return projection(self.down_proj, mid)
         gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
+        if (
+            os.environ.get("VLLM_GFX908_SILU_QUANT", "1") == "1"
+            and gate_up.dtype == torch.bfloat16
+            and gate_up.is_cuda
+        ):
+            from vllm.model_executor.layers.quantization.gptq_moe_a8w8 import (
+                silu_mul_quant_rn,
+            )
+            from vllm.model_executor.layers.rms_norm_int8_quant import (
+                PREQUANT_ATTR,
+            )
+
+            gate, up = gate_up.chunk(2, dim=-1)
+            mid = torch.empty_like(gate)
+            q, s = silu_mul_quant_rn(gate, up, out=mid)
+            setattr(mid, PREQUANT_ATTR, (q, s))
+            x = mid
+        else:
+            x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
 

@@ -159,7 +159,27 @@ class FlintMLP(nn.Module):
         act = flint_linear.gate_up_silu_mul(self.gate_up_proj, x)
         if act is None:
             gate_up, _ = self.gate_up_proj(x)
-            act = silu_and_mul(gate_up)
+            if (
+                os.environ.get("VLLM_GFX908_SILU_QUANT", "1") == "1"
+                and gate_up.dtype == torch.bfloat16
+                and gate_up.is_cuda
+            ):
+                # Fused SiLU*up + per-group int8 quant: the down_proj's
+                # blockscale path consumes the stash instead of
+                # re-quantizing the bf16 activation.
+                from vllm.model_executor.layers.quantization.gptq_moe_a8w8 import (
+                    silu_mul_quant_rn,
+                )
+                from vllm.model_executor.layers.rms_norm_int8_quant import (
+                    PREQUANT_ATTR,
+                )
+
+                gate, up = gate_up.chunk(2, dim=-1)
+                act = torch.empty_like(gate)
+                q, s = silu_mul_quant_rn(gate, up, out=act)
+                setattr(act, PREQUANT_ATTR, (q, s))
+            else:
+                act = silu_and_mul(gate_up)
         x, _ = self.down_proj(act)
         return x
 

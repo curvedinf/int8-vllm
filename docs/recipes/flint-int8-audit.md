@@ -25,10 +25,10 @@ bf16 surface; **fixable** = avoidable round trip; **fixed** = already fused.
 | 10 | expert SiLU*up epilogue | bf16 gate/up → int8 q + scales in one kernel (`silu_mul_quant_rn`) | fixed |
 | 11 | expert `down` (a8w8 blockscale) | int8 → **bf16 out**, scatter/reduce with gammas | **fixable**: Bolt keeps the routed output int8 through `combine_experts`; flint up-quants at the combine |
 | 12 | shared expert `gate_up_proj` (CK W8A8) | bf16 → int8 → **bf16 out** | inherent |
-| 13 | shared expert `silu_and_mul` | bf16 → bf16, then `down_proj` re-quantizes per-token | **fixable**: same fuse as the experts, via the `PREQUANT_ATTR` seam in `aiter_w8a16.apply_weights` (l.468-479) |
+| 13 | shared expert `silu_and_mul` | fused: bf16 gate/up → bit-exact bf16 act + per-group int8 stash, consumed by the blockscale down GEMM | fixed |
 | 14 | shared expert `down_proj` (CK) | bf16 → int8 → bf16 | inherent |
 | 15 | combine + residual add | bf16 | inherent while the residual stream is bf16 |
-| 16 | dense MLP layers 0-1 | identical to 12-14 (`FlintMLP`) | **fixable** (same silu seam) |
+| 16 | dense MLP layers 0-1 | identical to 12-14 (`FlintMLP`), same fused silu stash | fixed |
 | 17 | final norm | bf16 | inherent |
 | 18 | lm_head (int8 GS128) | bf16 → per-group int8 quant → int8 GEMM → bf16/fp32 logits | fixed (enabled) |
 | 19 | embedding | bf16 table lookup (trained with int8 fake-quant) | **fixable** (int8 table + dequant in lookup; Bolt ships `packed_embedding`) |
@@ -39,7 +39,7 @@ bf16 surface; **fixable** = avoidable round trip; **fixed** = already fused.
 |---|---|---|---|
 | 1 | draft `qkv_proj` / `o_proj` (AutoGPTQ→CK W8A8) | bf16 → int8 → bf16 | inherent |
 | 2 | draft attention | bf16 q/k/v, KV `int8_block_g128` dequantized in-kernel | inherent |
-| 3 | draft MLP (`Qwen3MLP` = Qwen2MLP: gate_up → `SiluAndMul` → down) | bf16 → int8 → bf16 → int8 → bf16 | **fixable** (silu seam, same as target) |
+| 3 | draft MLP (`Qwen3MLP` = Qwen2MLP: gate_up → `SiluAndMul` → down) | same fused silu stash as the target | fixed |
 | 4 | conv `kernel_projection` ×10, `fc`, `candidate_selector.hidden_projection` | bf16 | exception (Qwen draft float set) |
 | 5 | selector codebooks | bf16 | exception (measured) |
 | 6 | draft lm_head / candidate logits | shares the target head weights; the draft's own head module stays bf16 | exception |
@@ -55,8 +55,21 @@ bf16 surface; **fixable** = avoidable round trip; **fixed** = already fused.
 - Norm outputs are bf16 by design; rewriting them int8 would break the
   residual stream (Bolt also keeps the norm output bf16).
 
+## Directive (user, 2026-11-09): W8A8 everywhere under PTQR
+
+PTQR retrains against the bf16 teacher on the serving grid, so bf16 GEMM
+surfaces are no longer justified as "quality exceptions" - they are training
+gaps. Current status: every GEMM-shaped surface is int8 W8A8 except the
+draft's dense grid surfaces, the embedding lookup, and the residual stream
+(all listed below). The router gate is now int8 at ALL batch sizes (the
+prefill threshold is diagnostic only).
+
 ## Open up-quant round trips, priority order
 
+0. **Draft dense grid surfaces** (`conv kernel_projection` x10, `fc`,
+   `candidate_selector.hidden_projection`): currently bf16 linears. Need
+   int8 W8A8 weights + the conv/selector kernels dequantizing in-kernel,
+   and the draft PTQR trainer must fake-quant them.
 1. **MoE down output stays int8 through the combine** (Bolt's
    `decoder_int8.combine_experts` / `ResidualInt8`). Requires an int8
    quant-out down GEMM (AITER `gemm_float_quant_out` exists for resident

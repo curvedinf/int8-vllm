@@ -531,7 +531,22 @@ class AiterW8A16LinearKernel(MPLinearKernel):
                     K,
                 )
         elif c.group_size == 128:
-                x_q, x_s = _quantize_activation_per_block(x_2d, block_k=128)
+                pre = (
+                    None
+                    if torch.compiler.is_compiling()
+                    else getattr(x, PREQUANT_ATTR, None)
+                )
+                if (
+                    pre is not None
+                    and pre[0].shape == x_2d.shape
+                    and pre[0].dtype == torch.int8
+                    and pre[1].shape == (M, K // 128)
+                ):
+                    # Fused silu+mul+per-group quant epilogue already produced
+                    # this GEMM's activation (row-parallel MLP down_proj).
+                    x_q, x_s = pre
+                else:
+                    x_q, x_s = _quantize_activation_per_block(x_2d, block_k=128)
                 cfg = _get_aiter_w8a8_config(M, N, K, c.group_size)
                 if os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not (
                     torch.cuda.is_current_stream_capturing()

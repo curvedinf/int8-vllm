@@ -31,6 +31,7 @@ from vllm.model_executor.layers.quantization.utils import replace_parameter
 
 _G = 128
 _PACK = 4  # 8-bit GPTQ packs 4 values per int32
+_MOE_ACTIVE_STATS = {"sum": 0, "calls": 0}
 
 
 def _unpack_i8(packed: torch.Tensor) -> torch.Tensor:
@@ -181,6 +182,18 @@ class A8W8BlockscaleMoEMethod(AutoGPTQMoEMethod):
                   f"cap={_cap} enter", flush=True)
         rd, gather_idx, scatter_idx = _routing_from_topk(
             topk_ids, topk_weights, n_expts)
+        if (
+            os.environ.get("VLLM_MOE_ACTIVE_STATS") == "1"
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            _touch = int((rd.expt_hist > 0).sum().item())
+            _MOE_ACTIVE_STATS["sum"] += _touch
+            _MOE_ACTIVE_STATS["calls"] += 1
+            _n = _MOE_ACTIVE_STATS["calls"]
+            if _n % 500 == 0:
+                print(f"[moe-active] calls={_n} avg_touched="
+                      f"{_MOE_ACTIVE_STATS['sum'] / _n:.2f}/{n_expts}",
+                      flush=True)
         if _dbg:
             print(f"[moe8r] cap={_cap} routing-done", flush=True)
         xq, xs = quant_in if quant_in is not None else group_quant_rn(x)
@@ -222,6 +235,14 @@ class A8W8BlockscaleMoEMethod(AutoGPTQMoEMethod):
             layer._pre_quant = None
             q, s = pre
             if q.dtype == torch.int8 and q.shape == x.shape:
+                if (
+                    os.environ.get("VLLM_GFX908_FE_DEBUG") == "1"
+                    and not torch.cuda.is_current_stream_capturing()
+                ):
+                    fq, fs = group_quant_rn(x)
+                    print(f"[stash-dbg] m={x.shape[0]} "
+                          f"q_neq={(q != fq).sum().item()} "
+                          f"s_neq={(s != fs).sum().item()}", flush=True)
                 return self._run(layer, x, topk_weights, topk_ids, n_expts,
                                  quant_in=(q, s))
         return self._run(layer, x, topk_weights, topk_ids, n_expts)
@@ -249,7 +270,8 @@ def _group_quant_rn_kernel(X, Q, S, K, G: tl.constexpr):
 
 
 @triton.jit
-def _silu_mul_quant_rn_kernel(GT, UP, Q, S, XS, OS, G: tl.constexpr):
+def _silu_mul_quant_rn_kernel(GT, UP, Q, S, XS, OS, OUT, WRITE_OUT: tl.constexpr,
+                              G: tl.constexpr):
     row = tl.program_id(0)
     grp = tl.program_id(1)
     offs = grp * G + tl.arange(0, G)
@@ -257,11 +279,15 @@ def _silu_mul_quant_rn_kernel(GT, UP, Q, S, XS, OS, G: tl.constexpr):
     u = tl.load(UP + row * XS + offs).to(tl.float32)
     # Matches `(F.silu(gate.float()) * up.float()).to(bf16)` then quantizing
     # that bf16 tensor: one rounding, after the product.
-    y = (g * tl.sigmoid(g) * u).to(tl.bfloat16).to(tl.float32)
+    # ATen semantics: silu in fp32 with a precise exp, product rounded once.
+    y = tl.fdiv(g, 1.0 + libdevice.exp(-g), ieee_rounding=True) * u
+    y = y.to(tl.bfloat16).to(tl.float32)
     amax = tl.max(tl.abs(y), axis=0)
     s = tl.fdiv(tl.maximum(amax, 1e-8), 127.0, ieee_rounding=True)
     q = libdevice.llrint(tl.fdiv(y, s, ieee_rounding=True)).to(tl.float32)
     q = tl.minimum(tl.maximum(q, -127.0), 127.0)
+    if WRITE_OUT:
+        tl.store(OUT + row * OS + offs, y.to(tl.bfloat16))
     tl.store(Q + row * OS + offs, q.to(tl.int8))
     tl.store(S + row * (OS // G) + grp, s)
 
@@ -275,15 +301,18 @@ def group_quant_rn(x: torch.Tensor, group: int = _G):
     return q, s
 
 
-def silu_mul_quant_rn(gate: torch.Tensor, up: torch.Tensor, group: int = _G):
+def silu_mul_quant_rn(gate: torch.Tensor, up: torch.Tensor,
+                      group: int = _G, out: torch.Tensor | None = None):
     """int8-quantize silu(gate) * up in one pass."""
     m, i = gate.shape
     if gate.stride(0) != up.stride(0) or gate.stride(1) != 1 or up.stride(1) != 1:
         gate, up = gate.contiguous(), up.contiguous()
     q = torch.empty((m, i), dtype=torch.int8, device=gate.device)
     s = torch.empty((m, i // group), dtype=torch.float32, device=gate.device)
+    buf = out if out is not None else q
     _silu_mul_quant_rn_kernel[(m, i // group)](
-        gate, up, q, s, gate.stride(0), i, G=group)
+        gate, up, q, s, gate.stride(0), i, buf, WRITE_OUT=out is not None,
+        G=group)
     return q, s
 
 
