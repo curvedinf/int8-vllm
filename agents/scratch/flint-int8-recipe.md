@@ -1665,3 +1665,14 @@ masters are bit-identical to the HF bf16 source (rel 0.0), so PTQR did
 not move expert weights in 40 steps — expected, scales carry the
 training. With the expert-rank fix the v2 export should be faithful
 end-to-end; the earlier garbage was 100% the expert collision.
+
+v2 export verified: experts now dequantize to their own HF counterparts
+(experts 1/3/7/9 rel err 0.65% == uniform quantization noise; v1 had
+expert 3 -> expert 0 etc.). Boot with bf16 KV in flight to measure the
+serving-gate KLD of the corrected int8 weights. If it lands in the
+0.005-0.02 band the int8 weight path is healthy and the remaining
+blocker is the int8_block_g128 KV fault on flint (UA, kvh=1); if it is
+still >>0.02 the in-loop KLD trend (0.081 -> 0.174 over rung 1) is
+confirmed at the serving gate and the rung recipe needs changing
+(frozen scales / different lr), with the step-0 scales+bf16 masters as
+the RTN baseline.
