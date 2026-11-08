@@ -2367,3 +2367,21 @@ the speed benefit is ~2 ms per 2048-token prefill chunk. Bolt ships this
 as a prefill lever with coherence gates, but flint's router is more
 sensitive - recorded as a LIMITED EXCEPTION: default OFF, opt-in lever
 retained.
+
+## TURN 86: INT8 GATE + HEAD KEPT — PTQR RECOVERY ASSUMED
+
+User directive: the gate/lm_head numbers were measured with cold
+quantization; PTQR can recover most of that KLD, so keep both surfaces
+int8 and let the retrain absorb the cost.
+
+Decisions now in force:
+- lm_head int8 GS128: ON (KLD 0.0054 cold).
+- router gate int8 GS128: ON for prefill (>=512 tokens; KLD 0.0234 cold),
+  decode routing bf16. VLLM_GFX908_GATE_I8_MIN_TOKENS=0 quantizes all.
+- PTQR TRAINING REQUIREMENT: the target retrain must include the int8
+  gate and int8 lm_head as fake-quantized surfaces alongside the existing
+  GPTQ linears and experts, and the quality gate must be measured on the
+  retrained export (not the cold one). The draft retrain keeps its own
+  surface set.
+The audit's "no gate/lm_head int8" entries are superseded; expected
+recovery is recorded as unverified until the retrain lands.

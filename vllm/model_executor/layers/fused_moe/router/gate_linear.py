@@ -305,14 +305,16 @@ class GateLinear(ReplicatedLinear):
     def forward(
         self, x: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        # Bolt parity lever, OFF by default: the int8 router GEMM is a
-        # prefill lever in Bolt, but flint measured 0.0234 teacher-forced
-        # KLD at 1024-token prompts (0.0342 all-size) vs the fork's
-        # <=0.01 band, for ~2 ms/chunk of prefill. Kept as an opt-in
-        # (VLLM_GFX908_GATE_I8=1, prefill threshold via
-        # VLLM_GFX908_GATE_I8_MIN_TOKENS).
+        # Bolt-parity int8 router GEMM, ON for prefill by default. The
+        # cold quantization cost measured 0.0234 teacher-forced KLD at
+        # 1024-token prompts (0.0342 all-size); the PTQR retrain includes
+        # this surface as a fake-quantized module so the retrained scales
+        # recover most of it. Decode routing stays bf16 (threshold); set
+        # VLLM_GFX908_GATE_I8_MIN_TOKENS=0 to quantize every batch.
+        # Note: a prefill/int8 mismatch between training and serving is
+        # intentional - PTQR trains the int8 surface for the prefill path.
         if (
-            os.environ.get("VLLM_GFX908_GATE_I8", "0") == "1"
+            os.environ.get("VLLM_GFX908_GATE_I8", "1") == "1"
             and x.shape[0] >= int(os.environ.get(
                 "VLLM_GFX908_GATE_I8_MIN_TOKENS", "512"))
             and x.dim() == 2
