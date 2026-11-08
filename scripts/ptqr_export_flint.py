@@ -251,7 +251,21 @@ def main():
     for fname in ("config.json", "tokenizer.json", "tokenizer_config.json",
                   "generation_config.json", "chat_template.jinja"):
         src = Path(args.src) / fname
-        if src.exists():
+        if not src.exists():
+            continue
+        if fname == "config.json":
+            # vLLM 0.33 auto-detects the quant method from config.json's
+            # `quantization_config` (quantize_config.json alone is not
+            # enough): inject the GPTQ descriptor like gptqmodel writes it.
+            cfg = json.loads(src.read_text())
+            cfg["quantization_config"] = {
+                "quant_method": "gptq", "bits": 8,
+                "group_size": args.group, "desc_act": False, "sym": True,
+                "checkpoint_format": "gptq", "lm_head": False,
+                "format": "gptq",
+            }
+            (out_dir / fname).write_text(json.dumps(cfg, indent=2))
+        else:
             (out_dir / fname).write_bytes(src.read_bytes())
     (out_dir / "model.safetensors.index.json").write_text(json.dumps(index))
     print(f"{n_quant} tensors packed to GPTQ GS128; index written", flush=True)
