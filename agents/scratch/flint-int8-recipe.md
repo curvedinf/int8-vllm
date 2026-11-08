@@ -2113,3 +2113,22 @@ per-layer breakdown process — the routing cost needs in-situ profiling
 NOTE: my first equivalence test used random ids WITH duplicates per row
 (impossible from a real top-k); that produced spurious structure
 mismatches until the ids were made distinct.
+
+## TURN 75 (2026-11-08 ~21:3x): DENSE CK + DOWN-KERNEL RETUNE
+
+CK dense (whole-K column-parallel shapes qkv 1280x2048, dense gate_up
+3072x2048, shared gate_up 512x2048 at M=96/2048): splitK=0 (the missing-
+config fallback) is already fastest for every shape except shared
+gate_up M=2048, where splitK=1 gives 236 vs 245 us (-3.4%, ~0.4 ms per
+prefill chunk over 47 layers). Nothing else to gain there; the boot
+warning is cosmetic for these shapes. o_proj/down_proj are row-parallel
+(sharded K) and stay on the Triton blockscale path, not CK.
+
+MoE down kernel (I=512,N=2048,block_m=16): the heuristic shrinks
+block_n to 32 for grid occupancy. Measured through the production _run
+path (probe_flint_moe_down.py, one config per process): block_n=128,
+warps=8, stages=2, group_m=1 is best at 867 vs 887 us (-2.2% full
+layer); block_n=256 is ~876. split_k=2 changes the output (excluded).
+The earlier full-sweep crash was an artifact of my fabricated harness
+tensors, not a kernel limitation - the production path accepts every
+block_n. Installed the down override in _TUNED_MOE_CONFIGS.

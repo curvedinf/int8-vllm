@@ -294,6 +294,12 @@ _TUNED_MOE_CONFIGS = {
     # (K, N, block_m): overrides merged over the heuristic
     (2048, 1024, 16): {"block_n": 256, "num_warps": 8, "num_stages": 2,
                        "group_m": 1, "split_k": 1, "w_cache_modifier": None},
+    # down (I=512, N=2048) at decode: the heuristic shrinks block_n to 32;
+    # 128/warps8/stages2/group1 measured 867 vs 887 us full layer through
+    # the production _run path and is numerically equivalent (split_k=2
+    # changes results and is excluded).
+    (512, 2048, 16): {"block_n": 128, "num_warps": 8, "num_stages": 2,
+                      "group_m": 1, "split_k": 1, "w_cache_modifier": None},
 }
 
 
