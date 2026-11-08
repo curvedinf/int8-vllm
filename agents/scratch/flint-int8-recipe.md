@@ -1608,3 +1608,13 @@ the probe's bf16 noise floor (serving kernels vs the streaming teacher);
 qwen's serving-gate numbers (0.0069 PTQR vs 0.0110 deployed) sit in the
 same band, so the probe is calibrated. Int8 export boot in flight with
 kv=int8_block_g128 (recipe target).
+
+Int8 export first boot failed: `quantization=None` in the engine config,
+so the flint linears were built unquantized and the loader died on
+`model.layers.0.mlp.down_proj.qweight` not being a parameter. Cause:
+vLLM 0.33 auto-detects the quant method from **config.json's
+`quantization_config`** (the deployed qwen checkpoints carry gptqmodel's
+block); `quantize_config.json` alone is not consulted for the method.
+Fixed in the exporter (inject the GPTQ descriptor into config.json) and
+patched the existing export in place. Re-boot in flight; next boot
+surfaces the expert path (AutoGPTQMoEMethod int8 -> wna16 backend).
