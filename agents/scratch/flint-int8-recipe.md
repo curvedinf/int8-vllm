@@ -2385,3 +2385,23 @@ Decisions now in force:
   surface set.
 The audit's "no gate/lm_head int8" entries are superseded; expected
 recovery is recorded as unverified until the retrain lands.
+
+## TURN 87: FULL-FORWARD INT8 AUDIT + PTQR SURFACE UPDATE
+
+Audit committed at docs/recipes/flint-int8-audit.md: every quantization
+site in the target and draft forward (19 target rows, 7 draft rows).
+Remaining avoidable up-quant round trips, priority order:
+ 1. MoE down output -> bf16 at the combine (Bolt keeps int8 through
+    combine_experts; needs a quant-out down GEMM + int8 residual stream).
+ 2. shared/dense/draft MLP: gate_up(bf16 out) -> SiluAndMul(bf16) ->
+    down_proj re-quantizes per token. Fixable via the PREQUANT_ATTR seam
+    in aiter_w8a16 with a fused silu+mul+pertoken-quant kernel.
+ 3. embedding: bf16 table (trained int8 fake-quant) -> packed int8 lookup.
+ 4. o_proj int8 payload collective (built, race-free; graph-replay cost
+    is the blocker).
+Also (PTQR requirement from the user): the trainer now INCLUDES the router
+as a PTQRLinear (_SKIP_PATTERNS=()) and the target exporter writes the
+router as a trained-grid `dequant` surface (bf16 gate weights equal to
+the trained int8 codes). Tiny smoke is blocked by pre-existing tiny-config
+limits (head_dim 32 vs kv_group 128, rope table 2048 vs 4096 windows),
+not by these changes; full runs use the real config.

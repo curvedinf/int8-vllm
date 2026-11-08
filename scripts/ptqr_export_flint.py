@@ -40,6 +40,21 @@ def split_qkv(per, q_r, kv_r):
     return (torch.cat(qs, 0), torch.cat(ks, 0), torch.cat(vs, 0))
 
 
+G = 128
+
+
+def dequant_grid(w: torch.Tensor, s: torch.Tensor, group: int = G):
+    """Trained (fp32 master, per-group scale) -> values on the int8 grid."""
+    out_f, in_f = w.shape
+    wf = w.float().reshape(out_f, in_f // group, group)
+    amax = wf.abs().amax(dim=-1)
+    s = torch.maximum(s.float(), amax / 127.0)
+    z = wf / s.unsqueeze(-1)
+    q = (torch.sign(z) * torch.floor(z.abs() + 0.5).clamp(0, 127.0)).clamp(
+        -127, 127)
+    return (q * s.unsqueeze(-1)).reshape(out_f, in_f)
+
+
 def split_gated(per):
     """per: list of [2*half, in] fused [gate|up] slices -> (gate, up) fulls."""
     h = per[0].shape[0] // 2
@@ -78,7 +93,7 @@ def main():
         raise KeyError(name)
 
     # Build the export plan: list of (shard_base_name, hf_base_name, kind)
-    # kind: qkv | gated | col | row | whole | param
+    # kind: qkv | gated | col | row | whole | param | dequant
     plan = []
     for n in range(L):
         a = f"layers.{n}.attn"
@@ -103,8 +118,10 @@ def main():
             plan.append((f"layers.{n}.mlp.down",
                          f"model.layers.{n}.mlp.down_proj", "col"))
         else:
+            # Router: PTQR int8 surface; export the trained grid dequantized
+            # to bf16 (serving re-quantizes it to the same GS128 codes).
             plan.append((f"layers.{n}.mlp.router.weight",
-                         f"model.layers.{n}.mlp.gate.weight", "param"))
+                         f"model.layers.{n}.mlp.gate.weight", "dequant"))
             plan.append((f"layers.{n}.mlp.shared.gate_up",
                          f"model.layers.{n}.mlp.shared_expert", "gated"))
             plan.append((f"layers.{n}.mlp.shared.down",
@@ -194,6 +211,12 @@ def main():
             qw, qz, s16 = quant_pack(w.contiguous(), sc.contiguous(), args.group)
             yield hf, (qw, qz, s16)
             return
+        if kind == "dequant":
+            w = get_w(sname + ".weight")
+            sc = get_scale(sname)
+            yield hf, dequant_grid(w, sc, args.group).to(
+                torch.bfloat16).contiguous()
+            return
         if kind == "row":
             yield hf, torch.cat([s[sname] for s in shards], 0) \
                 .to(torch.bfloat16).contiguous()
@@ -208,7 +231,7 @@ def main():
     def entry_bytes(row):
         name, kind = row[0], row[2]
         rank = row[3] if len(row) > 3 else None
-        if kind in ("param", "row"):
+        if kind in ("param", "row", "dequant"):
             return get_w(name).numel() * 2
         if kind == "cat0":
             return sum(s[name].numel() for s in shards) * 2
@@ -294,7 +317,7 @@ def main():
         worst = []
         for row in plan:
             name, kind = row[0], row[2]
-            if kind in ("param", "row", "whole", "gated1"):
+            if kind in ("param", "row", "whole", "gated1", "dequant"):
                 continue
             if kind == "qkv":
                 per = [s[name + ".weight"] for s in shards]

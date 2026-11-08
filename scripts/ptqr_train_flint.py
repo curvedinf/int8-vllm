@@ -7,14 +7,15 @@ scripts/ptqr_flint_model.py (Flint has no transformers modeling code; the
 teacher/student tree is FlintRef).
 
 Student deployment contract mirrored exactly:
-* every Linear (qkv/o, dense+shared MLP, routed experts, router EXCLUDED,
-  lm_head INCLUDED per VLLM_GFX908_INT8_LM_HEAD) -> PTQRLinear
+* every Linear (qkv/o, dense+shared MLP, routed experts, router and
+  lm_head INCLUDED - both serve int8 and PTQR recovers their cold-quant
+  KLD) -> PTQRLinear
   (int8 RTN G128 weights + per-token int8 activations, annealed dither)
 * embedding int8 fake-quant (fake_quant_embedding_)
 * KV cache int8_block_g{G} per (token, kv_head): k/v quantized post-rope
   with the exact reshape_and_cache_g8 semantics (kv_block_quant_fake)
-* norms, per-head QK RMSNorm, attention sinks, router: untouched (bf16;
-  the measured exceptions for this stack)
+* norms, per-head QK RMSNorm, attention sinks: untouched (bf16; the
+  measured exceptions for this stack)
 * teacher: frozen full-BF16 FlintRef
 
 Single-process trainer (teacher+student fit on 4x MI100 via expert/head
@@ -70,10 +71,11 @@ from ptqr_train_target import (  # noqa: E402
     save_ptqr_checkpoint,
 )
 
-# Modules never quantized (bf16 exceptions per Qwen/Bolt findings + norms):
-# router (gating stays dense). QK RMSNorm weights and sinks are parameters,
-# not linears, so they are naturally untouched.
-_SKIP_PATTERNS = (".mlp.router",)
+# Modules never quantized. The router is INCLUDED: serving quantizes the
+# gate to int8 GS128 and the retrain trains it on that grid (PTQR recovers
+# the cold-quant KLD). QK RMSNorm weights and sinks are parameters, not
+# linears, so they are naturally untouched.
+_SKIP_PATTERNS = ()
 
 
 def _collect_skip_names(model: torch.nn.Module) -> set[str]:
