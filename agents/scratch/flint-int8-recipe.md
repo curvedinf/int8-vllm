@@ -1676,3 +1676,17 @@ still >>0.02 the in-loop KLD trend (0.081 -> 0.174 over rung 1) is
 confirmed at the serving gate and the rung recipe needs changing
 (frozen scales / different lr), with the step-0 scales+bf16 masters as
 the RTN baseline.
+
+## TURN 62 (2026-11-08 ~03:4x): EXPORT SINK BUG — head-sharded per rank
+
+v2 export (experts fixed) serves KLD 1.52 median / 18.7% top-1
+agreement — still broken. Class audit finds the exporter's `param` rows
+read rank 0's copy via `rank_of`, which is fine for *replicated* params
+(norms, qk norms, router: verified bf16-exact) but **the attention sink
+is head-sharded**: each rank's ckpt holds only its 8-head slice
+(`layers.N.attn.sink` [8]), so the export wrote an [8] sink as the
+[32] tensor and every rank loaded rank-0's head slice. Shared-expert and
+all quantized classes audited faithful (0.65-0.72%), so the sink was
+the last mapping bug. Fix: new `cat0` export kind = rank-ordered
+concatenation; v2's sinks repaired in place (rewrite the shards that
+carry them) instead of a full 30-min re-export.

@@ -93,8 +93,10 @@ def main():
                      f"model.layers.{n}.self_attn.q_norm.weight", "param"))
         plan.append((f"{a}.k_norm.weight",
                      f"model.layers.{n}.self_attn.k_norm.weight", "param"))
+        # Sinks are head-sharded (each rank holds its q-head slice): the
+        # full tensor is the rank-ordered concatenation, not rank 0's slice.
         plan.append((f"{a}.sink",
-                     f"model.layers.{n}.self_attn.softmax_offset", "param"))
+                     f"model.layers.{n}.self_attn.softmax_offset", "cat0"))
         if n in dense_layers:
             plan.append((f"layers.{n}.mlp.gate_up",
                          f"model.layers.{n}.mlp", "gated"))
@@ -196,6 +198,10 @@ def main():
             yield hf, torch.cat([s[sname] for s in shards], 0) \
                 .to(torch.bfloat16).contiguous()
             return
+        if kind == "cat0":  # head-sharded 1-D params (sinks), rank-ordered
+            yield hf, torch.cat([s[sname] for s in shards], 0) \
+                .to(torch.bfloat16).contiguous()
+            return
         raise ValueError(kind)
 
     # file plan: ~4.5 GiB chunks
@@ -204,6 +210,8 @@ def main():
         rank = row[3] if len(row) > 3 else None
         if kind in ("param", "row"):
             return get_w(name).numel() * 2
+        if kind == "cat0":
+            return sum(s[name].numel() for s in shards) * 2
         if kind == "qkv":
             return (q_full + 2 * kv_full) * H * 4
         w = get_w(name + ".weight") if not name.endswith(".weight") \
