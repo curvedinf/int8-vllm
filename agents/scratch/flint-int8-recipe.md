@@ -1871,3 +1871,17 @@ same-config captures). Capturing the PTQR target with SPECOFF=1 for a
 clean target-only comparison; also note the bf16 target + int8 draft NaN
 logprobs at 256-token generations is a real spec-path finding worth
 keeping (deployed PTQR target has never shown it).
+
+## Qwen 27B QA — FINAL (2026-11-08)
+
+Clean same-config serving gate (PTQR target, SPECOFF, int8_block_g128 KV,
+TP4/C6) vs a fresh same-era bf16 reference captured identically:
+**median KLD 0.007540**, mean 1.785, p95 11.85, greedy agree 36/52,
+52/52 prompts. Recorded R10S60 same-era value was median 0.00694
+(spec-on captures, 42/52) — the KLD gate is within ~9%, no regression.
+Full Qwen 27B recipe QA summary: int8-KV micro PASS; battery 4/4;
+serve-contract boot OK; coherence OK; 500/500 coherence soak; KLD
+0.0075 median. Side finding: bf16 target + int8 PTQR draft with SPEC ON
+returns NaN logprobs at 256-token generations (spec-off is clean; the
+deployed PTQR target never showed it) — worth a follow-up outside this
+goal. Qwen QA COMPLETE; Bolt next.
