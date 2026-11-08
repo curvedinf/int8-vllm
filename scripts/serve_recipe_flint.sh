@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# Official packed Flint + Flint-DFlash2 PTQR recipe; peer script to
+# serve_recipe_qwen38.sh / serve_recipe_bolt.sh.
+#
+# Stack (all mandatory, see docs/recipes/README.md and the ledger
+# agents/scratch/flint-int8-recipe.md):
+#   - target: curvedinf/Flint-GPTQ-INT8-W8A8-GS128-PTQR (PTQR rung 1 s40)
+#   - draft:  curvedinf/Flint-DFlash2-GPTQ-INT8-W8A8-GS128-PTQR
+#   - AITER W8A8 INT8 GEMMs for every GS128 dense linear
+#   - routed 256-expert MoE on the gfx908 grouped a8w8-blockscale kernel
+#     (vllm/model_executor/layers/quantization/gptq_moe_a8w8.py)
+#   - AITER unified attention, vLLM CUSTOM all-reduce
+#   - int8_block_g128 KV on BOTH target and draft
+#   - TP4 / C8 (eight concurrent sequences), DFlash2 NS=7
+# No 16-bit fallback: the a8w8 expert path is the production path. Setting
+# VLLM_GFX908_MOE_A8W8=0 (WNA16 experts) is a diagnostic lever only and is
+# NOT a supported recipe configuration.
+set -euo pipefail
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+MODEL_DIR="${MODEL_DIR:-${HOME}/models/Flint-GPTQ-INT8-W8A8-GS128-PTQR-r1s40-v2}"
+DRAFT_MODEL_DIR="${DRAFT_MODEL_DIR:-${HOME}/models/flint-dflash2-ptqr-r1-int8}"
+LOG_DIR="${LOG_DIR:-${ROOT_DIR}/logs/serve_recipe_flint}"
+HOST="${HOST:-127.0.0.1}"
+PORT="${PORT:-8030}"
+mkdir -p "${LOG_DIR}"
+PID_FILE="${LOG_DIR}/supervisor.pid"
+
+alive() {
+  [[ -r "${PID_FILE}" ]] || return 1
+  local pid argument previous=''
+  pid="$(cat "${PID_FILE}")"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  [[ -r "/proc/${pid}/cmdline" ]] || return 1
+  while IFS= read -r -d '' argument; do
+    if [[ "$previous" == */serve_recipe_flint.sh || "$previous" == serve_recipe_flint.sh ]]; then
+      [[ "$argument" == supervise ]] && return 0
+    fi
+    previous="$argument"
+  done < "/proc/${pid}/cmdline"
+  return 1
+}
+
+serve() {
+  export VLLM_API_KEY="${VLLM_API_KEY:-${LLAMA_API_KEY:-}}"
+  if [[ -z "${VLLM_API_KEY}" ]]; then
+    local key_file="${API_KEY_FILE:-/etc/llama/llama-api.key}"
+    [[ -r "$key_file" ]] || { echo "Cannot read API key file: $key_file" >&2; return 1; }
+    VLLM_API_KEY="$(tr -d '\r\n' < "$key_file")"
+  fi
+  [[ -n "${VLLM_API_KEY}" ]] || { echo 'API key is empty' >&2; return 1; }
+  export PATH="${ROOT_DIR}/.venv/bin:/opt/rocm/bin:${PATH}"
+  export PYTHONPATH="${ROOT_DIR}/python_startup:${ROOT_DIR}:${ROOT_DIR}/../aiter:${PYTHONPATH:-}"
+  export ROCM_PATH=/opt/rocm HIP_PATH=/opt/rocm LD_LIBRARY_PATH="/opt/rocm/lib:${LD_LIBRARY_PATH:-}"
+  export GPU_ARCHS=gfx908 PYTORCH_ROCM_ARCH=gfx908 VLLM_TARGET_DEVICE=rocm
+  export HIP_VISIBLE_DEVICES=0,1,2,3 CUDA_VISIBLE_DEVICES=0,1,2,3
+  export VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1
+  # vLLM CUSTOM all-reduce is the measured fastest on this mesh; AITER CAR is
+  # coherent and remains available via VLLM_ROCM_USE_AITER_CUSTOM_AR=1.
+  export VLLM_ROCM_USE_AITER_CUSTOM_AR=0
+  # Fused round-to-nearest activation quant (quality default, see
+  # INT8_AUDIT_RESULTS.md).
+  export VLLM_GFX908_ACT_QUANT=round
+  # Routed experts: GPTQ int8-group -> aiter grouped a8w8-blockscale GEMM.
+  # This is the production path (W8A8, int8 activations). Do not disable.
+  export VLLM_GFX908_MOE_A8W8="${VLLM_GFX908_MOE_A8W8:-1}"
+  # Direct FS->GPU weight loading through AMD Infinity Storage. The flint
+  # export was fixed for AIS 2026-11-08 (full 38.5 GiB byte gate PASS; the
+  # earlier hipFileRead InvalidValue was a stale/partial repack cache).
+  # First boot writes the per-rank repack cache (~15 min); later boots hit
+  # it. VLLM_FS_GPU=0 remains the plain-safetensors fallback.
+  export VLLM_FS_GPU="${VLLM_FS_GPU:-auto}"
+  export NCCL_ALGO=Ring NCCL_PROTO=Simple NCCL_P2P_DISABLE=0 NCCL_DMABUF_ENABLE=0
+  export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
+
+  local spec
+  spec="$("${ROOT_DIR}/.venv/bin/python" -c 'import json,sys; print(json.dumps(dict(method="dflash",model=sys.argv[1],num_speculative_tokens=int(sys.argv[2]),kv_cache_dtype="int8_block_g128")))' "$DRAFT_MODEL_DIR" "${NS:-7}")"
+  local args=(
+    -m vllm.entrypoints.openai.api_server
+    --model "$MODEL_DIR" --served-model-name flint
+    --host "$HOST" --port "$PORT"
+    --tensor-parallel-size "${TPS:-4}"
+    --max-num-seqs 8
+    --dtype bfloat16
+    --max-model-len "${MAXLEN:-262144}"
+    --max-num-batched-tokens "${MNBT:-2048}"
+    --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.90}"
+    # PTQR-era int8_block_g128 is the gated KV dtype for target AND draft
+    # (fp16 draft KV is measured broken; bf16 is banned by int8-first).
+    --kv-cache-dtype int8_block_g128
+    --speculative-config "$spec"
+    # Flint's template renders <think> reasoning blocks; the qwen3 engine
+    # parser splits them into reasoning_content. No tool-call parser: the
+    # checkpoint's XML tool format has no vLLM parser yet.
+    --reasoning-parser qwen3
+    --override-generation-config '{"temperature":1.0,"top_p":0.95,"top_k":20}'
+  )
+  if [[ "${EAGER:-0}" == 1 ]]; then
+    args+=(--enforce-eager)
+  else
+    # FULL_DECODE_ONLY graphs; the a8w8 MoE path is capture-safe (padding
+    # expert ids -1 are zero-weighted, not wrapped to expert 255).
+    args+=(--compilation-config "{\"mode\":0,\"cudagraph_mode\":\"FULL_DECODE_ONLY\",\"cudagraph_capture_sizes\":[${CUDAGRAPH_SIZES:-16,32,48,64,96,128}]}")
+  fi
+  "${ROOT_DIR}/.venv/bin/python" "${args[@]}" &
+  child=$!
+  wait "$child"
+}
+
+case "${1:-status}" in
+  supervise)
+    if alive; then echo 'Flint supervisor is already running' >&2; exit 1; fi
+    echo "$$" > "$PID_FILE"
+    child=''
+    trap 'if [[ -n "$child" ]]; then kill -TERM "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; fi; rm -f "$PID_FILE"; exit' TERM INT
+    trap 'rm -f "$PID_FILE"' EXIT
+    serve
+    ;;
+  start)
+    if alive; then echo 'Flint supervisor is already running'; exit 0; fi
+    nohup setsid bash "$0" supervise >> "${LOG_DIR}/server.log" 2>&1 < /dev/null &
+    for _ in $(seq 1 100); do
+      if alive; then
+        echo "Flint starting; log: ${LOG_DIR}/server.log"
+        exit 0
+      fi
+      sleep 0.1
+    done
+    echo "Flint supervisor failed to start; see ${LOG_DIR}/server.log" >&2
+    exit 1
+    ;;
+  stop)
+    if alive; then
+      pid="$(cat "$PID_FILE")"
+      if [[ "$(ps -o pgid= -p "$pid" | tr -d ' ')" == "$pid" ]]; then
+        kill -TERM -- "-$pid"
+      else
+        kill -TERM "$pid"
+      fi
+      for _ in $(seq 1 180); do alive || break; sleep 1; done
+      if alive; then
+        kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+        for _ in $(seq 1 30); do alive || break; sleep 1; done
+      fi
+      if alive; then echo 'Supervisor has not exited' >&2; exit 1; fi
+    fi
+    ;;
+  restart) bash "$0" stop; bash "$0" start ;;
+  status)
+    if alive; then
+      echo "Flint supervisor running (PID $(cat "$PID_FILE"))"
+      curl --fail --silent --show-error --max-time 3 "http://${HOST}:${PORT}/health"
+    else echo 'Flint stopped'; exit 1; fi
+    ;;
+  *) echo "Usage: $0 {start|stop|restart|status|supervise}" >&2; exit 2 ;;
+esac

@@ -11,6 +11,11 @@ GS128 dense weights and retains packed experts with a bounded INT8 cache.
 Its geometry, speculative block and serving settings are documented separately;
 the Qwen baseline below remains available unchanged.
 
+The [Flint + Flint-DFlash2 peer recipe](flint.md) serves a 49-layer,
+256-expert MoE pair at TP4/C8 with AITER W8A8 dense GEMMs, a true W8A8
+grouped expert kernel, `int8_block_g128` KV on target and draft, and an
+int8 PTQR draft (NS=7).
+
 Separate Qwen3.8 and Bolt systemd units are available; see
 [service installation and selection](services.md).
 
