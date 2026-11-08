@@ -23,6 +23,10 @@ from vllm.config import (
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.models.interfaces import (
+    EagleModelMixin,
+    SupportsEagle3,
+)
 from vllm.model_executor.layers.attention.attention import (
     unified_attention_with_output,
     unified_kv_cache_update,
@@ -684,7 +688,7 @@ class FlintDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-class FlintModel(nn.Module):
+class FlintModel(nn.Module, EagleModelMixin):
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -741,9 +745,13 @@ class FlintModel(nn.Module):
             except Exception:  # noqa: BLE001 - debug only
                 _do = False
         _saved = 0
+        aux_hidden_states: list[torch.Tensor] = []
         for _li, layer in enumerate(
-                self.layers[self.start_layer : self.end_layer]):
+                self.layers[self.start_layer : self.end_layer],
+                start=self.start_layer):
             hidden_states, residual = layer(positions, hidden_states, residual)
+            self._maybe_add_hidden_state(
+                aux_hidden_states, _li + 1, hidden_states, residual)
             if _do:
                 if torch.cuda.is_current_stream_capturing():
                     continue  # capture pass: host sync / save not allowed
@@ -767,10 +775,12 @@ class FlintModel(nn.Module):
                 {"hidden_states": hidden_states, "residual": residual}
             )
         hidden_states, _ = self.norm(hidden_states, residual)
+        if aux_hidden_states:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
 
-class FlintForCausalLM(nn.Module, SupportsPP):
+class FlintForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
             ".q_proj": (".qkv_proj", "q"),
@@ -842,6 +852,9 @@ class FlintForCausalLM(nn.Module, SupportsPP):
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.model._set_aux_hidden_state_layers(layers)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)

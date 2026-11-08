@@ -106,6 +106,11 @@ class A8W8BlockscaleMoEMethod(AutoGPTQMoEMethod):
         self.quant_config = quant_config
         self.input_dtype = None
         self._use_a8w8 = True
+        from vllm.logger import init_logger
+
+        init_logger(__name__).info_once(
+            "gfx908 routed experts: GPTQ int8-group -> AITER grouped "
+            "a8w8-blockscale (W8A8)")
         assert int(quant_config.group_size) > 0 and (
             int(quant_config.group_size) % _G == 0), (
                 f"A8W8 MoE needs a {_G}-multiple group size, got "

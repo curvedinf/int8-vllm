@@ -169,6 +169,10 @@ if TYPE_CHECKING:
     # median (0.0966 -> 0.0153) and lifted greedy agreement 24 -> 38/52 vs
     # the aiter trunc path. "aiter" retains the legacy trunc kernel.
     VLLM_GFX908_ACT_QUANT: str = "round"
+    # Routed-expert dtype: 1 (default) = GPTQ int8-group experts on the AITER
+    # grouped a8w8-blockscale kernel (true W8A8). 0 = legacy WNA16 experts
+    # (diagnostic only; not a production configuration).
+    VLLM_GFX908_MOE_A8W8: bool = True
     VLLM_GFX908_TINY_BA: bool = False
     VLLM_MLP_CAR_INT8_GS32: bool = False
     VLLM_GFX908_GATE_I8_PREFILL: bool = False
@@ -1448,6 +1452,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_GFX908_FUSED_NORM_QUANT", "False").lower() in ("true", "1")
     ),
     "VLLM_GFX908_ACT_QUANT": lambda: os.getenv("VLLM_GFX908_ACT_QUANT", "round"),
+    "VLLM_GFX908_MOE_A8W8": lambda: os.getenv("VLLM_GFX908_MOE_A8W8", "1") == "1",
     # This switch changes the traced GDN graph. Include it in compile/AOT
     # cache factors so a rollback cannot silently reuse the optimized graph.
     "VLLM_GFX908_TINY_BA": lambda: os.getenv("VLLM_GFX908_TINY_BA") == "1",
