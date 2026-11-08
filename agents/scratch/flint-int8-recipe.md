@@ -1842,3 +1842,11 @@ pre-merge engine; the recorded R10S60 gate value was median 0.00694 /
 the reference path or a real regression — needs a fresh same-era bf16
 reference capture to attribute (no bf16 qwen checkpoint found under
 models/ yet). 500-case soak running.
+
+Qwen 27B soak: **500/500 coherent, 0 failures** (C8, 472 s) — the
+recipe's main coherence gate passes on the current stack. Remaining for
+the Qwen attribution: capture a FRESH same-era bf16 reference
+(models/Qwen3.8-27B-bf16-ref exists) with the same serve recipe, then
+compare the PTQR capture against it (the archived SPEC_BF16.npz is from
+2026-09-01). After that: Bolt gates (boot, 500 soak, probe_bolt_quality,
+28k retrieval) and the flint draft/recipe/publish.
