@@ -304,6 +304,26 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 stride=(block_f16, slot_f16, head_f16, 1),
                 storage_offset=v_off,
             )
+            # Bounds audit: an out-of-range as_strided view is a silent
+            # illegal memory access; fail loud instead.
+            _n_f16 = raw.nbytes() // 2
+            for _nm, _t in (("k", self._g8_k), ("v", self._g8_v)):
+                if _t.numel():
+                    _max = _t.storage_offset() + sum(
+                        (sz - 1) * st
+                        for sz, st in zip(_t.shape, _t.stride()))
+                    assert _max < _n_f16, (
+                        f"int8_block_g{g} {_nm} scale view out of bounds: "
+                        f"max f16 index {_max} >= storage {_n_f16} "
+                        f"(blocks={num_blocks} block_size={block_size} "
+                        f"nkv={nkv} content={content} hs={hs})")
+            if os.environ.get("VLLM_KV_DBG_SHAPE"):
+                print(f"[kvshape] cache={tuple(kv_cache.shape)} "
+                      f"stride={kv_cache.stride()} hs={hs} groups={groups} "
+                      f"g8k={tuple(self._g8_k.shape)} "
+                      f"off={self._g8_k.storage_offset()} "
+                      f"strides={self._g8_k.stride()} n_f16={_n_f16}",
+                      flush=True)
             self._g8_k.fill_(1.0)
             self._g8_v.fill_(1.0)
 
