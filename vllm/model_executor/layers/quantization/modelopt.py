@@ -972,6 +972,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
 
 
+@register_weight_loader_v2_supported_method
 class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
     """Linear method for ModelOpt NVFP4 W4A16.
 
@@ -3145,3 +3146,24 @@ def build_linear_method(config, algo: str, prefix: str) -> LinearMethodBase:
         return builder(config, prefix)
     spec, ctx, format_scheme = resolve(algo, config, prefix)
     return ModelOptLinearMethod(spec, ctx, format_scheme)
+
+
+def _gfx908_w4a16_nvfp4_builder(config, prefix):
+    """gfx908 packed-GS128 path for W4A16 NVFP4 linears.
+
+    The merged generic dispatcher selected the NVFP4 kernel registry, whose
+    ROCm list only carries the emulation kernel (filtered out for W4A16) ->
+    "Failed to find a kernel that can implement the NVFP4 linear layer".
+    The fork's packed converter (ModelOptNvFp4W4A16LinearMethod with
+    packed_g128) was bypassed; route gfx908 back to it.
+    """
+    from vllm.platforms import current_platform
+    from vllm.platforms.rocm import on_gfx908
+
+    if current_platform.is_rocm() and on_gfx908():
+        return ModelOptNvFp4W4A16LinearMethod(config)
+    spec, ctx, fmt = resolve("W4A16_NVFP4", config, prefix)
+    return ModelOptLinearMethod(spec, ctx, fmt)
+
+
+LINEAR_METHOD_BUILDERS["W4A16_NVFP4"] = _gfx908_w4a16_nvfp4_builder

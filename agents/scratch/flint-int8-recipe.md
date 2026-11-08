@@ -1885,3 +1885,22 @@ serve-contract boot OK; coherence OK; 500/500 coherence soak; KLD
 returns NaN logprobs at 256-token generations (spec-off is clean; the
 deployed PTQR target never showed it) — worth a follow-up outside this
 goal. Qwen QA COMPLETE; Bolt next.
+
+## Bolt boot fix (2026-11-08): merge dropped the gfx908 W4A16-NVFP4 path
+
+Bolt could not boot on the merged branch: mamba `in_proj` (W4A16_NVFP4)
+went through the new generic `ModelOptLinearMethod` ->
+`init_nvfp4_linear_kernel(use_a16=True)`, whose ROCm kernel list only has
+the emulation kernel (filtered out for W4A16) -> "Failed to find a kernel
+that can implement the NVFP4 linear layer". The merge's
+`build_linear_method` dispatcher bypassed the fork's
+`ModelOptNvFp4W4A16LinearMethod` (packed_g128 = on_gfx908()).
+Fix (two parts): register `LINEAR_METHOD_BUILDERS["W4A16_NVFP4"]` with a
+builder that returns the packed method on gfx908 (generic path
+otherwise), and decorate that method with
+`@register_weight_loader_v2_supported_method` (without it the legacy
+loader shape-asserts on the packed NVFP4 tensors).
+Verified: Bolt boots (weights 8.07 GiB/rank in 22 s, CPU KV tier, GS128
+shared/routed overlap, prefix-cache geometry, mixed-load prefill), health
+200, coherent reply. Gates running: 52-prompt quality probe, 500-case
+soak, 28k retrieval/prefix replay.
