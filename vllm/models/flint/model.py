@@ -395,10 +395,34 @@ class FlintAttention(nn.Module):
             # then hand q/k/v to the attention backend — the AITER unified
             # backend writes the (int8-quantized) KV cache itself.
             num_tokens = qkv.shape[0]
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-            q = self.q_norm(q.view(num_tokens, self.num_heads, self.head_dim))
-            k = self.k_norm(k.view(num_tokens, self.num_kv_heads, self.head_dim))
-            if self.rotary_emb is not None:
+            if os.environ.get("VLLM_GFX908_QK_FUSION", "1") == "1":
+                # One fused per-head RMSNorm+RoPE pass (qk_norm_rope_rocm)
+                # replaces the eager split/norm/rope chain: 438 -> 58 us
+                # per layer at both decode and prefill token counts.
+                from vllm.models.flint.ops.qk_norm_rope import (
+                    qk_norm_rope_rocm,
+                )
+
+                q2, k2 = qk_norm_rope_rocm(
+                    qkv, positions,
+                    None if self.rotary_emb is None
+                    else self.rotary_emb.cos_sin_cache,
+                    self.q_norm.weight, self.k_norm.weight,
+                    self.num_heads, self.num_kv_heads, self.head_dim,
+                    self.q_norm.variance_epsilon,
+                    self.rotary_emb is not None)
+                q = q2.view(num_tokens, self.num_heads, self.head_dim)
+                k = k2.view(num_tokens, self.num_kv_heads, self.head_dim)
+                v = qkv[:, self.q_size + self.kv_size:]
+            else:
+                q, k, v = qkv.split(
+                    [self.q_size, self.kv_size, self.kv_size], dim=-1)
+                q = self.q_norm(
+                    q.view(num_tokens, self.num_heads, self.head_dim))
+                k = self.k_norm(
+                    k.view(num_tokens, self.num_kv_heads, self.head_dim))
+            if self.rotary_emb is not None and (
+                    os.environ.get("VLLM_GFX908_QK_FUSION", "1") != "1"):
                 # reference numerics (qk_norm_rope.py): rotate in fp32
                 # from the fp32 cos/sin cache — vLLM's rotary op rounds
                 # the cache to bf16 first, a documented deviation

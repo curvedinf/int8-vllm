@@ -10,6 +10,7 @@ rounds to bf16, and K/V are stored unchanged in the bf16 cache.
 """
 
 import torch
+from triton.language.extra import libdevice
 
 from vllm.triton_utils import tl, triton
 
@@ -185,3 +186,87 @@ def qk_norm_rope_cache(
         num_warps=4,
     )
     return q
+
+
+# ---------------------------------------------------------------------------
+# ROCm int8 path: fused per-head q/k RMSNorm + NeoX RoPE without the paged
+# bf16 cache write (the AITER unified backend writes the int8 KV cache
+# itself). Numerics match the eager ROCm reference in model.py: norm in fp32
+# rounded to bf16, then RoPE in fp32 from the fp32 cos/sin cache, rounded to
+# bf16. Replaces ~10 small kernels per layer with one launch.
+# ---------------------------------------------------------------------------
+
+
+@triton.jit(do_not_specialize=["num_tokens"])
+def _qk_norm_rope_rocm_kernel(
+    QKV, POS, CACHE, QW, KW, QOUT, KOUT,
+    num_tokens,
+    qkv_stride, q_stride, k_stride, cache_stride,
+    eps,
+    NQ: tl.constexpr, NKV: tl.constexpr, D: tl.constexpr,
+    APPLY_ROPE: tl.constexpr, BT: tl.constexpr,
+):
+    pid_t = tl.program_id(0)
+    head = tl.program_id(1)
+    toks = pid_t * BT + tl.arange(0, BT)
+    t_mask = toks < num_tokens
+    half: tl.constexpr = D // 2
+    offs_h = tl.arange(0, half)
+    is_q = head < NQ
+    h = tl.where(is_q, head, head - NQ)
+    # qkv row layout: [q heads | k heads | v heads]; k heads start at NQ.
+    src_head = tl.where(is_q, head, NQ + h)
+    row = QKV + toks.to(tl.int64)[:, None] * qkv_stride + src_head * D
+    x1 = tl.load(row + offs_h[None, :], mask=t_mask[:, None],
+                 other=0.0).to(tl.float32)
+    x2 = tl.load(row + half + offs_h[None, :], mask=t_mask[:, None],
+                 other=0.0).to(tl.float32)
+    w_ptr = QW if is_q else KW
+    w1 = tl.load(w_ptr + offs_h).to(tl.float32)
+    w2 = tl.load(w_ptr + half + offs_h).to(tl.float32)
+    ms = (tl.sum(x1 * x1, axis=1) + tl.sum(x2 * x2, axis=1)) / D
+    r = libdevice.rsqrt(ms + eps)
+    n1 = (x1 * r[:, None] * w1[None, :]).to(tl.bfloat16)
+    n2 = (x2 * r[:, None] * w2[None, :]).to(tl.bfloat16)
+
+    if APPLY_ROPE:
+        pos = tl.load(POS + toks, mask=t_mask, other=0).to(tl.int64)
+        cbase = CACHE + pos[:, None] * cache_stride + offs_h[None, :]
+        cos = tl.load(cbase, mask=t_mask[:, None], other=1.0)
+        sin = tl.load(cbase + half, mask=t_mask[:, None], other=0.0)
+        f1 = n1.to(tl.float32)
+        f2 = n2.to(tl.float32)
+        y1 = (f1 * cos - f2 * sin).to(tl.bfloat16)
+        y2 = (f2 * cos + f1 * sin).to(tl.bfloat16)
+    else:
+        y1, y2 = n1, n2
+
+    out_ptr = QOUT if is_q else KOUT
+    ostride = q_stride if is_q else k_stride
+    dst = out_ptr + toks.to(tl.int64)[:, None] * ostride + h * D
+    tl.store(dst + offs_h[None, :], y1, mask=t_mask[:, None])
+    tl.store(dst + half + offs_h[None, :], y2, mask=t_mask[:, None])
+
+
+def qk_norm_rope_rocm(qkv, positions, cos_sin_cache, q_weight, k_weight,
+                      num_q_heads: int, num_kv_heads: int, head_dim: int,
+                      eps: float, apply_rope: bool):
+    """Fused q/k per-head RMSNorm (+NeoX RoPE when apply_rope) for ROCm.
+
+    Returns (q, k) with q [T, num_q_heads*head_dim] and
+    k [T, num_kv_heads*head_dim]. v stays the caller's view into qkv.
+    """
+    t = qkv.shape[0]
+    q = torch.empty((t, num_q_heads * head_dim), dtype=qkv.dtype,
+                    device=qkv.device)
+    k = torch.empty((t, num_kv_heads * head_dim), dtype=qkv.dtype,
+                    device=qkv.device)
+    cache = cos_sin_cache if cos_sin_cache is not None else qkv
+    _qk_norm_rope_rocm_kernel[(triton.cdiv(t, _BLOCK_T),
+                               num_q_heads + num_kv_heads)](
+        qkv, positions, cache, q_weight, k_weight, q, k,
+        t, qkv.stride(0), q.stride(0), k.stride(0),
+        cache.stride(0) if cache is not qkv else 0,
+        eps, NQ=num_q_heads, NKV=num_kv_heads, D=head_dim,
+        APPLY_ROPE=apply_rope, BT=_BLOCK_T)
+    return q, k

@@ -2148,3 +2148,28 @@ block_n. Installed the down override in _TUNED_MOE_CONFIGS.
   from known pieces: MoE ~0.86 ms x47 = 40 ms, dense CK linears ~7 ms,
   attention ~2 ms; the rest (~20-30 ms) is per-layer norm/rope/split/
   all-reduce glue, which the fusion work targets directly.
+
+## TURN 77 (2026-11-08 ~21:0x): FUSED Q/K NORM+ROPE (ROCm) ACTIVE
+
+New `qk_norm_rope_rocm` in vllm/models/flint/ops/qk_norm_rope.py: one
+Triton kernel does per-head RMSNorm (fp32) + NeoX RoPE (fp32 from the
+fp32 cache) for q and k, no paged-cache write (UA writes int8 KV
+itself). Numerics match the eager reference except 1-3 elements out of
+~110k (1-ulp). Microbench: eager chain 438 us -> fused 58 us per layer
+at both T=96 and T=2048. Wired into FlintAttention.forward behind
+VLLM_GFX908_QK_FUSION (default 1), eager path kept as fallback.
+
+End-to-end, steady C12 2048/256 cold run: 212.7 -> **221.0 output
+tok/s** (+3.9%), TTFT 6.93 -> 6.31 s, TPOT 57.8 -> 53.0 ms (-8.3%).
+Coherent (17*3 -> 51). The model-level gain is smaller than the
+microbench because the eager chain's allocator churn is amortized in
+the real forward.
+
+CORRECTION (important): the earlier staggered numbers (350/456 tok/s)
+were PREFIX-CACHE ARTIFACTS - the staggered harness used the same
+seed-0 prompts as the preceding steady run, so prefill was cached. A
+cold staggered run (seed 1, delay 2.0 s) measures **198.4 tok/s**, which
+is WORSE than the cold steady run (221.0). The "staggering nearly doubles
+throughput" claim is retracted; the delay must be swept with a unique
+seed per run before any stacking claim. Prefix caching also means every
+A/B needs one cold run per configuration.
