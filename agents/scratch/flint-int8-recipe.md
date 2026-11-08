@@ -1637,3 +1637,22 @@ Int8 export boot status (2026-11-08 ~02:1x-02:4x):
   weights/GEMM/MoE fault.
 - Crashed boots leave ~28 GiB/GPU zombies; kill before the next attempt
   (this caused one false OOM).
+
+## TURN 61 (2026-11-08 ~02:5x): EXPORT EXPERT-STITCH BUG — local names collide
+
+The int8 export (first attempt) served garbage: with **bf16 KV** it boots
+and runs (so the weights path itself doesn't fault), but median KLD vs
+the teacher is **2.14** and top-1 agreement **18/1023 (1.8%)** on the
+1024-token val window. Weight forensics: dense layers are faithful
+(dequant rel err 0.7% vs the bf16 source: down_proj, o_proj, gate_proj),
+but **every expert maps to the wrong slot**: export expert 1 -> HF
+expert 0, expert 3 -> 0, expert 7 -> 4. Mechanism: the plan addresses
+experts by their *local* index `loc = e // world` inside the rank's
+expert list, and `rank_of(name)` returns the FIRST shard containing that
+name. Every rank's shard contains local experts 0..63, so every group of
+four globals read rank 0's copy: e in [4k,4k+3] -> global expert 4k.
+Fix: whole-expert plan rows carry the holding rank explicitly
+(`e % world`) and the getters take it. Re-export (v2) in flight.
+Also confirmed: the int8_block_g128 KV path with the UA backend faults
+(hipErrorIllegalAddress) on flint's GQA kvh=1 while bf16 KV is fine —
+a separate kernel issue to fix after the weights are right.

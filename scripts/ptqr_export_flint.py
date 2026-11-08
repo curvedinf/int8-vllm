@@ -113,14 +113,17 @@ def main():
                 loc = e // args.world
                 b = f"layers.{n}.mlp.experts.{loc}"
                 hb = f"model.layers.{n}.mlp.experts.{e}"
-                plan.append((f"{b}.gate_up", hb, "gated1"))  # whole, single rank
-                plan.append((f"{b}.down", f"{hb}.down_proj", "whole"))
+                # local expert names collide across shards (every rank has a
+                # local expert `loc`), so whole-expert rows must name the
+                # holding rank explicitly: rank e%world holds global expert e.
+                plan.append((f"{b}.gate_up", hb, "gated1", r))
+                plan.append((f"{b}.down", f"{hb}.down_proj", "whole", r))
     plan.append(("embed.weight", "model.embed_tokens.weight", "row"))
     plan.append(("lm_head.weight", "lm_head.weight", "row"))
     plan.append(("final_norm.weight", "model.norm.weight", "param"))
 
-    def get_w(shard_name):
-        s = shards[rank_of(shard_name)]
+    def get_w(shard_name, rank=None):
+        s = shards[rank if rank is not None else rank_of(shard_name)]
         k = shard_name if shard_name in s else shard_name + ".weight"
         return s[k]
 
@@ -129,14 +132,16 @@ def main():
             else shard_name
         return any(base + ".scale" in s for s in shards)
 
-    def get_scale(shard_name):
+    def get_scale(shard_name, rank=None):
         base = shard_name[:-len(".weight")] if shard_name.endswith(".weight") \
             else shard_name
-        return shards[rank_of(base + ".scale")][base + ".scale"]
+        r = rank if rank is not None else rank_of(base + ".scale")
+        return shards[r][base + ".scale"]
 
     def emit(row):
         """Yield (hf_key, tensor-or-tuple) entries for one plan row."""
-        sname, hf, kind = row
+        sname, hf, kind = row[0], row[1], row[2]
+        rank = row[3] if len(row) > 3 else None
         if kind == "param":
             yield hf, get_w(sname).to(torch.bfloat16)
             return
@@ -165,8 +170,8 @@ def main():
                 yield hf + f".{tag}", (qw, qz, s16)
             return
         if kind == "gated1":  # whole expert fused gate_up on one rank
-            w = get_w(sname + ".weight")
-            sc = get_scale(sname)
+            w = get_w(sname + ".weight", rank)
+            sc = get_scale(sname, rank)
             gate, up = w[: w.shape[0] // 2], w[w.shape[0] // 2:]
             gs, us = sc[: sc.shape[0] // 2], sc[sc.shape[0] // 2:]
             for wt, st, tag in ((gate, gs, "gate_proj"), (up, us, "up_proj")):
@@ -181,7 +186,7 @@ def main():
             yield hf, (qw, qz, s16)
             return
         if kind == "whole":
-            r = rank_of(sname + ".weight")
+            r = rank if rank is not None else rank_of(sname + ".weight")
             w = shards[r][sname + ".weight"]
             sc = shards[r][sname + ".scale"]
             qw, qz, s16 = quant_pack(w.contiguous(), sc.contiguous(), args.group)
@@ -196,6 +201,7 @@ def main():
     # file plan: ~4.5 GiB chunks
     def entry_bytes(row):
         name, kind = row[0], row[2]
+        rank = row[3] if len(row) > 3 else None
         if kind in ("param", "row"):
             return get_w(name).numel() * 2
         if kind == "qkv":
