@@ -257,8 +257,20 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
 
         Per-token-head scale shape: ``(num_blocks, block_size, num_kv_heads)``
         """
-        if self._k_scale_cache is not None or self._g8_k is not None:
+        # Invalidate when the bound KV cache changes: the profiling CUDA
+        # graph capture runs before the real cache is allocated, and caching
+        # scale views over that dummy buffer left stale pointers -> illegal
+        # access once the real cache replaced it.
+        _ptr = kv_cache.data_ptr()
+        if getattr(self, "_scale_cache_ptr", None) == _ptr and (
+                self._k_scale_cache is not None or self._g8_k is not None):
             return
+        if getattr(self, "_scale_cache_ptr", None) != _ptr:
+            self._k_scale_cache = None
+            self._v_scale_cache = None
+            self._g8_k = None
+            self._g8_v = None
+            self._scale_cache_ptr = _ptr
 
         num_blocks, nkv, block_size, content = kv_cache.shape
         dtype_sz = kv_cache.element_size()

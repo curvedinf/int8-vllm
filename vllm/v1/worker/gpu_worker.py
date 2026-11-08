@@ -715,7 +715,10 @@ class Worker(WorkerBase):
                 and not self.model_config.enforce_eager
             )
         ):
-            cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
+            import os as _os
+            if not _os.environ.get("VLLM_DISABLE_CUDAGRAPH_MEM_PROFILE"):
+                cudagraph_memory_estimate = \
+                    self.model_runner.profile_cudagraph_memory()
 
         # Respect the opt-in flag as originally designed.
         cudagraph_memory_estimate_applied = (

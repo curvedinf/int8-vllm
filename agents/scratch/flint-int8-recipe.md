@@ -1732,3 +1732,24 @@ in a shape the warmup exercises but our 1024-token single prefill does
 not: most likely the **decode/multi-request kernel with nkv=1** (qwen
 runs 2 kv heads/rank). Decode probe (eager, 8 tokens) in flight to
 separate decode from graph capture.
+
+## TURN 65 (2026-11-08 ~04:3x): int8 KV fault ROOT-CAUSED — stale scale views
+
+Clean-GPU bisect: eager int8 KV works (prefill NLL 1.7567, decode OK);
+graph mode faults in `compile_or_warm_up_model` -> warmup_kernels after
+196 kvshape prints. Disabling the *memory-estimate* capture
+(`profile_cudagraph_memory`, which runs BEFORE the real KV cache is
+allocated) makes graph mode + int8 KV work end-to-end: val probe
+coverage 0.7351, NLL 1.6965, median KLD 0.0103 vs bf16-KV 0.0095 —
+int8 KV costs ~0.0008 median KLD, negligible.
+Mechanism: `_ensure_scale_caches` cached its as_strided scale views on
+first call (inside the profiling capture, over the dummy/pre-allocation
+cache) and never invalidated them; after the real cache replaced it the
+views pointed at freed memory -> hipErrorIllegalAddress surfaced later.
+Fix: remember the cache data_ptr and rebuild the views when it changes.
+Debug knob `VLLM_DISABLE_CUDAGRAPH_MEM_PROFILE=1` added as a
+workaround/diagnostic (also useful on its own: the estimate is only
+applied when VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS is set).
+Also noted: `VLLM_BOLT_SHORT_PREFILL_COHORT` appeared set again in a
+probe's engine env with no setter in the launcher (the open env-injection
+mystery from upstream-v0330-merge.md).
