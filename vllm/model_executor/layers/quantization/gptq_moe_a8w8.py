@@ -206,14 +206,11 @@ class A8W8BlockscaleMoEMethod(AutoGPTQMoEMethod):
             return super().apply(
                 layer, x, topk_weights, topk_ids, shared_experts,
                 shared_experts_input)
-        from aiter.ops.triton.moe.moe_op_gemm_a8w8_blockscale import (
-            moe_gemm_a8w8_blockscale,
-        )
-
         assert getattr(layer, "expert_map", None) is None, "expert_map unsupported"
         m, hidden = x.shape
         if os.environ.get("VLLM_MOE_A8W8_DBG"):
-            print(f"[moe8] layer={getattr(layer, 'layer_name', getattr(layer, 'prefix', '?'))} M={m} "
+            name = getattr(layer, "layer_name", getattr(layer, "prefix", "?"))
+            print(f"[moe8] layer={name} M={m} "
                   f"capturing={torch.cuda.is_current_stream_capturing()}",
                   flush=True)
         n_expts = layer.w13_qweight.shape[0]

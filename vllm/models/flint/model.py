@@ -23,10 +23,6 @@ from vllm.config import (
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.models.interfaces import (
-    EagleModelMixin,
-    SupportsEagle3,
-)
 from vllm.model_executor.layers.attention.attention import (
     unified_attention_with_output,
     unified_kv_cache_update,
@@ -46,7 +42,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import make_attention_sink
-from vllm.model_executor.models.interfaces import SupportsPP
+from vllm.model_executor.models.interfaces import (
+    EagleModelMixin,
+    SupportsEagle3,
+    SupportsPP,
+)
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -70,6 +70,7 @@ from .ops.moe import (
     flint_moe_ll,
     ll_weights_from_layers,
 )
+
 # ROCm (gfx908 int8 fork): Flint's own Triton norm kernel fails to
 # compile here ("couldn't allocate output register for constraint 'f'" —
 # inline-asm rsqrt written for newer gfx targets; kills the worker at the
