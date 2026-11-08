@@ -2051,3 +2051,18 @@ acceptance is worst-case):
 - For reference (C8, 32/256, earlier boots): 261.1 tok/s, TPOT 27.2 ms.
 
 These are the tuning targets for GEMM retune / fusion / residency work.
+
+GEMM inventory for the retune (from the dispatch code):
+- Dense linears (qkv, o, dense MLP 0-1, shared experts): CK W8A8
+  (`gemm_a8w8_CK`, per-channel requant at load) with
+  `aiter/configs/a8w8_tuned_gemm.csv` lookup; missing shapes fall back
+  to splitK=0. Shapes (M at C12/NS7 = 96 verify rows; prefill chunk 2048):
+  qkv N=6144 K=2048; o N=2048 K=4096; dense gate/up N=12288 K=2048 (TP4
+  split); dense down N=2048 K=6144; shared expert gate/up N=2048 K=2048
+  (1024-intermediate split over TP), shared down N=2048 K=1024.
+- Routed experts: grouped a8w8-blockscale Triton kernel with a HARDCODED
+  `get_kernel_config` heuristic (no tuned CSV). Local E=64, gate/up
+  N=1024 K=2048, down N=2048 K=512, top-6; decode M=96, prefill M=2048
+  per chunk. This is the primary retune target (47 layers x 2 calls/step).
+- The warning seen at boot ("not found tuned config in a8w8_tuned_gemm.csv
+  ... will use default config") is the CK path missing Flint shapes.
