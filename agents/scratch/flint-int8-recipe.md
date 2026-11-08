@@ -2132,3 +2132,19 @@ layer); block_n=256 is ~876. split_k=2 changes the output (excluded).
 The earlier full-sweep crash was an artifact of my fabricated harness
 tensors, not a kernel limitation - the production path accepts every
 block_n. Installed the down override in _TUNED_MOE_CONFIGS.
+
+## TURN 76 (2026-11-08 ~20:4x): PROFILING ATTEMPT (ATTACH BLOCKED)
+
+- rocprofv3 attach (1.3.2) fails two ways on this host: the target must be
+  started with ROCP_TOOL_ATTACH=1, and even then ptrace is denied
+  (PTRACE_SEIZE EPERM), so `--pid` profiling is unusable here.
+- vLLM's torch profiler via `--profiler-config` (PROFILE_DIR lever added
+  to the recipe) only produced a frontend trace (244k python_function
+  events, no GPU kernels) and `/stop_profile` timed out (HTTP 000) after
+  the bench; worker traces never appeared. Eager mode also costs 6x
+  (TPOT 357 ms vs 57.7 ms graphed), so the profiled run is not
+  representative anyway.
+- Decision: stop investing in process-level profiling. Budget the step
+  from known pieces: MoE ~0.86 ms x47 = 40 ms, dense CK linears ~7 ms,
+  attention ~2 ms; the rest (~20-30 ms) is per-layer norm/rope/split/
+  all-reduce glue, which the fusion work targets directly.

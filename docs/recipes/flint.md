@@ -8,7 +8,9 @@ draft. There is no 16-bit fallback in this recipe.
 
 - Upstream target: [`RecursiveSI/flint`](https://huggingface.co/RecursiveSI/flint)
 - Upstream draft: [`incoai/Flint-DFlash2`](https://huggingface.co/incoai/Flint-DFlash2)
-- Serving script: `scripts/serve_recipe_flint.sh` (`start|stop|restart|status`)
+- Serving script: `scripts/serve_recipe_flint.sh` (`start|stop|restart|status`;
+  `EAGER=1` disables graphs, `PROFILE_DIR=<dir>` exposes the torch-profiler
+  `/start_profile` + `/stop_profile` endpoints)
 - systemd unit: [vllm-flint.service](../../scripts/vllm-flint.service)
   (see [service installation and selection](services.md))
 - Ledger / experiment record: `agents/scratch/flint-int8-recipe.md`

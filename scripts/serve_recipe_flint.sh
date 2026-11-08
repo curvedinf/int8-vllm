@@ -101,6 +101,10 @@ serve() {
     --reasoning-parser qwen3
     --override-generation-config '{"temperature":1.0,"top_p":0.95,"top_k":20}'
   )
+  if [[ -n "${PROFILE_DIR:-}" ]]; then
+    # torch-profiler diagnostic boot: exposes /start_profile + /stop_profile.
+    args+=(--profiler-config "{\"profiler\":\"torch\",\"torch_profiler_dir\":\"${PROFILE_DIR}\"}")
+  fi
   if [[ "${EAGER:-0}" == 1 ]]; then
     args+=(--enforce-eager)
   else
