@@ -1850,3 +1850,15 @@ the Qwen attribution: capture a FRESH same-era bf16 reference
 compare the PTQR capture against it (the archived SPEC_BF16.npz is from
 2026-09-01). After that: Bolt gates (boot, 500 soak, probe_bolt_quality,
 28k retrieval) and the flint draft/recipe/publish.
+
+Qwen bf16-reference recapture notes (2026-11-08 ~06:1x-06:4x):
+- bf16 ref boot OOMs at the recipe's default KV sizing (bf16 weights 2x);
+  KVMEM=6442450944 boots.
+- First reference capture (bf16 target + PTQR int8 draft, SPEC ON) fails
+  every other prompt with HTTP 400: "Out of range float values are not
+  JSON compliant: nan" — i.e. NaN logprobs in the response at 256-token
+  generations (64-token requests are fine). Likely the spec-verify path
+  with an int8 draft against a bf16 target (the deployed PTQR target
+  never shows this). Re-capturing with SPECOFF=1 (target-only reference)
+  and the same int8 KV dtype; archive note: SPEC_BF16.npz from Sep 1 was
+  a bf16 target + bf16 draft capture.
