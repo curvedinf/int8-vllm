@@ -1715,3 +1715,20 @@ current faithful artifact (models/Flint-GPTQ-INT8-W8A8-GS128-PTQR-r1s40-v2).
 Remaining blockers for the recipe: int8_block_g128 KV fault on flint
 (UA, kvh=1), W8A8 for the routed experts (currently TRITON WNA16),
 then the draft, serve recipe at C8, and the Qwen/Bolt QA.
+
+## TURN 64 (2026-11-08 ~04:1x): int8 KV — prefill OK, warmup/decode faults
+
+With `enforce_eager=True` the int8_block_g128 KV path **works for
+prefill**: same 1024-token val window, coverage 0.7429, NLL 1.7567 vs
+bf16-KV 1.7196 — i.e. int8 KV costs ~2% NLL on this window. The
+`VLLM_KV_DBG_SHAPE` dump shows the flint cache `(65759, 1, 64, 260)`
+stride `(16640, 16640, 260, 1)` — nkv=1, block 64, one 128-element
+scale group (G=128) — and the bounds audit passes.
+Graph mode fails earlier: `compile_or_warm_up_model` -> warmup_kernels
+(the multi-request prefill + 3 decode steps) dies with
+hipErrorIllegalAddress *after* the 196 kvshape prints, i.e. in the warmup
+forward itself, not the scale-view carving. Eager works, so the fault is
+in a shape the warmup exercises but our 1024-token single prefill does
+not: most likely the **decode/multi-request kernel with nkv=1** (qwen
+runs 2 kv heads/rank). Decode probe (eager, 8 tokens) in flight to
+separate decode from graph capture.
