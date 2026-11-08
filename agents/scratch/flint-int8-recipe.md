@@ -1753,3 +1753,10 @@ applied when VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS is set).
 Also noted: `VLLM_BOLT_SHORT_PREFILL_COHORT` appeared set again in a
 probe's engine env with no setter in the launcher (the open env-injection
 mystery from upstream-v0330-merge.md).
+
+Fix verified: int8_block_g128 KV + FULL cudagraph mode + the int8 export
+boots and generates with NO env workaround (scale-cache pointer
+invalidation is the root fix; the kill switch remains only as a
+diagnostic). Remaining engine gap: routed experts still run TRITON
+WNA16 (A16W8) — the aiter grouped a8w8-blockscale kernel is the planned
+W8A8 path.
