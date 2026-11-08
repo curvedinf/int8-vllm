@@ -1933,3 +1933,24 @@ draft is not trained yet), vllm bench serve openai, random corpus:
   TPOT 68.8 ms, output 43.8 tok/s.
 No 16-bit fallback: this is the int8 path end to end (AITER W8A8 dense,
 grouped a8w8-blockscale MoE, int8 KV).
+
+## Bolt QA — FINAL (2026-11-08, with the gfx908 W4A16 fix)
+
+- Stack: micro PASS, battery 4/4.
+- Boot: healthy; recipe contract active (packed INT8 GS128 official
+  weights, fused expert cache 40 layers, CPU KV tier, GS128 shared/routed
+  overlap, prefix-cache geometry, mixed-load prefill, short-prefill
+  cohort).
+- 52-prompt quality probe: **PASS 52/52** (coherence + finite logprobs,
+  logs/bolt-quality.json).
+- 28,067-token retrieval: cold 32.4 s -> "ORCHID CEDAR 4829"; prefix
+  replay 1.95 s, cached_tokens 28,064, **identical answer** ✓.
+- 500-case soak: **492/500 coherent, 8 failures** — all
+  "repeat tail x7" on the bash-count-lines prompt family, with the
+  replies opening with literal `<think></think>` markers (the template's
+  enable_thinking=False rendering plants an empty think block).
+  Re-running the failing seeds flips pass/fail -> stochastic at temp 0.7,
+  not a fixed regression, but BELOW the recipe's recorded 500/500 gate.
+  Recorded as a coherence regression to investigate (candidates: the
+  empty-think template convention vs the merged engine's template
+  rendering; presence penalty path is untouched upstream code).
