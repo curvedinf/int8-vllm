@@ -31,8 +31,12 @@ there, not from `quantize_config.json`.
 - Target: `Flint-GPTQ-INT8-W8A8-GS128-PTQR-r1s40` (rung 1, step 40 kept;
   35 shards, 36,439 tensors, 38.5 GiB). Export:
   `scripts/ptqr_export_flint.py`; trainer `scripts/ptqr_train_flint.py`.
-- Draft: `flint-dflash2-ptqr-r1-int8` (35 GPTQ linears + 12 bf16-grid
-  surfaces, 151 tensors, 518 MB). Export:
+- Draft: `flint-dflash2-ptqr-r1-int8` — **int8 PTQR, same structure as
+  the deployed Qwen int8 draft**: all 35 attention/MLP linears are GPTQ
+  int8 GS128 (W8A8) and the 12 dense/conv/selector surfaces keep the
+  trained grid in bf16 (the identical exception set as Qwen's PTQR
+  draft: 35 GPTQ linears + 34 float weights). 151 tensors, 518 MB
+  (bf16 source: 805 MB). Export:
   `scripts/ptqr_export_flint_draft.py`; trainer
   `scripts/ptqr_train_draft_flint_ptqr.py`; KD cache
   `scripts/ptqr_flint_draft_cache.py`.
@@ -56,6 +60,8 @@ Deliberate float exceptions (same class as the Qwen findings): selector
 codebooks, the draft's conv `kernel_projection` ×10, `fc` and
 `candidate_selector.hidden_projection` stay bf16 on their trained grid;
 embeddings/`lm_head` and the router ship bf16. Everything else is int8.
+The draft's 35 attention/MLP linears are **not** an exception — they are
+int8 W8A8 GS128, exactly as in the Qwen PTQR draft.
 
 The expert path is the production path. `VLLM_GFX908_MOE_A8W8=0`
 (reverting to WNA16/A16W8) is a diagnostic lever only. The startup log
