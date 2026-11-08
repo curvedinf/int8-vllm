@@ -461,7 +461,10 @@ def main():
               f"teacher sweeps in {time.time() - t0:.0f}s", flush=True)
 
     def _kd_load(path):
-        return torch.load(path, mmap=True, weights_only=True)
+        obj = torch.load(path, mmap=True, weights_only=True)
+        # _precache writes {"logits": ..., "y": ...}; older caches held the
+        # bare logits tensor.
+        return obj["logits"] if isinstance(obj, dict) else obj
 
     def one_batch(x, y, tau, logits_t=None):
         if replaced:

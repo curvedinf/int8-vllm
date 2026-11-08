@@ -1525,3 +1525,19 @@ kernel's `_quantize_activation_per_block`) + expert weights packed as
 fused-MoE sort + this kernel for gate_up (swiglu) and down. Remaining
 exceptions for flint: router gate, qk norms, sinks (bf16); embed/lm_head
 via the loader int8 conversions; KV int8_block_g128; no mamba surfaces.
+
+## TURN 57 (2026-11-08 ~00:0x): rung-1 KD crash (stale loader) + fix
+
+First full rung-1 run completed the KD precache (20 train + 10 val
+teacher sweeps, 531-538 s, 12.3 GB spill) then died at the first step:
+`AttributeError: 'dict' object has no attribute 'to'` — the training
+loop's `_kd_load` still returned the raw `torch.load` result while
+`_precache` had been changed to write `{"logits":…, "y":…}` (the eval
+path was already updated, the train loop was not). Fix: `_kd_load`
+unwraps `obj["logits"]`. Relaunched. Precache is rebuilt on every run by
+design (the unseeded dataloader shuffle makes old logits/`y` unmatchable
+against a new iterator), so each attempt costs ~9 min before training;
+add `--data_seed` + store `x` in the cache if this needs to be cheap.
+Also this run: aiter grouped a8w8 blockscale MoE kernel parameterized
+with `w_blockscale_n` (aiter commit 94a46f47d) so GPTQ per-column GS128
+scales can be passed as [E, K/128, N] without re-quantizing experts.
