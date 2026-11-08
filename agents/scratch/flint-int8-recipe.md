@@ -1760,3 +1760,30 @@ invalidation is the root fix; the kill switch remains only as a
 diagnostic). Remaining engine gap: routed experts still run TRITON
 WNA16 (A16W8) — the aiter grouped a8w8-blockscale kernel is the planned
 W8A8 path.
+
+## TURN 66 (2026-11-08 ~04:4x): W8A8 MoE kernel conventions VALIDATED on gfx908
+
+Unit test (agents/tmp/moe_a8w8_unit.py, random E=8 H=2048 I=512 top-2
+GS128): the aiter grouped a8w8-blockscale pipeline matches a torch
+reference at rel rms 0.0157 (quantization noise). Exact conventions:
+- Weights: w13 int8 [E, K, 2I] + scales [E, K/128, 2I] fp32 (per-output-
+  column scales — the kernel's default 128-wide N tiles must be
+  overridden with the new `w_blockscale_n=1` argument);
+  w2 int8 [E, I, H] + scales [E, I/128, H].
+- Activations: int8 [M, K] + per-row scales [M, K/128], pass
+  `per_row_x_scale=True`.
+- Gate-up call: `gather_indx=routing.gather_indx`, `apply_swiglu=False`.
+  The kernel's fused swiglu is NOT flint's: it expects interleaved
+  gate/up (`a[..., ::2]`, `a[..., 1::2]`) and adds +1 to the linear half
+  (`swiglu_add_residual` default). Split the 2I output in torch instead:
+  silu(first half) * second half (checkpoint layout is [gate|up]).
+- Down call: `scatter_indx=routing.scatter_indx`,
+  `gammas=routing.gate_scal` (the renormalized routing weights in
+  expert-sorted order — do NOT rebuild from topk probs; the slot order
+  is expert-sorted, not probability-sorted).
+- Routing: `routing(logits, top_k)` with sm_first=False = softmax over
+  the top-k logits; returns (RoutingData, gather_indx, scatter_indx).
+Next: FusedMoEExperts subclass + GPTQ-int8-group quant-method branch to
+load/shard/run this in the fork (weights currently arrive as GPTQ
+qweight/scales; conversion to [E,K,N] int8 + [E,K/128,N] scales is a
+per-expert unpack identical to the dense AiterW8A16 repack).
