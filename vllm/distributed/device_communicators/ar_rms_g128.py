@@ -101,6 +101,11 @@ def get_ar_rms(max_rows: int, hidden: int) -> "ArRmsG128 | None":
         if native is None or native.disabled or native.world_size != 4:
             return None
         _INSTANCE = ArRmsG128(native, max_rows, hidden)
+        from vllm.logger import init_logger
+
+        init_logger(__name__).info_once(
+            "flint: fused custom-AR + residual + RMSNorm + GS128 quant "
+            "collective active (TP4)")
         return _INSTANCE
     except Exception:
         return None

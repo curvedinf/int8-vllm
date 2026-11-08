@@ -2254,3 +2254,28 @@ present, int8 everywhere):
   lm_head int8 GS128                NO   - bf16 today (goal item)
 Next: close the router-gate and residual/lm_head gaps, then the 512k
 PTQR retrain.
+
+## TURN 81 (2026-11-08 ~22:0x): FUSED AR COLLECTIVE — ENABLED THEN GARBLED
+
+Validation that passed:
+- Parity vs the deployed native custom AR + prologue: M=96/512 exact
+  (normed/q 0-9 elements), M=2048 res exact, scales exact, q<=1 LSB.
+- Soak: 200 fused launches at M=2048, all res-exact; the 0.48 "mismatch"
+  seen once was a transient (not reproducible in 3 later runs + soak).
+- In-model debug probe (VLLM_GFX908_FE_DEBUG=1, first 12 calls): res_diff=0
+  and normed_diff=0 at m=2048 warmup in the real engine.
+
+Failure when enabled in serving (VLLM_GFX908_FUSED_EPILOGUE=1):
+- Boot, graph capture, and the fused log line all succeed, but the served
+  output is garbled repetition from the first tokens ("pl pl pl...").
+- Since res/normed parity is exact, the corruption is structural, not
+  numeric. Prime suspects: (a) graph-replay coherence of the captured
+  IPC copy + barrier (the native custom AR routes captured payloads
+  through pre-registered uncached buffers for exactly this reason),
+  (b) the stashed q/s consumed by the a8w8 method under capture.
+- Back to opt-in (default OFF); model verified coherent again (48).
+
+Bisect plan: EAGER=1 + FE=1 boot; add q/s parity to the FE debug probe;
+if eager is coherent, capture is the problem - then either run captured
+decode on the unfused path (as the qwen E3 seam does) or fix the captured
+collective.

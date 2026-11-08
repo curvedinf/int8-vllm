@@ -658,6 +658,14 @@ class FlintAttention(nn.Module):
         return output, residual
 
 
+_FE_DBG_COUNT = [0]
+
+
+def _fe_dbg_count() -> int:
+    _FE_DBG_COUNT[0] += 1
+    return _FE_DBG_COUNT[0]
+
+
 class FlintDecoderLayer(nn.Module):
     def __init__(
         self,
@@ -701,6 +709,9 @@ class FlintDecoderLayer(nn.Module):
         ):
             self.self_attn.o_proj.skip_reduce = True
             self._fused_ar_rms = True
+            self._fused_ar_max_rows = (
+                get_current_vllm_config().scheduler_config
+                .max_num_batched_tokens)
 
     def forward(
         self,
@@ -737,15 +748,29 @@ class FlintDecoderLayer(nn.Module):
                     get_ar_rms,
                 )
 
-                cfg = get_current_vllm_config()
                 fused = get_ar_rms(
-                    cfg.scheduler_config.max_num_batched_tokens,
+                    self._fused_ar_max_rows,
                     self.post_attention_layernorm.weight.numel())
             if fused is not None:
                 normed, res, q, s = fused.fused(
                     hidden_states, residual,
                     self.post_attention_layernorm.weight,
                     self.post_attention_layernorm.variance_epsilon)
+                if (
+                    os.environ.get("VLLM_GFX908_FE_DEBUG") == "1"
+                    and _fe_dbg_count() < 12
+                    and not torch.cuda.is_current_stream_capturing()
+                ):
+                    from vllm.distributed import get_tp_group
+
+                    ref_ar = get_tp_group().all_reduce(hidden_states)
+                    ref_normed, ref_res = self.post_attention_layernorm(
+                        ref_ar, residual.clone())
+                    print(
+                        f"[fe-dbg] m={hidden_states.shape[0]} "
+                        f"res_diff={(res.float() - ref_res.float()).abs().max().item():.3g} "
+                        f"normed_diff={(normed.float() - ref_normed.float()).abs().max().item():.3g}",
+                        flush=True)
                 experts = getattr(getattr(self.mlp, "experts", None),
                                   "routed_experts", None)
                 if experts is not None:
