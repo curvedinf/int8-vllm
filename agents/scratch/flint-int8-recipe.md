@@ -2322,3 +2322,29 @@ fresh boot check in flight). In isolation the fused call is faster
 (33 vs 91 us at m=8), so the loss is in-model (per-layer hard barrier
 under graph replay). Kept OPT-IN (default 0); the recipe stays unfused
 until the in-model cost is understood.
+
+## TURN 84: INT8 GS128 lm_head — QUALITY SPEC
+
+Implementation: vllm/model_executor/layers/quantization/int8_lm_head.py
+(Int8GS128HeadMethod) replaces the unquantized head method when
+VLLM_GFX908_LM_HEAD_I8=1 (now default ON). Weights are quantized to
+[N,K] int8 + [N,K/128] fp32 scales at first use; activations use the same
+per-group quantizer; projection through the AITER Triton blockscale GEMM.
+GEMM sanity: 0.95% rel error vs fp32 reference.
+
+Quality (teacher-forced echo logprobs, 6 fixed 256-token prompts,
+1530 positions compared; greedy continuations are NOT valid because they
+diverge and compare different contexts):
+  top-1 agreement     91.63% (1402/1530)
+  top-20 set overlap  92.38%
+  mean KLD            0.005352
+For reference the accepted whole-model PTQR-vs-bf16 serving KLD is
+~0.0075-0.0095 and greedy agreement 36-42/52 (69-81%). The int8 GS128
+head is well inside that class -> GOOD QUALITY.
+
+Speed (same build, steady C12 2048/256): TPOT 56.3/60.1 ms vs 58.8 ms
+for the bf16 head - within run noise; the head's per-rank weight read is
+only ~154 MB/step, so no measurable win. Enabled by default on quality
+grounds (int8-first directive), not speed.
+
+Probe: scripts/probe_lm_head_quality.py (capture/compare, teacher-forced).

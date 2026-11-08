@@ -658,14 +658,6 @@ class FlintAttention(nn.Module):
         return output, residual
 
 
-_FE_DBG_COUNT = [0]
-
-
-def _fe_dbg_count() -> int:
-    _FE_DBG_COUNT[0] += 1
-    return _FE_DBG_COUNT[0]
-
-
 class FlintDecoderLayer(nn.Module):
     def __init__(
         self,
@@ -758,7 +750,6 @@ class FlintDecoderLayer(nn.Module):
                     self.post_attention_layernorm.variance_epsilon)
                 if (
                     os.environ.get("VLLM_GFX908_FE_DEBUG") == "1"
-                    and _fe_dbg_count() < 12
                     and not torch.cuda.is_current_stream_capturing()
                 ):
                     from vllm.distributed import get_tp_group
@@ -766,10 +757,17 @@ class FlintDecoderLayer(nn.Module):
                     ref_ar = get_tp_group().all_reduce(hidden_states)
                     ref_normed, ref_res = self.post_attention_layernorm(
                         ref_ar, residual.clone())
+                    from vllm.model_executor.layers.quantization.gptq_moe_a8w8 import (
+                        group_quant_rn,
+                    )
+
+                    rq, rs = group_quant_rn(ref_normed)
                     print(
                         f"[fe-dbg] m={hidden_states.shape[0]} "
-                        f"res_diff={(res.float() - ref_res.float()).abs().max().item():.3g} "
-                        f"normed_diff={(normed.float() - ref_normed.float()).abs().max().item():.3g}",
+                        f"res_max={(res.float() - ref_res.float()).abs().max().item():.3g} "
+                        f"normed_neq={(normed != ref_normed).sum().item()} "
+                        f"q_neq={(q != rq).sum().item()} "
+                        f"s_neq={(s != rs).sum().item()}",
                         flush=True)
                 experts = getattr(getattr(self.mlp, "experts", None),
                                   "routed_experts", None)
@@ -957,6 +955,14 @@ class FlintForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
+        if os.environ.get("VLLM_GFX908_LM_HEAD_I8", "1") == "1":
+            # Quality probe / opt-in: replace the unquantized head method with
+            # an INT8 GS128 projection (weights quantized at first use).
+            from vllm.model_executor.layers.quantization.int8_lm_head import (
+                Int8GS128HeadMethod,
+            )
+
+            self.lm_head.quant_method = Int8GS128HeadMethod()
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
