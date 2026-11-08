@@ -1912,3 +1912,24 @@ Bolt gates (2026-11-08): 52-prompt quality probe **PASS 52/52**
 the IDENTICAL answer ✓ (the optional /reset_prefix_cache step 404s
 because the diagnostic endpoint needs VLLM_SERVER_DEV_MODE=1, which the
 recipe says not to enable in production). 500-case soak running.
+
+## TURN 69 (2026-11-08 ~09:4x): W8A8 MoE GRAPH CAPTURE FIXED — root cause was padding ids
+
+The capture crash was NOT a kernel limitation: vLLM's warmup/dummy and
+padded decode batches carry **expert id -1** in `topk_ids`. My routing
+reconstruction did `logits.scatter_(1, topk_ids.long(), log(w))`; a
+negative index silently wraps to the LAST expert, so the whole batch
+piled onto expert 255 -> degenerate histogram -> the aiter fused routing
+kernel faulted (HSA 0x1016). Debug prints showed `ids[-1,-1] dup=5` at
+M=8 immediately before the crash. Fix: mask invalid slots
+(`ids < 0` -> expert 0, weight 0) before building the synthetic logits.
+Result: **W8A8 experts + int8_block_g128 KV + full CUDA graphs** server
+boots (init engine 12.2 s, capture 100%), coherent replies.
+Flint C8 speed on that full int8 stack (TP4, C8, no draft — the DFlash2
+draft is not trained yet), vllm bench serve openai, random corpus:
+- 32 in / 256 out, 64 reqs @ C8: output **171.7 tok/s**, req 0.67/s,
+  TTFT 514 ms, TPOT/ITL **44.75 ms** (22.3 tok/s per stream).
+- 2048 in / 64 out, 16 reqs @ C8: TTFT 5.66 s (≈5.8k prefill tok/s),
+  TPOT 68.8 ms, output 43.8 tok/s.
+No 16-bit fallback: this is the int8 path end to end (AITER W8A8 dense,
+grouped a8w8-blockscale MoE, int8 KV).

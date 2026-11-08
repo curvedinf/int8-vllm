@@ -17,6 +17,8 @@ reference at E=8/H=2048/I=512/top-2, GS128):
   renormalized routing weights in expert-sorted order).
 """
 
+import os
+
 import torch
 import torch.nn.functional as F
 
@@ -58,11 +60,35 @@ def _routing_from_topk(topk_ids: torch.Tensor, topk_weights: torch.Tensor,
     """
     from aiter.ops.triton.moe.moe_routing.routing import routing
 
+    _dbg = os.environ.get("VLLM_MOE_A8W8_DBG")
+    if _dbg:
+        ids = topk_ids.long()
+        w = topk_weights.float()
+        dup = 0
+        for r in range(ids.shape[0]):
+            dup = max(dup, int(ids[r].numel() -
+                               ids[r].unique().numel()))
+        print(f"[moe8t] M={ids.shape[0]} ids[{int(ids.min())},"
+              f"{int(ids.max())}] w[{float(w.min()):.3g},"
+              f"{float(w.max()):.3g}] dup={dup}", flush=True)
+    # Padding/dummy rows carry expert id -1 (vLLM convention). A negative
+    # index silently wraps in scatter_ and the fused routing kernel then
+    # faults on the degenerate histogram; map those slots to expert 0 with
+    # zero routing weight instead (their outputs are discarded upstream).
+    valid = topk_ids >= 0
+    ids = torch.where(valid, topk_ids,
+                      torch.zeros_like(topk_ids)).long()
+    w = torch.where(valid, topk_weights.float(),
+                    torch.zeros_like(topk_weights, dtype=torch.float32))
     logits = torch.full((topk_ids.shape[0], n_expts), float("-inf"),
                         device=topk_ids.device, dtype=torch.float32)
-    logits.scatter_(1, topk_ids.long(),
-                    torch.log(topk_weights.float().clamp_min(1e-30)))
-    return routing(logits, topk_ids.shape[1])
+    logits.scatter_(1, ids, torch.log(w.clamp_min(1e-30)))
+    if _dbg:
+        print("[moe8t] scatter-done", flush=True)
+    rd = routing(logits, topk_ids.shape[1])
+    if _dbg:
+        print("[moe8t] routing-done", flush=True)
+    return rd
 
 
 class A8W8BlockscaleMoEMethod(AutoGPTQMoEMethod):
@@ -120,6 +146,8 @@ class A8W8BlockscaleMoEMethod(AutoGPTQMoEMethod):
         AITER's routing/MoE Triton kernels JIT on first use; a variant that
         first appears inside a graph capture faults on this stack.
         """
+        if os.environ.get("VLLM_MOE_A8W8_NOPREWARM"):
+            return
         if getattr(layer, "_a8w8_prewarmed", False):
             return
         if torch.cuda.is_current_stream_capturing():
@@ -139,21 +167,33 @@ class A8W8BlockscaleMoEMethod(AutoGPTQMoEMethod):
             moe_gemm_a8w8_blockscale,
         )
 
+        _dbg = os.environ.get("VLLM_MOE_A8W8_DBG")
+        _cap = (torch.cuda.is_current_stream_capturing() if _dbg else False)
+        if _dbg:
+            print(f"[moe8r] {getattr(layer, 'prefix', '?')} M={x.shape[0]} "
+                  f"cap={_cap} enter", flush=True)
         rd, gather_idx, scatter_idx = _routing_from_topk(
             topk_ids, topk_weights, n_expts)
+        if _dbg:
+            print(f"[moe8r] cap={_cap} routing-done", flush=True)
         xq, xs = _quant_act(x)
         kw = dict(routing_data=rd, out_dtype=x.dtype, per_row_x_scale=True,
                   w_blockscale_n=1)
         h2 = moe_gemm_a8w8_blockscale(
             xq, layer.w13_qweight, xs, layer.w13_scales,
             gather_indx=gather_idx, apply_swiglu=False, **kw)
+        if _dbg:
+            print(f"[moe8r] cap={_cap} gateup-done", flush=True)
         gate, up = h2.chunk(2, dim=-1)
         h = (F.silu(gate.float()) * up.float()).to(x.dtype)
         hq, hs = _quant_act(h)
-        return moe_gemm_a8w8_blockscale(
+        y = moe_gemm_a8w8_blockscale(
             hq, layer.w2_qweight, hs, layer.w2_scales,
             scatter_indx=scatter_idx, gammas=rd.gate_scal,
             apply_swiglu=False, **kw)
+        if _dbg:
+            print(f"[moe8r] cap={_cap} down-done", flush=True)
+        return y
 
     def apply(self, layer, x, topk_weights, topk_ids, shared_experts,
               shared_experts_input):
@@ -167,6 +207,10 @@ class A8W8BlockscaleMoEMethod(AutoGPTQMoEMethod):
 
         assert getattr(layer, "expert_map", None) is None, "expert_map unsupported"
         m, hidden = x.shape
+        if os.environ.get("VLLM_MOE_A8W8_DBG"):
+            print(f"[moe8] layer={getattr(layer, 'layer_name', getattr(layer, 'prefix', '?'))} M={m} "
+                  f"capturing={torch.cuda.is_current_stream_capturing()}",
+                  flush=True)
         n_expts = layer.w13_qweight.shape[0]
         topk = topk_ids.shape[1]
         self._prewarm(layer, hidden, topk, n_expts)
