@@ -30,10 +30,13 @@ matching speculative draft.
 | --- | --- | --- | --- |
 | Qwen3.8-27B | [INT8 PTQR target](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128-PTQR) + [DFlash2 draft](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128-PTQR) | 6 simultaneous sequences (C6); ~1.61M shared tokens | [Qwen setup](docs/recipes/README.md) |
 | NVIDIA Nemotron 3.5 Bolt 74B-A9B-24GB | [Official packed target](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB) + [LiLiCorr draft](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr) | 8 simultaneous sequences (C8); ~1.99M shared tokens | [Bolt setup](docs/recipes/nemotron_bolt.md) |
+| Flint | PTQR INT8 target + draft (built from [flint](https://huggingface.co/RecursiveSI/flint) + [Flint-DFlash2](https://huggingface.co/incoai/Flint-DFlash2); see recipe) | 8 simultaneous sequences (C8); ~4.48M shared tokens | [Flint setup](docs/recipes/flint.md) |
 
 Qwen uses INT8 weights retrained against a BF16 reference. Bolt loads the
 official packed checkpoints, converts dense weights to INT8 and caches INT8
-expert weights. Both recipes use grouped INT8 KV for the target and draft,
+expert weights. Flint ships PTQR INT8 weights for target and draft, runs
+AITER W8A8 dense GEMMs plus a grouped W8A8 expert kernel, and keeps INT8 KV
+on both models. All recipes use grouped INT8 KV for the target and draft,
 AITER attention kernels and custom XGMI all-reduce.
 
 These recipes are tested on **4 × MI100 (gfx908), with XGMI full mesh**.

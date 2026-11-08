@@ -93,6 +93,11 @@ Recipe contract: TP4, `--max-num-seqs 8`, bf16 compute dtype,
 writes a 41 GiB per-rank repack cache (~15 min), later boots load from
 it (~4.5 min). `VLLM_FS_GPU=0` is the plain-safetensors fallback.
 
+At `--gpu-memory-utilization 0.90` the int8 KV pool holds **4,476,935
+tokens (~4.48M shared GPU context)**; at C8 that is ~559k tokens per
+stream, and eight full-length 262k streams use 47% of the pool. There is
+no CPU KV tier in this recipe.
+
 ## Gates (2026-11-08)
 
 - Serving NLL (int8 export, v2): 4.6588 @64 tokens, 1.3898 @1024
