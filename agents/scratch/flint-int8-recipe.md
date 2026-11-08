@@ -1618,3 +1618,22 @@ block); `quantize_config.json` alone is not consulted for the method.
 Fixed in the exporter (inject the GPTQ descriptor into config.json) and
 patched the existing export in place. Re-boot in flight; next boot
 surfaces the expert path (AutoGPTQMoEMethod int8 -> wna16 backend).
+
+Int8 export boot status (2026-11-08 ~02:1x-02:4x):
+- vLLM detects `auto_gptq` once config.json carries quantization_config
+  (fixed in the exporter; existing export patched in place).
+- Dense flint linears load through GPTQ; the 256-expert MoE layers warn
+  "not supported by GPTQMoeMarlin. Falling back to Moe WNA16 kernels" and
+  select the **TRITON WNA16** backend — i.e. the experts currently run
+  A16W8 (weight-only int8, bf16 activations), NOT W8A8. This is the known
+  gap the aiter grouped a8w8-blockscale kernel is meant to close.
+- AIS loader fails on the new export (`FsGpuError: AIS hipFileRead
+  failed: InvalidValue`) — probes use VLLM_FS_GPU=0 (plain safetensors,
+  ~20 s/shard). Need to root-cause before the serve recipe (load speed).
+- First full int8 boot (int8_block_g128 KV) loaded every shard, then
+  crashed in the first forward with `hipErrorIllegalAddress` (surfaced at
+  sample_hidden_states indexing; the async fault is earlier). Isolation
+  boot with **bf16 KV** in flight — separates KV-path fault from
+  weights/GEMM/MoE fault.
+- Crashed boots leave ~28 GiB/GPU zombies; kill before the next attempt
+  (this caused one false OOM).
