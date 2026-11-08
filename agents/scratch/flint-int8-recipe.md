@@ -2296,3 +2296,29 @@ collective.
   serving batch sizes; add a threadfence/acquire after the start barrier
   or switch the peer read to a volatile/system-scope load; test with
   AMDSMI/ASAN-style serialization to confirm the race.
+
+## TURN 83 (2026-11-08 ~23:0x): COLLECTIVE RACE ROOT-CAUSED AND FIXED
+
+Root cause: the launcher did a host-side hipMemcpyAsync of the WHOLE
+payload into the rank's IPC buffer before the kernel, but the barrier is
+per-block. A lagging peer's block could still be reading launch k's rows
+while this rank's launch k+1 memcpy had already overwritten every row -
+so the lagging block read the next launch's data (res errors up to 65 on
+O(1) values). Reproduced deterministically: 48/49 back-to-back m=8
+launches wrong without host sync; 40/49 wrong even with a host barrier
+(the CPU barrier does not order GPU work); repeated identical payloads
+were fine. m>=64 masked it by timing inertia.
+
+Fix: move the copy INTO the kernel, per block, over the block's own
+rows, with a system fence before the barrier. Each block's barrier then
+protects exactly the rows it copies and reads; the host memcpy is gone.
+After the fix: 0/49 bad (with and without host sync) and the full parity
+sweep m=1..2048 is res-exact (normed/q 1-ulp noise 0-38 elements).
+
+In-model: coherent with the fused epilogue (8*6 -> 48), graphs capture.
+BUT throughput/TPOT regressed vs the unfused recipe: TPOT 67.3/67.9 ms
+and 148-162 tok/s, versus ~56 ms / 216-228 tok/s unfused (same build,
+fresh boot check in flight). In isolation the fused call is faster
+(33 vs 91 us at m=8), so the loss is in-model (per-layer hard barrier
+under graph replay). Kept OPT-IN (default 0); the recipe stays unfused
+until the in-model cost is understood.

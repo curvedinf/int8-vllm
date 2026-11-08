@@ -58,7 +58,8 @@ __device__ __forceinline__ float block_sum(float v, float* smem, int tid) {
 }
 
 // One block per row of the payload; rows are strided across blocks.
-__global__ void ar_rms_g128(Peers p, const __hip_bfloat16* residual,
+__global__ void ar_rms_g128(Peers p, const __hip_bfloat16* in,
+                            const __hip_bfloat16* residual,
                             const __hip_bfloat16* w, __hip_bfloat16* normed,
                             __hip_bfloat16* res_out, int8_t* q_out,
                             float* s_out, int m, int k, float eps, int rank,
@@ -67,6 +68,25 @@ __global__ void ar_rms_g128(Peers p, const __hip_bfloat16* residual,
   __shared__ float inv_s;
   const int tid = threadIdx.x;
   const int per = k / 256;  // elements per thread (k=2048 -> 8)
+  // Publish this block's rows into its own IPC buffer BEFORE the barrier.
+  // Rows are block-strided, so the per-block barrier protects exactly the
+  // rows this block copies and every peer's matching block has copied: the
+  // host-side whole-buffer memcpy could overwrite rows a lagging peer's
+  // other blocks were still reading (measured at m=8).
+  {
+    __hip_bfloat16* dst = reinterpret_cast<__hip_bfloat16*>(p.data[rank]);
+    for (int row = blockIdx.x; row < m; row += row_stride) {
+      const int base = tid * per;
+      #pragma unroll
+      for (int i = 0; i < 16; ++i) {
+        if (i < per) {
+          dst[row * k + base + i] = in[row * k + base + i];
+        }
+      }
+    }
+    __threadfence_system();
+  }
+  barrier(p, rank, false);
   for (int row = blockIdx.x; row < m; row += row_stride) {
     float acc[16];
     float resf[16];
@@ -153,9 +173,6 @@ extern "C" int ar_rms_g128_launch(
     p.signals[r] = static_cast<Signal*>(signals[r]);
   }
   auto st = static_cast<hipStream_t>(stream);
-  auto rc = hipMemcpyAsync(p.data[rank], in, size_t(m) * k * 2,
-                           hipMemcpyDeviceToDevice, st);
-  if (rc != hipSuccess) return int(rc);
   int blocks = m < kMaxBlocks ? m : kMaxBlocks;
   const char* b = std::getenv("VLLM_GFX908_G128_AR_BLOCKS");
   if (b) {
@@ -163,7 +180,8 @@ extern "C" int ar_rms_g128_launch(
     if (cap > 0 && cap < blocks) blocks = cap;
   }
   ar_rms_g128<<<blocks, 256, 0, st>>>(
-      p, static_cast<const __hip_bfloat16*>(residual),
+      p, static_cast<const __hip_bfloat16*>(in),
+      static_cast<const __hip_bfloat16*>(residual),
       static_cast<const __hip_bfloat16*>(w), static_cast<__hip_bfloat16*>(normed),
       static_cast<__hip_bfloat16*>(res_out), static_cast<int8_t*>(q_out),
       static_cast<float*>(s_out), m, k, eps, rank, blocks);
