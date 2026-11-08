@@ -1805,3 +1805,12 @@ with gather + torch silu(gate)*up, quantizes the intermediate, runs down
 with scatter + gammas=gate_scal. Hooked in AutoGPTQConfig.get_quant_method
 for RoutedExperts when on_gfx908() + int8 + G%128==0
 (VLLM_GFX908_MOE_A8W8=0 disables). Boot probe in flight.
+
+W8A8 expert path result (eager): val window coverage 0.7361, NLL 1.7168,
+median KLD 0.011010, top-1 agreement 90.0% — quality-identical to the
+WNA16 (A16W8) path (0.0095/90.3%/1.6965) within probe noise, so the
+grouped a8w8 blockscale experts are numerically sound. Graph mode with
+the integration HSA-faults (warmup/capture), while eager works; suspect
+Triton JIT variants compiling inside cuda-graph capture. Added a
+one-time capture-size JIT prewarm (M 1..512, skipped during capture) in
+the quant method; graph-mode probe in flight.
