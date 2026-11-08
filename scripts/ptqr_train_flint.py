@@ -203,6 +203,9 @@ def main():
                    help="smoke only: keep the first N experts per MoE layer "
                         "(0 = all). Validates real-checkpoint wiring without "
                         "the full 37.5B expert mass.")
+    p.add_argument("--grad_checkpoint", action="store_true",
+                   help="recompute layers in backward (memory for seq 2048 "
+                        "training; ~30%% slower)")
     p.add_argument("--no_ptqr", action="store_true",
                    help="unquantized student control (teacher-vs-teacher)")
     args = p.parse_args()
@@ -373,6 +376,7 @@ def main():
             _shard(teacher, world, rank, group=tp_group)
             _shard(student, world, rank, group=tp_group)
     student.to(device)
+    student._grad_ckpt = bool(args.grad_checkpoint)
 
     n_lin = len(replaced)
     print(f"student: {n_lin} PTQRLinear surfaces, kv_group={args.kv_group}, "

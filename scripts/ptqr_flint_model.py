@@ -353,8 +353,14 @@ class FlintRef(nn.Module):
             x = tp_sum(full)
         else:
             x = self.embed(ids)
+        ckpt = (getattr(self, "_grad_ckpt", False) and self.training
+                and torch.is_grad_enabled())
         for layer in self.layers:
-            x = layer(x, positions)
+            if ckpt:
+                from torch.utils.checkpoint import checkpoint
+                x = checkpoint(layer, x, positions, use_reentrant=False)
+            else:
+                x = layer(x, positions)
         return self.final_norm(x)
 
     def head(self, h: torch.Tensor) -> torch.Tensor:

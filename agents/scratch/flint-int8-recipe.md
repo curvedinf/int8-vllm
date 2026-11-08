@@ -1541,3 +1541,16 @@ add `--data_seed` + store `x` in the cache if this needs to be cheap.
 Also this run: aiter grouped a8w8 blockscale MoE kernel parameterized
 with `w_blockscale_n` (aiter commit 94a46f47d) so GPTQ per-column GS128
 scales can be passed as [E, K/128, N] without re-quantizing experts.
+
+## TURN 58 (2026-11-08 ~00:1x): rung-1 OOM at seq 2048 -> grad checkpointing
+
+Second rung-1 attempt passed the KD-load fix and died at the first
+training step in `FlintRef.forward_hidden` -> AttentionRef.forward:
+CUDA OOM (30.8/32.0 GiB allocated, forward only). The student holds
+18.5 GiB/rank of weights; the reference attention keeps fp32 [8, 2048,
+2048] score/softmax tensors per layer for backward (~134 MB x 49 plus
+matmul inputs ~7-10 GiB total) which does not fit next to the weights.
+Fix: `--grad_checkpoint` (torch.utils.checkpoint, use_reentrant=False)
+around the 49 decoder layers in FlintRef.forward_hidden, enabled by the
+rung script. Forward peak becomes ~one layer + weights + KD logits;
+backward recomputes layers (~30% slower). Relaunched.

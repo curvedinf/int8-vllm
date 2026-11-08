@@ -31,5 +31,5 @@ exec .venv/bin/python -m torch.distributed.run --nproc_per_node=4 \
   --val_name flint_longctx/val_tokens.pt \
   --seq_len 2048 --batch_size 1 \
   --max_steps "${STEPS[$IDX]}" --lr "${LRS[$IDX]}" \
-  --logits_chunk 128 --save_every 20 --eval_every 20 \
+  --logits_chunk 128 --save_every 20 --eval_every 20 --grad_checkpoint \
   --out_dir "${OUT}" "${INIT[@]}" "$@"
