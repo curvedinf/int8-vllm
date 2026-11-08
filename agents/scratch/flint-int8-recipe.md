@@ -2093,3 +2093,23 @@ A/B only on cold runs):
   wall 8.78 -> 6.73 s, TPOT 89.7 -> 77.3 ms.
 Next: the routing build (337 us/layer, 15.8 ms/step) is the largest
 remaining fixed cost; then dense CK tuning and the norm/AR fusions.
+
+## TURN 74 (2026-11-08 ~21:0x): ROUTING SHORTCUT — VALID BUT SLOWER (ABANDONED)
+
+Idea: build the aiter Bitmatrix directly from the known top-k ids
+(index_put of bit words) and call `sort_tokens`, skipping the redundant
+logits build + fused topk (~135 us claim).
+
+Result: structures needed by the GEMM (hist, token_offs_raw/pad,
+block_pid_map) match the stock path EXACTLY; the gather/scatter/gate
+permutations differ only within an expert, and the gate_up GEMM output
+is bit-identical (max diff 0.0). But the shortcut measures 500 us vs
+155 us for stock in the same process (three zeroed scratchpad/bitmatrix
+allocations + index_put dominate at these tiny sizes). Abandoned.
+
+Measurement caveat: stock routing measured 155 us here vs 337 us in the
+per-layer breakdown process — the routing cost needs in-situ profiling
+(rocprof on the serving process) before any rewrite is worth it.
+NOTE: my first equivalence test used random ids WITH duplicates per row
+(impossible from a real top-k); that produced spurious structure
+mismatches until the ids were made distinct.
