@@ -169,7 +169,7 @@ class A8W8BlockscaleMoEMethod(AutoGPTQMoEMethod):
             self._run(layer, xd, w, ids, n_expts)
         layer._a8w8_prewarmed = True
 
-    def _run(self, layer, x, topk_weights, topk_ids, n_expts):
+    def _run(self, layer, x, topk_weights, topk_ids, n_expts, quant_in=None):
         from aiter.ops.triton.moe.moe_op_gemm_a8w8_blockscale import (
             moe_gemm_a8w8_blockscale,
         )
@@ -183,7 +183,7 @@ class A8W8BlockscaleMoEMethod(AutoGPTQMoEMethod):
             topk_ids, topk_weights, n_expts)
         if _dbg:
             print(f"[moe8r] cap={_cap} routing-done", flush=True)
-        xq, xs = group_quant_rn(x)
+        xq, xs = quant_in if quant_in is not None else group_quant_rn(x)
         kw = dict(routing_data=rd, out_dtype=x.dtype, per_row_x_scale=True,
                   w_blockscale_n=1)
         h2 = moe_gemm_a8w8_blockscale(
@@ -217,6 +217,13 @@ class A8W8BlockscaleMoEMethod(AutoGPTQMoEMethod):
         n_expts = layer.w13_qweight.shape[0]
         topk = topk_ids.shape[1]
         self._prewarm(layer, hidden, topk, n_expts)
+        pre = getattr(layer, "_pre_quant", None)
+        if pre is not None:
+            layer._pre_quant = None
+            q, s = pre
+            if q.dtype == torch.int8 and q.shape == x.shape:
+                return self._run(layer, x, topk_weights, topk_ids, n_expts,
+                                 quant_in=(q, s))
         return self._run(layer, x, topk_weights, topk_ids, n_expts)
 
 # ---------------------------------------------------------------------------
@@ -325,3 +332,50 @@ def _install_tuned_moe_configs() -> None:
 
 
 _install_tuned_moe_configs()
+
+
+# ---------------------------------------------------------------------------
+# Residual + RMSNorm + per-group int8 quant prologue (Flint MoE input).
+# Replaces `fused_add_rms_norm` followed by a separate group quant with one
+# kernel: residual = bf16(x + residual); out = bf16(rmsnorm(residual) * w);
+# q/scales = per-128-group round-half-even quant of out.
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _residual_norm_quant_kernel(
+    X, R, W, OUT, Q, S, eps,
+    K: tl.constexpr, G: tl.constexpr,
+):
+    row = tl.program_id(0)
+    offs = tl.arange(0, K)
+    x = tl.load(X + row * K + offs).to(tl.float32)
+    r = tl.load(R + row * K + offs).to(tl.float32)
+    res = (x + r).to(tl.bfloat16)
+    tl.store(R + row * K + offs, res)
+    rf = res.to(tl.float32)
+    ms = tl.sum(rf * rf, axis=0) / K
+    inv = libdevice.rsqrt(ms + eps)
+    w = tl.load(W + offs).to(tl.float32)
+    normed = (rf * inv * w).to(tl.bfloat16)
+    tl.store(OUT + row * K + offs, normed)
+    nf = normed.to(tl.float32).reshape(K // G, G)
+    amax = tl.max(tl.abs(nf), axis=1)
+    sc = tl.fdiv(tl.maximum(amax, 1e-8), 127.0, ieee_rounding=True)
+    q = libdevice.llrint(tl.fdiv(nf, sc[:, None], ieee_rounding=True))
+    q = tl.minimum(tl.maximum(q, -127.0), 127.0)
+    tl.store(Q + row * K + offs, q.reshape(K).to(tl.int8))
+    tl.store(S + row * (K // G) + tl.arange(0, K // G), sc)
+
+
+def residual_norm_group_quant(x: torch.Tensor, residual: torch.Tensor,
+                              weight: torch.Tensor, eps: float,
+                              group: int = _G):
+    """Fused residual add + RMSNorm + int8 group quant (K fixed by x)."""
+    m, k = x.shape
+    out = torch.empty_like(x)
+    q = torch.empty((m, k), dtype=torch.int8, device=x.device)
+    s = torch.empty((m, k // group), dtype=torch.float32, device=x.device)
+    _residual_norm_quant_kernel[(m,)](x, residual, weight, out, q, s, eps,
+                                      K=k, G=group)
+    return out, q, s

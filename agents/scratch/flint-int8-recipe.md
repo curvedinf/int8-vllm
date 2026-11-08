@@ -2199,3 +2199,24 @@ Findings:
 3. Conclusion: the simultaneous decode+prefill behaviour is the default;
    tuning stays oriented at the steady C12 2048/256 workload, and the
    staggered case is documented as equivalent-with-idle-delay.
+
+## TURN 79 (2026-11-08 ~21:4x): FUSED RESIDUAL+NORM+QUANT PROLOGUE
+
+`residual_norm_group_quant` (gptq_moe_a8w8.py): one Triton kernel does
+residual add (bf16), RMSNorm (fp32), and the per-128-group int8 quant for
+the MoE input; the normed bf16 output still feeds the router. Wired into
+FlintDecoderLayer._post_attention (VLLM_GFX908_NORM_QUANT=1) with the
+quantized copy stashed on the RoutedExperts and consumed by the a8w8
+method (skips its own prologue quant).
+
+Numerics vs the reference chain: residual bit-exact, norm output 2/196k
+(T=96) and 12/4.2M (T=2048) elements differ by 1 ulp, quantized values
+1 element different at T=96, scales exact.
+
+Measurement caveat (important): steady C12 cold runs after this change
+measured 228.4 / 155.8 / 148.8 output tok/s while TPOT stayed 55.6-58.1
+ms. The wall/throughput variance (+-25%) is prefill-side and makes
+sub-5% decode changes unresolvable in single runs; TPOT is the stable
+decode metric. The prologue fusion's expected ~1.5 ms/step is inside
+that band, so it is accepted on numerics and kernel count, not on a
+measured throughput delta.

@@ -719,6 +719,28 @@ class FlintDecoderLayer(nn.Module):
             )
             if ll is not None:
                 return ll
+            experts = getattr(getattr(self.mlp, "experts", None),
+                              "routed_experts", None)
+            if (
+                os.environ.get("VLLM_GFX908_NORM_QUANT", "1") == "1"
+                and experts is not None
+                and hasattr(experts, "w13_qweight")
+            ):
+                # Fused residual add + RMSNorm + int8 group quant: the norm
+                # output feeds the router and the experts; the quantized copy
+                # is consumed by the a8w8 MoE method, which skips its own
+                # prologue quant.
+                from vllm.model_executor.layers.quantization.gptq_moe_a8w8 import (
+                    residual_norm_group_quant,
+                )
+
+                hidden_states, q, s = residual_norm_group_quant(
+                    hidden_states, residual,
+                    self.post_attention_layernorm.weight,
+                    self.post_attention_layernorm.variance_epsilon)
+                experts._pre_quant = (q, s)
+                hidden_states = self.mlp(hidden_states)
+                return hidden_states, residual
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
