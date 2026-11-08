@@ -1,0 +1,29 @@
+[Unit]
+Description=Flint + Flint-DFlash2 INT8 PTQR GS128 API (TP4 C8)
+Wants=network-online.target
+After=network-online.target vllm.service
+Conflicts=vllm.service vllm-qwen38.service vllm-bolt.service llama-api-4x64k.service vllm-openai-gfx908.service
+
+[Service]
+Type=simple
+User=curved
+Group=curved
+SupplementaryGroups=video render
+WorkingDirectory=/home/curved/int8-vllm
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/etc/llama/llama-api.env
+ExecStartPre=/home/curved/int8-vllm/scripts/serve_recipe_flint.sh stop
+ExecStart=/home/curved/int8-vllm/scripts/serve_recipe_flint.sh supervise
+ExecStop=/home/curved/int8-vllm/scripts/serve_recipe_flint.sh stop
+Restart=always
+RestartSec=10
+KillSignal=SIGTERM
+KillMode=control-group
+TimeoutStopSec=75
+LimitNOFILE=1048576
+LimitMEMLOCK=infinity
+TasksMax=infinity
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

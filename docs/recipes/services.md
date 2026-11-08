@@ -1,11 +1,12 @@
 # Installing the recipe services
 
-The two recipes have separate systemd units:
+The three recipes have separate systemd units:
 
 | Recipe | Unit file | Service name |
 | --- | --- | --- |
 | Qwen3.8 + DFlash2 | [vllm-qwen38.service](../../scripts/vllm-qwen38.service) | `vllm-qwen38.service` |
 | Nemotron Bolt + LiLiCorr | [vllm-bolt.service](../../scripts/vllm-bolt.service) | `vllm-bolt.service` |
+| Flint + Flint-DFlash2 | [vllm-flint.service](../../scripts/vllm-flint.service) | `vllm-flint.service` |
 
 Both services run as `curved`, with primary group `curved`.
 The units expect `/home/curved/int8-vllm`, its `.venv`, the sibling `aiter`
@@ -23,7 +24,8 @@ instance of that same recipe before starting.
 From the checkout, install both definitions without starting either:
 
 ```bash
-sudo install -m0644 scripts/vllm-qwen38.service scripts/vllm-bolt.service /etc/systemd/system/
+sudo install -m0644 scripts/vllm-qwen38.service scripts/vllm-bolt.service \
+  scripts/vllm-flint.service /etc/systemd/system/
 sudo systemctl daemon-reload
 ```
 
@@ -32,12 +34,16 @@ one recipe. These commands stop the previous recipe and change boot selection:
 
 ```bash
 # Select Bolt.
-sudo systemctl disable --now vllm.service "vllm-qwen38.service"
+sudo systemctl disable --now vllm.service "vllm-qwen38.service" "vllm-flint.service"
 sudo systemctl enable --now "vllm-bolt.service"
 
 # Alternatively, select Qwen3.8.
-sudo systemctl disable --now vllm.service "vllm-bolt.service"
+sudo systemctl disable --now vllm.service "vllm-bolt.service" "vllm-flint.service"
 sudo systemctl enable --now "vllm-qwen38.service"
+
+# Alternatively, select Flint.
+sudo systemctl disable --now vllm.service "vllm-qwen38.service" "vllm-bolt.service"
+sudo systemctl enable --now "vllm-flint.service"
 ```
 
 If the legacy `vllm.service` was never installed, omit it from these commands.
