@@ -20,7 +20,9 @@ reference at E=8/H=2048/I=512/top-2, GS128):
 import os
 
 import torch
-import torch.nn.functional as F
+import triton
+import triton.language as tl
+from triton.language.extra import libdevice
 
 from vllm.model_executor.layers.quantization.auto_gptq import (
     AutoGPTQMoEMethod,
@@ -181,7 +183,7 @@ class A8W8BlockscaleMoEMethod(AutoGPTQMoEMethod):
             topk_ids, topk_weights, n_expts)
         if _dbg:
             print(f"[moe8r] cap={_cap} routing-done", flush=True)
-        xq, xs = _quant_act(x)
+        xq, xs = group_quant_rn(x)
         kw = dict(routing_data=rd, out_dtype=x.dtype, per_row_x_scale=True,
                   w_blockscale_n=1)
         h2 = moe_gemm_a8w8_blockscale(
@@ -190,8 +192,7 @@ class A8W8BlockscaleMoEMethod(AutoGPTQMoEMethod):
         if _dbg:
             print(f"[moe8r] cap={_cap} gateup-done", flush=True)
         gate, up = h2.chunk(2, dim=-1)
-        h = (F.silu(gate.float()) * up.float()).to(x.dtype)
-        hq, hs = _quant_act(h)
+        hq, hs = silu_mul_quant_rn(gate, up)
         y = moe_gemm_a8w8_blockscale(
             hq, layer.w2_qweight, hs, layer.w2_scales,
             scatter_indx=scatter_idx, gammas=rd.gate_scal,
@@ -217,3 +218,104 @@ class A8W8BlockscaleMoEMethod(AutoGPTQMoEMethod):
         topk = topk_ids.shape[1]
         self._prewarm(layer, hidden, topk, n_expts)
         return self._run(layer, x, topk_weights, topk_ids, n_expts)
+
+# ---------------------------------------------------------------------------
+# Fused per-group int8 quant: prologue (x) and SiLU*up epilogue.
+# Replaces the eager torch chains (float cast -> abs -> amax -> div -> round
+# -> clamp -> cast) with one Triton pass per group; the math is identical
+# (fp32 amax / 127, round-half-even, clamp +-127, fp32 group scales).
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _group_quant_rn_kernel(X, Q, S, K, G: tl.constexpr):
+    row = tl.program_id(0)
+    grp = tl.program_id(1)
+    offs = grp * G + tl.arange(0, G)
+    x = tl.load(X + row * K + offs).to(tl.float32)
+    amax = tl.max(tl.abs(x), axis=0)
+    s = tl.fdiv(tl.maximum(amax, 1e-8), 127.0, ieee_rounding=True)
+    q = libdevice.llrint(tl.fdiv(x, s, ieee_rounding=True)).to(tl.float32)
+    q = tl.minimum(tl.maximum(q, -127.0), 127.0)
+    tl.store(Q + row * K + offs, q.to(tl.int8))
+    tl.store(S + row * (K // G) + grp, s)
+
+
+@triton.jit
+def _silu_mul_quant_rn_kernel(GT, UP, Q, S, XS, OS, G: tl.constexpr):
+    row = tl.program_id(0)
+    grp = tl.program_id(1)
+    offs = grp * G + tl.arange(0, G)
+    g = tl.load(GT + row * XS + offs).to(tl.float32)
+    u = tl.load(UP + row * XS + offs).to(tl.float32)
+    # Matches `(F.silu(gate.float()) * up.float()).to(bf16)` then quantizing
+    # that bf16 tensor: one rounding, after the product.
+    y = (g * tl.sigmoid(g) * u).to(tl.bfloat16).to(tl.float32)
+    amax = tl.max(tl.abs(y), axis=0)
+    s = tl.fdiv(tl.maximum(amax, 1e-8), 127.0, ieee_rounding=True)
+    q = libdevice.llrint(tl.fdiv(y, s, ieee_rounding=True)).to(tl.float32)
+    q = tl.minimum(tl.maximum(q, -127.0), 127.0)
+    tl.store(Q + row * OS + offs, q.to(tl.int8))
+    tl.store(S + row * (OS // G) + grp, s)
+
+
+def group_quant_rn(x: torch.Tensor, group: int = _G):
+    """Per-(row, group) symmetric int8 quant, round-half-even."""
+    m, k = x.shape
+    q = torch.empty((m, k), dtype=torch.int8, device=x.device)
+    s = torch.empty((m, k // group), dtype=torch.float32, device=x.device)
+    _group_quant_rn_kernel[(m, k // group)](x, q, s, k, G=group)
+    return q, s
+
+
+def silu_mul_quant_rn(gate: torch.Tensor, up: torch.Tensor, group: int = _G):
+    """int8-quantize silu(gate) * up in one pass."""
+    m, i = gate.shape
+    if gate.stride(0) != up.stride(0) or gate.stride(1) != 1 or up.stride(1) != 1:
+        gate, up = gate.contiguous(), up.contiguous()
+    q = torch.empty((m, i), dtype=torch.int8, device=gate.device)
+    s = torch.empty((m, i // group), dtype=torch.float32, device=gate.device)
+    _silu_mul_quant_rn_kernel[(m, i // group)](
+        gate, up, q, s, gate.stride(0), i, G=group)
+    return q, s
+
+
+
+# ---------------------------------------------------------------------------
+# Tuned gfx908 configs for Flint's routed-expert shapes.
+# Swept with scripts/tune_flint_moe_gemm.py (M=96 decode, block_m=16):
+# gate_up N=1024 K=2048 block_n=256/warps=8/stages=2/group_m=1 measured
+# 253 us vs 293 us for the heuristic's block_n=128/warps=4 (-14%).
+# The down kernel's block_n shrink is load-bearing (forcing 256 faults), so
+# only leaf knobs are overridden there.
+# ---------------------------------------------------------------------------
+
+_TUNED_MOE_CONFIGS = {
+    # (K, N, block_m): overrides merged over the heuristic
+    (2048, 1024, 16): {"block_n": 256, "num_warps": 8, "num_stages": 2,
+                       "group_m": 1, "split_k": 1, "w_cache_modifier": None},
+}
+
+
+def _install_tuned_moe_configs() -> None:
+    if os.environ.get("VLLM_GFX908_MOE_TUNED", "1") != "1":
+        return
+    from aiter.ops.triton.moe import moe_op_gemm_a8w8_blockscale as _moe
+
+    if getattr(_moe, "_vllm_tuned_installed", False):
+        return
+    _orig = _moe.get_kernel_config
+
+    def get_kernel_config(m, n, k, routing_data, blockscale_n=128):
+        cfg = _orig(m, n, k, routing_data, blockscale_n)
+        override = _TUNED_MOE_CONFIGS.get((k, n, cfg["block_m"]))
+        if override:
+            cfg = dict(cfg)
+            cfg.update(override)
+        return cfg
+
+    _moe.get_kernel_config = get_kernel_config
+    _moe._vllm_tuned_installed = True
+
+
+_install_tuned_moe_configs()
