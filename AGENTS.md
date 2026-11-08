@@ -321,9 +321,10 @@ check in order and stop at the first that holds:
 2. `agents/tmp/context-paging.json` records `{"harness_install": "declined"}`.
    Skip silently.
 3. Otherwise ask: "Install context paging in your harness for this project? It
-   captures user messages automatically and keeps paged context recoverable."
-   On yes, follow the skill's harness wiring
-   ([references/kimi-hooks.md](agents/skills/activated/context-paging/references/kimi-hooks.md))
+   captures the full conversation automatically and keeps paged context
+   recoverable." On yes, follow the skill's harness wiring
+   ([references/kimi-hooks.md](agents/skills/activated/context-paging/references/kimi-hooks.md),
+   [references/codex-hooks.md](agents/skills/activated/context-paging/references/codex-hooks.md))
    this session, subscribing last. On no, write
    `{"harness_install": "declined"}` to `agents/tmp/context-paging.json`. Any
    other answer defers to the next session; ask at most once per session.

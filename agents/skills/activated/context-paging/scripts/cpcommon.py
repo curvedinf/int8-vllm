@@ -205,6 +205,22 @@ def parse_since(argv):
     return rest, "-%d %s" % (int(n), unit_name), val
 
 
+ROLES = ("user", "thinking", "assistant", "tool_call", "tool", "system")
+
+
+def parse_role(argv):
+    """Split --role R,R out of argv; return (rest, roles list or None)."""
+    if "--role" not in argv:
+        return list(argv), None
+    i = argv.index("--role")
+    if i + 1 >= len(argv):
+        sys.exit("--role needs a comma-separated list: %s" % ",".join(ROLES))
+    roles = [r.strip() for r in argv[i + 1].split(",") if r.strip()]
+    if not roles:
+        sys.exit("--role needs a comma-separated list: %s" % ",".join(ROLES))
+    return argv[:i] + argv[i + 2:], roles
+
+
 def filters_line(**kw):
     """Render applied lookup filters as one compact header line."""
     parts = []

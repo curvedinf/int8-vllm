@@ -9,3 +9,6 @@
 - [dev-skills installation record](dev-skills-install.md): source revision and destination mapping.
 - [Bolt support](bolt-support.md): active packed-weight INT8 port and deployment gates.
 - [Bolt optimization](bolt-optimization.md): continuous performance loop and incumbent.
+- [Bolt boot optimization](boot-optimization.md): boot-time profile and optimizations.
+- [Flint int8 recipe](flint-int8-recipe.md): active goal design map and measurements.
+- [Upstream v0.33.0 merge](upstream-v0330-merge.md): merge state, resolutions and gates.

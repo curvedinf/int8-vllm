@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """List the current session's messages chronologically, newest last.
 
-usage: cp_message_list.py [QUERY] [LIMIT] [--since DUR]
+usage: cp_message_list.py [QUERY] [LIMIT] [--since DUR] [--role R,R]
 
-Defaults to the past hour; --since 30m, 24h, 7d, or any widens the window.
+Defaults to the past hour; --since 30m, 24h, 7d, or any widens the
+window; --role restricts to the given roles (user, thinking, assistant,
+tool_call, tool).
 """
 import sys
 
@@ -12,6 +14,7 @@ import cpcommon as cp
 
 def main():
     argv, modifier, label = cp.parse_since(sys.argv[1:])
+    argv, roles = cp.parse_role(argv)
     if len(argv) > 2:
         sys.exit(__doc__.strip())
     query = argv[0] if argv else None
@@ -27,13 +30,17 @@ def main():
     if query:
         conds.append("content LIKE ?")
         params.append("%" + query + "%")
+    if roles:
+        conds.append("role IN (%s)" % ",".join("?" * len(roles)))
+        params.extend(roles)
     tc = " AND created_at >= datetime('now', ?)" if modifier else ""
     rows = con.execute(
         "SELECT id, role, content, created_at FROM messages WHERE "
         + " AND ".join(conds) + tc + " ORDER BY id DESC LIMIT ?",
         params + ([modifier] if modifier else []) + [limit],
     ).fetchall()
-    print(cp.filters_line(scope=key, query=query, since=label, limit=limit))
+    print(cp.filters_line(scope=key, query=query, since=label, limit=limit,
+                          role=",".join(roles) if roles else None))
     older_n = 0
     if modifier:
         older_n = con.execute(

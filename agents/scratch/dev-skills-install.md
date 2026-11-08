@@ -43,3 +43,15 @@
 - **Applied:** whole skill folder copied byte-identical (`diff -r` clean); no other upstream file changed
 - **Preserved local refinements:** `refine-skill`, `design-validation`, `run-experiment` SKILL.md keep their local self-improvement patches; upstream `AGENTS.md` unchanged
 - **Verified live:** default `cp_search.py "context paging"` shows the `since=1h` header and the beyond-window hint; `--since any` widens; `cp_message_list.py` shows the chronological header and captured prompts
+
+## Update 2026-11-08 — dev-skills @ e1600efbc0378aaa5c761ddbd1caaa338457021b
+
+- **Source:** https://github.com/curvedinf/dev-skills @ `e1600efbc0378aaa5c761ddbd1caaa338457021b` (main, 2026-11-08, "cp full-conversation capture and typed search"); prior revision `a740ada5…`
+- **Changed upstream (only context-paging):** capture model moves from prompts-only to full conversation. `kimi-hooks.md` now documents `PostToolUse`/`PostToolUseFailure` live inserts plus `Stop`/`SubagentStop`/`SessionEnd` sweeps of `wire.jsonl` via a cursor file; new `codex-hooks.md`; `SKILL.md` documents the six message roles and typed search; `cp_search.py` gains `--role R,R` and a `[matches: …]` per-role/per-kind tally; `cp_message_list.py` gains `--role`; `cpcommon.py` gains `ROLES`/`parse_role`
+- **Applied:** whole context-paging folder copied byte-identical (`diff -r` clean, excluding local `__pycache__`); no other skill changed, so the local `refine-skill` / `design-validation` / `run-experiment` patches are untouched
+- **AGENTS.md merged:** opt-in text now says "full conversation" and links both `kimi-hooks.md` and `codex-hooks.md`; routing rows unchanged
+- **Harness (already opted in, subscription retained):** replaced `~/.kimi-code/hooks/context-paging/hook.py` with the new full-turn dispatcher (backup `hook.py.bak-20261108-092825`) and appended the four new `[[hooks]]` rules (`PostToolUse`, `PostToolUseFailure`, `Stop`, `SubagentStop`) after `UserPromptSubmit` (config backup `config.toml.bak-20261108-092825`); `kimi doctor config` reports OK
+- **Verified:** dispatcher exercised with synthetic payloads against a temporary `CP_DB` — produced `user`, `tool_call`, `tool`, `thinking`, `assistant`, and `system` rows from the live wire transcript; an unsubscribed cwd wrote nothing and exited 0. `cp_search.py "dev-skills" --since any --role user` returns the filters + matches lines from the real DB. Test cursor state was removed (`agents/context-paging/cursors.json`/`cursors.lock` deleted) so the real DB sweeps this session from the start
+- **Activation:** hook rules apply on `/reload` or the next session; the current session ran under the old prompt-only rules
+- **Self-improvement:** unchanged (enabled)
+- **maintain-scratch:** reviewed all scratch notes as due (last completion 2026-10-15); nothing obsolete to compact, index completed with the three missing active notes, timer stamped 2026-11-08
