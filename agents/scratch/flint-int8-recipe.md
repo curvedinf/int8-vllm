@@ -2173,3 +2173,29 @@ is WORSE than the cold steady run (221.0). The "staggering nearly doubles
 throughput" claim is retracted; the delay must be swept with a unique
 seed per run before any stacking claim. Prefix caching also means every
 A/B needs one cold run per configuration.
+
+## TURN 78 (2026-11-08 ~21:2x): COLD STAGGERED SWEEP — NO OVERLAP GAIN
+
+All runs use unique seeds (no prefix-cache reuse), steady/C12 reference.
+
+Staggered 6+6, delay sweep (output tok/s):
+- 0.5 s: 211.5, 208.8, 183.9
+- 1.0 s: 205.5, 196.3, 136.9
+- 1.5 s: 155.4
+- 2.0 s: 200.3
+- 3.0 s: 180.8
+- 4.0 s: 174.1
+Steady C12 reference (same box, cold): 221.0, 216.5, 157.2.
+
+Findings:
+1. Run-to-run variance is +/-25% even with identical configs (one steady
+   run at 157 tok/s vs 221), so single runs cannot resolve differences
+   under ~10%. Future A/Bs need >=3 repeats and medians.
+2. Staggering 6+6 at delay <=1 s is indistinguishable from steady within
+   that noise; longer delays simply add idle wall time (174-200 tok/s at
+   3-4 s). The default chunked-prefill scheduler already interleaves
+   prefill chunks with decode in the steady case, so the "delayed second
+   wave" adds no throughput.
+3. Conclusion: the simultaneous decode+prefill behaviour is the default;
+   tuning stays oriented at the steady C12 2048/256 workload, and the
+   staggered case is documented as equivalent-with-idle-delay.
