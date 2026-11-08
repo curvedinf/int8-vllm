@@ -2024,3 +2024,30 @@ prepare it" (interrupted the restart).
 - Status: PREPARED, NOT VALIDATED. Live service was restored to the
   previous C8/262k configuration via env overrides. First 512k/C12 boot
   and a >262k long-context retrieval test are pending.
+
+## TURN 72 (2026-11-08 ~19:4x): 512k/C12 BOOTED + TUNING BASELINES
+
+Prepared 512k/C12 config validated: target "Using max model len 524288",
+draft max_position overridden to 524288 by vLLM (its own rope override
+exists; our table extension is belt-and-braces), GPU KV cache size
+**4,536,102 tokens**, max concurrency for 524,288 tokens/request 8.65x
+(C12 short requests fit; full-length concurrency is 8.65).
+W8A8 expert log line, UA, int8 KV, EAGLE3 aux, graphs all present.
+
+New harness `scripts/bench_flint_workloads.py` (token-id prompts,
+ignore_eos, greedy, SSE timing): steady N at t=0 and staggered 6 + 6
+with a delay.
+
+Baselines on the 512k/C12 recipe (random token-id prompts, so draft
+acceptance is worst-case):
+- steady C12, 2048 in / 256 out: wall 16.26 s, **188.9 output tok/s**,
+  prompt 1511 tok/s, TTFT mean 7.60 s (p95 13.28 s), TPOT 69.3 ms.
+  The 12x2048 prefill is serialized through 2048-token chunks and
+  interleaves with 96-row decode steps.
+- staggered 6 + 6 at delay 2.0 s: wall 8.78 s, **350.0 output tok/s**,
+  wave1 TTFT 2.64 s, wave2 TTFT 3.12 s (1.07 s after launch), TPOT
+  89.7 ms. Overlapping prefill with decode nearly doubles throughput vs
+  the steady C12 run.
+- For reference (C8, 32/256, earlier boots): 261.1 tok/s, TPOT 27.2 ms.
+
+These are the tuning targets for GEMM retune / fusion / residency work.
