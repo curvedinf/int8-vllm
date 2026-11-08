@@ -104,10 +104,56 @@ class A8W8BlockscaleMoEMethod(AutoGPTQMoEMethod):
                 replace_parameter(layer, name, None)
         assert w13.dtype == torch.int8 and w2.dtype == torch.int8, e
 
+    def get_fused_moe_quant_config(self, layer):
+        # No modular kernel / FusedMoEQuantConfig in this path.
+        return None
+
     def process_weights_after_loading(self, layer) -> None:
         if not self._use_a8w8:
             return super().process_weights_after_loading(layer)
         self._to_kernel_layout(layer)
+
+    @torch.no_grad()
+    def _prewarm(self, layer, hidden: int, topk: int, n_expts: int) -> None:
+        """Compile every capture-size variant before CUDA graph capture.
+
+        AITER's routing/MoE Triton kernels JIT on first use; a variant that
+        first appears inside a graph capture faults on this stack.
+        """
+        if getattr(layer, "_a8w8_prewarmed", False):
+            return
+        if torch.cuda.is_current_stream_capturing():
+            return
+        dev = layer.w13_qweight.device
+        dt = torch.bfloat16
+        for m in (1, 2, 4, 8, 16, 32, 64, 128, 256, 512):
+            xd = torch.randn(m, hidden, device=dev, dtype=dt) / 10
+            ids = torch.randint(0, n_expts, (m, topk), device=dev)
+            w = torch.rand(m, topk, device=dev)
+            w = w / w.sum(-1, keepdim=True)
+            self._run(layer, xd, w, ids, n_expts)
+        layer._a8w8_prewarmed = True
+
+    def _run(self, layer, x, topk_weights, topk_ids, n_expts):
+        from aiter.ops.triton.moe.moe_op_gemm_a8w8_blockscale import (
+            moe_gemm_a8w8_blockscale,
+        )
+
+        rd, gather_idx, scatter_idx = _routing_from_topk(
+            topk_ids, topk_weights, n_expts)
+        xq, xs = _quant_act(x)
+        kw = dict(routing_data=rd, out_dtype=x.dtype, per_row_x_scale=True,
+                  w_blockscale_n=1)
+        h2 = moe_gemm_a8w8_blockscale(
+            xq, layer.w13_qweight, xs, layer.w13_scales,
+            gather_indx=gather_idx, apply_swiglu=False, **kw)
+        gate, up = h2.chunk(2, dim=-1)
+        h = (F.silu(gate.float()) * up.float()).to(x.dtype)
+        hq, hs = _quant_act(h)
+        return moe_gemm_a8w8_blockscale(
+            hq, layer.w2_qweight, hs, layer.w2_scales,
+            scatter_indx=scatter_idx, gammas=rd.gate_scal,
+            apply_swiglu=False, **kw)
 
     def apply(self, layer, x, topk_weights, topk_ids, shared_experts,
               shared_experts_input):
@@ -122,22 +168,6 @@ class A8W8BlockscaleMoEMethod(AutoGPTQMoEMethod):
         assert getattr(layer, "expert_map", None) is None, "expert_map unsupported"
         m, hidden = x.shape
         n_expts = layer.w13_qweight.shape[0]
-        rd, gather_idx, scatter_idx = _routing_from_topk(
-            topk_ids, topk_weights, n_expts)
-
-        xq, xs = _quant_act(x)
-        kw = dict(
-            routing_data=rd, out_dtype=x.dtype, per_row_x_scale=True,
-            w_blockscale_n=1,
-        )
-        h2 = moe_gemm_a8w8_blockscale(
-            xq, layer.w13_qweight, xs, layer.w13_scales,
-            gather_indx=gather_idx, apply_swiglu=False, **kw)
-        gate, up = h2.chunk(2, dim=-1)
-        h = (F.silu(gate.float()) * up.float()).to(x.dtype)
-        hq, hs = _quant_act(h)
-        y = moe_gemm_a8w8_blockscale(
-            hq, layer.w2_qweight, hs, layer.w2_scales,
-            scatter_indx=scatter_idx, gammas=rd.gate_scal, apply_swiglu=False,
-            **kw)
-        return y
+        topk = topk_ids.shape[1]
+        self._prewarm(layer, hidden, topk, n_expts)
+        return self._run(layer, x, topk_weights, topk_ids, n_expts)

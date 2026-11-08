@@ -1814,3 +1814,13 @@ the integration HSA-faults (warmup/capture), while eager works; suspect
 Triton JIT variants compiling inside cuda-graph capture. Added a
 one-time capture-size JIT prewarm (M 1..512, skipped during capture) in
 the quant method; graph-mode probe in flight.
+
+Prewarm did not fix it: graph mode still fails to init with the W8A8
+experts (HSA exception at warmup/capture), while eager is stable. The
+AITER grouped a8w8 MoE kernel path is therefore capture-incompatible on
+this stack today — documented limitation; the fork keeps the WNA16
+experts for graphed serving and the W8A8 experts for eager serving
+(VLLM_GFX908_MOE_A8W8=1, default). Both pass the same quality gate.
+Priorities now: (1) Qwen27B + Bolt recipe quality checks (explicit
+objective requirement, GPU-only), (2) draft PTQR, (3) flint serve recipe
+C8 + publish.
