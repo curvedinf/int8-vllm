@@ -1600,3 +1600,11 @@ top-20 + target NLL coverage), compare_val_topk.py (union-renormalized
 per-position KLD, median/mean/p95, top-1 agreement, NLLs).
 Teacher window: NLL 3.7097 (val window at offset 0).
 Boots queued: bf16 flint (reference), then the int8 export.
+
+Serving-gate reference (bf16 flint served, kv=auto, 1024-val window at
+offset 0): median KLD 0.005459, mean 0.040420, p95 0.072471, top-1
+agreement 947/1023 (92.6%), target coverage in top-20 73.6%. This is
+the probe's bf16 noise floor (serving kernels vs the streaming teacher);
+qwen's serving-gate numbers (0.0069 PTQR vs 0.0110 deployed) sit in the
+same band, so the probe is calibrated. Int8 export boot in flight with
+kv=int8_block_g128 (recipe target).
