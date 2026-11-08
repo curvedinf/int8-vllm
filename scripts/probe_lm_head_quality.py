@@ -32,7 +32,8 @@ def _post(url, key, body):
 def capture(args):
     os.makedirs(OUT, exist_ok=True)
     rng = random.Random(1234)
-    prompts = [[rng.randrange(VOCAB) for _ in range(256)] for _ in range(6)]
+    n = args.prompt_len
+    prompts = [[rng.randrange(VOCAB) for _ in range(n)] for _ in range(6)]
     out = []
     url = args.base_url.rstrip("/") + "/v1/completions"
     for i, ids in enumerate(prompts):
@@ -116,6 +117,7 @@ def main():
     ap.add_argument("--base-url", default="http://127.0.0.1:8030")
     ap.add_argument("--api-key", default="recipe-local")
     ap.add_argument("--model", default="flint")
+    ap.add_argument("--prompt-len", type=int, default=256)
     ap.add_argument("--tag")
     ap.add_argument("--ref")
     ap.add_argument("--cand")

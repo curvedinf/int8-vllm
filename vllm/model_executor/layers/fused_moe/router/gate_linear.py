@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
+
 import torch
 from torch.nn.parameter import Parameter
 
@@ -103,6 +105,7 @@ class GateLinear(ReplicatedLinear):
             return_bias=return_bias,
         )
         self.out_dtype = out_dtype
+        self._i8: tuple | None = None  # (int8 weight, GS128 scales)
         self.is_gfx950 = is_gfx950
 
         # A quantized gate exposes no plain ``weight``, so every specialized
@@ -276,9 +279,46 @@ class GateLinear(ReplicatedLinear):
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         return output if not self.return_bias else (output, None)
 
+    def _int8_forward(self, x: torch.Tensor) -> torch.Tensor:
+        """INT8 GS128 router GEMM (Bolt GATE_I8 parity).
+
+        Weights are quantized once at first use; the activation uses the
+        same per-128-group quantizer as the expert prologue. Logits are
+        returned in fp32 like the other router tiers.
+        """
+        from aiter.ops.triton.gemm.basic.gemm_a8w8_blockscale import (
+            gemm_a8w8_blockscale,
+        )
+
+        from vllm.model_executor.layers.quantization.utils.packed_g128_int8 import (
+            quantize,
+        )
+
+        if self._i8 is None:
+            self._i8 = quantize(self.weight.data.float().contiguous())
+        wq, ws = self._i8
+        x2 = x.reshape(-1, x.shape[-1]).contiguous()
+        xq, xs = quantize(x2)
+        out = gemm_a8w8_blockscale(xq, wq, xs, ws, dtype=torch.float32)
+        return out.reshape(*x.shape[:-1], -1)
+
     def forward(
         self, x: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        # Bolt parity lever, OFF by default: the int8 router GEMM is a
+        # prefill lever in Bolt, but flint measured 0.0234 teacher-forced
+        # KLD at 1024-token prompts (0.0342 all-size) vs the fork's
+        # <=0.01 band, for ~2 ms/chunk of prefill. Kept as an opt-in
+        # (VLLM_GFX908_GATE_I8=1, prefill threshold via
+        # VLLM_GFX908_GATE_I8_MIN_TOKENS).
+        if (
+            os.environ.get("VLLM_GFX908_GATE_I8", "0") == "1"
+            and x.shape[0] >= int(os.environ.get(
+                "VLLM_GFX908_GATE_I8_MIN_TOKENS", "512"))
+            and x.dim() == 2
+            and x.dtype in (torch.bfloat16, torch.float16)
+        ):
+            return self._return(self._int8_forward(x))
         # Tier 1: cuteDSL ll_bf16_gemm (SM90+, bf16 in, fp32 out,
         # any dims w/ K divisible by 8)
         if (

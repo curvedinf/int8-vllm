@@ -2348,3 +2348,22 @@ only ~154 MB/step, so no measurable win. Enabled by default on quality
 grounds (int8-first directive), not speed.
 
 Probe: scripts/probe_lm_head_quality.py (capture/compare, teacher-forced).
+
+## TURN 85: ROUTER GATE INT8 — MEASURED, DEFAULT OFF (EXCEPTION)
+
+Implemented an int8 GS128 tier in GateLinear (VLLM_GFX908_GATE_I8=1;
+weights quantized once with the aiter GS128 quantizer - round-half-even,
+div_rn, so numerics are faithful; prefill threshold via
+VLLM_GFX908_GATE_I8_MIN_TOKENS=512).
+
+Teacher-forced quality (echo logprobs, 6 prompts, gate-only delta,
+int8 lm_head on in both legs):
+- all-size gate int8, 256-token prompts: top-1 78.4%, overlap 83.3%,
+  KLD 0.0342 (1530 positions).
+- prefill-path int8 (1024-token prompts): top-1 82.2%, overlap 85.3%,
+  KLD 0.0234 (6138 positions).
+Both exceed the fork's accepted serving-KLD band (~0.0075-0.0095);
+the speed benefit is ~2 ms per 2048-token prefill chunk. Bolt ships this
+as a prefill lever with coherence gates, but flint's router is more
+sensitive - recorded as a LIMITED EXCEPTION: default OFF, opt-in lever
+retained.
