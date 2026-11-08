@@ -1554,3 +1554,26 @@ Fix: `--grad_checkpoint` (torch.utils.checkpoint, use_reentrant=False)
 around the 49 decoder layers in FlintRef.forward_hidden, enabled by the
 rung script. Forward peak becomes ~one layer + weights + KD logits;
 backward recomputes layers (~30% slower). Relaunched.
+
+## TURN 59 (2026-11-08 ~00:35-01:0x): rung 1 training; in-loop KLD moved UP
+
+Rung-1 (with grad checkpointing, --grad_checkpoint) cleared the OOM and
+is training: step 0 loss 2.347 (ce 2.245, kd 0.051); step 10 loss 1.771
+(ce 1.634); step 20 loss 2.253 (ce 2.041) — per-batch CE is noisy.
+In-loop eval (teacher-forced val KLD, tau=0):
+  step 0  kld 0.080868  teacher_nll 3.2220
+  step 20 kld 0.131807  teacher_nll 3.2220
+KLD rose 63% after 20 steps. Two readings: (a) the scale-only PTQR
+updates at lr 1e-5 are overshooting this model (per-batch CE at step 20
+is also above step 10), or (b) the in-loop metric is not the gate — the
+Qwen ledger recorded exactly this divergence (trainer-stack KLD said
+improvement while the deployed semantics destroyed weights; the trusted
+gate is export -> serve -> KLD/agreement, ledger PTQR_P1_* rows). Plan:
+let rung 1 finish, export step 60 via scripts/ptqr_export_flint.py,
+serve it, and compute the SER VING-gate KLD vs the bf16 teacher (the
+teacher's val nll on the same windows is 3.222). Do not chain rungs 2/3
+until the serving KLD says rung 1 is healthy; if rung 1 is worse than
+the step-0 point, export step 0's checkpoint (already saved) as the
+untrained RTN baseline and compare.
+Also note checkpoint saves are 4 x ~12 GB (48 GB per save event, step
+0/20/40/60) and take ~4-5 min each; disk 2.5 TB free.
