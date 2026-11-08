@@ -501,6 +501,7 @@ def main():
         return loss, (ce_sum / n).detach(), (kd_sum / n).detach()
 
     step = 0
+    last_saved = -1
     while step < args.max_steps:
         if kd_train is not None:
             (x, y), ltp = kd_train[step % len(kd_train)]
@@ -523,6 +524,7 @@ def main():
                 save_ptqr_checkpoint(student, replaced, Path(args.out_dir),
                                      step, args, rank=rank, world=world,
                                      vocab_size=teacher.cfg.vocab_size)
+                last_saved = step
             step += 1
             student.zero_grad(set_to_none=True)
             continue
@@ -549,11 +551,12 @@ def main():
                 save_ptqr_checkpoint(student, replaced, Path(args.out_dir),
                                      step, args, rank=rank, world=world,
                                      vocab_size=teacher.cfg.vocab_size)
+                last_saved = step
             step += 1
             student.zero_grad(set_to_none=True)
 
     os.makedirs(args.out_dir, exist_ok=True)
-    if replaced and step % args.save_every != 0:
+    if replaced and last_saved != step:
         save_ptqr_checkpoint(student, replaced, Path(args.out_dir), step,
                              args, rank=rank, world=world,
                              vocab_size=teacher.cfg.vocab_size)
