@@ -2220,3 +2220,37 @@ sub-5% decode changes unresolvable in single runs; TPOT is the stable
 decode metric. The prologue fusion's expected ~1.5 ms/step is inside
 that band, so it is accepted on numerics and kernel count, not on a
 measured throughput delta.
+
+## TURN 80 (2026-11-08 ~21:3x): FUSED CUSTOM-AR COLLECTIVE + INT8 AUDIT
+
+Fused TP4 collective written and built:
+- csrc/custom_all_reduce_rms_g128.hip (built by
+  scripts/build_fused_ar_rms_g128.sh -> vllm/_ar_rms_g128.so): one kernel
+  does AR over the native custom-AR IPC buffers + residual add + RMSNorm
+  + per-128-group int8 quant, replacing custom_ar() followed by the
+  prologue kernel.
+- vllm/distributed/device_communicators/ar_rms_g128.py wraps it
+  (ArRmsG128/get_ar_rms); FlintDecoderLayer sets o_proj.skip_reduce and
+  calls it in _post_attention when VLLM_GFX908_FUSED_EPILOGUE=1.
+- Parity at M=96 (torchrun, TP4): residual exact, normed 2/196k 1-ulp,
+  q 1/196k, scales exact vs all-gather + residual_norm_group_quant.
+  The M=2048 leg and the timing loop hang the test harness (barrier or
+  gloo all_gather interaction) - UNVALIDATED at prefill sizes.
+- Status: OPT-IN, default OFF (VLLM_GFX908_FUSED_EPILOGUE=0) until the
+  M=2048 path is fixed; fallback in _post_attention finishes the skipped
+  AR with the TP group if the fused object is unavailable.
+
+ACTIVATION-QUANT AUDIT vs qwen3.8/Bolt (user directive: all decisions
+present, int8 everywhere):
+  round-to-nearest act quant        YES  (script + CK path)
+  dense GS128 GEMMs -> CK W8A8      YES
+  MoE routed experts W8A8 blockscale YES (per-group fused prologue)
+  shared expert / dense MLP W8A8    YES (AutoGPTQ linears)
+  target+draft int8_block KV        YES
+  draft int8 PTQR + float exceptions YES (same set as Qwen draft)
+  router gate int8 (Bolt GATE_I8)   NO   - flint gate is bf16
+  int8 residual stream (Bolt RESIDUAL_INT8) NO - flint residual bf16;
+                                    the fused collective above is step 1
+  lm_head int8 GS128                NO   - bf16 today (goal item)
+Next: close the router-gate and residual/lm_head gaps, then the 512k
+PTQR retrain.

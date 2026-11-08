@@ -689,6 +689,18 @@ class FlintDecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
+        # Fused TP4 collective: AR(o_proj partials) + residual + RMSNorm +
+        # GS128 quant in one custom-AR kernel (vllm/_ar_rms_g128.so). The
+        # linear returns rank-local partials; the fused call replaces the AR
+        # and the post-attention norm/quant chain.
+        self._fused_ar_rms = False
+        if (
+            isinstance(self.mlp, FlintSparseMoeBlock)
+            and os.environ.get("VLLM_GFX908_FUSED_EPILOGUE", "0") == "1"
+            and get_tensor_model_parallel_world_size() == 4
+        ):
+            self.self_attn.o_proj.skip_reduce = True
+            self._fused_ar_rms = True
 
     def forward(
         self,
@@ -719,6 +731,32 @@ class FlintDecoderLayer(nn.Module):
             )
             if ll is not None:
                 return ll
+            fused = None
+            if self._fused_ar_rms:
+                from vllm.distributed.device_communicators.ar_rms_g128 import (
+                    get_ar_rms,
+                )
+
+                cfg = get_current_vllm_config()
+                fused = get_ar_rms(
+                    cfg.scheduler_config.max_num_batched_tokens,
+                    self.post_attention_layernorm.weight.numel())
+            if fused is not None:
+                normed, res, q, s = fused.fused(
+                    hidden_states, residual,
+                    self.post_attention_layernorm.weight,
+                    self.post_attention_layernorm.variance_epsilon)
+                experts = getattr(getattr(self.mlp, "experts", None),
+                                  "routed_experts", None)
+                if experts is not None:
+                    experts._pre_quant = (q, s)
+                return self.mlp(normed), res
+            if self._fused_ar_rms:
+                # Fallback when the fused collective is unavailable: finish
+                # the all-reduce the linear skipped, then the normal chain.
+                from vllm.distributed import get_tp_group
+
+                hidden_states = get_tp_group().all_reduce(hidden_states)
             experts = getattr(getattr(self.mlp, "experts", None),
                               "routed_experts", None)
             if (
