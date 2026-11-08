@@ -1577,3 +1577,26 @@ the step-0 point, export step 0's checkpoint (already saved) as the
 untrained RTN baseline and compare.
 Also note checkpoint saves are 4 x ~12 GB (48 GB per save event, step
 0/20/40/60) and take ~4-5 min each; disk 2.5 TB free.
+
+## TURN 60 (2026-11-08 ~01:3x-01:5x): rung 1 done (artifact = step 40), exported
+
+Rung 1 completed: 60 steps (step-40 eval kld 0.173934 vs step-0
+0.080868 vs step-20 0.131807 — in-loop KLD worsened monotonically as
+tau annealed to 0). The trainer's final-save condition skipped step 60
+(loop exits at step==max before the modulo save); fixed to always save
+the last step (last_saved tracking). So rung-1's kept artifact is
+**step 40**; its step-0/20/40 scale files also remain, but the step
+files are pruned to the latest, so a step-0 export would need the
+pristine bf16 shards + step-0 scales (not attempted).
+Export: `scripts/ptqr_export_flint.py --ckpt_dir models/flint-ptqr-r1
+--step 40 --world 4 --src models/flint-bf16 --out
+models/Flint-GPTQ-INT8-W8A8-GS128-PTQR-r1s40` -> 36,439 tensors packed
+to GPTQ GS128, 35 shards, quantize_config bits=8 gs=128 sym (lm_head
+false), config/tokenizer copied.
+Serving-gate probe built (agents/tmp): teacher_val_topk.py (4-rank
+teacher, top-20 logprobs + target NLL on a 1024-token val window at
+TOK_OFF), serv_val_topk.py (vLLM prompt_logprobs=20 on the same ids,
+top-20 + target NLL coverage), compare_val_topk.py (union-renormalized
+per-position KLD, median/mean/p95, top-1 agreement, NLLs).
+Teacher window: NLL 3.7097 (val window at offset 0).
+Boots queued: bf16 flint (reference), then the int8 export.
