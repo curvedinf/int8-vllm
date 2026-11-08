@@ -1690,3 +1690,8 @@ all quantized classes audited faithful (0.65-0.72%), so the sink was
 the last mapping bug. Fix: new `cat0` export kind = rank-ordered
 concatenation; v2's sinks repaired in place (rewrite the shards that
 carry them) instead of a full 30-min re-export.
+
+v2 sink repair verified: all 49 `self_attn.softmax_offset` tensors are
+now [32] and bit-identical to the HF checkpoint (0.0 max diff). New boot
+with bf16 KV in flight; this is the first faithful int8 export of the
+rung-1 (step-40) PTQR payload.
