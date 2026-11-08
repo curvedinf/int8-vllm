@@ -1656,3 +1656,12 @@ Fix: whole-expert plan rows carry the holding rank explicitly
 Also confirmed: the int8_block_g128 KV path with the UA backend faults
 (hipErrorIllegalAddress) on flint's GQA kvh=1 while bf16 KV is fine —
 a separate kernel issue to fix after the weights are right.
+
+Export faithfulness audit (v1, independent of the expert bug): q/k/v
+projections dequant rel err 0.66-0.70%, dense gate/up 0.72%, router
+bf16 exact, lm_head bf16 exact, embedding bf16 rel 0.85% (the trainer's
+int8 fake-quant, intended), dense down/o 0.66-0.72%. Checkpoint expert
+masters are bit-identical to the HF bf16 source (rel 0.0), so PTQR did
+not move expert weights in 40 steps — expected, scales carry the
+training. With the expert-rank fix the v2 export should be faithful
+end-to-end; the earlier garbage was 100% the expert collision.
