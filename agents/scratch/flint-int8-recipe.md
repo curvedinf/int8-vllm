@@ -2279,3 +2279,20 @@ Bisect plan: EAGER=1 + FE=1 boot; add q/s parity to the FE debug probe;
 if eager is coherent, capture is the problem - then either run captured
 decode on the unfused path (as the qwen E3 seam does) or fix the captured
 collective.
+
+## TURN 82: FUSED AR COLLECTIVE — EAGER ALSO GARBLES; SMALL-M FLAKY
+
+- EAGER=1 + FUSED_EPILOGUE=1 boot: served output still garbled from the
+  first tokens. Graph capture is NOT the cause.
+- Parity at small m is timing-dependent: the same m=1 test failed in one
+  process (normed 2005/2048 differing) and matched exactly in another
+  (n bad 0/2048). m>=64 has been consistently clean (soak 200x at 2048),
+  m in {1,2,8,13} failed in the looped test.
+- Conclusion: a race in the collective's data/barrier path that shows up
+  at small payloads / rapid back-to-back launches. Until it is
+  understood, the fused epilogue stays OFF (default 0, coherent model
+  verified: 8*6 -> 48 and 8*6 -> 48 again after restart).
+- Next probe: in the debug boot, compare q/s (not just normed/res) at the
+  serving batch sizes; add a threadfence/acquire after the start barrier
+  or switch the peer read to a volatile/system-scope load; test with
+  AMDSMI/ASAN-style serialization to confirm the race.
