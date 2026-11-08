@@ -11,7 +11,8 @@
 #     (vllm/model_executor/layers/quantization/gptq_moe_a8w8.py)
 #   - AITER unified attention, vLLM CUSTOM all-reduce
 #   - int8_block_g128 KV on BOTH target and draft
-#   - TP4 / C8 (eight concurrent sequences), DFlash2 NS=7
+#   - TP4 / C12 (twelve concurrent sequences), DFlash2 NS=7
+#   - 512k per-request cap (Flint announcement; card recommends <=256k)
 # No 16-bit fallback: the a8w8 expert path is the production path. Setting
 # VLLM_GFX908_MOE_A8W8=0 (WNA16 experts) is a diagnostic lever only and is
 # NOT a supported recipe configuration.
@@ -70,6 +71,11 @@ serve() {
   # First boot writes the per-rank repack cache (~15 min); later boots hit
   # it. VLLM_FS_GPU=0 remains the plain-safetensors fallback.
   export VLLM_FS_GPU="${VLLM_FS_GPU:-auto}"
+  # Flint's checkpoint documents 262,144 but is released with 512k support
+  # (recursive.com announcement; card recommends staying <=256k). The guard
+  # must be lifted for --max-model-len > the config's max_position_embeddings;
+  # the rope tables are extended to the runtime length in the model code.
+  export VLLM_ALLOW_LONG_MAX_MODEL_LEN="${VLLM_ALLOW_LONG_MAX_MODEL_LEN:-1}"
   export NCCL_ALGO=Ring NCCL_PROTO=Simple NCCL_P2P_DISABLE=0 NCCL_DMABUF_ENABLE=0
   export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 
@@ -80,9 +86,9 @@ serve() {
     --model "$MODEL_DIR" --served-model-name flint
     --host "$HOST" --port "$PORT"
     --tensor-parallel-size "${TPS:-4}"
-    --max-num-seqs 8
+    --max-num-seqs "${C:-12}"
     --dtype bfloat16
-    --max-model-len "${MAXLEN:-262144}"
+    --max-model-len "${MAXLEN:-524288}"
     --max-num-batched-tokens "${MNBT:-2048}"
     --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.90}"
     # PTQR-era int8_block_g128 is the gated KV dtype for target AND draft

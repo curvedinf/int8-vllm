@@ -2001,3 +2001,26 @@ per-rank repack cache (41 GiB, ~15 min); later boots are HIT
 Also registered `VLLM_GFX908_MOE_A8W8` in vllm/envs.py (removes the
 "unknown env var" warning) and added the one-time W8A8-expert log line
 so the startup report names the expert kernel.
+
+## TURN 71 (2026-11-08 ~19:2x): 512k / C12 PREPARED (NOT BOOTED)
+
+User asked for a 512k per-request cap and a C12 recipe, then "just
+prepare it" (interrupted the restart).
+
+- The HF model card and the Recursive announcement confirm 512k support
+  (recommended <=256k); the checkpoint config documents only 262,144.
+  Model card facts: sliding window 513 tokens (current + 512 preceding);
+  RoPE on sliding layers, NO positional encoding on the 12 full-attention
+  layers; documented context configuration 262,144.
+- Code: the target and DFlash2 draft rope tables now extend to the
+  runtime max_model_len (`get_current_vllm_config_or_none`), so positions
+  >262k no longer read past the table. Identical tables at <=262,144.
+- Recipe: `--max-model-len 524288`, `--max-num-seqs 12`, and
+  `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` (the config guard raises above the
+  declared max_position_embeddings).
+- KV math: the measured 262k boot held 4,476,935 tokens; the 512k rope
+  tables add ~0.27 GB/GPU, so expect ~4.4M shared tokens. C12 x 512k =
+  6.29M > pool, so full-length concurrent requests will queue/preempt.
+- Status: PREPARED, NOT VALIDATED. Live service was restored to the
+  previous C8/262k configuration via env overrides. First 512k/C12 boot
+  and a >262k long-context retrieval test are pending.

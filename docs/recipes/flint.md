@@ -85,20 +85,30 @@ scripts/serve_recipe_flint.sh status
 scripts/serve_recipe_flint.sh stop
 ```
 
-Recipe contract: TP4, `--max-num-seqs 8`, bf16 compute dtype,
-`--max-model-len 262144`, `--max-num-batched-tokens 2048`,
-`--gpu-memory-utilization 0.90`, `int8_block_g128` KV, DFlash2 draft
-`NS=7` with its own `int8_block_g128` KV, FULL_DECODE_ONLY graphs.
+Recipe contract: TP4, `--max-num-seqs 12` (C12), bf16 compute dtype,
+`--max-model-len 524288` (512k per-request cap), `--max-num-batched-tokens
+2048`, `--gpu-memory-utilization 0.90`, `int8_block_g128` KV, DFlash2
+draft `NS=7` with its own `int8_block_g128` KV, FULL_DECODE_ONLY graphs.
+
+512k preparation (2026-11-08): the checkpoint documents 262,144 tokens,
+while the release announcement states 512k support (recommended
+<=256k). The recipe sets `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` and both the
+target and draft extend their rope tables to the runtime length; only
+the 513-token sliding layers rotate, so positions past the trained range
+stay local. **The first boot at 512k/C12 and a long-context validation
+are still pending** — the numbers below are the measured C8/262k legs.
 `VLLM_FS_GPU=auto` (AIS direct-to-GPU) is the default; the first boot
 writes a 41 GiB per-rank repack cache (~15 min), later boots load from
 it (~4.5 min). `VLLM_FS_GPU=0` is the plain-safetensors fallback.
 
-At `--gpu-memory-utilization 0.90` the int8 KV pool holds **4,476,935
-tokens (~4.48M shared GPU context)**; at C8 that is ~559k tokens per
-stream, and eight full-length 262k streams use 47% of the pool. There is
-no CPU KV tier in this recipe.
+At `--gpu-memory-utilization 0.90` with a 262k cap the int8 KV pool held
+**4,476,935 tokens (~4.48M shared GPU context)**; the 512k rope tables
+cost ~0.27 GB/GPU, so expect ~4.4M tokens at the prepared cap (re-measure
+at the first 512k boot). At C12 that is ~366k tokens per stream; twelve
+full 512k streams would need 6.29M tokens and exceed the pool, so the
+scheduler queues/preempts. There is no CPU KV tier in this recipe.
 
-## Gates (2026-11-08)
+## Gates (2026-11-08, C8 / 262k configuration)
 
 - Serving NLL (int8 export, v2): 4.6588 @64 tokens, 1.3898 @1024
   (bf16 reference 4.6590 / 1.39, teacher 4.6586).

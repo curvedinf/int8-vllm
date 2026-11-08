@@ -21,7 +21,12 @@ _SPEC_ROUND = [0]
 def spec_round() -> int:
     return _SPEC_ROUND[0]
 
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import (
+    CacheConfig,
+    VllmConfig,
+    get_current_vllm_config,
+    get_current_vllm_config_or_none,
+)
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
@@ -418,10 +423,24 @@ class DFlashQwen3DecoderLayer(nn.Module):
         # distilled the other way has to say so here.
         is_neox_style = getattr(config, "is_neox_style", True)
 
+        # The draft shares the target's context window. When the target runs
+        # beyond the checkpoint's documented length (Flint: 512k vs 262,144),
+        # the draft's rope table must span the same absolute positions.
+        _max_position = config.max_position_embeddings
+        _cfg = get_current_vllm_config_or_none()
+        if _cfg is not None:
+            _spec = _cfg.speculative_config
+            _draft = _spec.draft_model_config if _spec is not None else None
+            _limit = _draft.max_model_len if _draft is not None else None
+            if _limit is None and _cfg.model_config is not None:
+                _limit = _cfg.model_config.max_model_len
+            if _limit is not None:
+                _max_position = max(_max_position, _limit)
+
         self.self_attn = DFlashQwen3Attention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
-            max_position=config.max_position_embeddings,
+            max_position=_max_position,
             num_kv_heads=config.num_key_value_heads,
             rms_norm_eps=config.rms_norm_eps,
             attention_bias=getattr(config, "attention_bias", False),

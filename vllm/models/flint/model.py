@@ -19,6 +19,7 @@ from vllm.config import (
     ParallelConfig,
     VllmConfig,
     get_current_vllm_config,
+    get_current_vllm_config_or_none,
 )
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
@@ -310,9 +311,19 @@ class FlintAttention(nn.Module):
             # Only its cos|sin table is used, by the fused kernels. Kept in
             # fp32 like the reference implementation; get_rope memoizes, so
             # all layers share one table.
+            # Flint is released with 512k support (announcement) although the
+            # checkpoint's documented configuration is 262,144; the rope table
+            # must cover every absolute position or the kernel reads past it.
+            # Only the 513-token sliding layers rotate, so positions beyond
+            # the trained range stay local.
+            max_position = config.max_position_embeddings
+            _cfg = get_current_vllm_config_or_none()
+            if _cfg is not None and _cfg.model_config is not None:
+                max_position = max(
+                    max_position, _cfg.model_config.max_model_len)
             self.rotary_emb = get_rope(
                 self.head_dim,
-                max_position=config.max_position_embeddings,
+                max_position=max_position,
                 rope_parameters=config.rope_parameters,
                 dtype=torch.float32,
             )
