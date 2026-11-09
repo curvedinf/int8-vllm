@@ -384,11 +384,12 @@ _TUNED_MOE_CONFIGS = {
     #   gate_up K=2048 N=256, down K=128 N=2048.
     # The gated epilogue quantizes the whole 128-column output group, so the
     # gate_up tile must stay at 256 columns (I_p=128 is exactly one group);
-    # the heuristic otherwise shrinks it to 32 for small decode grids.
-    (2048, 256, 16): {"block_n": 256, "num_warps": 8, "num_stages": 2,
-                      "group_m": 1, "split_k": 1},
+    # the heuristic otherwise shrinks it to 32 for small decode grids —
+    # the fused SwiGLU quant-out epilogue requires that tile.
     # down at decode: keep the measured 128-column tile (split_k stays 1;
     # split_k=2 changes results and is excluded).
+    (2048, 256, 16): {"block_n": 256, "num_warps": 8, "num_stages": 2,
+                      "group_m": 1, "split_k": 1},
     (128, 2048, 16): {"block_n": 128, "num_warps": 8, "num_stages": 2,
                       "group_m": 1, "split_k": 1, "w_cache_modifier": None},
     # Legacy unsharded sweep shapes, kept for non-TP4 runs.
