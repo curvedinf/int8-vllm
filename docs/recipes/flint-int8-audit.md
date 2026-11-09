@@ -29,7 +29,7 @@ bf16 surface; **fixable** = avoidable round trip; **fixed** = already fused.
 | 14 | shared expert `down_proj` (CK) | bf16 → int8 → bf16 | inherent |
 | 15 | combine + residual add | expert combine is bf16 (down GEMM output); the residual add is fused into the next norm and emits int8 payloads | residual fixed; expert combine int8 is the remaining round trip |
 | 16 | dense MLP layers 0-1 | identical to 12-14 (`FlintMLP`), same fused silu stash | fixed |
-| 17 | final norm | int8 payload in → bf16 out for the logits GEMM (inherent: the head quantizes in-prologue) | inherent |
+| 17 | final norm | int8 payload in → bf16 out; the head quantizes only the selected logits rows in-prologue (selection happens after the model returns) | inherent |
 | 18 | lm_head (int8 GS128) | bf16 → per-group int8 quant → int8 GEMM → bf16/fp32 logits | fixed (enabled) |
 | 19 | embedding | int8 table at load + gather-then-dequant (fork path, `VLLM_GFX908_INT8_EMBEDDING` default on; per-row fp16 scales) | fixed |
 
@@ -87,8 +87,14 @@ bf16.
 3. **Attention output → `o_proj`**: the attention kernel emits bf16 and
    `o_proj` quantizes in-prologue; an attention-epilogue quant would remove
    that round trip.
-4. **Final norm → lm_head**: the head quantizes its input in-prologue; fuse
-   the final norm with the GS128 prologue quant.
+4. **Final norm → lm_head: NOT VIABLE as a norm epilogue.** vLLM selects
+   the logits rows *after* the model returns
+   (`hidden_states[logits_indices]` advanced indexing in the gpu runner),
+   which drops tensor attributes; a stash emitted by the final norm cannot
+   reach the head, and quantizing every row for the handful of selected
+   ones is extra work. The head's own prologue already quantizes only the
+   selected rows, which is the efficient order. Measured: head stash hits
+   0/4 workers by construction.
 
 Draft-side: every dense grid surface (`conv kernel_projection` x10, `fc`,
 `candidate_selector.hidden_projection`) is already int8 at load; no bf16
@@ -107,10 +113,11 @@ Three categories, and only the first is an accepted exception:
    up-quants: the values were produced in float and never had an int8 form.
 2. **Prologue-fusion gap** - the producer already has the values in
    registers but stores bf16 and the consumer re-quantizes:
-   - norm output -> `qkv_proj` (CK prologue `pertoken_quant_rn`). The MoE
-     path already emits an int8 stash; the CK path needs the same per-token
-     stash and must consume it in `ACT_QUANT=round` mode.
-   - final norm -> `lm_head` (GS128 prologue quant).
+   - norm output -> `qkv_proj` (CK prologue `pertoken_quant_rn`) — DONE for
+     the payload layers (per-token stash consumed under `ACT_QUANT=round`);
+     layer 0's plain RMSNorm still takes the CK prologue.
+   - final norm -> `lm_head` — not viable: the runner selects logits rows
+     after the model returns, so no stash can ride along (see item 4 above).
    - embedding gather -> first norm (int8 table dequantized before the
      norm reads it).
 3. **Epilogue-fusion gap** - a GEMM writes bf16 and the next kernel
