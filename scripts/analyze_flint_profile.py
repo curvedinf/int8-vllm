@@ -1,54 +1,68 @@
 #!/usr/bin/env python3
-"""Aggregate a rocprofv3 kernel trace into per-kernel time shares.
+"""Aggregate a torch-profiler chrome trace into a decode-step budget.
 
-Usage:
-  analyze_flint_profile.py <out_dir> [--steps N]
-Finds the newest kernel_trace.csv under out_dir (or takes the csv path),
-groups by kernel name, and prints the top consumers with ms total, call
-count and (with --steps) us per decode step.
+Usage: .venv/bin/python scripts/analyze_flint_profile.py <trace_dir>
+Groups kernels by name, sums microseconds, and reports the top
+contributors plus totals partitioned into: MoE GEMMs, collectives,
+attention, dense GEMMs, elementwise/other. This attributes a vLLM
+decode step's wall time to concrete mechanisms (run-experiment input).
 """
+import json, sys
+from pathlib import Path
 
-import argparse
-import glob
-import os
-
-import pandas as pd
-
+def find_traces(root: Path):
+    out = []
+    for p in root.rglob("*.json"):
+        try:
+            d = json.loads(p.read_text())
+        except Exception:
+            continue
+        evs = d.get("traceEvents", [])
+        if any(e.get("ph") == "X" and e.get("dur") for e in evs):
+            out.append(p)
+    return out
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("path")
-    ap.add_argument("--steps", type=int, default=0)
-    ap.add_argument("--top", type=int, default=25)
-    args = ap.parse_args()
-
-    path = args.path
-    if os.path.isdir(path):
-        cands = glob.glob(os.path.join(path, "**", "kernel_trace.csv"),
-                          recursive=True)
-        if not cands:
-            cands = glob.glob(os.path.join(path, "**", "*.csv"), recursive=True)
-        if not cands:
-            raise SystemExit(f"no csv under {path}")
-        path = max(cands, key=os.path.getmtime)
-    df = pd.read_csv(path)
-    print("columns:", list(df.columns)[:12], "rows:", len(df))
-    name_col = next(c for c in df.columns if "Kernel" in c and "Name" in c)
-    dur_col = next(c for c in df.columns if c in ("Duration", "DurationNs")
-                   or "Duration" in c)
-    df["ms"] = pd.to_numeric(df[dur_col], errors="coerce") / 1e6
-    g = (df.groupby(name_col)["ms"].agg(["sum", "count"])
-           .sort_values("sum", ascending=False))
-    total = g["sum"].sum()
-    print(f"total kernel time {total:.1f} ms over {len(df)} dispatches")
-    if args.steps:
-        print(f"per step ({args.steps} steps): {total / args.steps * 1000:.0f} us")
-    for name, row in g.head(args.top).iterrows():
-        per = (row["sum"] / args.steps * 1000) if args.steps else 0.0
-        short = name if len(name) < 90 else name[:87] + "..."
-        print(f"{row['sum']:9.2f} ms {int(row['count']):7d}x "
-              f"{(row['sum']/total*100):5.1f}% {per:8.1f} us/step  {short}")
-
+    root = Path(sys.argv[1])
+    files = find_traces(root)
+    print(f"traces: {len(files)}")
+    if not files:
+        return
+    for f in files:
+        print(f"== {f}")
+    agg = {}
+    walls = []
+    for f in files:
+        d = json.loads(f.read_text())
+        for e in d.get("traceEvents", []):
+            if e.get("ph") != "X" or not e.get("dur"):
+                continue
+            name = e.get("name", "?")
+            agg[name] = agg.get(name, 0) + e["dur"]
+            if name in ("vllm::execute_model", "execute_model"):
+                walls.append(e["dur"])
+    total = sum(agg.values())
+    print(f"self-time total: {total/1e3:.1f} ms")
+    if walls:
+        print(f"execute_model calls: {len(walls)} mean {walls and (sum(walls)/len(walls)/1e3):.2f} ms")
+    cats = {"moe": 0.0, "coll": 0.0, "attn": 0.0, "gemm": 0.0, "other": 0.0}
+    for n, t in agg.items():
+        ln = n.lower()
+        if "moe" in ln or "_moe" in ln or "grouped" in ln:
+            cats["moe"] += t
+        elif any(s in ln for s in ("all_reduce", "reduce", "collective", "ar_", "car")):
+            cats["coll"] += t
+        elif "attention" in ln or "attn" in ln or "flash" in ln or "unified" in ln:
+            cats["attn"] += t
+        elif any(s in ln for s in ("gemm", "matmul", "ck_", "aiter")):
+            cats["gemm"] += t
+        else:
+            cats["other"] += t
+    for k, v in cats.items():
+        print(f"  {k:6s} {v/total*100:5.1f}%  {v/1e3:7.2f} ms")
+    print("top kernels:")
+    for n, t in sorted(agg.items(), key=lambda kv: -kv[1])[:20]:
+        print(f"  {t/1e3:7.3f} ms  {n[:90]}")
 
 if __name__ == "__main__":
     main()

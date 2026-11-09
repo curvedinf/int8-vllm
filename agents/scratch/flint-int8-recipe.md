@@ -2595,3 +2595,15 @@ payload residual (Bolt decoder_norm), closing the stream.
   exit-state cache predates this target, so rebuilding
   (scripts/ptqr_flint_draft_cache.py) + the known draft trainer is the
   follow-up.
+
+## PERF LOOP 2026-11-09 (objective: C12 2048->256 total request time)
+- Baseline (retrained r1s40-512k, NS=7): steady C12 TPOT 66.45 ms, aggregate 172.3 tok/s.
+- Torch-profiler endpoint returned 404 (wrong path); the profiling boot
+  (PROFILE_DIR) + /start_profile+stop_profile pattern worked, but APIServer
+  aborted at shutdown with a gilstate_tss_set TSS error AFTER the bench
+  and after backend start; workers needed kill -9. Server restored.
+  Analyzer: scripts/analyze_flint_profile.py (written this loop).
+  Profiling is too fragile in this environment; its crash cost (zombie
+  VRAM, full pkill) is a barrier. Do NOT use it again this session.
+- NS sweep (seed 91131, C12 2048/256): NS=5 69.44ms/161.7/len4.14,
+  NS=7 66.45/172.3/4.95, NS=9 88.88/147.9/6.86, NS=11 102.37/134.2/6.74.
