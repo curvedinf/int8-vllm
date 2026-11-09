@@ -18,7 +18,7 @@
 # NOT a supported recipe configuration.
 set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-MODEL_DIR="${MODEL_DIR:-${HOME}/models/Flint-GPTQ-INT8-W8A8-GS128-PTQR-r1s40-v2}"
+MODEL_DIR="${MODEL_DIR:-${HOME}/models/Flint-GPTQ-INT8-W8A8-GS128-PTQR-r1s40-512k}"  # retrained on the 512k-scope corpus (rollback: r1s40-v2)
 DRAFT_MODEL_DIR="${DRAFT_MODEL_DIR:-${HOME}/models/flint-dflash2-ptqr-r1-int8}"
 LOG_DIR="${LOG_DIR:-${ROOT_DIR}/logs/serve_recipe_flint}"
 HOST="${HOST:-127.0.0.1}"

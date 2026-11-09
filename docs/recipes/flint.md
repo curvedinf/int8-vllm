@@ -32,9 +32,14 @@ group scales were trained against the bf16 teacher on serving-shaped
 `quantization_config` block — vLLM 0.33 detects the quant method from
 there, not from `quantize_config.json`.
 
-- Target: `Flint-GPTQ-INT8-W8A8-GS128-PTQR-r1s40` (rung 1, step 40 kept;
-  35 shards, 36,439 tensors, 38.5 GiB). Export:
-  `scripts/ptqr_export_flint.py`; trainer `scripts/ptqr_train_flint.py`.
+- Target (recipe default): `Flint-GPTQ-INT8-W8A8-GS128-PTQR-r1s40-512k` —
+  rung 1 via `scripts/ptqr_flint_rungs.sh 1` (seq 2048, kd_cache 20,
+  60 steps, lr 1e-5), step-40 save exported; trained on the extended
+  corpus with eight 512k-token needle documents (7.07M tokens). 35
+  shards, 36,439 tensors, 38.5 GiB. Same-seed A/B vs r1s40-v2:
+  TPOT 71.75 vs 75.56 ms, acceptance 4.88 vs 5.10 (-0.22, within the
+  +-1 gate). Export: `scripts/ptqr_export_flint.py`; trainer
+  `scripts/ptqr_train_flint.py`.
 - Draft: `flint-dflash2-ptqr-r1-int8` — **int8 PTQR, same structure as
   the deployed Qwen int8 draft**: all 35 attention/MLP linears are GPTQ
   int8 GS128 (W8A8) and the 12 dense/conv/selector surfaces keep the
@@ -149,11 +154,14 @@ The MoE block, dense/shared MLP and draft MLP are end-to-end int8:
   the int8 domain.
 - Dense/shared gate_up: resident `[2N,K]` int8 weights + `gemm_silu_quant_out`
   (SwiGLU+GS128 in one kernel); the row-parallel down emits a payload.
-- Measured: boot healthy, coherent, steady C12 2048/256 **TPOT 58.5-59.4
-  ms** (~200 tok/s output), staggered 6+6 TPOT 56.9/62.3 ms.
-- Long-context PTQR retrain in progress (seq 4096, kd_cache 20, 120
-  steps, corpus with eight 512k-token needle documents). Draft retrain,
-  KLD gate and the NS sweep follow it.
+- Measured on the retrained target: boot healthy, coherent; steady C12
+  2048/256 TPOT 66.45 ms / 172.3 tok/s (same-seed A/B vs the previous
+  target 75.56 ms); staggered 6+6 TPOT 56.9/62.3 ms preserved.
+- **NS sweep (12x 2048/256, seed 91131)**: NS=5 69.44 ms / 161.7 tok/s
+  (len 4.14), **NS=7 66.45 ms / 172.3 tok/s (len 4.95)**, NS=9 88.88 ms
+  / 147.9 (len 6.86), NS=11 102.37 ms / 134.2 (len 6.74). NS=7 stays the
+  recipe default. Ledger: FLINT_R1S40_512K_RETRAIN_20261109,
+  FLINT_NS_SWEEP_C12_20261109.
 
 ## Known deltas
 
