@@ -232,9 +232,16 @@ def main():
     local_rank = int(_os.environ.get("LOCAL_RANK", "0"))
     tp_group = None
     if world > 1:
+        import datetime as _dt
+
         import torch.distributed as dist
         _rssm("pre-dist")
-        dist.init_process_group("nccl" if device != "cpu" else "gloo")
+        # The streamed teacher sweep is IO-bound and rank-skewed; the
+        # default 10-min NCCL watchdog fired on the logits all-gather.
+        dist.init_process_group(
+            "nccl" if device != "cpu" else "gloo",
+            timeout=_dt.timedelta(hours=2),
+        )
         tp_group = dist.group.WORLD
         device = f"cuda:{local_rank}" if device != "cpu" else device
         torch.cuda.set_device(local_rank) if device != "cpu" else None
