@@ -132,3 +132,21 @@ Three categories, and only the first is an accepted exception:
 Nothing in categories 2 and 3 is doctrine; they are scheduled work. The
 residual stream, o_proj output, expert input, and silu stash are already
 int8 payloads, and a failed payload step raises rather than falling back.
+
+## Expert residency (measured)
+
+Flint TP4 replicates all 256 routed experts on every rank (only the
+intermediate axis is sharded: I_p = 512/4 = 128). Per rank, per MoE layer:
+
+- `w13` [256, 2048, 256] int8 = 128 MiB, `w2` [256, 128, 2048] int8 = 64 MiB
+- 47 MoE layers -> ~8.8 GiB of resident routed-expert weights per rank
+  (plus 0.28 GiB of shared-expert weights)
+
+Residency is therefore not a cache policy but the only viable placement:
+at C12 each decode step feeds 72 tokens x top-6 = 432 expert visits per
+layer over 256 experts, so essentially every expert is touched every step
+and union working-set equals the resident set. A Bolt-style eviction cache
+would only add residency faults on top of the weight reads the GEMMs
+already stream. Coverage is instrumented in the a8w8 path
+(`VLLM_MOE_ACTIVE_STATS=1` prints avg touched experts per layer); the
+prefill/eager runs with the target workload touch all 256.
