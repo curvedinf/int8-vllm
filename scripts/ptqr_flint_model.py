@@ -259,6 +259,9 @@ class MoeRef(nn.Module):
         self._loc = None
 
     def forward(self, x):
+        shape = x.shape
+        if x.dim() != 2:
+            x = x.reshape(-1, shape[-1])
         t = x.shape[0]
         logits = self.router(x).float()
         probs = torch.sigmoid(logits)
@@ -300,6 +303,8 @@ class MoeRef(nn.Module):
         out = routed + self.shared(x)
         if getattr(self, "_partial_output", False):
             out = tp_sum(out)
+        if out.shape != shape:
+            out = out.reshape(shape)
         return out
 
 
