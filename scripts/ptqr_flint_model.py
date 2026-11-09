@@ -256,6 +256,7 @@ class MoeRef(nn.Module):
             [MlpRef(cfg, cfg.moe_intermediate_size) for _ in range(cfg.num_experts)]
         )
         self.shared = MlpRef(cfg, cfg.shared_expert_intermediate_size)
+        self._loc = None
 
     def forward(self, x):
         t = x.shape[0]
@@ -269,13 +270,33 @@ class MoeRef(nn.Module):
         expert_ids = getattr(self, "_expert_ids", None) or list(
             range(len(self.experts))
         )
-        for e, expert in zip(expert_ids, self.experts):
-            sel = (top_i == e)
-            if not sel.any():
+        world = len(expert_ids)
+        if self._loc is None or self._loc.device != x.device:
+            maxg = logits.shape[-1]  # router emits GLOBAL ids
+            loc = torch.full((maxg,), -1, dtype=torch.long, device=x.device)
+            for idx, gid in enumerate(expert_ids):
+                loc[gid] = idx
+            self._loc = loc
+        tok = torch.arange(t, device=x.device).repeat_interleave(self.top_k)
+        loc_i = self._loc[top_i.reshape(-1)]
+        w = top_p.reshape(-1)
+        keep = loc_i >= 0
+        tok, loc_i, w = tok[keep], loc_i[keep], w[keep]
+        order = torch.argsort(loc_i, stable=True)
+        tok, loc_i, w = tok[order], loc_i[order], w[order]
+        counts = torch.bincount(loc_i, minlength=world).cumsum(0)
+        starts = torch.cat([counts.new_zeros(1), counts])
+        # ONE host read of the boundaries; the expert loop then runs
+        # launch-asynchronously (the previous per-expert sel.any()/row
+        # syncs made the streaming sweep host-bound for hours).
+        bounds = starts.tolist()
+        for e in range(world):
+            lo, hi = bounds[e], bounds[e + 1]
+            if hi <= lo:
                 continue
-            w = (top_p * sel).sum(-1)
-            rows = sel.any(-1)
-            routed[rows] += expert(x[rows]) * w[rows, None].to(x.dtype)
+            rows = tok[lo:hi]
+            out_e = self.experts[e](x[rows])
+            routed.index_add_(0, rows, out_e * w[lo:hi, None].to(x.dtype))
         out = routed + self.shared(x)
         if getattr(self, "_partial_output", False):
             out = tp_sum(out)
