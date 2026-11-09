@@ -125,6 +125,17 @@ class A8W8BlockscaleMoEMethod(AutoGPTQMoEMethod):
         w2 = _unpack_i8(layer.w2_qweight.data)            # [E, I_p, H]
         s13 = layer.w13_scales.data.float()               # [E, K/G, 2I_p]
         s2 = layer.w2_scales.data.float()                 # [E, I_p/G, H]
+        # Interleave the gate/up halves along N so the MoE kernel's fused
+        # SwiGLU epilogue (tl.split pairs) can consume them in one pass.
+        i = w13.shape[-1] // 2
+        w13_i = torch.empty_like(w13)
+        w13_i[..., 0::2] = w13[..., :i]
+        w13_i[..., 1::2] = w13[..., i:]
+        w13 = w13_i
+        s13_i = torch.empty_like(s13)
+        s13_i[..., 0::2] = s13[..., :i]
+        s13_i[..., 1::2] = s13[..., i:]
+        s13 = s13_i
         replace_parameter(layer, "w13_qweight", w13)
         replace_parameter(layer, "w2_qweight", w2)
         replace_parameter(layer, "w13_scales", s13)
@@ -162,12 +173,25 @@ class A8W8BlockscaleMoEMethod(AutoGPTQMoEMethod):
             return
         dev = layer.w13_qweight.device
         dt = torch.bfloat16
-        for m in (1, 2, 4, 8, 16, 32, 64, 128, 256, 512):
-            xd = torch.randn(m, hidden, device=dev, dtype=dt) / 10
-            ids = torch.randint(0, n_expts, (m, topk), device=dev)
-            w = torch.rand(m, topk, device=dev)
-            w = w / w.sum(-1, keepdim=True)
-            self._run(layer, xd, w, ids, n_expts)
+        # Never consume the live shared-branch payload from a real forward.
+        saved = getattr(layer, "_shared_out", None)
+        saved_out = getattr(layer, "_out_quant", None)
+        if saved is not None:
+            layer._shared_out = None
+        if saved_out is not None:
+            layer._out_quant = None
+        try:
+            for m in (1, 2, 4, 8, 16, 32, 64, 128, 256, 512):
+                xd = torch.randn(m, hidden, device=dev, dtype=dt) / 10
+                ids = torch.randint(0, n_expts, (m, topk), device=dev)
+                w = torch.rand(m, topk, device=dev)
+                w = w / w.sum(-1, keepdim=True)
+                self._run(layer, xd, w, ids, n_expts)
+        finally:
+            if saved is not None:
+                layer._shared_out = saved
+            if saved_out is not None:
+                layer._out_quant = saved_out
         layer._a8w8_prewarmed = True
 
     def _run(self, layer, x, topk_weights, topk_ids, n_expts, quant_in=None):
@@ -199,20 +223,48 @@ class A8W8BlockscaleMoEMethod(AutoGPTQMoEMethod):
         xq, xs = quant_in if quant_in is not None else group_quant_rn(x)
         kw = dict(routing_data=rd, out_dtype=x.dtype, per_row_x_scale=True,
                   w_blockscale_n=1)
-        h2 = moe_gemm_a8w8_blockscale(
+        # gate_up: fused SwiGLU + per-group int8 epilogue (interleaved
+        # gate/up weights): no bf16 gate/up tensor, no separate silu pass.
+        hq, hs = moe_gemm_a8w8_blockscale(
             xq, layer.w13_qweight, xs, layer.w13_scales,
-            gather_indx=gather_idx, apply_swiglu=False, **kw)
+            gather_indx=gather_idx, apply_swiglu=True,
+            swiglu_add_residual=False, quant_out=True, **kw)
         if _dbg:
             print(f"[moe8r] cap={_cap} gateup-done", flush=True)
-        gate, up = h2.chunk(2, dim=-1)
-        hq, hs = silu_mul_quant_rn(gate, up)
-        y = moe_gemm_a8w8_blockscale(
+        shared = getattr(layer, "_shared_out", None)
+        layer._shared_out = None
+        rq = rs = None
+        if shared is not None:
+            # Shared branch is already an int8 payload (down quant-out +
+            # GS128 all-reduce); fold it in the combine epilogue.
+            k = shared.shape[-1]
+            rq = shared.codes.reshape(-1, k)
+            rs = shared.scales.reshape(-1, k // 128)
+        yq, ys = moe_gemm_a8w8_blockscale(
             hq, layer.w2_qweight, hs, layer.w2_scales,
             scatter_indx=scatter_idx, gammas=rd.gate_scal,
-            apply_swiglu=False, **kw)
+            apply_swiglu=False, down_quant_out=True,
+            residual_q=rq, residual_s=rs, **kw)
         if _dbg:
             print(f"[moe8r] cap={_cap} down-done", flush=True)
-        return y
+        m, hidden = x.shape
+        from vllm.distributed import get_tensor_model_parallel_world_size
+        from vllm.model_executor.layers.residual_int8 import ResidualInt8
+
+        payload = ResidualInt8(
+            yq.view(m, hidden), ys.view(m, hidden // 128), x.dtype)
+        if get_tensor_model_parallel_world_size() > 1:
+            # Both branches are K-sharded partials; one int8 collective
+            # reduces the combined payload (the runner skips its own AR).
+            from vllm.distributed.device_communicators import (
+                residual_g128_all_reduce as _rg,
+            )
+
+            payload = _rg.all_reduce(payload)
+        # The MoE runner crosses a torch.ops boundary whose schema casts the
+        # result to Tensor; carry the scales beside it.
+        layer._out_quant = (payload.codes, payload.scales)
+        return payload.codes
 
     def apply(self, layer, x, topk_weights, topk_ids, shared_experts,
               shared_experts_input):
@@ -328,12 +380,20 @@ def silu_mul_quant_rn(gate: torch.Tensor, up: torch.Tensor,
 
 _TUNED_MOE_CONFIGS = {
     # (K, N, block_m): overrides merged over the heuristic
+    # Real Flint TP4 expert shapes (intermediate per rank = 128):
+    #   gate_up K=2048 N=256, down K=128 N=2048.
+    # The gated epilogue quantizes the whole 128-column output group, so the
+    # gate_up tile must stay at 256 columns (I_p=128 is exactly one group);
+    # the heuristic otherwise shrinks it to 32 for small decode grids.
+    (2048, 256, 16): {"block_n": 256, "num_warps": 8, "num_stages": 2,
+                      "group_m": 1, "split_k": 1},
+    # down at decode: keep the measured 128-column tile (split_k stays 1;
+    # split_k=2 changes results and is excluded).
+    (128, 2048, 16): {"block_n": 128, "num_warps": 8, "num_stages": 2,
+                      "group_m": 1, "split_k": 1, "w_cache_modifier": None},
+    # Legacy unsharded sweep shapes, kept for non-TP4 runs.
     (2048, 1024, 16): {"block_n": 256, "num_warps": 8, "num_stages": 2,
                        "group_m": 1, "split_k": 1, "w_cache_modifier": None},
-    # down (I=512, N=2048) at decode: the heuristic shrinks block_n to 32;
-    # 128/warps8/stages2/group1 measured 867 vs 887 us full layer through
-    # the production _run path and is numerically equivalent (split_k=2
-    # changes results and is excluded).
     (512, 2048, 16): {"block_n": 128, "num_warps": 8, "num_stages": 2,
                       "group_m": 1, "split_k": 1, "w_cache_modifier": None},
 }

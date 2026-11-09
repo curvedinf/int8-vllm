@@ -21,13 +21,13 @@ bf16 surface; **fixable** = avoidable round trip; **fixed** = already fused.
 | 6 | `post_attention_layernorm` | bf16 → bf16 | inherent |
 | 7 | router gate (`GateLinear`, int8 tier) | prefill: bf16 → int8 GS128 GEMM → fp32 logits; decode: bf16 tier | enabled (PTQR recovers) |
 | 8 | routed experts input quant | bf16 normed → per-group int8 + fp32 scales (fused with residual+norm) | fixed |
-| 9 | expert `gate_up` (a8w8 blockscale) | int8 → int32 accum → **bf16 out** | inherent (SiLU needs float) |
-| 10 | expert SiLU*up epilogue | bf16 gate/up → int8 q + scales in one kernel (`silu_mul_quant_rn`) | fixed |
-| 11 | expert `down` (a8w8 blockscale) | int8 → **bf16 out**, scatter/reduce with gammas | **fixable**: Bolt keeps the routed output int8 through `combine_experts`; flint up-quants at the combine |
+| 9 | expert `gate_up` (a8w8 blockscale) | int8 GEMM with fused SwiGLU + per-128 int8 epilogue (interleaved gate/up weights); no bf16 gate/up tensor | fixed |
+| 10 | expert SiLU*up epilogue | folded into the gate_up GEMM epilogue (exact `silu_mul_quant_rn` contract: bf16-rounded halves, fp32 silu, one product rounding, GS128 quant) | fixed |
+| 11 | expert `down` (a8w8 blockscale) | int8 GEMM → float combine (gammas) → **quant-out in the reduce epilogue** (shared branch folded as an int8 residual) → TP int8 collective | fixed |
 | 12 | shared expert `gate_up_proj` (CK W8A8) | bf16 → int8 → **bf16 out** | inherent |
 | 13 | shared expert `silu_and_mul` | fused: bf16 gate/up → bit-exact bf16 act + per-group int8 stash, consumed by the blockscale down GEMM | fixed |
-| 14 | shared expert `down_proj` (CK) | bf16 → int8 → bf16 | inherent |
-| 15 | combine + residual add | expert combine is bf16 (down GEMM output); the residual add is fused into the next norm and emits int8 payloads | residual fixed; expert combine int8 is the remaining round trip |
+| 14 | shared expert `down_proj` (blockscale) | int8 GEMM with quant-out epilogue → GS128 payload; TP-reduced with the routed combine and folded as an int8 residual | fixed |
+| 15 | combine + residual add | weighted expert combine + shared-branch fold + per-128 int8 quant in one reduce kernel (`reduce_grouped`); the runner's float AR is skipped and the payload is TP-reduced with the GS128 collective | fixed |
 | 16 | dense MLP layers 0-1 | identical to 12-14 (`FlintMLP`), same fused silu stash | fixed |
 | 17 | final norm | int8 payload in → bf16 out; the head quantizes only the selected logits rows in-prologue (selection happens after the model returns) | inherent |
 | 18 | lm_head (int8 GS128) | bf16 → per-group int8 quant → int8 GEMM → bf16/fp32 logits | fixed (enabled) |
@@ -72,11 +72,14 @@ bf16.
 
 ## Remaining activation round trips (in priority order)
 
-1. **MoE expert down output → combine**: the blockscale `down` GEMM emits
-   bf16, the weighted expert combine runs in bf16, and the layer then
-   re-quantizes to the int8 payload (`_to_payload`). Closing it needs a
-   quant-out epilogue on the down GEMM plus an int8 weighted combine
-   (Bolt's `decoder_int8.combine_experts` pattern). Largest remaining item.
+1. **MoE routed block**: DONE end to end. gate_up = int8 GEMM with fused
+   SwiGLU + GS128 quant epilogue (interleaved gate/up weights, bit-exact
+   with the old `silu_mul_quant_rn` chain: 2e-5 code mismatch from
+   accumulation order, scales exact). down = float combine in the reduce
+   with the shared branch folded as an int8 residual, quantized in the
+   same epilogue; the runner's float all-reduce is disabled
+   (`skip_final_all_reduce`) and the combined payload is TP-reduced with
+   `residual_g128_all_reduce`. No bf16 tensor crosses the MoE block.
 2. **Norm → GEMM prologue quant**: DONE for both consumers.
    `residual_norm(emit_pertoken=True)` emits the CK per-token contract
    (bit-identical to `pertoken_quant_rn`, 0 mismatches at M=1..1024) for
@@ -122,12 +125,9 @@ Three categories, and only the first is an accepted exception:
      norm reads it).
 3. **Epilogue-fusion gap** - a GEMM writes bf16 and the next kernel
    re-quantizes:
-   - expert `gate_up` -> `silu_mul_quant_rn`; fuse SiLU*mul+quant into the
-     GEMM epilogue and the bf16 gate/up tensor disappears.
-   - `down` -> weighted expert combine -> `_to_payload`; this is the only
-     true int8->bf16->int8 round trip left in the target layer. Needs a
-     quant-out down epilogue plus an int8 combine (Bolt pattern). Largest
-     remaining item.
+   - expert `gate_up` -> `silu_mul_quant_rn` — DONE (folded into the GEMM).
+   - `down` -> weighted expert combine -> `_to_payload` — DONE (quant-out in
+     the reduce epilogue, shared branch folded in int8).
 
 Nothing in categories 2 and 3 is doctrine; they are scheduled work. The
 residual stream, o_proj output, expert input, and silu stash are already

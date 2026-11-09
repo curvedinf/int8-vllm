@@ -183,7 +183,12 @@ class FlintMLP(nn.Module):
                 setattr(act, PREQUANT_ATTR, (q, s))
             else:
                 act = silu_and_mul(gate_up)
-        x, _ = self.down_proj(act)
+        out = self.down_proj(act)
+        from vllm.model_executor.layers.residual_int8 import ResidualInt8
+
+        if isinstance(out, ResidualInt8):
+            return out
+        x, _ = out
         return x
 
 
@@ -230,7 +235,7 @@ class FlintSparseMoeBlock(nn.Module):
             )
             return
         self.experts = FusedMoEFactory(
-            shared_experts=self.shared_expert,
+            shared_experts=None,
             gate=self.gate,
             num_experts=config.num_experts,
             top_k=config.num_experts_per_tok,
@@ -248,6 +253,24 @@ class FlintSparseMoeBlock(nn.Module):
                 config.moe_intermediate_size,
                 config.num_experts_per_tok,
             )
+        # Shared expert joins the int8 payload chain: its row-parallel down
+        # emits codes/scales (blockscale quant-out epilogue), is folded into
+        # the routed combine epilogue (one quant kernel for the whole block)
+        # and the combined payload is TP-reduced in the int8 domain. The
+        # runner must therefore skip its own float all-reduce.
+        from vllm.model_executor.layers.quantization.gptq_moe_a8w8 import (
+            A8W8BlockscaleMoEMethod,
+        )
+
+        _routed = getattr(self.experts, "routed_experts", None)
+        if _routed is not None and isinstance(
+            getattr(_routed, "quant_method", None), A8W8BlockscaleMoEMethod
+        ):
+            self.experts.moe_config.skip_final_all_reduce = True
+        shared_down = self.shared_expert.down_proj
+        shared_down._gfx908_int8_out = True
+        shared_down._gfx908_payload_out = True
+        shared_down.skip_reduce = True
 
     def forward_ll(
         self, attn_out: torch.Tensor, residual: torch.Tensor, norm: RMSNorm
@@ -287,7 +310,29 @@ class FlintSparseMoeBlock(nn.Module):
                 self.experts.routed_experts,
                 self.shared_expert,
             )
-        return self.experts(hidden_states=hidden_states, router_logits=hidden_states)
+        from vllm.model_executor.layers.residual_int8 import ResidualInt8
+
+        shared = self.shared_expert(hidden_states)
+        if not isinstance(shared, ResidualInt8):
+            # Non-int8 shared path (other quant backends): keep the branch
+            # explicitly instead of dropping it now that the runner no
+            # longer owns the shared expert.
+            target = getattr(self.experts, "routed_experts", self.experts)
+            out = self.experts(
+                hidden_states=hidden_states, router_logits=hidden_states)
+            if isinstance(out, torch.Tensor) and out.dtype == torch.int8:
+                q, s = target._out_quant
+                target._out_quant = None
+                return ResidualInt8(q, s, torch.bfloat16)
+            return out + shared
+        target = getattr(self.experts, "routed_experts", self.experts)
+        target._shared_out = shared
+        out = self.experts(hidden_states=hidden_states, router_logits=hidden_states)
+        if isinstance(out, torch.Tensor) and out.dtype == torch.int8:
+            q, s = target._out_quant
+            target._out_quant = None
+            return ResidualInt8(q, s, torch.bfloat16)
+        return out
 
 
 _OP_DBG = [0]
@@ -758,6 +803,8 @@ def _to_payload(t: torch.Tensor):
     )
     from vllm.model_executor.layers.residual_int8 import ResidualInt8
 
+    if isinstance(t, ResidualInt8):
+        return t
     if not _stream_i8() or not t.is_cuda:
         return t
     if t.dtype != torch.bfloat16:
