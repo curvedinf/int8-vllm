@@ -390,6 +390,8 @@ _TUNED_MOE_CONFIGS = {
     # split_k=2 changes results and is excluded).
     (2048, 256, 16): {"block_n": 256, "num_warps": 8, "num_stages": 2,
                       "group_m": 1, "split_k": 1},
+    # down (K=I_p=128, N=2048): the heuristic shrinks block_n to 32 for small
+    # grids; 128 measured 2.3x faster than the heuristic at decode (199 vs 457us).
     (128, 2048, 16): {"block_n": 128, "num_warps": 8, "num_stages": 2,
                       "group_m": 1, "split_k": 1, "w_cache_modifier": None},
     # Legacy unsharded sweep shapes, kept for non-TP4 runs.
