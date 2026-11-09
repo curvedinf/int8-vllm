@@ -76,6 +76,21 @@ serve() {
   # must be lifted for --max-model-len > the config's max_position_embeddings;
   # the rope tables are extended to the runtime length in the model code.
   export VLLM_ALLOW_LONG_MAX_MODEL_LEN="${VLLM_ALLOW_LONG_MAX_MODEL_LEN:-1}"
+  # INT8 payload boundary at the attention o_proj: the blockscale GEMM emits
+  # codes+GS128 scales, the GS128 collective reduces them, and the fused
+  # residual+norm+quant seam consumes the payload. Requires the socket-IPC
+  # library (built on demand).
+  export VLLM_GFX908_O_PROJ_I8="${VLLM_GFX908_O_PROJ_I8:-1}"
+  if [[ "$VLLM_GFX908_O_PROJ_I8" == 1 ]]; then
+    export VLLM_GFX908_RESIDUAL_INT8="${VLLM_GFX908_RESIDUAL_INT8:-1}"
+    export VLLM_RESIDUAL_G128_LIBRARY="${VLLM_RESIDUAL_G128_LIBRARY:-${ROOT_DIR}/vllm/_residual_g128.so}"
+    if [[ ! -f "$VLLM_RESIDUAL_G128_LIBRARY" ]]; then
+      bash "${ROOT_DIR}/scripts/build_residual_g128.sh" "$VLLM_RESIDUAL_G128_LIBRARY" || {
+        echo 'Failed to build the GS128 collective; disabling payload mode' >&2
+        export VLLM_GFX908_O_PROJ_I8=0 VLLM_GFX908_RESIDUAL_INT8=0
+      }
+    fi
+  fi
   export NCCL_ALGO=Ring NCCL_PROTO=Simple NCCL_P2P_DISABLE=0 NCCL_DMABUF_ENABLE=0
   export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 

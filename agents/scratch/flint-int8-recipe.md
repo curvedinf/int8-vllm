@@ -2472,3 +2472,28 @@ against the reference chain (materialize(out of the linear's own AR) +
 fused prologue) and print diffs at the first layers; check the
 o_proj linear's return-tuple/`skip_reduce` interplay and whether the
 payload reaches _post_attention at all.
+
+## TURN 91: INT8 PAYLOAD BOUNDARY WORKING (attention o_proj)
+
+Root cause of the garble: the o_proj has `_ck_q` (the CK requant is built
+for row-parallel layers too, contrary to the comment), so every layer took
+the CK branch and wrote bf16; `skip_reduce=True` then silently dropped the
+TP all-reduce for every MoE layer. Fixes:
+- the o_proj is kept on the blockscale path at load when the payload is
+  requested (`_gfx908_payload_out` skips the CK requant, originals kept);
+- runtime gating sets skip_reduce/_gfx908_int8_out only when `_ck_q` is
+  absent, so a CK layer can never lose its AR;
+- recipe defaults: VLLM_GFX908_O_PROJ_I8=1, RESIDUAL_INT8=1, lib path
+  (built on demand).
+
+Verified: coherent (8*6 -> 48) in raw-residual mode with the payload chain
+active, health 200. Steady 2048/256: 189.5 tok/s, TPOT 61.4 ms, draft
+acceptance ~53% - comparable to the bf16 chain (within run noise).
+In-model debug on the profile dummy input showed ref/payload both zero
+(vacuous), so the numeric parity of the payload boundary is evidenced by
+the standalone tests (GEMM 0.67%, AR 0.65%, norm 1 ulp) plus coherence.
+
+Remaining bf16: the MLP-down boundary (down output is bf16, next layer's
+input norm adds it bf16) and the attention q/k/v activations. Next: extend
+the payload to the MLP down output and make the input norm consume a
+payload residual (Bolt decoder_norm), closing the stream.

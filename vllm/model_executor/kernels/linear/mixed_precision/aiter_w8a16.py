@@ -251,6 +251,7 @@ class AiterW8A16LinearKernel(MPLinearKernel):
         if (
             os.environ.get("VLLM_GFX908_CK_W8A8", "1") == "1"
             and current_platform.is_rocm()
+            and not getattr(layer, "_gfx908_payload_out", False)
         ):
             try:
                 dense = _dequant_rows(None).float()
@@ -532,7 +533,7 @@ class AiterW8A16LinearKernel(MPLinearKernel):
                 )
         elif c.group_size == 128:
                 if (
-                    os.environ.get("VLLM_GFX908_O_PROJ_I8", "0") == "1"
+                    os.environ.get("VLLM_GFX908_O_PROJ_I8", "1") == "1"
                     and getattr(layer, "_gfx908_int8_out", False)
                     and M > 0
                 ):

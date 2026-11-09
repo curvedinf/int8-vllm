@@ -287,6 +287,14 @@ class FlintSparseMoeBlock(nn.Module):
         return self.experts(hidden_states=hidden_states, router_logits=hidden_states)
 
 
+_OP_DBG = [0]
+
+
+def _op_dbg_count() -> int:
+    _OP_DBG[0] += 1
+    return _OP_DBG[0]
+
+
 class FlintAttention(nn.Module):
     def __init__(
         self,
@@ -323,12 +331,16 @@ class FlintAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
-        if os.environ.get("VLLM_GFX908_O_PROJ_I8", "0") == "1":
+        if os.environ.get("VLLM_GFX908_O_PROJ_I8", "1") == "1":
             # INT8 payload boundary: the rows-parallel o_proj (blockscale
             # path) emits codes+scales; the GS128 collective reduces them
             # and the residual/norm seam consumes the payload directly.
             self.o_proj._gfx908_int8_out = True
             self.o_proj.skip_reduce = True
+            # Keep this layer on the blockscale path at load: its quant-out
+            # epilogue is the only way to emit an int8 payload (the CK path
+            # writes bf16).
+            self.o_proj._gfx908_payload_out = True
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
@@ -546,8 +558,56 @@ class FlintAttention(nn.Module):
                     f"impl={type(self.attn.impl).__name__} meta={_am} "
                     f"out_absmax={float(attn_output.abs().max())} "
                     f"q_absmax={float(q.abs().max())}", flush=True)
-            output, _ = self.o_proj(
-                attn_output.view(num_tokens, self.num_heads * self.head_dim))
+            o_in = attn_output.view(
+                num_tokens, self.num_heads * self.head_dim)
+            _payload_ok = (
+                os.environ.get("VLLM_GFX908_O_PROJ_I8", "1") == "1"
+                and getattr(self.o_proj, "_ck_q", None) is None
+            )
+            self.o_proj._gfx908_int8_out = _payload_ok
+            self.o_proj.skip_reduce = _payload_ok
+            if (
+                os.environ.get("VLLM_GFX908_O_PROJ_I8_DBG") == "1"
+                and getattr(self.o_proj, "_gfx908_int8_out", False)
+                and not torch.cuda.is_current_stream_capturing()
+                and _op_dbg_count() < 6
+            ):
+                # Compare the payload chain against the plain bf16 chain on
+                # the exact same activation.
+                from vllm.model_executor.layers.residual_int8 import (
+                    materialize,
+                )
+                from vllm.distributed.device_communicators import (
+                    residual_g128_all_reduce as _rgd,
+                )
+
+                self.o_proj._gfx908_int8_out = False
+                self.o_proj.skip_reduce = False
+                ref, _ = self.o_proj(o_in)
+                self.o_proj._gfx908_int8_out = True
+                self.o_proj.skip_reduce = True
+                pl, _ = self.o_proj(o_in)
+                print(f"[op-dbg] prefix={getattr(self.o_proj,'prefix','?')} "
+                      f"pflag={getattr(self.o_proj,'_gfx908_payload_out',None)} "
+                      f"m={num_tokens} pl_type={type(pl).__name__} "
+                      f"has_codes={hasattr(pl, 'codes')} "
+                      f"pl_shape={getattr(pl, 'shape', None)} "
+                      f"ck={getattr(self.o_proj, '_ck_q', None) is not None} "
+                      f"flags={getattr(self.o_proj, '_gfx908_int8_out', None)},"
+                      f"{getattr(self.o_proj, 'skip_reduce', None)}",
+                      flush=True)
+                if not hasattr(pl, "codes"):
+                    return pl
+                red = _rgd.all_reduce(pl)
+                diff = (materialize(red).float() - ref.float()).abs()
+                print(f"[op-dbg] m={num_tokens} "
+                      f"max|payload-ref|={diff.max().item():.4g} "
+                      f"rel={(diff.norm() / ref.float().norm()).item():.4g} "
+                      f"refmax={ref.abs().max().item():.3g} "
+                      f"redmax={materialize(red).abs().max().item():.3g}",
+                      flush=True)
+                return pl
+            output, _ = self.o_proj(o_in)
             return output
         k_cache, v_cache, layer_slots = self._cache_views()
         plan = self._decode_plan() if self.flint_decode else None
@@ -717,6 +777,7 @@ class FlintDecoderLayer(nn.Module):
             # all-reduce (otherwise the TP reduction would be skipped).
             self.self_attn.o_proj._gfx908_int8_out = False
             self.self_attn.o_proj.skip_reduce = False
+            self.self_attn.o_proj._gfx908_payload_out = False
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
