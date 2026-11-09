@@ -31,7 +31,7 @@ bf16 surface; **fixable** = avoidable round trip; **fixed** = already fused.
 | 16 | dense MLP layers 0-1 | identical to 12-14 (`FlintMLP`), same fused silu stash | fixed |
 | 17 | final norm | bf16 | inherent |
 | 18 | lm_head (int8 GS128) | bf16 → per-group int8 quant → int8 GEMM → bf16/fp32 logits | fixed (enabled) |
-| 19 | embedding | bf16 table lookup (trained with int8 fake-quant) | **fixable** (int8 table + dequant in lookup; Bolt ships `packed_embedding`) |
+| 19 | embedding | int8 table at load + gather-then-dequant (fork path, `VLLM_GFX908_INT8_EMBEDDING` default on; per-row fp16 scales) | fixed |
 
 ## Draft chain (DFlash2)
 
@@ -40,7 +40,9 @@ bf16 surface; **fixable** = avoidable round trip; **fixed** = already fused.
 | 1 | draft `qkv_proj` / `o_proj` (AutoGPTQ→CK W8A8) | bf16 → int8 → bf16 | inherent |
 | 2 | draft attention | bf16 q/k/v, KV `int8_block_g128` dequantized in-kernel | inherent |
 | 3 | draft MLP (`Qwen3MLP` = Qwen2MLP: gate_up → `SiluAndMul` → down) | same fused silu stash as the target | fixed |
-| 4 | conv `kernel_projection` ×10, `fc`, `candidate_selector.hidden_projection` | bf16 | exception (Qwen draft float set) |
+| 4 | conv `kernel_projection` ×10, `candidate_selector.hidden_projection` | int8 W8A8 at load (`VLLM_GFX908_DF2_W8A8` default on) | fixed |
+| 4b | conv `base_kernel` planes | int8 per (side,tap) at load, dequant-on-add; bf16 base freed | fixed |
+| 4c | draft `fc` | int8 CK W8A8 at load (`install_int8_linear`) | fixed |
 | 5 | selector codebooks | bf16 | exception (measured) |
 | 6 | draft lm_head / candidate logits | shares the target head weights; the draft's own head module stays bf16 | exception |
 | 7 | draft KV | `int8_block_g128` | fixed |
@@ -66,7 +68,10 @@ prefill threshold is diagnostic only).
 
 ## Open up-quant round trips, priority order
 
-0. **Draft dense grid surfaces** (`conv kernel_projection` x10, `fc`,
+(0. Draft dense grid surfaces - DONE: already int8 at load, plus fc and
+   base_kernel now converted. No bf16 GEMM remains.)
+
+0. **Residual / activation stream** (`conv kernel_projection` x10, `fc`,
    `candidate_selector.hidden_projection`): currently bf16 linears. Need
    int8 W8A8 weights + the conv/selector kernels dequantizing in-kernel,
    and the draft PTQR trainer must fake-quant them.
