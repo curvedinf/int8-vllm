@@ -2426,3 +2426,23 @@ Findings while stripping the last bf16 surfaces:
   attention q/k/v activations, norm outputs, MoE combine) and the
   selector codebooks. That is the Bolt decoder_int8 refactor; it is the
   blocker before retraining per the user's order.
+
+## TURN 89: SELECTOR CODEBOOKS INT8
+
+CandidateSelector codebooks (predecessor/successor, 150144x256 each) are
+now int8 tables with one fp16 scale per row, gathered then dequantized
+(VLLM_GFX908_DF2_CODEBOOK_I8 default 1). Boot clean, coherent, steady
+215.2 tok/s / TPOT 59.8, draft acceptance 2452/4648 = 52.8% on random
+2048-token prompts (healthy; no collapse from the ranking quant).
+
+Remaining bf16 in the forward: the residual/activation stream only
+(residual adds, AR payloads, attention q/k/v activations, norm outputs,
+MoE routed combine). Plan (Bolt decoder_int8 parity):
+- `_add_norm` gains a RAW_RESIDUAL path: bf16 residual in, bf16 sum out,
+  so the payload chain can stay int8 without quantizing the skip stream.
+- o_proj (row-parallel, blockscale) emits int8+GS128 scales via the
+  GEMM's output_scales (validated: dtype=int8 + [M,N/128] fp32 scales
+  works), AR through the GS128 collective, then the extended _add_norm
+  produces normed+q/s for the MoE.
+- Then the MLP down boundary and the input norm, closing the loop.
+This is the last blocker before the PTQR retrain.

@@ -459,6 +459,14 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
         return hidden_states, residual
 
 
+def _codebook_lookup(table, ids: torch.Tensor) -> torch.Tensor:
+    """Gather codebook rows, dequantizing int8 tables after the lookup."""
+    if isinstance(table, tuple):
+        q, s = table
+        return (q[ids].float() * s[ids].unsqueeze(-1)).to(torch.bfloat16)
+    return table[ids]
+
+
 def _score_edges(
     predecessor_table: torch.Tensor,
     successor_table: torch.Tensor,
@@ -468,7 +476,7 @@ def _score_edges(
     anchor_token_ids: torch.Tensor,
     top_k: int,
 ) -> torch.Tensor:
-    successors = successor_table[candidate_ids]
+    successors = _codebook_lookup(successor_table, candidate_ids)
     predecessor_ids = torch.cat(
         (
             anchor_token_ids[:, None, None].expand(-1, 1, top_k),
@@ -476,7 +484,7 @@ def _score_edges(
         ),
         dim=1,
     )
-    predecessors = predecessor_table[predecessor_ids]
+    predecessors = _codebook_lookup(predecessor_table, predecessor_ids)
     return unary_logits[:, :, None] + torch.einsum(
         "blpr,blcr->blpc", predecessors * hidden[:, :, None], successors
     )
@@ -526,6 +534,18 @@ class CandidateSelector(nn.Module):
         self._hp_q = (
             (w / self._hp_s).round_().clamp_(-127, 127).to(torch.int8).contiguous()
         )
+        # Codebooks: int8 tables with one fp16 scale per row. The gather
+        # dequantizes only the selected rows; the ranking still sees the
+        # quantized values (PTQR trains this grid).
+        if os.environ.get("VLLM_GFX908_DF2_CODEBOOK_I8", "1") == "1":
+            for tag, name in (("_pc", "predecessor_codebook"),
+                              ("_sc", "successor_codebook")):
+                wb = getattr(self, name).data.float()
+                sc = (wb.abs().amax(dim=1, keepdim=True).clamp(min=1e-8)
+                      / 127.0).to(torch.float16)
+                qc = (wb / sc.float()).round().clamp(-128, 127).to(torch.int8)
+                setattr(self, tag + "_q", qc.contiguous())
+                setattr(self, tag + "_s", sc.contiguous())
 
     def forward(
         self,
@@ -546,9 +566,19 @@ class CandidateSelector(nn.Module):
             )
         else:
             hidden = self.hidden_projection(hidden_states)
+        pred = (
+            (self._pc_q, self._pc_s)
+            if getattr(self, "_pc_q", None) is not None
+            else self.predecessor_codebook
+        )
+        succ = (
+            (self._sc_q, self._sc_s)
+            if getattr(self, "_sc_q", None) is not None
+            else self.successor_codebook
+        )
         return _score_edges(
-            self.predecessor_codebook,
-            self.successor_codebook,
+            pred,
+            succ,
             candidate_ids,
             unary_logits,
             hidden,
