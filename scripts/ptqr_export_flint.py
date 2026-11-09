@@ -339,7 +339,9 @@ def main():
                             (full.float() - r.float()).abs().max().item(),
                             f"{row[1]}.{tag}"))
                 continue
-            full = torch.cat([s[name + ".weight"] for s in shards], 1)
+            key = name if kind == "cat0" else name + ".weight"
+            full = torch.cat([s[key] for s in shards],
+                             0 if kind == "cat0" else 1)
             r = ref.get(row[1] + ".weight")
             if r is not None:
                 worst.append(((full.float() - r.float()).abs().max().item(),
