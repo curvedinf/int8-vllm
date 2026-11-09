@@ -2497,3 +2497,101 @@ Remaining bf16: the MLP-down boundary (down output is bf16, next layer's
 input norm adds it bf16) and the attention q/k/v activations. Next: extend
 the payload to the MLP down output and make the input norm consume a
 payload residual (Bolt decoder_norm), closing the stream.
+
+## PTQR 512k retrain status (2026-11-09)
+- Corpus rebuilt with tier-5: eight 512k-token needle-in-haystack docs +
+  the chat tiers (which had been silently empty: transformers 5.x returns
+  an Encoding object; `_as_ids` now handles `.ids`). Train stream 7.07M
+  tokens, `/home/curved/SDGraft/data/flint_longctx/`.
+- Trainer attempts on 4xMI100 (server stopped):
+  - seq_len 16384 + teacher_stream -> OOM (8 GiB allocation needed)
+  - seq_len 8192 -> OOM (4.58 GiB needed, 25.7GB resident)
+  - seq_len 4096 -> fits (~31.6GB/GPU). The apparent "hang" after the
+    KD warm is the 20-batch streamed-teacher sweep: ~267 s measured for a
+    1x1024 probe (one 75GB shard pass + teacher forwards), so the 20x4096
+    sweep runs ~20-25 min with GPUs idle during IO. Not a deadlock.
+  - Probe run (seq 1024, kd_cache 1, 2 steps) completed: step loss 3.0058,
+    kld 0.077, checkpoint shards saved.
+  - Real run launched 04:39 UTC: seq 4096, kd_cache 20, 120 steps,
+    save/eval cadence 20/40, out `/home/curved/models/ptqr_flint_r512k`,
+    log `logs/ptqr_flint_r512k/train.log`. ETA hours; the serve recipe is
+    stopped while it trains.
+- Server restored to the int8 recipe after the attempts.
+- Draft retrain, export, quality gates and NS sweep still pending.
+### Next commands when the target run finishes
+- export: `.venv/bin/python scripts/ptqr_export_flint.py --ckpt_dir
+  /home/curved/models/ptqr_flint_r512k --step <last> --out
+  /home/curved/models/Flint-GPTQ-INT8-W8A8-GS128-PTQR-r512k --verify`
+- KLD gate: boot the recipe with MODEL_DIR=<export>, capture with
+  `scripts/kld_probe_v2.py` vs a fresh SPEC_BF16 reference, compare.
+- draft: `scripts/ptqr_train_draft_flint_ptqr.py --cache
+  /home/curved/models/flint_draft_cache --out
+  /home/curved/models/flint_ptqr_draft_r512k` then
+  `scripts/ptqr_export_flint_draft.py --ckpt ... --out ...`.
+- NS sweep on the final pair: NS env of serve_recipe_flint.sh (7/9/11/13),
+  steady + staggered workloads, ledger rows.
+- Expert residency accounting committed (067f108edf): all 256 experts
+  replicated per rank, ~8.8 GiB/rank; no eviction cache is viable at C12.
+- 4096x20 sweep aborted twice: (1) 10-min NCCL watchdog (fixed to 2h),
+  (2) genuine 2h collective wait from rank IO skew on the single bcache
+  device (75GB teacher shards vs 61GB RAM; 6h sweep, one rank lagged).
+  Decision: run the retrain rung at seq 1024, kd_cache 4, 40 steps so the
+  sweep/steps complete; the corpus still spans the 512k needle docs.
+  A GPU-resident teacher phase (18.75GB/rank, sequential to the student)
+  is the right fix for full 4096+ sweeps but is a trainer redesign.
+- 1024-window rung (kd_cache 4, lr 1e-5, tau 1.0->0.001): loss/CE rose
+  3.0/2.77 -> 4.7/4.35 (s10) -> 4.9/3.89 (s30); trainer eval KLD
+  0.077 -> 0.154 (s20). Unstable; stopped at s30. Retrying once at
+  lr 5e-6, tau end 0.01, distill_weight 1.0 before abandoning the
+  1024 schedule; the 4096/20 sweep is infeasible here (75GB teacher
+  vs 61GB RAM, 6h+ rank-skewed sweeps).
+### KLD gate procedure for the int8-only stack (no prebuilt bf16 capture)
+1) bf16 reference boot (port 8031, pure bf16 stack, no spec, auto KV):
+   env VLLM_GFX908_O_PROJ_I8=0 VLLM_GFX908_RESIDUAL_INT8=0
+   VLLM_GFX908_STREAM_I8=0 VLLM_GFX908_MOE_A8W8=0 VLLM_GFX908_LM_HEAD_I8=0
+   VLLM_GFX908_GATE_I8=0 VLLM_GFX908_INT8_EMBEDDING=0 VLLM_GFX908_ACT_QUANT=round
+   .venv/bin/python -m vllm.entrypoints.openai.api_server --model
+   /home/curved/models/flint-bf16 --served-model-name flint --port 8031
+   --tensor-parallel-size 4 --max-num-seqs 12 --dtype bfloat16
+   --max-model-len 65536 --gpu-memory-utilization 0.90 --kv-cache-dtype auto
+   --reasoning-parser qwen3
+2) KLD_URL=http://127.0.0.1:8031 KLD_KEY=<key> .venv/bin/python
+   scripts/kld_probe_v2.py capture --tag flint_bf16_ref
+3) recipe boot on 8030, capture tag flint_i8_cur, compare vs flint_bf16_ref.
+4) NS sweep on the recipe: NS=5/7/9/11, steady + staggered 6+6.
+- Retry without grad checkpointing (lr 1e-5, 20 steps): step-10 CE
+  4.3535 identical to the checkpointed run -> not the hook; the CE rise
+  is the tau anneal to hard int8 (step-10 tau 0.017) without enough
+  steps to recover. A single 40-step rung is not the recipe (ladder rungs
+  are r8s25/r9s15/r10s60 etc.).
+- Plan: validate the shipping stack (bf16 KLD ref + int8 capture + NS
+  sweep), then a low-tau 4096-window fine-tune initialized from the
+  deployed r1s40 (--init_from), kd_cache 4 -> ~1.5h sweep + short steps.
+- FUCKUP LOCATED: the retrain attempts deviated from the recorded PTQR
+  process (`scripts/ptqr_flint_rungs.sh 1`: seq 2048, kd_cache 20, 60
+  steps, lr 1e-5, logits_chunk 128, grad_checkpoint). The 4096/1024
+  windows, kd_cache 4 and 20/40-step runs were not the process; the CE
+  swings are the process's normal tau trajectory over a 60-step rung.
+  Running the recorded rung-1 script exactly.
+
+## RETRAIN RESOLVED (2026-11-09 17:00-19:20)
+- Root cause of the failed retrains: deviation from the recorded process
+  (seq 2048 / kd_cache 20 / 60 steps / lr 1e-5 via
+  scripts/ptqr_flint_rungs.sh 1). The 4096/1024 windows, kd_cache 4 and
+  20/40-step runs annealed tau off-schedule.
+- Ran the recorded rung: sweep 20+10 batches in 606s; step-40 save is
+  the final artifact (saves at 0/20/40). Exported to
+  Flint-GPTQ-INT8-W8A8-GS128-PTQR-r1s40-512k (36,439 tensors, 38.5GiB).
+  Exporter bugs fixed on the way: router plan row base name, rank_of
+  module base, verify 1-D sinks.
+- Validation: boots healthy on the int8-only stack, coherent; same-seed
+  A/B vs r1s40-v2 TPOT 71.75 vs 75.56 ms, acceptance 4.88 vs 5.10
+  (within +-1 gate). NS sweep NS=7 best (66.45 ms / 172.3 tok/s).
+  Ledger rows FLINT_R1S40_512K_RETRAIN_20261109 and
+  FLINT_NS_SWEEP_C12_20261109. Recipe default switched to the retrained
+  export; r1s40-v2 remains the rollback.
+- OPEN: draft retrain at the new target. The existing int8 PTQR draft
+  is retained (validated against the new target by the A/B); its
+  exit-state cache predates this target, so rebuilding
+  (scripts/ptqr_flint_draft_cache.py) + the known draft trainer is the
+  follow-up.
