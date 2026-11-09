@@ -157,9 +157,31 @@ class FlintMLP(nn.Module):
             reduce_results=reduce_results,
             prefix=f"{prefix}.down_proj",
         )
+        # int8-only dense/shared MLP: resident blockscale weights feed the
+        # fused gate_up+SwiGLU+GS128 kernel, and the row-parallel down emits
+        # a GS128 payload (its TP partial is reduced by the caller).
+        from vllm.model_executor.layers.quantization.auto_gptq import (
+            AutoGPTQConfig,
+        )
+
+        if isinstance(quant_config, AutoGPTQConfig):
+            self.gate_up_proj._gfx908_gated_out = True
+            self.down_proj._gfx908_int8_out = True
+            self.down_proj._gfx908_payload_out = True
+            self.down_proj.skip_reduce = True
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         act = flint_linear.gate_up_silu_mul(self.gate_up_proj, x)
+        if act is None and (
+            getattr(self.gate_up_proj, "_gfx908_w_q", None) is not None
+            and x.is_cuda
+            and x.dtype in (torch.bfloat16, torch.float16)
+        ):
+            from vllm.model_executor.layers.decoder_int8 import (
+                gate_up_silu_quant,
+            )
+
+            act = gate_up_silu_quant(self.gate_up_proj, x)
         if act is None:
             gate_up, _ = self.gate_up_proj(x)
             if (
@@ -1052,6 +1074,14 @@ class FlintDecoderLayer(nn.Module):
             hidden_states, residual = self.post_attention_layernorm(
                 hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
+        if isinstance(hidden_states, ResidualInt8) and (
+                get_tensor_model_parallel_world_size() > 1):
+            # Dense-MLP down is row-parallel: its payload is a TP partial.
+            from vllm.distributed.device_communicators import (
+                residual_g128_all_reduce as _rgd,
+            )
+
+            hidden_states = _rgd.all_reduce(hidden_states)
         return _to_payload(hidden_states), residual
 
 

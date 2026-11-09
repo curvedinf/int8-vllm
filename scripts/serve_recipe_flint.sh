@@ -62,6 +62,8 @@ serve() {
   # Fused round-to-nearest activation quant (quality default, see
   # INT8_AUDIT_RESULTS.md).
   export VLLM_GFX908_ACT_QUANT=round
+  # Draft MLP: fused gate_up+SwiGLU+GS128 kernel (int8-only draft activations)
+  export VLLM_GFX908_DRAFT_GATED_I8="${VLLM_GFX908_DRAFT_GATED_I8:-1}"
   # Routed experts: GPTQ int8-group -> aiter grouped a8w8-blockscale GEMM.
   # This is the production path (W8A8, int8 activations). Do not disable.
   export VLLM_GFX908_MOE_A8W8="${VLLM_GFX908_MOE_A8W8:-1}"

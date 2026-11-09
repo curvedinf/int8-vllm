@@ -212,6 +212,13 @@ class AiterW8A16LinearKernel(MPLinearKernel):
 
         self._transform_param(layer, self.w_q_name, repack_w_q)
         self._transform_param(layer, self.w_s_name, repack_w_s)
+        if getattr(layer, "_gfx908_gated_out", False):
+            # Resident fused gate_up consumer (gemm_silu_quant_out): keep
+            # [2N,K] int8 rows and fp32 [2N,K/128] groups; skip CK below.
+            w_q, w_s, _ = self._get_weight_params(layer)
+            layer._gfx908_w_q = w_q.data.contiguous()
+            layer._gfx908_w_s = w_s.data.float().contiguous()
+            self._warm_gated(layer)
 
         # DFlash fused context-KV consumer: same contract as
         # TritonW8A16LinearKernel — dense dequant of the AITER-layout
@@ -254,6 +261,8 @@ class AiterW8A16LinearKernel(MPLinearKernel):
             os.environ.get("VLLM_GFX908_CK_W8A8", "1") == "1"
             and current_platform.is_rocm()
             and not getattr(layer, "_gfx908_payload_out", False)
+            and not getattr(layer, "_gfx908_gated_out", False)
+            and not getattr(layer, "_gfx908_stash_in", False)
         ):
             try:
                 dense = _dequant_rows(None).float()
@@ -306,6 +315,32 @@ class AiterW8A16LinearKernel(MPLinearKernel):
                             requires_grad=False,
                         ),
                     )
+
+    def _warm_gated(self, layer: torch.nn.Module) -> None:
+        """Compile the fused gate_up+SwiGLU+quant kernel before capture."""
+        if torch.cuda.is_current_stream_capturing():
+            return
+        try:
+            from aiter.ops.triton.gemm.basic.gemm_silu_quant_out import (
+                gemm_silu_quant_out,
+            )
+
+            from vllm.model_executor.layers.quantization.utils.packed_g128_int8 import (
+                quantize,
+            )
+
+            w_q = layer._gfx908_w_q
+            w_s = layer._gfx908_w_s.unsqueeze(0)
+            k = w_q.shape[1]
+            dev = w_q.device
+            for m in (1, 4, 8, 16, 32, 64, 256, 2048):
+                x = torch.randn(m, k, device=dev, dtype=torch.bfloat16) / 10
+                q, s = quantize(x)
+                gemm_silu_quant_out(
+                    q, s, w_q, w_s, gated=True, dtype=torch.bfloat16
+                )
+        except Exception:  # noqa: BLE001 - warmup must not break loading
+            return
 
     def _warmup(self, layer: torch.nn.Module) -> None:
         """JIT-compile the production AITER A8W8 configs.

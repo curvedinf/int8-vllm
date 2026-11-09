@@ -12,6 +12,51 @@ from vllm.model_executor.layers.residual_int8 import ResidualInt8, materialize
 from vllm.triton_utils import tl, triton
 
 
+def gate_up_silu_quant(layer, x):
+    """Resident-weight gate_up GEMM with fused SwiGLU + GS128 int8 output.
+
+    Returns an uninitialized activation tensor whose only consumer is the
+    row-parallel down projection through the PREQUANT stash (no bf16
+    gate/up tensor and no separate silu pass).
+    """
+    from aiter.ops.triton.gemm.basic.gemm_silu_quant_out import (
+        gemm_silu_quant_out,
+    )
+
+    from vllm.model_executor.layers.quantization.utils.packed_g128_int8 import (
+        quantize,
+    )
+    from vllm.model_executor.layers.rms_norm_int8_quant import PREQUANT_ATTR
+
+    w_q = layer._gfx908_w_q
+    w_s = layer._gfx908_w_s
+    shape = x.shape
+    k = shape[-1]
+    x2 = x.reshape(-1, k).contiguous()
+    pre = (
+        None
+        if torch.compiler.is_compiling()
+        else getattr(x, PREQUANT_ATTR, None)
+    )
+    if (
+        pre is not None
+        and pre[0].shape == x2.shape
+        and pre[0].dtype == torch.int8
+        and pre[1].shape == (x2.shape[0], k // 128)
+    ):
+        q, s = pre
+    else:
+        q, s = quantize(x2)
+    out_q, out_s = gemm_silu_quant_out(
+        q, s, w_q, w_s.unsqueeze(0), gated=True, dtype=x.dtype
+    )
+    act = torch.empty(
+        (*shape[:-1], out_q.shape[-1]), dtype=x.dtype, device=x.device
+    )
+    setattr(act, PREQUANT_ATTR, (out_q, out_s))
+    return act
+
+
 def quantize_input(value):
     """Explicit ingress from embeddings or a reference-dtype attention interior."""
     if isinstance(value, ResidualInt8):

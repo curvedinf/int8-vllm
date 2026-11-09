@@ -109,6 +109,16 @@ class Qwen2MLP(nn.Module):
                 f"Unsupported activation: {hidden_act}. Only silu is supported for now."
             )
         self.act_fn = SiluAndMul()
+        if os.environ.get("VLLM_GFX908_DRAFT_GATED_I8") == "1":
+            from vllm.model_executor.layers.quantization.auto_gptq import (
+                AutoGPTQConfig,
+            )
+
+            if isinstance(quant_config, AutoGPTQConfig):
+                # int8 draft MLP: fused gate_up+SwiGLU+GS128 kernel, and
+                # the blockscale down consumes the stash directly.
+                self.gate_up_proj._gfx908_gated_out = True
+                self.down_proj._gfx908_stash_in = True
 
     def forward(self, x):
         from vllm.model_executor.layers.residual_int8 import ResidualInt8
@@ -118,6 +128,18 @@ class Qwen2MLP(nn.Module):
 
             mid = projection(self.gate_up_proj, x, activation="silu_mul")
             return projection(self.down_proj, mid)
+        if (
+            getattr(self.gate_up_proj, "_gfx908_w_q", None) is not None
+            and x.is_cuda
+            and x.dtype in (torch.bfloat16, torch.float16)
+        ):
+            from vllm.model_executor.layers.decoder_int8 import (
+                gate_up_silu_quant,
+            )
+
+            mid = gate_up_silu_quant(self.gate_up_proj, x)
+            x, _ = self.down_proj(mid)
+            return x
         gate_up, _ = self.gate_up_proj(x)
         if (
             os.environ.get("VLLM_GFX908_SILU_QUANT", "1") == "1"

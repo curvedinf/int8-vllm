@@ -24,7 +24,7 @@ bf16 surface; **fixable** = avoidable round trip; **fixed** = already fused.
 | 9 | expert `gate_up` (a8w8 blockscale) | int8 GEMM with fused SwiGLU + per-128 int8 epilogue (interleaved gate/up weights); no bf16 gate/up tensor | fixed |
 | 10 | expert SiLU*up epilogue | folded into the gate_up GEMM epilogue (exact `silu_mul_quant_rn` contract: bf16-rounded halves, fp32 silu, one product rounding, GS128 quant) | fixed |
 | 11 | expert `down` (a8w8 blockscale) | int8 GEMM → float combine (gammas) → **quant-out in the reduce epilogue** (shared branch folded as an int8 residual) → TP int8 collective | fixed |
-| 12 | shared expert `gate_up_proj` (CK W8A8) | bf16 → int8 → **bf16 out** | inherent |
+| 12 | shared/dense `gate_up` | resident [2N,K] int8 weights + `gemm_silu_quant_out`: SwiGLU and the GS128 int8 output in one kernel; no bf16 gate/up tensor | fixed |
 | 13 | shared expert `silu_and_mul` | fused: bf16 gate/up → bit-exact bf16 act + per-group int8 stash, consumed by the blockscale down GEMM | fixed |
 | 14 | shared expert `down_proj` (blockscale) | int8 GEMM with quant-out epilogue → GS128 payload; TP-reduced with the routed combine and folded as an int8 residual | fixed |
 | 15 | combine + residual add | weighted expert combine + shared-branch fold + per-128 int8 quant in one reduce kernel (`reduce_grouped`); the runner's float AR is skipped and the payload is TP-reduced with the GS128 collective | fixed |
