@@ -57,15 +57,21 @@ surfaces 0.16 %; untouched tensors byte-identical to the bf16 draft.
 | Routed experts | `vllm/model_executor/layers/quantization/gptq_moe_a8w8.py` — GPTQ int8-group → AITER grouped `a8w8_blockscale` (`[E,K,N]` int8 + per-column GS128 fp32 scales, `w_blockscale_n=1`) |
 | Attention | AITER unified attention |
 | KV (target + draft) | `int8_block_g128` |
-| All-reduce | vLLM CUSTOM (`VLLM_ROCM_USE_AITER_CUSTOM_AR=0`) |
+| All-reduce | vLLM CUSTOM (`VLLM_ROCM_USE_AITER_CUSTOM_AR=0`); residual-stream collects use `residual_g128_all_reduce` on int8 codes+scales |
 | Act quant | `VLLM_GFX908_ACT_QUANT=round` |
+| Residual stream | int8 GS128 payloads between every decoder layer (`residual_int8`), fused residual+norm+quant seams |
+| Attention/input norm prologue | `residual_norm(emit_pertoken=True)` stashes the CK per-token quant; the CK GEMM consumes `PREQUANT_ATTR` |
+| MoE gate_up | fused SwiGLU + per-128 int8 epilogue in the grouped GEMM (`QUANT_OUT`, interleaved gate/up weights) |
+| MoE down/combine | `reduce_grouped` quant-out: shared branch folded as an int8 residual, combined row quantized per 128; runner float AR disabled, one int8 collective |
+| Dense/shared/draft MLP | `gemm_silu_quant_out`: SwiGLU + GS128 int8 output from resident blockscale weights |
+| Router gate, lm_head | int8 GS128 at all batch sizes; norm epilogues hand both consumers their per-group stash |
+| Embedding | int8 table, gather-dequant |
 
-Deliberate float exceptions (same class as the Qwen findings): selector
-codebooks, the draft's conv `kernel_projection` ×10, `fc` and
-`candidate_selector.hidden_projection` stay bf16 on their trained grid;
-embeddings/`lm_head` and the router ship bf16. Everything else is int8.
-The draft's 35 attention/MLP linears are **not** an exception — they are
-int8 W8A8 GS128, exactly as in the Qwen PTQR draft.
+Activation doctrine (2026-11-09): every stored activation between
+quantizable ops is int8; the only float math is attention
+(softmax/QK^T/PV, identical to the Qwen and Bolt recipes) and the logits
+interface. Selector codebooks, the draft's conv planes and `fc` are int8
+at load. The draft's 35 attention/MLP linears are int8 W8A8 GS128.
 
 The expert path is the production path. `VLLM_GFX908_MOE_A8W8=0`
 (reverting to WNA16/A16W8) is a diagnostic lever only. The startup log
@@ -97,8 +103,10 @@ while the release announcement states 512k support (recommended
 <=256k). The recipe sets `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` and both the
 target and draft extend their rope tables to the runtime length; only
 the 513-token sliding layers rotate, so positions past the trained range
-stay local. **The first boot at 512k/C12 and a long-context validation
-are still pending** — the numbers below are the measured C8/262k legs.
+stay local. The 512k/C12 boot is live (2026-11-09): `--max-num-seqs 12`,
+`--max-model-len 524288`, int8 KV on both models, DFlash2 NS=7. The
+numbers below are the C8/262k legs; the C12/2048-token measurements are
+in the int8-only section at the end.
 `VLLM_FS_GPU=auto` (AIS direct-to-GPU) is the default; the first boot
 writes a 41 GiB per-rank repack cache (~15 min), later boots load from
 it (~4.5 min). `VLLM_FS_GPU=0` is the plain-safetensors fallback.
@@ -126,6 +134,26 @@ scheduler queues/preempts. There is no CPU KV tier in this recipe.
   (≈5.3k prefill tok/s), TPOT 44.1 ms.
 - AIS byte gate: 38.50 GiB verified byte-identical across 109,620
   chunks; target + draft load through AIS.
+
+## int8-only fusion state (2026-11-09)
+
+The MoE block, dense/shared MLP and draft MLP are end-to-end int8:
+
+- Gate_up: interleaved gate/up weights feed the grouped GEMM's fused
+  SwiGLU epilogue with per-128 int8 output (bit-exact contract vs the old
+  `silu_mul_quant_rn` chain: 2e-5 code mismatch from accumulation order,
+  scales exact).
+- Down/combine: the reduce epilogue folds the shared branch as an int8
+  residual and quantizes the combined row; the runner's float all-reduce
+  is disabled (`skip_final_all_reduce`) and the payload is TP-reduced in
+  the int8 domain.
+- Dense/shared gate_up: resident `[2N,K]` int8 weights + `gemm_silu_quant_out`
+  (SwiGLU+GS128 in one kernel); the row-parallel down emits a payload.
+- Measured: boot healthy, coherent, steady C12 2048/256 **TPOT 58.5-59.4
+  ms** (~200 tok/s output), staggered 6+6 TPOT 56.9/62.3 ms.
+- Long-context PTQR retrain in progress (seq 4096, kd_cache 20, 120
+  steps, corpus with eight 512k-token needle documents). Draft retrain,
+  KLD gate and the NS sweep follow it.
 
 ## Known deltas
 
