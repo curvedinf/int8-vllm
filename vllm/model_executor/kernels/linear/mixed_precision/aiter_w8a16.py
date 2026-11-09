@@ -531,6 +531,48 @@ class AiterW8A16LinearKernel(MPLinearKernel):
                     K,
                 )
         elif c.group_size == 128:
+                if (
+                    os.environ.get("VLLM_GFX908_O_PROJ_I8", "0") == "1"
+                    and getattr(layer, "_gfx908_int8_out", False)
+                    and M > 0
+                ):
+                    # INT8-payload epilogue (Bolt decoder_int8 parity): the
+                    # GEMM writes codes + GS128 scales so the following
+                    # all-reduce and residual/norm seam stay int8.
+                    pre = (
+                        None
+                        if torch.compiler.is_compiling()
+                        else getattr(x, PREQUANT_ATTR, None)
+                    )
+                    if (
+                        pre is not None
+                        and pre[0].shape == x_2d.shape
+                        and pre[0].dtype == torch.int8
+                        and pre[1].shape == (M, K // 128)
+                    ):
+                        x_q, x_s = pre
+                    else:
+                        x_q, x_s = _quantize_activation_per_block(
+                            x_2d, block_k=128)
+                    cfg = _get_aiter_w8a8_config(M, N, K, c.group_size)
+                    cfg = dict(cfg)
+                    cfg["BLOCK_SIZE_N"] = 128
+                    cfg["NUM_KSPLIT"] = 1
+                    y8 = torch.empty((M, N), dtype=torch.int8,
+                                     device=x_2d.device)
+                    s8 = torch.empty((M, N // 128), dtype=torch.float32,
+                                     device=x_2d.device)
+                    gemm_a8w8_blockscale(
+                        x_q, w_q, x_s, w_s, dtype=torch.int8, y=y8,
+                        output_scales=s8, config=cfg)
+                    from vllm.model_executor.layers.residual_int8 import (
+                        ResidualInt8,
+                    )
+
+                    return ResidualInt8(
+                        y8.view(*out_shape[:-1], N),
+                        s8.view(*out_shape[:-1], N // 128),
+                        x_2d.dtype)
                 pre = (
                     None
                     if torch.compiler.is_compiling()

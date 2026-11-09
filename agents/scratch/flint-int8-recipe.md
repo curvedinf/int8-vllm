@@ -2446,3 +2446,29 @@ MoE routed combine). Plan (Bolt decoder_int8 parity):
   produces normed+q/s for the MoE.
 - Then the MLP down boundary and the input norm, closing the loop.
 This is the last blocker before the PTQR retrain.
+
+## TURN 90: RESIDUAL PAYLOAD BOUNDARY — COMPONENTS VALID, INTEGRATION GARBLES
+
+Implemented: a RAW_RESIDUAL path in residual_int8._add_norm (bf16 skip
+in/out, payload in, normed q/s out; k=2048 allowed only for this seam),
+the blockscale GEMM's QUANT_OUT epilogue (dtype=int8 + [M,N/128] fp32
+scales; BLOCK_SIZE_N forced 128, NUM_KSPLIT=1), the o_proj payload
+boundary (skip_reduce + int8 AR via the GS128 collective + residual_norm
+raw), and a materialize-mode bisect lever
+(VLLM_GFX908_O_PROJ_I8_MODE=materialize).
+
+Standalone validation: quant-out GEMM dequant rel 0.0067 at M=8..256;
+int8 AR vs all-gather rel 0.0065 at M=96/2048 (chunked); residual_norm
+raw res exact, normed <=1 ulp.
+
+In-model result: garbled output, IDENTICAL between raw and materialize
+modes -> the corruption is in the model integration, not the new norm.
+Dense layers 0-1 were excluded from the boundary (they have no payload
+consumer and would skip the TP reduce). Flags: VLLM_GFX908_O_PROJ_I8=0
+by default; coherent model verified (48).
+
+Next debug step: inside one boot, compare _post_attention's outputs
+against the reference chain (materialize(out of the linear's own AR) +
+fused prologue) and print diffs at the first layers; check the
+o_proj linear's return-tuple/`skip_reduce` interplay and whether the
+payload reaches _post_attention at all.

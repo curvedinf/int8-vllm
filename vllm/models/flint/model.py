@@ -323,6 +323,12 @@ class FlintAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
+        if os.environ.get("VLLM_GFX908_O_PROJ_I8", "0") == "1":
+            # INT8 payload boundary: the rows-parallel o_proj (blockscale
+            # path) emits codes+scales; the GS128 collective reduces them
+            # and the residual/norm seam consumes the payload directly.
+            self.o_proj._gfx908_int8_out = True
+            self.o_proj.skip_reduce = True
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
@@ -705,6 +711,12 @@ class FlintDecoderLayer(nn.Module):
             )
         else:
             self.mlp = FlintSparseMoeBlock(config, quant_config, prefix=f"{prefix}.mlp")
+        if not isinstance(self.mlp, FlintSparseMoeBlock):
+            # The INT8 payload boundary is consumed by the MoE layer's
+            # _post_attention; dense-MLP layers keep the normal o_proj
+            # all-reduce (otherwise the TP reduction would be skipped).
+            self.self_attn.o_proj._gfx908_int8_out = False
+            self.self_attn.o_proj.skip_reduce = False
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
@@ -754,6 +766,59 @@ class FlintDecoderLayer(nn.Module):
             )
             if ll is not None:
                 return ll
+            from vllm.model_executor.layers.residual_int8 import (
+                ResidualInt8,
+            )
+
+            if isinstance(hidden_states, ResidualInt8):
+                try:
+                    from vllm.distributed.device_communicators import (
+                        residual_g128_all_reduce as _rg,
+                    )
+                    from vllm.model_executor.layers.residual_int8 import (
+                        residual_norm,
+                    )
+
+                    payload = _rg.all_reduce(hidden_states)
+                    if os.environ.get(
+                            "VLLM_GFX908_O_PROJ_I8_MODE") == "materialize":
+                        from vllm.model_executor.layers.quantization.gptq_moe_a8w8 import (
+                            residual_norm_group_quant,
+                        )
+                        from vllm.model_executor.layers.residual_int8 import (
+                            materialize as _mat,
+                        )
+
+                        hidden = _mat(payload)
+                        normed, q, s = residual_norm_group_quant(
+                            hidden, residual,
+                            self.post_attention_layernorm.weight,
+                            self.post_attention_layernorm.variance_epsilon)
+                        res = None
+                    else:
+                        normed, res, q, s = residual_norm(
+                            self.post_attention_layernorm, payload, residual,
+                            emit_quant=True, raw_residual=True)
+                    experts = getattr(
+                        getattr(self.mlp, "experts", None), "routed_experts",
+                        None)
+                    if experts is not None:
+                        experts._pre_quant = (q, s)
+                    if res is None:
+                        res = (materialize(payload).float()
+                               + residual.float()).to(residual.dtype)
+                    return self.mlp(normed), res
+                except Exception:  # noqa: BLE001 - fall back to bf16
+                    from vllm.model_executor.layers.residual_int8 import (
+                        materialize,
+                    )
+
+                    hidden_states = materialize(hidden_states)
+                    if getattr(self.self_attn.o_proj, "skip_reduce", False):
+                        from vllm.distributed import get_tp_group
+
+                        hidden_states = get_tp_group().all_reduce(
+                            hidden_states)
             fused = None
             if self._fused_ar_rms:
                 from vllm.distributed.device_communicators.ar_rms_g128 import (

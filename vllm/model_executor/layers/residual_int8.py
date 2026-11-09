@@ -104,6 +104,7 @@ def _add_norm(
     S,
     YQ,
     YS,
+    YRES,
     K: tl.constexpr,
     EPS: tl.constexpr,
     X_QUANT: tl.constexpr,
@@ -113,6 +114,7 @@ def _add_norm(
     EMIT_NORMAL_QUANT: tl.constexpr,
     NATIVE_NORM: tl.constexpr,
     WRITE_NORMAL: tl.constexpr,
+    RAW_RESIDUAL: tl.constexpr,
 ):
     row = tl.program_id(0)
     cols = tl.arange(0, K)
@@ -126,16 +128,22 @@ def _add_norm(
         value += other
     if HAS_RESIDUAL:
         residual = tl.load(R + row * K + cols).to(tl.float32)
-        residual *= tl.load(RS + row * (K // 128) + cols // 128)
+        if not RAW_RESIDUAL:
+            residual *= tl.load(RS + row * (K // 128) + cols // 128)
         value += residual
     # Native small-M RMSNorm reduces the unrounded sum; AITER's large-M
     # path rounds the sum to the compute dtype first. Preserve that distinction.
     stored = value.to(Y.dtype.element_ty).to(tl.float32)
-    groups = tl.reshape(stored, (K // 128, 128))
-    scale = tl.maximum(tl.div_rn(tl.max(tl.abs(groups), 1), 127.0), 1.0e-30)
-    codes = lib.nearbyint(tl.div_rn(groups, scale[:, None]))
-    tl.store(Q + row * K + cols, tl.reshape(codes, (K,)).to(tl.int8))
-    tl.store(S + row * (K // 128) + tl.arange(0, K // 128), scale)
+    if RAW_RESIDUAL:
+        # The skip stream stays floating: publish the (AR + residual) sum for
+        # the next layer instead of a GS128 residual payload.
+        tl.store(YRES + row * K + cols, stored.to(YRES.dtype.element_ty))
+    else:
+        groups = tl.reshape(stored, (K // 128, 128))
+        scale = tl.maximum(tl.div_rn(tl.max(tl.abs(groups), 1), 127.0), 1.0e-30)
+        codes = lib.nearbyint(tl.div_rn(groups, scale[:, None]))
+        tl.store(Q + row * K + cols, tl.reshape(codes, (K,)).to(tl.int8))
+        tl.store(S + row * (K // 128) + tl.arange(0, K // 128), scale)
     if NORMALIZE:
         if not NATIVE_NORM:
             value = stored
@@ -191,6 +199,7 @@ def _run(
     native=False,
     quantized=False,
     x2=None,
+    raw_residual=False,
 ):
     packed = isinstance(x, ResidualInt8)
     if packed:
@@ -198,8 +207,10 @@ def _run(
     data = x.codes if packed else x
     dtype = x.compute_dtype if packed else x.dtype
     k = data.shape[-1]
-    if k not in (1024, 4096) or dtype not in (torch.bfloat16, torch.float32):
-        raise ValueError("INT8 residuals require BF16/FP32 and hidden size 1024/4096")
+    if (k not in (1024, 4096) and not (raw_residual and k == 2048)) or dtype             not in (torch.bfloat16, torch.float32):
+        raise ValueError(
+            "INT8 residuals require BF16/FP32 at hidden 1024/4096 "
+            "(2048 only for the raw-residual flint seam)")
     if x2 is not None:
         if (
             not isinstance(x2, ResidualInt8)
@@ -209,14 +220,22 @@ def _run(
         ):
             raise ValueError("Expected a matching second GS128 branch")
         _validate(x2)
-    if residual is not None and (
+    if residual is not None and raw_residual:
+        if (
+            not torch.is_tensor(residual)
+            or residual.shape != data.shape
+            or residual.device != data.device
+            or residual.dtype not in (torch.bfloat16, torch.float32)
+        ):
+            raise ValueError("Expected a matching floating residual tensor")
+    elif residual is not None and (
         not isinstance(residual, ResidualInt8)
         or residual.shape != data.shape
         or residual.codes.device != data.device
         or residual.compute_dtype != dtype
     ):
         raise ValueError("Expected a matching explicit GS128 residual")
-    if residual is not None:
+    if residual is not None and not raw_residual:
         _validate(residual)
     if weight is not None and (weight.shape != (k,) or weight.device != data.device):
         raise ValueError("Expected a matching RMSNorm weight")
@@ -231,20 +250,30 @@ def _run(
     )
     yq = torch.empty_like(q) if emit_quant else q
     ys = torch.empty_like(s) if emit_quant else s
+    yres = (
+        torch.empty_like(residual)
+        if raw_residual
+        else torch.empty((0,), device=data.device, dtype=dtype)
+    )
     if data.is_cuda:
         _add_norm[(data.numel() // k,)](
             data.contiguous(),
             x.scales if packed else s,
             x2.codes if x2 is not None else q,
             x2.scales if x2 is not None else s,
-            residual.codes if residual is not None else q,
-            residual.scales if residual is not None else s,
+            residual
+            if (raw_residual and residual is not None)
+            else (residual.codes if residual is not None else q),
+            q
+            if raw_residual
+            else (residual.scales if residual is not None else s),
             weight if weight is not None else out,
             out,
             q,
             s,
             yq,
             ys,
+            yres,
             k,
             epsilon,
             packed,
@@ -254,6 +283,7 @@ def _run(
             emit_quant,
             native,
             not quantized,
+            raw_residual,
             num_warps=4,
             enable_fp_fusion=False,
         )
@@ -269,9 +299,14 @@ def _run(
                 x2.codes.float() * x2.scales.repeat_interleave(128, -1)
             )
         if residual is not None:
-            rg = residual.codes.unflatten(-1, (-1, 128)).float()
-            value = value + (rg * residual.scales.unsqueeze(-1)).flatten(-2)
+            if raw_residual:
+                value = value + residual.float()
+            else:
+                rg = residual.codes.unflatten(-1, (-1, 128)).float()
+                value = value + (rg * residual.scales.unsqueeze(-1)).flatten(-2)
         stored = value.to(dtype).float()
+        if raw_residual and torch.is_tensor(yres) and yres.numel():
+            yres.copy_(stored.to(yres.dtype).view(shape))
 
         def quantize(v, codes, scales):
             groups = v.unflatten(-1, (-1, 128)).float()
@@ -294,6 +329,9 @@ def _run(
                 quantize(normal, yq, ys)
     if quantized:
         return ResidualInt8(yq, ys, dtype), ResidualInt8(q, s, dtype)
+    if raw_residual:
+        result = (out, yres)
+        return (*result, yq, ys) if emit_quant else result
     result = (out, ResidualInt8(q, s, dtype))
     return (*result, yq, ys) if emit_quant else result
 
@@ -304,7 +342,8 @@ def add_residual(x, residual=None):
     return _run(x, residual)[1]
 
 
-def residual_norm(norm, x, residual=None, *, emit_quant=False, quantized=False):
+def residual_norm(norm, x, residual=None, *, emit_quant=False, quantized=False,
+                  raw_residual=False):
     """Preserve the baseline path unless the explicit residual switch is on."""
     _width = x.routed.shape[-1] if isinstance(x, ResidualPair) else x.shape[-1]
     # the seam is qualified for Bolt/LiLiCorr hidden sizes only; other models
@@ -312,7 +351,10 @@ def residual_norm(norm, x, residual=None, *, emit_quant=False, quantized=False):
     # but the width is unqualified, decoder_norm's quantized=True (derived
     # from the same env) degrades to the native norm instead of raising —
     # the raise belongs to explicit caller misuse only (env off + quant ask).
-    if not envs.VLLM_GFX908_RESIDUAL_INT8 or _width not in (1024, 4096):
+    if not envs.VLLM_GFX908_RESIDUAL_INT8 or (
+        _width not in (1024, 4096)
+        and not (raw_residual and _width == 2048)
+    ):
         if not envs.VLLM_GFX908_RESIDUAL_INT8 and (emit_quant or quantized):
             raise ValueError("Normal-output quantization requires INT8 residual mode")
         if residual is None:
@@ -344,6 +386,7 @@ def residual_norm(norm, x, residual=None, *, emit_quant=False, quantized=False):
         native,
         quantized,
         x2=x2,
+        raw_residual=raw_residual,
     )
 
 
