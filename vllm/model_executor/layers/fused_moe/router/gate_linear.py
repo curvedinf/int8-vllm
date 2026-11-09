@@ -19,6 +19,8 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
+_GATE_PREQUANT_HIT = [False]
+
 
 @PluggableLayer.register("gate_linear")
 class GateLinear(ReplicatedLinear):
@@ -293,12 +295,39 @@ class GateLinear(ReplicatedLinear):
         from vllm.model_executor.layers.quantization.utils.packed_g128_int8 import (
             quantize,
         )
+        from vllm.model_executor.layers.rms_norm_int8_quant import (
+            PREQUANT_ATTR,
+        )
 
         if self._i8 is None:
             self._i8 = quantize(self.weight.data.float().contiguous())
         wq, ws = self._i8
         x2 = x.reshape(-1, x.shape[-1]).contiguous()
-        xq, xs = quantize(x2)
+        # The fused residual+norm epilogue emits exactly this per-group
+        # quant (same formula); consume it when present.
+        prequant = (
+            None
+            if torch.compiler.is_compiling()
+            else getattr(x, PREQUANT_ATTR, None)
+        )
+        if (
+            prequant is not None
+            and prequant[0].shape == x2.shape
+            and prequant[0].dtype == torch.int8
+            and prequant[1].shape
+            == (x2.shape[0], (x2.shape[1] + 127) // 128)
+        ):
+            xq, xs = prequant
+            if (
+                os.environ.get("VLLM_GFX908_PREQUANT_DEBUG") == "1"
+                and not _GATE_PREQUANT_HIT[0]
+            ):
+                _GATE_PREQUANT_HIT[0] = True
+                print(
+                    f"[prequant] gate stash consumed M={x2.shape[0]} "
+                    f"K={x2.shape[1]}", flush=True)
+        else:
+            xq, xs = quantize(x2)
         out = gemm_a8w8_blockscale(xq, wq, xs, ws, dtype=torch.float32)
         return out.reshape(*x.shape[:-1], -1)
 

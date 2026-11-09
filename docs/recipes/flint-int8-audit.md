@@ -77,12 +77,13 @@ bf16.
    re-quantizes to the int8 payload (`_to_payload`). Closing it needs a
    quant-out epilogue on the down GEMM plus an int8 weighted combine
    (Bolt's `decoder_int8.combine_experts` pattern). Largest remaining item.
-2. **Attention-input norm → `qkv_proj`**: DONE. `residual_norm(emit_pertoken=True)`
-   emits the per-token round-to-nearest int8 stash (bit-identical to
-   `pertoken_quant_rn`, verified 0 mismatches at M=1..1024) and the CK W8A8
-   path consumes it under `ACT_QUANT=round`; one fewer launch per payload
-   layer. The MoE post-attention norm still feeds the router gate through
-   the gate's own prologue quant — same fusion applies there.
+2. **Norm → GEMM prologue quant**: DONE for both consumers.
+   `residual_norm(emit_pertoken=True)` emits the CK per-token contract
+   (bit-identical to `pertoken_quant_rn`, 0 mismatches at M=1..1024) for
+   `qkv_proj`; `residual_norm(emit_quant=True)` emits the GS128 per-group
+   contract (bit-identical to `packed_g128_int8.quantize`) and both the
+   expert prologue and the router gate consume it. One fewer quant launch
+   per consumer per layer.
 3. **Attention output → `o_proj`**: the attention kernel emits bf16 and
    `o_proj` quantizes in-prologue; an attention-epilogue quant would remove
    that round trip.

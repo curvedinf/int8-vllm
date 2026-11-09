@@ -871,7 +871,9 @@ class FlintDecoderLayer(nn.Module):
             ResidualInt8,
             residual_norm,
         )
-
+        from vllm.model_executor.layers.rms_norm_int8_quant import (
+            PREQUANT_ATTR,
+        )
         if isinstance(self.mlp, FlintSparseMoeBlock):
             ll = self.mlp.forward_ll(
                 hidden_states, residual, self.post_attention_layernorm
@@ -911,6 +913,9 @@ class FlintDecoderLayer(nn.Module):
                         None)
                     if experts is not None:
                         experts._pre_quant = (q, s)
+                    # The gate's int8 GS128 quantizer is the same kernel
+                    # formula as the norm epilogue; hand it the stash too.
+                    setattr(normed, PREQUANT_ATTR, (q, s))
                     if res is None:
                         res = (_mat(payload).float()
                                + residual.float()).to(residual.dtype)
@@ -960,6 +965,7 @@ class FlintDecoderLayer(nn.Module):
                                   "routed_experts", None)
                 if experts is not None:
                     experts._pre_quant = (q, s)
+                setattr(normed, PREQUANT_ATTR, (q, s))
                 return _to_payload(self.mlp(normed)), res
             if self._fused_ar_rms:
                 # Fallback when the fused collective is unavailable: finish
@@ -988,6 +994,7 @@ class FlintDecoderLayer(nn.Module):
                     self.post_attention_layernorm.weight,
                     self.post_attention_layernorm.variance_epsilon)
                 experts._pre_quant = (q, s)
+                setattr(hidden_states, PREQUANT_ATTR, (q, s))
                 hidden_states = self.mlp(hidden_states)
                 return _to_payload(hidden_states), residual
         if isinstance(residual, ResidualInt8):
