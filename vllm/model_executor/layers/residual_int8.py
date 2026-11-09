@@ -200,6 +200,7 @@ def _run(
     quantized=False,
     x2=None,
     raw_residual=False,
+    allow_2048=False,
 ):
     packed = isinstance(x, ResidualInt8)
     if packed:
@@ -207,7 +208,10 @@ def _run(
     data = x.codes if packed else x
     dtype = x.compute_dtype if packed else x.dtype
     k = data.shape[-1]
-    if (k not in (1024, 4096) and not (raw_residual and k == 2048)) or dtype             not in (torch.bfloat16, torch.float32):
+    if (
+        k not in (1024, 4096)
+        and not ((raw_residual or allow_2048) and k == 2048)
+    ) or dtype not in (torch.bfloat16, torch.float32):
         raise ValueError(
             "INT8 residuals require BF16/FP32 at hidden 1024/4096 "
             "(2048 only for the raw-residual flint seam)")
@@ -343,7 +347,7 @@ def add_residual(x, residual=None):
 
 
 def residual_norm(norm, x, residual=None, *, emit_quant=False, quantized=False,
-                  raw_residual=False):
+                  raw_residual=False, allow_2048=False):
     """Preserve the baseline path unless the explicit residual switch is on."""
     _width = x.routed.shape[-1] if isinstance(x, ResidualPair) else x.shape[-1]
     # the seam is qualified for Bolt/LiLiCorr hidden sizes only; other models
@@ -353,7 +357,7 @@ def residual_norm(norm, x, residual=None, *, emit_quant=False, quantized=False,
     # the raise belongs to explicit caller misuse only (env off + quant ask).
     if not envs.VLLM_GFX908_RESIDUAL_INT8 or (
         _width not in (1024, 4096)
-        and not (raw_residual and _width == 2048)
+        and not (allow_2048 and _width == 2048)
     ):
         if not envs.VLLM_GFX908_RESIDUAL_INT8 and (emit_quant or quantized):
             raise ValueError("Normal-output quantization requires INT8 residual mode")
@@ -387,6 +391,7 @@ def residual_norm(norm, x, residual=None, *, emit_quant=False, quantized=False,
         quantized,
         x2=x2,
         raw_residual=raw_residual,
+        allow_2048=allow_2048,
     )
 
 

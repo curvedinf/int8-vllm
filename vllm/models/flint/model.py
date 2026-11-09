@@ -23,6 +23,7 @@ from vllm.config import (
 )
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import (
     unified_attention_with_output,
@@ -95,6 +96,8 @@ else:
 from .ops.qk_norm_rope import qk_norm_rope_cache
 from .ops.qkv_fused import MAX_M as LL_MAX_TOKENS
 from .ops.qkv_fused import flint_qkv_fused
+
+logger = init_logger(__name__)
 
 
 def _flint_kernels(
@@ -574,11 +577,11 @@ class FlintAttention(nn.Module):
             ):
                 # Compare the payload chain against the plain bf16 chain on
                 # the exact same activation.
-                from vllm.model_executor.layers.residual_int8 import (
-                    materialize,
-                )
                 from vllm.distributed.device_communicators import (
                     residual_g128_all_reduce as _rgd,
+                )
+                from vllm.model_executor.layers.residual_int8 import (
+                    materialize,
                 )
 
                 self.o_proj._gfx908_int8_out = False
@@ -744,6 +747,27 @@ class FlintAttention(nn.Module):
         return output, residual
 
 
+def _stream_i8() -> bool:
+    return os.environ.get("VLLM_GFX908_STREAM_I8", "1") == "1"
+
+
+def _to_payload(t: torch.Tensor):
+    """Layer-output activation -> int8 GS128 payload (stream granularity)."""
+    from vllm.model_executor.layers.quantization.gptq_moe_a8w8 import (
+        group_quant_rn,
+    )
+    from vllm.model_executor.layers.residual_int8 import ResidualInt8
+
+    if not _stream_i8() or not t.is_cuda:
+        return t
+    if t.dtype != torch.bfloat16:
+        raise ValueError(
+            f"int8 residual stream requires bf16 activations, got {t.dtype}")
+    q, s = group_quant_rn(t.reshape(-1, t.shape[-1]))
+    return ResidualInt8(
+        q.view(t.shape), s.view(*t.shape[:-1], s.shape[-1]), t.dtype)
+
+
 class FlintDecoderLayer(nn.Module):
     def __init__(
         self,
@@ -810,9 +834,25 @@ class FlintDecoderLayer(nn.Module):
             )
             if ll is not None:
                 return self._post_attention(*ll)
+        from vllm.model_executor.layers.residual_int8 import (
+            ResidualInt8,
+            residual_norm,
+        )
+
         if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
+            if _stream_i8() and hidden_states.is_cuda:
+                residual = _to_payload(hidden_states)
+                hidden_states = self.input_layernorm(hidden_states)
+            else:
+                residual = hidden_states
+                hidden_states = self.input_layernorm(hidden_states)
+        elif isinstance(hidden_states, ResidualInt8):
+            # Previous layer's output stayed an int8 payload; the norm
+            # dequantizes version in-register (no bf16 round trip). The
+            # residual payload is folded in exactly like the packed chain.
+            hidden_states, residual = residual_norm(
+                self.input_layernorm, hidden_states, residual,
+                allow_2048=True)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = self.self_attn(positions, hidden_states)
@@ -821,25 +861,23 @@ class FlintDecoderLayer(nn.Module):
     def _post_attention(
         self, hidden_states: torch.Tensor, residual: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        from vllm.model_executor.layers.residual_int8 import (
+            ResidualInt8,
+            residual_norm,
+        )
+
         if isinstance(self.mlp, FlintSparseMoeBlock):
             ll = self.mlp.forward_ll(
                 hidden_states, residual, self.post_attention_layernorm
             )
             if ll is not None:
                 return ll
-            from vllm.model_executor.layers.residual_int8 import (
-                ResidualInt8,
-            )
 
             if isinstance(hidden_states, ResidualInt8):
                 try:
                     from vllm.distributed.device_communicators import (
                         residual_g128_all_reduce as _rg,
                     )
-                    from vllm.model_executor.layers.residual_int8 import (
-                        residual_norm,
-                    )
-
                     payload = _rg.all_reduce(hidden_states)
                     if os.environ.get(
                             "VLLM_GFX908_O_PROJ_I8_MODE") == "materialize":
@@ -851,6 +889,8 @@ class FlintDecoderLayer(nn.Module):
                         )
 
                         hidden = _mat(payload)
+                        if isinstance(residual, ResidualInt8):
+                            residual = _mat(residual)
                         normed, q, s = residual_norm_group_quant(
                             hidden, residual,
                             self.post_attention_layernorm.weight,
@@ -859,27 +899,21 @@ class FlintDecoderLayer(nn.Module):
                     else:
                         normed, res, q, s = residual_norm(
                             self.post_attention_layernorm, payload, residual,
-                            emit_quant=True, raw_residual=True)
+                            emit_quant=True, allow_2048=True)
                     experts = getattr(
                         getattr(self.mlp, "experts", None), "routed_experts",
                         None)
                     if experts is not None:
                         experts._pre_quant = (q, s)
                     if res is None:
-                        res = (materialize(payload).float()
+                        res = (_mat(payload).float()
                                + residual.float()).to(residual.dtype)
-                    return self.mlp(normed), res
-                except Exception:  # noqa: BLE001 - fall back to bf16
-                    from vllm.model_executor.layers.residual_int8 import (
-                        materialize,
-                    )
-
-                    hidden_states = materialize(hidden_states)
-                    if getattr(self.self_attn.o_proj, "skip_reduce", False):
-                        from vllm.distributed import get_tp_group
-
-                        hidden_states = get_tp_group().all_reduce(
-                            hidden_states)
+                    return _to_payload(self.mlp(normed)), res
+                except Exception as exc:  # noqa: BLE001 - int8-only path
+                    logger.error(
+                        "int8 payload chain failed (no bf16 fallback): %r",
+                        exc)
+                    raise
             fused = None
             if self._fused_ar_rms:
                 from vllm.distributed.device_communicators.ar_rms_g128 import (
@@ -920,7 +954,7 @@ class FlintDecoderLayer(nn.Module):
                                   "routed_experts", None)
                 if experts is not None:
                     experts._pre_quant = (q, s)
-                return self.mlp(normed), res
+                return _to_payload(self.mlp(normed)), res
             if self._fused_ar_rms:
                 # Fallback when the fused collective is unavailable: finish
                 # the all-reduce the linear skipped, then the normal chain.
@@ -933,6 +967,7 @@ class FlintDecoderLayer(nn.Module):
                 os.environ.get("VLLM_GFX908_NORM_QUANT", "1") == "1"
                 and experts is not None
                 and hasattr(experts, "w13_qweight")
+                and not isinstance(residual, ResidualInt8)
             ):
                 # Fused residual add + RMSNorm + int8 group quant: the norm
                 # output feeds the router and the experts; the quantized copy
@@ -948,10 +983,16 @@ class FlintDecoderLayer(nn.Module):
                     self.post_attention_layernorm.variance_epsilon)
                 experts._pre_quant = (q, s)
                 hidden_states = self.mlp(hidden_states)
-                return hidden_states, residual
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+                return _to_payload(hidden_states), residual
+        if isinstance(residual, ResidualInt8):
+            hidden_states, residual = residual_norm(
+                self.post_attention_layernorm, hidden_states, residual,
+                allow_2048=True)
+        else:
+            hidden_states, residual = self.post_attention_layernorm(
+                hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
-        return hidden_states, residual
+        return _to_payload(hidden_states), residual
 
 
 class FlintModel(nn.Module, EagleModelMixin):
@@ -1016,8 +1057,18 @@ class FlintModel(nn.Module, EagleModelMixin):
                 self.layers[self.start_layer : self.end_layer],
                 start=self.start_layer):
             hidden_states, residual = layer(positions, hidden_states, residual)
+            from vllm.model_executor.layers.residual_int8 import (
+                ResidualInt8 as _RI8,
+            )
+            from vllm.model_executor.layers.residual_int8 import (
+                materialize as _mat8,
+            )
+
             self._maybe_add_hidden_state(
-                aux_hidden_states, _li + 1, hidden_states, residual)
+                aux_hidden_states, _li + 1,
+                _mat8(hidden_states) if isinstance(hidden_states, _RI8)
+                else hidden_states,
+                _mat8(residual) if isinstance(residual, _RI8) else residual)
             if _do:
                 if torch.cuda.is_current_stream_capturing():
                     continue  # capture pass: host sync / save not allowed
@@ -1040,7 +1091,20 @@ class FlintModel(nn.Module, EagleModelMixin):
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
-        hidden_states, _ = self.norm(hidden_states, residual)
+        from vllm.model_executor.layers.residual_int8 import (
+            ResidualInt8 as _RI8b,
+        )
+        from vllm.model_executor.layers.residual_int8 import (
+            residual_norm as _rn8,
+        )
+
+        if isinstance(hidden_states, _RI8b):
+            hidden_states, _ = _rn8(
+                self.norm, hidden_states,
+                residual if isinstance(residual, _RI8b) else
+                _to_payload(residual), allow_2048=True)
+        else:
+            hidden_states, _ = self.norm(hidden_states, residual)
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states
