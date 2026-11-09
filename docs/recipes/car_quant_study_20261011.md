@@ -218,7 +218,7 @@ and sibling-aiter `PYTHONPATH`; block Nginx and stop the service first.
 ```bash
 /opt/rocm/bin/hipcc -O3 -std=c++17 --offload-arch=gfx908 -shared -fPIC \
   benchmarks/kernels/car_quant_study.cpp -o /tmp/car_quant_study.so
-PYTHONPATH="$PWD:$PWD/../aiter" .venv/bin/python -m torch.distributed.run \
+PYTHONPATH="$PWD:$PWD/../int8-aiter" .venv/bin/python -m torch.distributed.run \
   --nproc_per_node=4 benchmarks/kernels/benchmark_gfx908_car_quant.py \
   --library /tmp/car_quant_study.so --rows 7,42,128,1664,2048 \
   --output logs/agent_mixed/car_quant_reproduction.json
@@ -609,7 +609,7 @@ Build from the repository root using the required ROCm environment:
 ```bash
 export ROCM_PATH=/opt/rocm LD_LIBRARY_PATH=/opt/rocm/lib
 export PYTORCH_ROCM_ARCH=gfx908 GPU_ARCHS=gfx908 VLLM_TARGET_DEVICE=rocm
-export PYTHONPATH="$PWD:$PWD/../aiter"
+export PYTHONPATH="$PWD:$PWD/../int8-aiter"
 mkdir -p build
 /opt/rocm/bin/hipcc -O3 -ffp-contract=off -std=c++17 \
   --offload-arch=gfx908 -shared -fPIC csrc/custom_all_reduce_int8_gs32.hip \
@@ -655,15 +655,15 @@ controller. After building the library, use the required environment above
 and run as the service owner:
 
 ```bash
-runuser -u curved -- env PYTHONPATH="$PWD:$PWD/../aiter" \
+runuser -u curved -- env PYTHONPATH="$PWD:$PWD/../int8-aiter" \
   ROCM_PATH=/opt/rocm LD_LIBRARY_PATH=/opt/rocm/lib \
   PYTORCH_ROCM_ARCH=gfx908 GPU_ARCHS=gfx908 VLLM_TARGET_DEVICE=rocm \
   .venv/bin/python scripts/test_int8_kv_micro.py
-runuser -u curved -- env PYTHONPATH="$PWD:$PWD/../aiter" \
+runuser -u curved -- env PYTHONPATH="$PWD:$PWD/../int8-aiter" \
   ROCM_PATH=/opt/rocm LD_LIBRARY_PATH=/opt/rocm/lib \
   PYTORCH_ROCM_ARCH=gfx908 GPU_ARCHS=gfx908 VLLM_TARGET_DEVICE=rocm \
   HIP_VISIBLE_DEVICES=0 .venv/bin/python scripts/battery_gfx908.py
-runuser -u curved -- env PYTHONPATH="$PWD:$PWD/../aiter" \
+runuser -u curved -- env PYTHONPATH="$PWD:$PWD/../int8-aiter" \
   ROCM_PATH=/opt/rocm LD_LIBRARY_PATH=/opt/rocm/lib \
   PYTORCH_ROCM_ARCH=gfx908 GPU_ARCHS=gfx908 VLLM_TARGET_DEVICE=rocm \
   VLLM_MLP_CAR_INT8_LIBRARY="$PWD/build/mlp_car_int8_gs32.so" \

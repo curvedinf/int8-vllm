@@ -7,7 +7,7 @@
 2. Read kernel: unified_attention with g8 scales matches a torch reference
    (dequant to bf16 exactly like the kernel, fp32 softmax).
 
-Run: PYTHONPATH="$PWD:$PWD/../aiter" .venv/bin/python scripts/test_int8_block_kv.py
+Run: PYTHONPATH="$PWD:$PWD/../int8-aiter" .venv/bin/python scripts/test_int8_block_kv.py
 """
 import sys
 

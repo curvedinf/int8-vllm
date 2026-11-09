@@ -14,7 +14,7 @@ import sys
 import torch
 
 sys.path.insert(0, "/home/curved/vllm-gfx908")
-sys.path.insert(0, "/home/curved/aiter")
+sys.path.insert(0, "/home/curved/int8-aiter")
 from aiter.ops.triton.attention.unified_attention import unified_attention  # noqa
 
 dev = "cuda"

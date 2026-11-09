@@ -56,7 +56,8 @@ def pertoken_quant_rn(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     Returns (q, s): q int8 [M,K], s fp32 [M,1] — the same contract as
     aiter.pertoken_quant(x, quant_dtype=torch.int8).
     """
-    assert x.dim() == 2 and x.dtype in (torch.float16, torch.bfloat16)
+    assert x.dim() == 2 and x.dtype in (torch.float16, torch.bfloat16), (
+        f"pertoken_quant_rn got dim={x.dim()} dtype={x.dtype} shape={tuple(x.shape)}")
     x = x.contiguous()
     M, K = x.shape
     q = torch.empty((M, K), dtype=torch.int8, device=x.device)

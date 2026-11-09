@@ -9,7 +9,7 @@ the O(ctx) per-step term.
 import sys
 import torch
 
-sys.path.insert(0, "/home/curved/aiter")
+sys.path.insert(0, "/home/curved/int8-aiter")
 from aiter.ops.triton.gated_delta_net.fused_rearrange_sigmoid_gdr import (
     fused_rearrange_sigmoid_gated_delta_rule,
 )

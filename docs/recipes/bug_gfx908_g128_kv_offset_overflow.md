@@ -80,7 +80,7 @@ Run the regression on an idle MI100 with at least 10 GiB free:
 ```bash
 ROCM_PATH=/opt/rocm LD_LIBRARY_PATH=/opt/rocm/lib \
 PYTORCH_ROCM_ARCH=gfx908 GPU_ARCHS=gfx908 VLLM_TARGET_DEVICE=rocm \
-HIP_VISIBLE_DEVICES=0 PYTHONPATH="$PWD:$PWD/../aiter" \
+HIP_VISIBLE_DEVICES=0 PYTHONPATH="$PWD:$PWD/../int8-aiter" \
 .venv/bin/python -m pytest \
   tests/kernels/attention/test_gfx908_g128_addressing.py -q
 ```
@@ -108,7 +108,7 @@ correct on both versions, and checks bit-identical outputs before timing:
 ```bash
 ROCM_PATH=/opt/rocm LD_LIBRARY_PATH=/opt/rocm/lib \
 PYTORCH_ROCM_ARCH=gfx908 GPU_ARCHS=gfx908 VLLM_TARGET_DEVICE=rocm \
-PYTHONPATH="$PWD:$PWD/../aiter" .venv/bin/python \
+PYTHONPATH="$PWD:$PWD/../int8-aiter" .venv/bin/python \
   benchmarks/kernels/benchmark_gfx908_g128_address_width.py \
   --baseline-ref 7d36b7a2da --pairs 5 --iters 100
 ```

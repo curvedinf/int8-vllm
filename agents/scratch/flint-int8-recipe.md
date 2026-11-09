@@ -2405,3 +2405,24 @@ router as a trained-grid `dequant` surface (bf16 gate weights equal to
 the trained int8 codes). Tiny smoke is blocked by pre-existing tiny-config
 limits (head_dim 32 vs kv_group 128, rope table 2048 vs 4096 windows),
 not by these changes; full runs use the real config.
+
+## TURN 88 (2026-11-09): BF16 STRIP BEFORE RETRAIN — STATUS
+
+Findings while stripping the last bf16 surfaces:
+- The fork ALREADY int8-quantizes the embedding at load
+  (VLLM_GFX908_INT8_EMBEDDING default True, per-row fp16 scales,
+  gather-then-dequant) and has a per-channel CK int8 lm_head path
+  (VLLM_GFX908_INT8_LM_HEAD, default off; superseded by our GS128 head).
+  My duplicate int8-embedding patch crashed the profiling run (it read the
+  already-int8 weight as the activation dtype and emitted int8 hidden
+  states); removed.
+- Draft dense surfaces: kernel_projection and selector hidden_projection
+  were ALREADY int8 W8A8 at load (VLLM_GFX908_DF2_W8A8 default 1). The
+  actual gaps were `fc` (now converted at load via install_int8_linear,
+  CK per-token W8A8) and the conv base_kernel planes (now quantized at
+  load per (side,tap) with dequant-on-add; bf16 base freed).
+  No bf16 GEMM remains on either model.
+- Remaining bf16: the residual/activation stream (adds, AR payloads,
+  attention q/k/v activations, norm outputs, MoE combine) and the
+  selector codebooks. That is the Bolt decoder_int8 refactor; it is the
+  blocker before retraining per the user's order.

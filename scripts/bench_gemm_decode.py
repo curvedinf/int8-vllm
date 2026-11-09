@@ -6,7 +6,7 @@ Per-rank decode shapes for Qwen3.8-27B TP4 (5120 hidden, 17408/4 inter).
 import sys
 import torch
 
-sys.path.insert(0, "/home/curved/aiter")
+sys.path.insert(0, "/home/curved/int8-aiter")
 
 dev = "cuda"
 

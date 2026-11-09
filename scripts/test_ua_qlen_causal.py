@@ -23,7 +23,7 @@ import sys
 import torch
 
 sys.path.insert(0, ".")
-sys.path.insert(0, "../aiter")
+sys.path.insert(0, "../int8-aiter")
 from aiter.ops.triton.unified_attention import unified_attention  # noqa
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (  # noqa
     triton_reshape_and_cache_flash_per_token_head_quant as write_kv,

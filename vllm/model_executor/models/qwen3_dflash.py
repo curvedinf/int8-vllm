@@ -1236,6 +1236,16 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         for module in self.modules():
             if isinstance(module, (DFlashGroupedConv, CandidateSelector)):
                 module.process_weights_after_loading()
+        # The aux-hidden `fc` squeeze is the last bf16 GEMM in the draft:
+        # quantize it to int8 W8A8 at load (per-channel weights, per-token
+        # int8 activations), matching the other draft surfaces.
+        if getattr(self.model, "use_aux_hidden_state", False) and os.environ.get(
+                "VLLM_GFX908_DF2_W8A8", "1") == "1":
+            from vllm.model_executor.layers.quantization.int8_linear import (
+                install_int8_linear,
+            )
+
+            install_int8_linear(self.model.fc, name="draft.fc")
         if os.environ.get("VLLM_SPEC_DEBUG_DUMP"):
             w = self.model._fused_kv_weight
             hs = self.model._hidden_norm_weight

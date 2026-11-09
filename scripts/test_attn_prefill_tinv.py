@@ -8,7 +8,7 @@ so the attention read is the remaining candidate. This test: prefix of N
 keys in pages + T query rows with their own keys appended; run T_part vs
 T_full on identical content; the shared prefix rows must be BITWISE equal.
 
-Usage: HIP_VISIBLE_DEVICES=0 PYTHONPATH=pwd:../aiter .venv/bin/python \
+Usage: HIP_VISIBLE_DEVICES=0 PYTHONPATH=pwd:../int8-aiter .venv/bin/python \
   scripts/test_attn_prefill_tinv.py
 """
 import argparse
@@ -17,7 +17,7 @@ import sys
 import torch
 
 sys.path.insert(0, "/home/curved/vllm-gfx908")
-sys.path.insert(0, "/home/curved/aiter")
+sys.path.insert(0, "/home/curved/int8-aiter")
 from aiter.ops.triton.attention.unified_attention import unified_attention  # noqa
 
 p = argparse.ArgumentParser()

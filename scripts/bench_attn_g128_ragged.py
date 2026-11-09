@@ -9,7 +9,7 @@ Run after ANY change to the g8 tile loads.
 """
 import os, sys, torch
 
-sys.path.insert(0, "/home/curved/aiter")
+sys.path.insert(0, "/home/curved/int8-aiter")
 sys.path.insert(0, "/home/curved/vllm-gfx908")
 
 from vllm.v1.attention.ops.triton_unified_attention import unified_attention

@@ -12,8 +12,8 @@ import time
 
 import torch
 
-sys.path.insert(0, "/home/curved/aiter")
-sys.path.insert(0, "/home/curved/aiter/csrc/ck_gemm_a8w8")
+sys.path.insert(0, "/home/curved/int8-aiter")
+sys.path.insert(0, "/home/curved/int8-aiter/csrc/ck_gemm_a8w8")
 sys.path.insert(0, "/home/curved/vllm-gfx908")
 
 from gemm_a8w8_common import kernels_list  # noqa: E402

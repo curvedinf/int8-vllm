@@ -49,7 +49,7 @@ replayable benchmark are preserved in
 `logs/garble/prior_agent_audit_20260926/`.
 
 ```bash
-PYTHONPATH="$PWD:$PWD/../aiter" .venv/bin/python \
+PYTHONPATH="$PWD:$PWD/../int8-aiter" .venv/bin/python \
   logs/garble/prior_agent_audit_20260926/block_guard_benchmark.py
 ```
 

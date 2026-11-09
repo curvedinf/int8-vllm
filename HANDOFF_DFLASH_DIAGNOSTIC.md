@@ -129,7 +129,7 @@ Verification (NS=7, eager, audit recorder, tag `bf16_auto_kv_fixed`):
 
 ## Verification already run
 
-`PYTHONPATH="$PWD:$PWD/../aiter" .venv/bin/python -m pytest tests/v1/spec_decode/test_dflash2.py -q`
+`PYTHONPATH="$PWD:$PWD/../int8-aiter" .venv/bin/python -m pytest tests/v1/spec_decode/test_dflash2.py -q`
 passed: **5 passed** (23 warnings). `py_compile`, `bash -n`, and `git diff --check`
 also passed. No repo code was changed during the root-cause pass (kernel repro
 scripts live in /tmp, owned by curved).

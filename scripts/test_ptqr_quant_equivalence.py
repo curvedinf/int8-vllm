@@ -6,7 +6,7 @@ The trainer's training forward must replicate deployment bit-for-bit at tau=0:
   kv_block_quant_fake == vllm reshape_and_cache_g8 writer      (int8_block_gG)
 
 Run in the SERVING venv (vllm + triton 3.6):
-  PYTHONPATH="$PWD:$PWD/../aiter" .venv/bin/python scripts/test_ptqr_quant_equivalence.py
+  PYTHONPATH="$PWD:$PWD/../int8-aiter" .venv/bin/python scripts/test_ptqr_quant_equivalence.py
 """
 import sys
 

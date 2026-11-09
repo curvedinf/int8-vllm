@@ -8,7 +8,7 @@ Shapes: Qwen3.8-27B TP4 full-attn layers: 6 q-heads, 1 kv-head, head_dim
 import sys
 import torch
 
-sys.path.insert(0, "/home/curved/aiter")
+sys.path.insert(0, "/home/curved/int8-aiter")
 sys.path.insert(0, "/home/curved/vllm-gfx908")
 
 from aiter.ops.triton.attention.unified_attention import unified_attention

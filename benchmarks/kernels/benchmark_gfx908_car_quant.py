@@ -5,7 +5,7 @@
 Compile the adjacent HIP prototype separately, then run with torchrun:
   hipcc -O3 -std=c++17 --offload-arch=gfx908 -shared -fPIC \
     benchmarks/kernels/car_quant_study.cpp -o /tmp/car_quant_study.so
-  PYTHONPATH="$PWD:$PWD/../aiter" .venv/bin/python -m torch.distributed.run \
+  PYTHONPATH="$PWD:$PWD/../int8-aiter" .venv/bin/python -m torch.distributed.run \
     --nproc_per_node=4 benchmarks/kernels/benchmark_gfx908_car_quant.py \
     --library /tmp/car_quant_study.so --output /tmp/car_quant_results.json
 

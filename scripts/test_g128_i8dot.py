@@ -8,7 +8,7 @@ import time
 
 import torch
 
-sys.path.insert(0, "/home/curved/aiter")
+sys.path.insert(0, "/home/curved/int8-aiter")
 sys.path.insert(0, "/home/curved/int8-vllm")
 
 from vllm.v1.attention.ops.triton_unified_attention import reduce_segments  # noqa: F401

@@ -12,7 +12,7 @@ import sys
 
 import torch
 
-sys.path.insert(0, "../aiter")
+sys.path.insert(0, "../int8-aiter")
 from aiter.ops.triton.unified_attention import unified_attention  # noqa
 
 torch.manual_seed(11)

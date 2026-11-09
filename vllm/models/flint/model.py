@@ -784,7 +784,8 @@ class FlintDecoderLayer(nn.Module):
                     rq, rs = group_quant_rn(ref_normed)
                     print(
                         f"[fe-dbg] m={hidden_states.shape[0]} "
-                        f"res_max={(res.float() - ref_res.float()).abs().max().item():.3g} "
+                        f"res_max="
+                        f"{(res.float() - ref_res.float()).abs().max().item():.3g} "
                         f"normed_neq={(normed != ref_normed).sum().item()} "
                         f"q_neq={(q != rq).sum().item()} "
                         f"s_neq={(s != rs).sum().item()}",

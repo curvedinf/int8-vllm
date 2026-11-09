@@ -8,7 +8,7 @@ dispatch whitelist should cover these shapes.
 """
 import sys, torch
 
-sys.path.insert(0, "/home/curved/aiter")
+sys.path.insert(0, "/home/curved/int8-aiter")
 
 dev = "cuda"
 torch.manual_seed(0)

@@ -24,7 +24,7 @@ Separate Qwen3.8 and Bolt systemd units are available; see
 | Repo | Branch | Role |
 |---|---|---|
 | `int8-vllm` (this repo) | `main` (`curvedinf/int8-vllm`) | serving engine, int8 kernels |
-| sibling `../aiter` checkout | `main` (`curvedinf/int8-aiter`) | int8 unified-attention + gfx908 tuning (PYTHONPATH) |
+| sibling `../int8-aiter` checkout | `main` (`curvedinf/int8-aiter`) | int8 unified-attention + gfx908 tuning (PYTHONPATH) |
 
 The serving venv carries a deliberate ROCm **runtime** override:
 `torch/lib/libamdhip64.so` + `libhsa-runtime64.so` are the 7.2.53211
@@ -263,7 +263,7 @@ the long-context garble class stay closed under the unified-kernel levers.
 
 ## Validation gates (run these, in order, after any stack change)
 
-1. `PYTHONPATH="$PWD:$PWD/../aiter" .venv/bin/python scripts/test_int8_kv_micro.py` — int8 PTH
+1. `PYTHONPATH="$PWD:$PWD/../int8-aiter" .venv/bin/python scripts/test_int8_kv_micro.py` — int8 PTH
    attention incl. non-causal (2.4e-4)
 2. `HIP_VISIBLE_DEVICES=<idle> .venv/bin/python scripts/battery_gfx908.py`
    — prod shapes, FA interface, boot imports, gemm whitelist (4/4)

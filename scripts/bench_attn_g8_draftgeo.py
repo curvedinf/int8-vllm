@@ -9,7 +9,7 @@ results and sane speed. 3D vs 2D must match within the residual class.
 """
 import os, sys, torch
 
-sys.path.insert(0, "/home/curved/aiter")
+sys.path.insert(0, "/home/curved/int8-aiter")
 sys.path.insert(0, "/home/curved/vllm-gfx908")
 
 from vllm.v1.attention.ops.triton_unified_attention import unified_attention

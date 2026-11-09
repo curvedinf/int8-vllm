@@ -10,7 +10,7 @@
 # Usage: tune_a8w8_gfx908.sh [gpu_id]   (default GPU 1; server must be down)
 set -euo pipefail
 GPU="${1:-1}"
-AITER=/home/curved/aiter
+AITER=/home/curved/int8-aiter
 PY=/home/curved/vllm-gfx908/.venv/bin/python
 SHAPES=$(mktemp /tmp/untune_shapes.XXXXXX.csv)
 

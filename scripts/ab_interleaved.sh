@@ -12,7 +12,7 @@ PAIRS="${1:-3}"
 TAG="${2:-abgemm}"
 CSV="${3:-$ROOT/logs/goal_opt/${TAG}_pairs.csv}"
 KEY="$(cat /tmp/q38_apikey)"
-CAND_CSV=${CAND_CSV:-/home/curved/aiter/aiter/configs/a8w8_tuned_gemm_msmall.csv}
+CAND_CSV=${CAND_CSV:-/home/curved/int8-aiter/aiter/configs/a8w8_tuned_gemm_msmall.csv}
 
 echo "arm,pair,tok_s,tpot_ms,steady_agg,steady_overlap" > "$CSV"
 

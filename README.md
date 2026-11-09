@@ -55,7 +55,7 @@ Use Linux with ROCm at `/opt/rocm`, a repository-local `.venv` and a sibling
 ```bash
 cd "$HOME"
 git clone --branch main https://github.com/curvedinf/int8-vllm.git
-git clone --branch main https://github.com/curvedinf/int8-aiter.git aiter
+git clone --branch main https://github.com/curvedinf/int8-aiter.git
 cd int8-vllm
 ```
 
@@ -75,7 +75,7 @@ export ROCM_PATH=/opt/rocm HIP_PATH=/opt/rocm
 export PYTORCH_ROCM_ARCH=gfx908 GPU_ARCHS=gfx908 VLLM_TARGET_DEVICE=rocm
 export LD_LIBRARY_PATH="/opt/rocm/lib:${LD_LIBRARY_PATH:-}"
 export PATH="$PWD/.venv/bin:/opt/rocm/bin:$PATH"
-export PYTHONPATH="$PWD:$PWD/../aiter"
+export PYTHONPATH="$PWD:$PWD/../int8-aiter"
 MAX_JOBS=32 .venv/bin/python setup.py build_ext --inplace
 
 # Required by Bolt's default INT8 decoder path.

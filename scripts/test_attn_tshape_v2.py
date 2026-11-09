@@ -8,7 +8,7 @@
      [0, N+t], its per-row T=1 counterpart attends the identical key set.
   4. g128 scale layout: fp16 [blocks, block, kvh, D/128, 128].
 
-Usage: HIP_VISIBLE_DEVICES=0 PYTHONPATH=pwd:../aiter .venv/bin/python \
+Usage: HIP_VISIBLE_DEVICES=0 PYTHONPATH=pwd:../int8-aiter .venv/bin/python \
          scripts/test_attn_tshape_v2.py [--ctx 2048] [--tries 4]
 """
 import argparse
@@ -18,7 +18,7 @@ import sys
 import torch
 
 sys.path.insert(0, "/home/curved/vllm-gfx908")
-sys.path.insert(0, "/home/curved/aiter")
+sys.path.insert(0, "/home/curved/int8-aiter")
 from aiter.ops.triton.attention.unified_attention import unified_attention  # noqa
 
 p = argparse.ArgumentParser()

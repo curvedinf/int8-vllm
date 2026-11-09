@@ -1,6 +1,6 @@
 import sys, math, torch
 sys.path.insert(0, ".")
-sys.path.insert(0, "../aiter")
+sys.path.insert(0, "../int8-aiter")
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import rejection_sample
 
 DEV = "cuda"; V = 1024; R = 777; N = 40000; NS = 1

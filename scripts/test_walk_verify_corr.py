@@ -18,7 +18,7 @@ import sys
 import torch
 
 sys.path.insert(0, ".")
-sys.path.insert(0, "../aiter")
+sys.path.insert(0, "../int8-aiter")
 from vllm.triton_utils import tl, triton  # noqa
 
 

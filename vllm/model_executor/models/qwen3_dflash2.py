@@ -226,6 +226,21 @@ class DFlashGroupedConv(nn.Module):
         self._kp_q = (
             (w / self._kp_s).round_().clamp_(-127, 127).to(torch.int8).contiguous()
         )
+        # Conv base planes: int8 W8A8-everywhere. If the checkpoint did not
+        # ship int8 planes, quantize the loaded bf16 base per (side, tap)
+        # and free it; _convolve dequantizes on add.
+        if (
+            os.environ.get("VLLM_GFX908_DF2_CONV_I8", "1") == "1"
+            and getattr(self, "_bk_q", None) is None
+        ):
+            wb = self.base_kernel.data.float()
+            amax = wb.abs().amax(dim=-1).clamp(min=1e-12)  # [2, taps]
+            s = (amax / 127.0).to(torch.float32).contiguous()
+            q = (wb / s.unsqueeze(-1)).round().clamp(
+                -127, 127).to(torch.int8).contiguous()
+            self._bk_q = q
+            self._bk_s = s
+            self.base_kernel.data.zero_()
 
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]

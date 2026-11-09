@@ -55,11 +55,11 @@ do not derive an alternate production configuration from archival material.
 ```
 <parent>/
 ├── int8-vllm/      branch main   (this repo — curvedinf/int8-vllm; serving venv .venv/)
-└── aiter/         branch main   (curvedinf/int8-aiter; PYTHONPATH consumer, not pip-installed)
+└── int8-aiter/    branch main   (curvedinf/int8-aiter; PYTHONPATH consumer, not pip-installed)
 ```
 
-- `aiter` is consumed **from the sibling checkout at runtime** via
-  `PYTHONPATH=../aiter` — never `pip install` it into `.venv` (that would
+- `int8-aiter` is consumed **from the sibling checkout at runtime** via
+  `PYTHONPATH=../int8-aiter` — never `pip install` it into `.venv` (that would
   shadow the checkout and its lazy JIT rebuild behavior). All attention and
   GEMM kernels come from this checkout; no separate attention package is part
   of the recipe.
@@ -67,7 +67,7 @@ do not derive an alternate production configuration from archival material.
   `upstream/main` (vllm upstream = vllm-project/vllm, aiter upstream =
   ROCm/aiter) into `main`, then validate E2E before pushing.
 - Known root-owned dirs were worked around as `*.rootjunk` siblings in the
-  `../aiter` checkout and `.git/objects/.root-owned-*` here — they need a one-time
+  `../int8-aiter` checkout and `.git/objects/.root-owned-*` here — they need a one-time
   `sudo rm`/`chown` by the human.
 
 ## Environment (do not deviate)
@@ -130,7 +130,7 @@ rebuild, smoke-check:
 .venv/bin/python -c "import vllm, vllm._rocm_C; from vllm.model_executor.kernels.linear.mixed_precision.aiter_w8a16 import AiterW8A16LinearKernel; print(AiterW8A16LinearKernel)"
 ```
 
-aiter JIT modules (`../aiter/aiter/jit/module_*.so`) rebuild lazily on first
+aiter JIT modules (`../int8-aiter/aiter/jit/module_*.so`) rebuild lazily on first
 use — but the JIT only triggers on `ModuleNotFoundError`, so after source
 changes move the stale `.so` aside once.
 
@@ -182,7 +182,7 @@ service.
 
 ## Testing ladder (run in this order after any stack change)
 
-1. **Micro** (idle GPU ok): `PYTHONPATH="$PWD:$PWD/../aiter" .venv/bin/python scripts/test_int8_kv_micro.py`
+1. **Micro** (idle GPU ok): `PYTHONPATH="$PWD:$PWD/../int8-aiter" .venv/bin/python scripts/test_int8_kv_micro.py`
    — int8 per-token-head attention vs fp16 reference.
 2. **Battery** (idle GPU ok): `HIP_VISIBLE_DEVICES=<idle> .venv/bin/python scripts/battery_gfx908.py`
    — production shapes (hdim 256, GQA 6:1), varlen causal/non-causal/sliding-window
