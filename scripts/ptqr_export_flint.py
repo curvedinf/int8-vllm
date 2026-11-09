@@ -120,7 +120,7 @@ def main():
         else:
             # Router: PTQR int8 surface; export the trained grid dequantized
             # to bf16 (serving re-quantizes it to the same GS128 codes).
-            plan.append((f"layers.{n}.mlp.router.weight",
+            plan.append((f"layers.{n}.mlp.router",
                          f"model.layers.{n}.mlp.gate.weight", "dequant"))
             plan.append((f"layers.{n}.mlp.shared.gate_up",
                          f"model.layers.{n}.mlp.shared_expert", "gated"))
