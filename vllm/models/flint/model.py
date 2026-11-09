@@ -838,6 +838,9 @@ class FlintDecoderLayer(nn.Module):
             ResidualInt8,
             residual_norm,
         )
+        from vllm.model_executor.layers.rms_norm_int8_quant import (
+            PREQUANT_ATTR,
+        )
 
         if residual is None:
             if _stream_i8() and hidden_states.is_cuda:
@@ -850,9 +853,12 @@ class FlintDecoderLayer(nn.Module):
             # Previous layer's output stayed an int8 payload; the norm
             # dequantizes version in-register (no bf16 round trip). The
             # residual payload is folded in exactly like the packed chain.
-            hidden_states, residual = residual_norm(
+            # The CK qkv prologue consumes the per-token stash emitted by
+            # the same kernel (one fewer launch per layer).
+            hidden_states, residual, qpt, spt = residual_norm(
                 self.input_layernorm, hidden_states, residual,
-                allow_2048=True)
+                allow_2048=True, emit_pertoken=True)
+            setattr(hidden_states, PREQUANT_ATTR, (qpt, spt))
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = self.self_attn(positions, hidden_states)

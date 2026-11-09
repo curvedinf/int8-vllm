@@ -105,6 +105,8 @@ def _add_norm(
     YQ,
     YS,
     YRES,
+    QPT,
+    SPT,
     K: tl.constexpr,
     EPS: tl.constexpr,
     X_QUANT: tl.constexpr,
@@ -115,6 +117,7 @@ def _add_norm(
     NATIVE_NORM: tl.constexpr,
     WRITE_NORMAL: tl.constexpr,
     RAW_RESIDUAL: tl.constexpr,
+    EMIT_PTOKEN_QUANT: tl.constexpr,
 ):
     row = tl.program_id(0)
     cols = tl.arange(0, K)
@@ -162,6 +165,19 @@ def _add_norm(
             nq = lib.nearbyint(tl.div_rn(ng, ns[:, None]))
             tl.store(YQ + row * K + cols, tl.reshape(nq, (K,)).to(tl.int8))
             tl.store(YS + row * (K // 128) + tl.arange(0, K // 128), ns)
+        if EMIT_PTOKEN_QUANT:
+            # CK W8A8 prologue contract: one scale per row, absmax/127,
+            # round-half-up clamp [-127,127] — bit-compatible with
+            # act_quant_rn.pertoken_quant_rn on the stored bf16 norm.
+            nf = normal.to(tl.float32)
+            amax = tl.max(tl.abs(nf), 0)
+            ts = tl.div_rn(tl.maximum(amax, 0.0), 127.0)
+            ts = tl.where(ts == 0.0, 1.0, ts)
+            rcp = tl.div_rn(1.0, ts)
+            tq = tl.floor(nf * rcp + 0.5)
+            tq = tl.minimum(tl.maximum(tq, -127.0), 127.0)
+            tl.store(QPT + row * K + cols, tq.to(tl.int8))
+            tl.store(SPT + row, ts)
 
 
 @triton.jit
@@ -201,6 +217,7 @@ def _run(
     x2=None,
     raw_residual=False,
     allow_2048=False,
+    emit_pertoken=False,
 ):
     packed = isinstance(x, ResidualInt8)
     if packed:
@@ -243,6 +260,11 @@ def _run(
         _validate(residual)
     if weight is not None and (weight.shape != (k,) or weight.device != data.device):
         raise ValueError("Expected a matching RMSNorm weight")
+    if emit_pertoken and (
+        weight is None or raw_residual or quantized or emit_quant
+    ):
+        raise ValueError(
+            "Per-token CK stash requires a normalized, unquantized output")
     shape = data.shape
     scales_shape = (*shape[:-1], k // 128)
     q = torch.empty_like(data, dtype=torch.int8, memory_format=torch.contiguous_format)
@@ -254,6 +276,17 @@ def _run(
     )
     yq = torch.empty_like(q) if emit_quant else q
     ys = torch.empty_like(s) if emit_quant else s
+    qpt = (
+        torch.empty_like(q, memory_format=torch.contiguous_format)
+        if emit_pertoken
+        else q
+    )
+    spt = (
+        torch.empty((data.numel() // k, 1), device=data.device,
+                    dtype=torch.float32)
+        if emit_pertoken
+        else s
+    )
     yres = (
         torch.empty_like(residual)
         if raw_residual
@@ -278,6 +311,8 @@ def _run(
             yq,
             ys,
             yres,
+            qpt,
+            spt,
             k,
             epsilon,
             packed,
@@ -288,6 +323,7 @@ def _run(
             native,
             not quantized,
             raw_residual,
+            emit_pertoken,
             num_warps=4,
             enable_fp_fusion=False,
         )
@@ -331,12 +367,22 @@ def _run(
                 out.copy_(normal)
             if emit_quant:
                 quantize(normal, yq, ys)
+            if emit_pertoken:
+                nf = normal.float()
+                amax = nf.abs().amax(-1, keepdim=True)
+                ts = torch.where(amax > 0, amax / 127.0,
+                                 torch.ones_like(amax))
+                tq = torch.floor(nf * (1.0 / ts) + 0.5).clamp(-127, 127)
+                qpt.copy_(tq.to(torch.int8).reshape(shape))
+                spt.copy_(ts.reshape(-1, 1))
     if quantized:
         return ResidualInt8(yq, ys, dtype), ResidualInt8(q, s, dtype)
     if raw_residual:
         result = (out, yres)
         return (*result, yq, ys) if emit_quant else result
     result = (out, ResidualInt8(q, s, dtype))
+    if emit_pertoken:
+        return (*result, qpt, spt)
     return (*result, yq, ys) if emit_quant else result
 
 
@@ -347,7 +393,7 @@ def add_residual(x, residual=None):
 
 
 def residual_norm(norm, x, residual=None, *, emit_quant=False, quantized=False,
-                  raw_residual=False, allow_2048=False):
+                  raw_residual=False, allow_2048=False, emit_pertoken=False):
     """Preserve the baseline path unless the explicit residual switch is on."""
     _width = x.routed.shape[-1] if isinstance(x, ResidualPair) else x.shape[-1]
     # the seam is qualified for Bolt/LiLiCorr hidden sizes only; other models
@@ -361,6 +407,9 @@ def residual_norm(norm, x, residual=None, *, emit_quant=False, quantized=False,
     ):
         if not envs.VLLM_GFX908_RESIDUAL_INT8 and (emit_quant or quantized):
             raise ValueError("Normal-output quantization requires INT8 residual mode")
+        if emit_pertoken:
+            raise ValueError(
+                "Per-token norm stash requires an INT8 residual seam")
         if residual is None:
             return norm(x), x
         return norm(x, residual)
@@ -392,6 +441,7 @@ def residual_norm(norm, x, residual=None, *, emit_quant=False, quantized=False,
         x2=x2,
         raw_residual=raw_residual,
         allow_2048=allow_2048,
+        emit_pertoken=emit_pertoken,
     )
 
 

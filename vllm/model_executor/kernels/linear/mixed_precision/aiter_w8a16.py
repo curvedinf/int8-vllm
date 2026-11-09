@@ -37,6 +37,8 @@ _AITER_W8A16_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128, 256]
 # Keep this named threshold for compatibility with existing probes.
 _W8A8_DISPATCH_MIN_M = 1
 
+_PREQUANT_HIT = [False]
+
 
 def _get_aiter_w8a8_config(M: int, N: int, K: int, group_size: int):
     """Select a gfx908-suitable AITER a8w8_blockscale config.
@@ -459,8 +461,32 @@ class AiterW8A16LinearKernel(MPLinearKernel):
                         pertoken_quant_rn,
                     )
 
-                    # x_f16 is x_2d (bf16) in this branch — see above.
-                    x_q, x_s = pertoken_quant_rn(x_f16)
+                    # x_f16 is x_2d (bf16) in this branch — see above. The
+                    # fused payload norm stashes the same per-token
+                    # round-to-nearest quant; consume it when present.
+                    prequant = (
+                        None
+                        if torch.compiler.is_compiling()
+                        else getattr(x, PREQUANT_ATTR, None)
+                    )
+                    if (
+                        prequant is not None
+                        and prequant[0].shape == x_2d.shape
+                        and prequant[0].dtype == torch.int8
+                        and prequant[1].shape == (M, 1)
+                        and x_2d.dtype in (torch.float16, torch.bfloat16)
+                    ):
+                        x_q, x_s = prequant
+                        if (
+                            os.environ.get("VLLM_GFX908_PREQUANT_DEBUG") == "1"
+                            and not _PREQUANT_HIT[0]
+                        ):
+                            _PREQUANT_HIT[0] = True
+                            print(
+                                f"[prequant] CK stash consumed M={M} "
+                                f"K={K}", flush=True)
+                    else:
+                        x_q, x_s = pertoken_quant_rn(x_f16)
                 else:
                     # The fused-norm path stashes (q, scale) on the normed
                     # tensor; consume it instead of re-quantizing. Opaque to
