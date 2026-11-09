@@ -36,16 +36,24 @@ def build(tokenizer, args, rng):
 
     ids: list[int] = []
 
-    def emit_text(text: str):
+    def emit_text(text: str, cap: int | None = None):
         toks = tokenizer.encode(text, add_special_tokens=False)
-        ids.extend(toks[: args.max_sample])
+        ids.extend(toks[: cap or args.max_sample])
 
     def _as_ids(out):
         if isinstance(out, dict):
             out = out.get("input_ids", [])
+        if hasattr(out, "ids"):
+            out = out.ids
+        elif hasattr(out, "input_ids"):
+            out = out.input_ids
+        if len(out) and hasattr(out[0], "ids"):
+            out = out[0].ids
+        elif len(out) and isinstance(out[0], (list, tuple)):
+            out = out[0]
         return [int(t) for t in out]
 
-    def emit_chat(messages, tools=None):
+    def emit_chat(messages, tools=None, cap: int | None = None):
         try:
             if tools is not None:
                 out = tokenizer.apply_chat_template(
@@ -55,7 +63,7 @@ def build(tokenizer, args, rng):
                 out = tokenizer.apply_chat_template(
                     messages, tokenize=True, add_generation_prompt=False
                 )
-            ids.extend(_as_ids(out)[: args.max_sample])
+            ids.extend(_as_ids(out)[: cap or args.max_sample])
         except Exception:
             pass  # template-mismatched leg; skip rather than poison the corpus
 
@@ -171,6 +179,45 @@ def build(tokenizer, args, rng):
             ]
         )
     print(f"tier4 long legs: {args.n_long} tokens so far {len(ids)}")
+
+    # tier 5: 512k needle-in-haystack documents. Each document is a 512k-token
+    # haystack of C4 text with a planted fact; half the needles sit within the
+    # last 16k tokens (trainable long-range retrieval at the feasible window),
+    # half at a uniformly random depth (512k-document exposure).
+    if args.n_xlong:
+        cap = 512 * 1024
+        for k in range(args.n_xlong):
+            target = 460 * 1024 * 3  # chars ~3x tokens; leaves headroom
+            parts, cur = [], 0
+            while cur < target:
+                parts.append(docs[rng.randrange(len(docs))])
+                cur += len(parts[-1])
+            hay = "\n\n".join(parts)
+            if k % 2:
+                depth = rng.randrange(max(1, len(hay) - 16 * 1024 * 3))
+            else:
+                depth = rng.randrange(max(1, len(hay) - 16 * 1024 * 3),
+                                      max(1, len(hay) - 64 * 3))
+            code = f"ZK{rng.randrange(10**9):09d}"
+            project = f"PROJECT-{rng.randrange(10**6):06d}"
+            fact = (f"\n\nThe access code for {project} is {code}.\n\n")
+            doc = hay[:depth] + fact + hay[depth:]
+            emit_chat(
+                [
+                    {
+                        "role": "user",
+                        "content": (
+                            "The following reference notes contain one access "
+                            "code. Read them carefully.\n\n" + doc +
+                            f"\n\nQuestion: what is the access code for "
+                            f"{project}? Answer with the code only."
+                        ),
+                    },
+                    {"role": "assistant", "content": code},
+                ],
+                cap=cap,
+            )
+            print(f"tier5 xlong doc {k + 1}/{args.n_xlong} tokens so far {len(ids)}")
     return ids
 
 
@@ -180,6 +227,8 @@ def main():
     p.add_argument("--n-c4", type=int, default=3500)
     p.add_argument("--n-agent", type=int, default=800)
     p.add_argument("--n-long", type=int, default=48)
+    p.add_argument("--n-xlong", type=int, default=8,
+                   help="512k-token needle-in-haystack documents (tier 5)")
     p.add_argument("--max-sample", type=int, default=16384)
     p.add_argument("--val-frac", type=float, default=0.01)
     args = p.parse_args()
