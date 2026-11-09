@@ -88,7 +88,7 @@ def main():
 
     def rank_of(name):
         for r, s in enumerate(shards):
-            if name in s:
+            if name in s or (name + ".weight") in s:
                 return r
         raise KeyError(name)
 
