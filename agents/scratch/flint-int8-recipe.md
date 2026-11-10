@@ -3472,3 +3472,29 @@ Notes:
   or the deprecated alias if it still lands in the config) and re-run the
   two-turn probe. If that alone fixes warm TTFT, then add the frontier
   checkpoint + GDS eviction on top.
+
+## USER DIRECTIVE (2026-11-10): Flint has Mamba -> implement the full
+FlashStates linear-caching set (frontier checkpoint, cost-aware eviction,
+leaf-last, prefill export). Explicitly in scope.
+
+### Next concrete step (partial Mamba hits)
+Boot geometry shows the mamba group at block_size=64 == hash unit 64, so
+`partial_hash_hits_enabled()` fails its `spec.block_size > hash_block_size`
+test (kv_cache_utils.py:762-783) and warm hits can only land on 128-token
+boundaries ("partial Mamba hits=False"). Levers, in order:
+1. Boot with `--mamba-block-size 128` (cache.py:307, currently auto=None)
+   so the mamba group is larger than the 64-token hash unit -> partial
+   hashing on -> hits can resume at 64-token granularity. Measure with
+   /tmp/warm_ttft_probe.py (turn2 is the sensitive one: 288 ms after align,
+   1165 ms before).
+2. If partial hits come on, check `mamba_shared_prefix_checkpoint`
+   (requires eagle group ids + no MTP re-prefill tail) and
+   `num_prefill_checkpoint_blocks > 0` so a long prefill can checkpoint
+   mid-chunk (FlashStates' prefill-export analogue).
+3. Frontier checkpoint: save the recurrent state at the exact last token of
+   a finished request (not a block boundary) and key it to the prompt's
+   tail hash, so turn N+1 resumes with zero prefix recompute.
+4. Cost-aware eviction (GreedyDual): priority = prefill_seconds_saved /
+   blocks_freed, cost = D + E*tokens; leaf-last ordering with idle demotion.
+   Home: the prefix-cache eviction in BlockPool + the CPU tier
+   (TieringOffloadingSpec) so all models share it.
