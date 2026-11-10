@@ -2878,17 +2878,33 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             _t = self._pphase
             _t["post"] += time.perf_counter() - _t0
             _t["n"] = _t.get("n", 0) + 1
-            if _t["n"] % 200 == 0:
-                n = _t["n"]
-                parts = " | ".join(
-                    f"{k} {1000 * v / n:6.2f}ms"
-                    for k, v in _t.items()
-                    if k != "n"
-                )
-                print(f"[pphase] n={n} | {parts}", flush=True)
-                for k in _t:
-                    if k != "n":
-                        _t[k] = 0.0
+        if os.environ.get("VLLM_STEPWALL") == "1":
+            _now = time.perf_counter()
+            _v = getattr(self, "_period", None)
+            if _v is None:
+                _v = self._period = {"sum": 0.0, "n": 0, "last": None}
+            if _v["last"] is not None:
+                _d = _now - _v["last"]
+                if _d < 1.0:  # skip idle gaps between benches
+                    _v["sum"] += _d
+                    _v["n"] += 1
+            _v["last"] = _now
+        if _pph and _t["n"] % 200 == 0:
+            n = _t["n"]
+            parts = " | ".join(
+                f"{k} {1000 * v / n:6.2f}ms"
+                for k, v in _t.items()
+                if k != "n"
+            )
+            _pw = getattr(self, "_period", None)
+            if _pw and _pw["n"]:
+                parts += f" | period {1000 * _pw['sum'] / _pw['n']:6.2f}ms"
+                _pw["sum"] = 0.0
+                _pw["n"] = 0
+            print(f"[pphase] n={n} | {parts}", flush=True)
+            for k in _t:
+                if k != "n":
+                    _t[k] = 0.0
         # Graph-safe attention trace: drain in-graph event pairs stashed by
         # the backend during capture and query them post-replay (env-gated).
         if os.environ.get("VLLM_ATTNTRACE") == "1":

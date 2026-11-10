@@ -3072,6 +3072,29 @@ payload residual (Bolt decoder_norm), closing the stream.
 - Next: draft lm_head int8 feasibility (PTQR export script currently sets
   lm_head=False).
 
+## PERF LOOP batch 18 (2026-11-10): int8 LM head + step-metric correction
+- LM head is now int8 by default (per-channel weight int8 + per-token act
+  quant through CK W8A8; `VLLM_GFX908_INT8_LM_HEAD=1` in the recipe, =0 is
+  the bf16 rollback). Micro at the TP4 shard N=37536/K=2048: M=96 1775 ->
+  310us, M=12 214 -> 144us. Serving A/B same seed 62408, cold-first runs:
+  55.81 (bf16 head boot) vs 54.70 (int8 head boot); warm repeats 72.0/71.3
+  vs 71.1/71.5. Acceptance 5.60/6.10 vs 6.37/5.74/5.66 -> PASS. The 1.5ms
+  micro prize is mostly hidden by async overlap.
+- METRIC CORRECTION: the bench's TPOT is the engine STEP time (one stream
+  chunk per step; probe: 24 chunks for 128 tokens, gaps 37.1-38.2ms,
+  acceptance 5.33/step). Cold-first TPOT (55-56) under-reports the hosted
+  C12 step because serialized prefill staggers request starts; warm
+  full-overlap C12 2048->256 is ~71 ms. Single-stream step 37 ms.
+  Use warm full-overlap numbers for loop decisions; cold-first only for
+  boot-to-boot A/B.
+- C12 full overlap: target graph replay ~38.4 ms (graphtime) vs 30.2 ms at
+  the staggered/ramp state; worker CPU phases sum ~51 ms; client step 71.7
+  -> ~20 ms unexplained between worker phases and client period.
+  VLLM_STEPWALL=1 added (worker entry->exit wall, printed with pphase) to
+  split worker time from engine-side time. ATTNTRACE in-graph events still
+  fault (hipErrorInvalidHandle) and inflate propose to 47ms; do not use for
+  perf runs.
+
 ## PERF LOOP persistent floor (2026-11-10): 48us vs 118us full
 - W-stream-only kernel at N=6144 (12MB): 48.0us (BN=64). Full GEMM 118us.
   Headroom 70us/GEMM; realistic persistent target 70-90us (saves 28-48us).
