@@ -72,7 +72,7 @@ def _routing_from_topk(topk_ids: torch.Tensor, topk_weights: torch.Tensor,
     # two-kernel direct over (expt_indx, expt_scal). Env-gated, default on;
     # falls back to routing() when logits/topk path is unavailable.
     if (
-        os.environ.get("VLLM_GFX908_DIRECT_ROUTING", "1") == "1"
+        os.environ.get("VLLM_GFX908_DIRECT_ROUTING", "0") == "1"
         and 0 < topk_ids.shape[0] <= 256
         # _offsets_sort_scatter sorts over LOAD=128 lanes; larger batches
         # (profile/prefill) never fitted and would fault the GEMM on empty
