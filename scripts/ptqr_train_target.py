@@ -1661,20 +1661,35 @@ def save_ptqr_checkpoint(model, replaced, out_dir: Path, step: int, args,
                       "lr", "distill_weight", "temp_start", "temp_end")}}
     suffix = f"_rank{rank}" if world > 1 else ""
     path = out_dir / f"ptqr_target_step{step}{suffix}.pt"
-    # keep only the LATEST shard per rank — 4-rank saves are ~30 GB per step
-    # and historical steps filled the 936 GB disk mid-run (measured iostream
-    # failure); retraining is deterministic enough to rely on the latest.
-    for old in out_dir.glob(f"ptqr_target_step*{suffix}.pt"):
-        if old != path:
-            old.unlink(missing_ok=True)
-    torch.save(ckpt, path)
+    # Atomic write: every truncated `ptqr_target_step*_rank*.pt` in the
+    # model dirs was a torch.save killed mid-file (~5.5 GB per rank), which
+    # left zips without a central directory and no usable --init_from
+    # source (measured 2026-11-10). Write to a temp name, fsync, rename, and
+    # only then drop older steps. Keep only the LATEST shard per rank —
+    # 4-rank saves are ~30 GB per step and historical steps filled the disk
+    # mid-run.
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "wb") as fh:
+        torch.save(ckpt, fh)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+    for old_step in out_dir.glob(f"ptqr_target_step*{suffix}.pt"):
+        if old_step != path:
+            old_step.unlink(missing_ok=True)
     print(f"  [save] {path}", flush=True)
     # scales live inside PTQRLinear modules; also emit them keyed by tensor name
     scales = {}
     for name, mod in model.named_modules():
         if isinstance(mod, PTQRLinear):
             scales[name + ".scale"] = mod.scale.detach().cpu()
-    torch.save(scales, out_dir / f"ptqr_target_scales_step{step}{suffix}.pt")
+    spath = out_dir / f"ptqr_target_scales_step{step}{suffix}.pt"
+    stmp = spath.with_name(spath.name + ".tmp")
+    with open(stmp, "wb") as fh:
+        torch.save(scales, fh)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(stmp, spath)
 
 
 if __name__ == "__main__":
