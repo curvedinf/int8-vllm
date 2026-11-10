@@ -4030,3 +4030,33 @@ target's full-causal attention per layer. It measures 20x more
 (q=96 rows over 12 seqs x 8 q tokens, 2 kv heads/rank, hdim 128,
 int8_block_g128, block tables, window 2048, causal) with a variant sweep;
 serving-level tests cannot separate setup cost from scan cost here.
+
+### CORRECTION (batch 26): g_wall is a queue-drain measure, not graph time
+Two experiments this batch, both confounded - read this before trusting any
+in-graph timing on this stack.
+
+1) Target-attention ablation (VLLM_TARGET_ABLATE=attn, zeros attn_output
+   but keeps the KV write): g_wall 22.4 -> **3.0 ms**. NOT interpretable as
+   attention cost: zeroing attention collapses the hidden states, so the
+   router sends the batch to a handful of experts and the MoE's weight
+   stream collapses too. Acceptance also goes to 1.0, which changes the
+   step mix. Never ablate a quantity that feeds the router.
+
+2) Context sweep at fixed out=128, seed 5150 (g_wall after each run):
+   in=128 -> 2.67 ms | in=512 -> 6.26 ms | in=2048 -> 9.84 ms.
+   But the MoE alone is >=13 ms/step by microbench (9.5 GB/step per rank at
+   950 GB/s practical ceiling), so a 9.84 ms "target graph" is impossible.
+   => g_wall (wall around run_fullgraph + synchronize) drains only part of
+   the queued work on this stack, exactly like the CUDA-event variant.
+   The ledger row FLINT_STEP_ACCOUNTING_GRAPHWALL reading "target graph
+   22.5 ms" is therefore an UPPER-ISH artifact of the same kind; the
+   trustworthy budget is still the per-kernel sum (~20.5 ms) plus the bench
+   wall/throughput numbers.
+3) What the context sweep DOES establish (bench observables only, no
+   in-graph timer): context length is a first-order cost. Same seed, same
+   n=12, out=128: in=128 308.8 tok/s, in=512 273.7, in=2048 103.5 - a 3x
+   throughput loss from 128 to 2048 input tokens. Attention/KV is far more
+   expensive than the ~0.2 ms (47 layers) the old budget assumed, and it is
+   the one cost that scales with the recipe's 2304-token context.
+=> Next time: measure attention with bench observables (throughput/TTFT vs
+context), never with in-graph timers or attention ablations on this stack.
