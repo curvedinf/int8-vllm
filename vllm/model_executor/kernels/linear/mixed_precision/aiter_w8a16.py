@@ -47,6 +47,25 @@ def _get_aiter_w8a8_config(M: int, N: int, K: int, group_size: int):
     BLOCK_SIZE_K=128, matching the GPTQ group_size. Microbench shows the same
     large-M config as W8A16 works well.
     """
+    if 64 < M <= 128:
+        # C12 decode (M=96 with NS=7). bm=32/bn=128 keeps ~4x more CTAs busy
+        # than the old M>64 bm=128 branch (which gave grid_m=1); NUM_KSPLIT=4
+        # wins on the narrow-N shapes, 1 on the wide ones. In-graph at M=96:
+        # qkv 29.4us vs 64.8 CK, gate_up 52.9 vs 70.4.
+        num_ksplit = 4 if N <= 1536 else 1
+        return {
+            "BLOCK_SIZE_M": 32,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 4,
+            "num_warps": 4,
+            "num_stages": 2,
+            "cache_modifier": None,
+            "NUM_KSPLIT": num_ksplit,
+            "SPLITK_BLOCK_SIZE": 512 if num_ksplit > 1 else 2048,
+            "waves_per_eu": 1,
+            "kpack": 1,
+        }
     if M <= 16:
         block_m, block_n, num_warps, num_stages = 16, 64, 4, 2
     elif M <= 32:
@@ -67,6 +86,23 @@ def _get_aiter_w8a8_config(M: int, N: int, K: int, group_size: int):
         "NUM_KSPLIT": 1,
         "SPLITK_BLOCK_SIZE": 2048,
     }
+
+
+def _group_quant_activation(x: torch.Tensor):
+    """GS128 activation quant for the blockscale path.
+
+    Prefers the fused Triton round-to-nearest kernel the MoE path uses
+    (13.9us vs ~50us for the torch decomposition at M=96,K=2048) and falls
+    back to the torch version if it cannot run.
+    """
+    try:
+        from vllm.model_executor.layers.quantization.gptq_moe_a8w8 import (
+            group_quant_rn,
+        )
+
+        return group_quant_rn(x)
+    except Exception:  # noqa: BLE001 - keep the blockscale path alive
+        return _quantize_activation_per_block(x, block_k=128)
 
 
 def _quantize_activation_per_block(x: torch.Tensor, block_k: int = 128):
@@ -299,6 +335,9 @@ class AiterW8A16LinearKernel(MPLinearKernel):
             hasattr(layer, "_ck_q")
             and not hasattr(layer, "head_size")
             and os.environ.get("VLLM_GFX908_CK_FREE_GS128", "1") == "1"
+            # The deployed decode band runs the blockscale kernel off the
+            # GS128 originals; freeing them would disable that path.
+            and os.environ.get("VLLM_GFX908_DECODE_BLOCKSCALE", "1") != "1"
         ):
             for pname in (
                 self.w_q_name,
@@ -365,10 +404,19 @@ class AiterW8A16LinearKernel(MPLinearKernel):
             # fallback: graph capture and first inference otherwise pay the
             # aiter-JIT config lookup per production shape. The pertoken
             # quant + CK gemm pair mirrors apply_weights exactly.
-            if hasattr(layer, "_ck_q"):
+            _dbs = (
+                os.environ.get("VLLM_GFX908_DECODE_BLOCKSCALE", "1") == "1"
+                and getattr(layer, self.w_q_name, None)
+                is not None
+                and getattr(layer, self.w_q_name).numel() > 0
+            )
+            if hasattr(layer, "_ck_q") or _dbs:
                 for M in warmup_shapes:
                     key = ("ck", M, N, K, gs)
                     if key in self._WARMUP_CACHE:
+                        continue
+                    if _dbs and M <= 128:
+                        # decode band is served by the blockscale kernel now
                         continue
                     self._WARMUP_CACHE.add(key)
                     try:
@@ -390,13 +438,18 @@ class AiterW8A16LinearKernel(MPLinearKernel):
                     key = ("a8w8", M, N, K, gs)
                     if key in self._WARMUP_CACHE:
                         continue
+                    if hasattr(layer, "_ck_q") and not _dbs:
+                        continue
+                    if _dbs and M > 128:
+                        # big shapes stay on CK
+                        continue
                     self._WARMUP_CACHE.add(key)
 
                     x = torch.empty((M, K), dtype=dtype, device=device)
                     cfg = _get_aiter_w8a8_config(M, N, K, gs)
 
                     try:
-                        x_q, x_s = _quantize_activation_per_block(x, block_k=128)
+                        x_q, x_s = _group_quant_activation(x)
                         gemm_a8w8_blockscale(
                             x_q,
                             w_q,
@@ -467,8 +520,22 @@ class AiterW8A16LinearKernel(MPLinearKernel):
         # the blockscale originals) is group-agnostic, so GS32 (or any G)
         # checkpoints that built `_ck_q` must take the CK path — the
         # blockscale fallback would read the freed (empty) originals.
+        # Deployed-decode dispatch (C12: M=96..128): the tuned Triton
+        # blockscale wins there. Measured in-graph at M=96,K=2048: qkv
+        # 95.3us end to end on CK (35.5 quant + 64.7 gemm) vs 34.7us on
+        # group_quant (13.9) + tuned blockscale gemm (29.5); gate_up
+        # 52.9 vs 70.4 for the gemm alone. Needs the GS128 originals, so
+        # the load-side free below is skipped while this is enabled.
+        _decode_bs = (
+            os.environ.get("VLLM_GFX908_DECODE_BLOCKSCALE", "1") == "1"
+            and 64 < M <= 128
+            and c.group_size == 128
+            and w_q is not None
+            and w_q.numel() > 0
+        )
         if (
-            hasattr(layer, "_ck_q")
+            not _decode_bs
+            and hasattr(layer, "_ck_q")
             and layer._ck_q is not None
             and layer._ck_q.dim() == 2
         ):
@@ -614,8 +681,7 @@ class AiterW8A16LinearKernel(MPLinearKernel):
                     ):
                         x_q, x_s = pre
                     else:
-                        x_q, x_s = _quantize_activation_per_block(
-                            x_2d, block_k=128)
+                        x_q, x_s = _group_quant_activation(x_2d)
                     cfg = _get_aiter_w8a8_config(M, N, K, c.group_size)
                     cfg = dict(cfg)
                     cfg["BLOCK_SIZE_N"] = 128
@@ -650,7 +716,7 @@ class AiterW8A16LinearKernel(MPLinearKernel):
                     # this GEMM's activation (row-parallel MLP down_proj).
                     x_q, x_s = pre
                 else:
-                    x_q, x_s = _quantize_activation_per_block(x_2d, block_k=128)
+                    x_q, x_s = _group_quant_activation(x_2d)
                 cfg = _get_aiter_w8a8_config(M, N, K, c.group_size)
                 if os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not (
                     torch.cuda.is_current_stream_capturing()

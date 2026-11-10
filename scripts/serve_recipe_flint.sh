@@ -62,6 +62,12 @@ serve() {
   # Fused round-to-nearest activation quant (quality default, see
   # INT8_AUDIT_RESULTS.md).
   export VLLM_GFX908_ACT_QUANT=round
+  # Deployed decode band (M 65..128, i.e. C12 with NS=7) runs the tuned
+  # Triton a8w8-blockscale GEMM off the retained GS128 originals; prefill
+  # stays on CK. Measured at M=96: qkv 95.3 -> 34.7us end to end (quant +
+  # gemm), gate_up gemm 70.4 -> 52.9. =0 restores the all-CK dispatch and
+  # the GS128 free.
+  export VLLM_GFX908_DECODE_BLOCKSCALE="${VLLM_GFX908_DECODE_BLOCKSCALE:-1}"
   # LM head: untied per-channel INT8 weights + per-token activation quant
   # through the CK W8A8 GEMM (gfx908 int8 doctrine). Micro at TP4 vocab
   # shard N=37536, K=2048: M=96 bf16 1775us -> int8 310us; M=12 214 -> 144.
