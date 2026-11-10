@@ -3010,3 +3010,11 @@ payload residual (Bolt decoder_norm), closing the stream.
 - Pure launch-count win (flat GEMM cost across N). Implementation: concat
   weights at load (one GEMM, split outputs) + serving A/B + acceptance gate.
 - Same pattern applies to draft graph (5 layers, 7.16ms).
+
+## PERF LOOP batch 12 concat verdict (2026-11-10): VETOED by dataflow
+- QKV (pre-norm) and gate_up (post-norm) are separated by attention in the
+  dataflow. They cannot share one GEMM. Both are already Merged internally.
+- Launch-count within a stage is already minimal. The remaining launches are
+  across stages (attn boundary). Persistent per-layer kernels are the only
+  shape that captures them (kernel build, not weight concat).
+- Concat prize (5.1ms) is withdrawn as unachievable in the current dataflow.
