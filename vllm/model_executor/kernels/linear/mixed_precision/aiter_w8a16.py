@@ -41,7 +41,8 @@ _W8A8_DISPATCH_MIN_M = 1
 _PREQUANT_HIT = [False]
 
 
-def _get_aiter_w8a8_config(M: int, N: int, K: int, group_size: int):
+def _get_aiter_w8a8_config(M: int, N: int, K: int, group_size: int,
+                          payload: bool = False):
     """Select a gfx908-suitable AITER a8w8_blockscale config.
 
     For W8A8 the activation and weight scales are block-wise along K with
@@ -54,6 +55,44 @@ def _get_aiter_w8a8_config(M: int, N: int, K: int, group_size: int):
         # wins on the narrow-N shapes, 1 on the wide ones. In-graph at M=96:
         # qkv 29.4us vs 64.8 CK, gate_up 52.9 vs 70.4.
         num_ksplit = 4 if N <= 1536 else 1
+        # The draft (hidden 5120) has two shapes outside the target's range
+        # that prefer a different tile (in-graph, M=96):
+        #   gate_up N=8704 K=5120: 256-column tile with 8 warps streams
+        #     252.8 -> 214.3us (208 GB/s; the 128-column/4-warp tile cannot
+        #     fill the CUs). These GEMMs are CTA-concurrency bound, not
+        #     weight-traffic bound: one M tile at bm=128 re-reads the weight
+        #     1x instead of 3x and still measures slower (333 vs 256us).
+        #   qkv N=1536 K=5120: 79.7 -> 61.3us at bm=128/bn=64/ks=4 (one M
+        #     tile, so the weight streams once; 48 CTAs still fill enough
+        #     of the grid because ks=4 splits K).
+        if not payload and N >= 4096 and K >= 4096:
+            return {
+                "BLOCK_SIZE_M": 32,
+                "BLOCK_SIZE_N": 256,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 4,
+                "num_warps": 8,
+                "num_stages": 2,
+                "cache_modifier": None,
+                "NUM_KSPLIT": 1,
+                "SPLITK_BLOCK_SIZE": 2048,
+                "waves_per_eu": 1,
+                "kpack": 1,
+            }
+        if not payload and N <= 1536 and K >= 4096:
+            return {
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 4,
+                "num_warps": 4,
+                "num_stages": 2,
+                "cache_modifier": None,
+                "NUM_KSPLIT": 4,
+                "SPLITK_BLOCK_SIZE": 512,
+                "waves_per_eu": 1,
+                "kpack": 1,
+            }
         # Shrink the M tile to 16 only when that still fits the 240 CTA slots
         # (2 per CU at 32 KB LDS). It buys latency hiding on the shapes that
         # otherwise launch 48 CTAs (payload o_proj 30.8 -> 26.6us, shared
@@ -456,7 +495,10 @@ class AiterW8A16LinearKernel(MPLinearKernel):
                     self._WARMUP_CACHE.add(key)
 
                     x = torch.empty((M, K), dtype=dtype, device=device)
-                    cfg = _get_aiter_w8a8_config(M, N, K, gs)
+                    cfg = _get_aiter_w8a8_config(
+                        M, N, K, gs,
+                        payload=bool(getattr(
+                            layer, "_gfx908_payload_out", False)))
 
                     try:
                         x_q, x_s = _group_quant_activation(x)
@@ -711,7 +753,8 @@ class AiterW8A16LinearKernel(MPLinearKernel):
                         x_q, x_s = pre
                     else:
                         x_q, x_s = _group_quant_activation(x_2d)
-                    cfg = _get_aiter_w8a8_config(M, N, K, c.group_size)
+                    cfg = _get_aiter_w8a8_config(
+                        M, N, K, c.group_size, payload=True)
                     cfg = dict(cfg)
                     cfg["BLOCK_SIZE_N"] = 128
                     cfg["NUM_KSPLIT"] = 1

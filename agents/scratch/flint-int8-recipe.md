@@ -3890,3 +3890,26 @@ Note: `w_scale` for the dense blockscale kernel is [N, K//128] (the MoE
 grouped kernel uses [E, K/G, N]) - a transposed bench silently asserts.
 Recipe `[pphase] period` is NOT a stable A/B metric: same-boot warm runs
 read 39.7/48.1/42.8 ms while throughput was flat.
+
+### Step budget closed by direct measurement (batch 21)
+`VLLM_GRAPH_SYNC=1` (new, env-gated in model_runner) times the target graph
+as wall clock around run_fullgraph + synchronize: **22.5 ms of GPU per
+step**. Kernel sums independently give 20.5 ms (MoE 13.3 + dense 5.5 +
+combine 1.3 + lm_head 0.23 + attn 0.2), so ~2 ms is norms/AR/glue inside
+the graph. With the draft graph (~7.2) and sampler (~1), ~31 ms of the
+~37 ms step is accounted GPU work; the rest is inter-graph gaps.
+IMPORTANT measurement trap: CUDA event pairs recorded on the current
+stream around run_fullgraph report only the enqueue (3.97 ms against a
+37.7 ms step) because the graph replays off that stream. Use wall clock.
+GPU busy sampled at 0.1 s during a decode-heavy run: 39% of samples >=90%
+over a window that was ~50% bench wall.
+
+### Draft GEMM tiles (accepted, batch 21): -0.28 ms/step
+Draft gate_up N=8704 K=5120 wants bn=256/8 warps (252.8 -> 214.3 us);
+draft qkv N=1536 K=5120 wants bm=128/bn=64/ks=4 (79.7 -> 61.3 us). Both
+are shape predicates in `_get_aiter_w8a8_config`, gated by an explicit
+`payload` flag because the fused int8-output layers force bn=128 and
+bn=128 with 8 warps measures 7255 us. Draft o_proj/down are already at
+their best tile. The draft GEMMs are CTA-concurrency bound, not
+weight-traffic bound (bm=128 gives 1x weight reads but measures slower).
+Serving: 652.8/670.0 tok/s, TPOT 57.52/57.55, acceptance 5.99-6.30.

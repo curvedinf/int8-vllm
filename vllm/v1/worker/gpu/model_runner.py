@@ -2060,6 +2060,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         # VLLM_STEPPHASE: CPU wall split of the worker step (env-gated).
         _pph = os.environ.get("VLLM_STEPPHASE") == "1"
+        # VLLM_GRAPH_SYNC: additionally sync and time the target graph replay.
+        _gsync = os.environ.get("VLLM_GRAPH_SYNC") == "1"
         _t0 = time.perf_counter() if _pph else 0.0
         if not dummy_run:
             # Update the request states.
@@ -2467,10 +2469,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if _pph:
                 self._pphase["f_prefw"] += time.perf_counter() - _t0
                 _t0 = time.perf_counter()
+            if _gsync:
+                # VLLM_GRAPH_SYNC=1: true GPU spend of the target graph.
+                # Wall clock around replay+synchronize, not CUDA events: the
+                # graph replays off the timing stream, so an event pair
+                # recorded on the current stream reports only the enqueue
+                # (measured 3.97 ms against a 37.7 ms step).
+                _gw0 = time.perf_counter()
             model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
             if _pph:
                 self._pphase["f_replay"] += time.perf_counter() - _t0
                 _t0 = time.perf_counter()
+            if _gsync:
+                torch.cuda.synchronize()
+                self._pphase["g_wall"] = (
+                    self._pphase.get("g_wall", 0.0)
+                    + time.perf_counter() - _gw0
+                )
         else:
             # For piecewise and eager mode, just call model().
             batch_descriptor = BatchDescriptor(
