@@ -256,7 +256,12 @@ class A8W8BlockscaleMoEMethod(AutoGPTQMoEMethod):
         if saved_out is not None:
             layer._out_quant = None
         try:
-            for m in (1, 2, 4, 8, 16, 32, 64, 128, 256, 512):
+            # C12 decode serves M=96 tokens (6 rows/stream x (NS+1)); the
+            # grouped kernel is keyed on gathered rows (M*top_k), so these
+            # token counts must be prewarmed or the first C12 step JITs
+            # mid-inference (151 such warnings before this list grew).
+            for m in (1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 120, 128, 192,
+                      256, 512):
                 xd = torch.randn(m, hidden, device=dev, dtype=dt) / 10
                 ids = torch.randint(0, n_expts, (m, topk), device=dev)
                 w = torch.rand(m, topk, device=dev)
