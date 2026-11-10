@@ -75,7 +75,11 @@ def _drain_attntrace(model, torch) -> None:
             count = 0
         box["ev_pairs"] = []
         box["k"] += 0.0
-    if count >= 4900:
+    # Backend forward runs only at capture (once per graph): one pair per
+    # layer total (49). Drain + print whenever pairs exist (per step is
+    # fine: sync cost is one synchronize per drain, ~10us, and events are
+    # already complete post-replay).
+    if count >= 49:
         print(f"[attntrace-graph] {count} calls | kernel "
               f"{total/count*1000:8.1f} us/call", flush=True)
 
