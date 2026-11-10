@@ -137,7 +137,10 @@ serve() {
   # Mamba prefix-cache mode lever (FlashStates-style recurrent-state reuse).
   # "align" turns on MambaManager's checkpoint machinery so a prefix hit can
   # restore the recurrent state instead of rebuilding it.
-  if [[ -n "${MAMBA_MODE:-}" ]]; then
+  # Default on: without it mamba groups never cache and a warm prefix hit
+  # rebuilds the recurrent state (warm TTFT 1165ms vs 391ms for a miss).
+  export MAMBA_MODE="${MAMBA_MODE:-align}"
+  if [[ -n "${MAMBA_MODE}" ]]; then
     args+=(--mamba-cache-mode "${MAMBA_MODE}")
   fi
   # Async-scheduling A/B lever (None=default). 0 forces sync, 1 forces on.
