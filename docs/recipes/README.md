@@ -6,6 +6,14 @@ load-bearing for the int8-native doctrine and were each gated by KLD/bench
 measurements. Historical experiments live in git history; they are not
 alternative production recipes.
 
+> **Performance numbers in this file are historical.** Throughput figures
+> recorded before 2026-11-10 came from a greedy, random-token, aggregate-only
+> benchmark whose rate also depended on prefix-cache warmth; they are not
+> production throughput. Performance work — measurement, A/B acceptance and
+> the three-phase tuning cycle — follows
+> [`optimization_procedure.md`](optimization_procedure.md), which is
+> mandatory.
+
 The [Nemotron Bolt + LiLiCorr peer recipe](nemotron_bolt.md) uses cached INT8
 GS128 dense weights and retains packed experts with a bounded INT8 cache.
 Its geometry, speculative block and serving settings are documented separately;

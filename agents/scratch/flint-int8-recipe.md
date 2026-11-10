@@ -1,5 +1,15 @@
 # Flint int8 recipe — design map (goal work, 2026-11-06)
 
+> **PROCEDURE SUPERSEDED (2026-11-10).** This note records work done under a
+> retired measurement procedure. Every throughput number in it (including
+> "650-705 tok/s", NS sweeps and the step budgets' tok/s projections) came
+> from greedy, random-token prompts with cache-warm denominators and is not
+> production throughput. The served path measures 28.8-29.6 tok/s at
+> acceptance ~1.1. Performance work follows
+> `docs/recipes/optimization_procedure.md`; keep this file for the
+> cost/mechanism evidence (PTQR root cause, kernel tuning, caching design),
+> not for performance claims.
+
 USER PREFERENCE (standing, 2026-11-10): reply to the user in ENGLISH only.
 Do not write Chinese in replies, ledger entries or notes.
 
@@ -2041,8 +2051,10 @@ New harness `scripts/bench_flint_workloads.py` (token-id prompts,
 ignore_eos, greedy, SSE timing): steady N at t=0 and staggered 6 + 6
 with a delay.
 
-Baselines on the 512k/C12 recipe (random token-id prompts, so draft
-acceptance is worst-case):
+Baselines on the 512k/C12 recipe (random token-id prompts). SUPERSEDED: the
+assumption that random prompts are worst-case for acceptance was inverted —
+random IDs make the target nearly deterministic and *raise* acceptance. See
+optimization_procedure.md.
 - steady C12, 2048 in / 256 out: wall 16.26 s, **188.9 output tok/s**,
   prompt 1511 tok/s, TTFT mean 7.60 s (p95 13.28 s), TPOT 69.3 ms.
   The 12x2048 prefill is serialized through 2048-token chunks and
@@ -3860,8 +3872,9 @@ s_tail 0.24, propose 0.10, f_replay 0.46-0.65 = enqueue only), and the step
 period is 36.85 ms in steady decode (63.6 ms in the cold/first run). So the
 step is GPU-bound (36.85 - 1.5 ~= 35 ms of GPU work) and kernel cuts pay.
 The bench's `tpot_ms` is the per-SSE-chunk interval, not per-token - do not
-compare it with the pphase period directly. Use wall_s + output_tok_s +
-period.
+compare it with the pphase period directly. SUPERSEDED: `output_tok_s` was
+also the wrong metric (wall-clock denominator, greedy/random prompts, chunk
+counting); use the metric definitions in optimization_procedure.md section 3.
 Remaining GPU blocks per step (measured, M=96): MoE gate_up 8.7 ms
 (186 us/layer, wave-limited, see above), MoE down 4.6 ms (96.9 us),
 dense linears ~6 ms (118.8 us/layer: qkv 34.7 + shared gu 26.8 + o_proj
@@ -4343,9 +4356,9 @@ is "CAR + unfused seam" vs "AR + fused seam", not a clean collective size.
 The collective cost therefore remains UNMEASURED; the only way to get it is
 the isolated probe (scripts/bench_ar_collective.py), which is stale past two
 API moves and then needs the native CustomAllreduce wired up.
-Reassurance instead: six consecutive warm runs at C12 2048/256 (seed 62408)
-gave 650.1 / 705.4 / 632.7 / 661.8 / 657.3 / 656.8 tok/s, i.e. **650-705
-tok/s, stable within +-5%**, TTFT 472-898 ms on warm cache. The 535-707
-spread recorded earlier was boot-transient (first runs after a restart), not
-systemic. So single-boot A/Bs need a warm-up run first; the steady state is
-much tighter than the earlier note implied.
+VOID (2026-11-10 audit): the six runs (650.1 / 705.4 / 632.7 / 661.8 / 657.3
+/ 656.8 tok/s) were greedy, random-token, 12-stream aggregates with a warm
+prefix cache. The served path measures 28.8-29.6 tok/s at acceptance ~1.1; the
+step-period measurement above (36.85 ms single stream) is the useful part.
+Do not cite the 650-705 figure as throughput; see
+optimization_procedure.md.

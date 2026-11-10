@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """Steady and staggered C12 workload harness for the Flint recipe.
 
+RETIRED AS A PERFORMANCE INSTRUMENT (2026-11-10). This harness feeds uniform
+random token IDs, samples greedily, counts SSE chunks as tokens and divides by
+a wall clock that includes prefill, so its rate is not the served path
+(measured: 28.8-29.6 tok/s single stream at recipe sampling). Use it as a
+synthetic diagnostic only. Performance work follows
+docs/recipes/optimization_procedure.md (workloads W1-W5).
+
 Workloads (token-id prompts, ignore_eos, greedy):
   steady      N concurrent 2048-in/256-out completions, all at t=0
   staggered   6 completions at t=0, DELAY later a second 6-completion wave

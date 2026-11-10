@@ -177,20 +177,37 @@ The MoE block, dense/shared MLP and draft MLP are end-to-end int8:
 - The draft export keeps the trained bf16-grid surfaces; re-quantizing
   them would need a new scaled kernel (same exception as Qwen).
 
-## Performance state after the tuning loop (2026-11-10)
+## Performance state (corrected 2026-11-10)
 
-Current, warm, C12 × 2048 in / 256 out, seed 62408: **650-705 output
-tok/s, TPOT 57.5-59.1 ms, acceptance 5.3-5.9**. Six consecutive warm runs
-measured 650.1 / 705.4 / 632.7 / 661.8 / 657.3 / 656.8, so the steady state
-is stable within ±5%; the wider 535-707 spread seen earlier is a boot
-transient - always take one warm-up run before an A/B. Loop start was
-71.5 ms / ~520 tok/s.
-Warm-cache TTFT (single request, two-turn probe): **174 ms** for 2048
-cached + 128 new tokens, i.e. ~25 ms of prefill + one ~40 ms decode step +
-~110 ms of fixed request/engine overhead. Cold single-request prefill is
-396 ms for 2048 tokens (~5.2k tok/s); a 12-request cold batch is ~5.7 s.
+Measured under `optimization_procedure.md`. The recipe's served sampling is
+temperature 1.0 / top-p 0.95 / top-k 20 (`--override-generation-config`).
 
-Step budget (per step, measured from the parts):
+| Measurement | Result |
+|---|---|
+| Single stream, chat+tools, served sampling, ~3k prompt | **28.8-29.6 tok/s**; acceptance 1.04-1.20 |
+| Single stream, real text, greedy diagnostic, 2.3k / 9.4k / 33.5k ctx | 86.9 / 54.8 / 33.7 tok/s; 3.08 / 2.21 / 1.88 tokens/step |
+| C12, real text, served sampling, cold prompts | 101.7 tok/s whole run; TTFT mean 13.5 s |
+| C12, real text, greedy diagnostic, cold | 223.7 tok/s whole run; TTFT 6.47 s |
+| same command immediately re-run (prefix cached) | 552.2 tok/s whole run; TTFT 0.62 s |
+
+The earlier "650-705 tok/s" figure was a 12-stream aggregate measured greedily
+on random-token prompts with a warm prefix cache. It is void as a production
+number; the procedure document records the audit.
+
+Acceptance is the binding constraint. At served sampling the first draft
+position is accepted 44% of the time and positions >= 2 are ~10% or less, so a
+step yields ~1.1 tokens; greedy on real text yields ~3.1. Single-stream step
+time is roughly unchanged (35-38 ms), so throughput is acceptance / step time.
+
+Warm-cache TTFT (single request, two-turn probe): **174 ms** for 2048 cached +
+128 new tokens, i.e. ~25 ms of prefill + one ~40 ms decode step + ~110 ms of
+fixed request/engine overhead. Cold single-request prefill is 396 ms for 2048
+tokens (~5.2k tok/s) under the retired prompt path; re-measure under W2.
+
+Step budget (per step, measured from the parts). The part-level numbers were
+collected under the retired procedure and remain the best available
+attribution, but they are step-time measurements only: re-measure under W1
+before using them to accept a change.
 
 | Block | ms | state |
 |---|---|---|
@@ -201,8 +218,9 @@ Step budget (per step, measured from the parts):
 | Sampler | ~1 | — |
 
 Attention cost scales at **~6.8 µs per context token per step** (period
-25.85 / 27.40 / 32.79 / 38.89 ms at 128 / 512 / 1024 / 2048 input tokens);
-halving the sequence count removes exactly half of it. It is compute-bound
+25.85 / 27.40 / 32.79 / 38.89 ms at 128 / 512 / 1024 / 2048 input tokens) —
+a retired-procedure measurement, directionally useful but not yet reproduced
+under W1. Halving the sequence count removes half of it. It is compute-bound
 (~200 GFLOP/step at ~2% of fp16 peak), not KV-bandwidth-bound.
 
 Isolated with `scripts/bench_attn_micro.py` (CUDA-graph timing of the real
@@ -217,10 +235,15 @@ path at decode shapes (230 vs 108 µs) but only 1.03x at prefill shapes
 for the five draft layers.
 
 **Practical stream ceiling on this mesh is 877-953 GB/s**, not the 1.23
-TB/s nominal. The MoE reads 9.5 GB/step per rank, so its floor is ~10 ms
-and it measures 13.3 — do not expect a 2× there.
+TB/s nominal. Re-verified 2026-11-10 with four GPUs streaming concurrently:
+921-939 GB/s per GPU, 3.72 TB/s aggregate, so there is no cross-GPU bandwidth
+collapse. The MoE reads 9.5 GB/step per rank, so its floor is ~10 ms and it
+measures 13.3 — do not expect a 2× there.
 
-### Accepted in the loop
+### Accepted in the loop (step-time based)
+These were accepted on kernel/step-time measurements under the retired
+procedure; they reduce ms/step and remain sound, but re-validate under W1
+before citing them as throughput gains.
 - MoE down grouped GEMM: `bn=256, num_stages=1` (154.0 -> 96.9 µs/layer;
   one stage keeps the 32 KB tile so two CTAs are resident per CU).
 - Dense decode band: `bm=16` whenever the grid stays <=120 CTAs
@@ -245,9 +268,12 @@ and it measures 13.3 — do not expect a 2× there.
   path already splits the key dimension 8-way; `int8_per_token_head` is
   slower *and* worse quality, so block dequant is not the cost; TILE_SIZE
   64->128 gives no gain and moves numerics.
-- **NS** is not a free knob: `NS+1` fixes the captured graph shapes, the
-  MoE prewarm counts and `max_num_scheduled_tokens`. NS=6 and NS=8 fall
-  ~3× onto uncaptured shapes (226-358 tok/s). Keep NS=7.
+- **NS is NOT closed.** It was selected under acceptance 5.3-5.9 (greedy,
+  random-token prompts). At served sampling acceptance is ~1.1-1.8, so NS=7
+  pays seven draft verifies for ~0.1-0.8 extra tokens; the optimum must be
+  re-derived in phase 3 (procedure section 4). Keep in mind that `NS+1` fixes
+  the captured graph shapes, the MoE prewarm counts and
+  `max_num_scheduled_tokens`, so any NS change needs its own graph capture.
 
 ### Measurement traps on this stack
 - CUDA event pairs recorded inside a hipGraph raise
@@ -256,5 +282,6 @@ and it measures 13.3 — do not expect a 2× there.
   drains only part of the queue (it can read *less* than the MoE alone).
 - Ablating the target's attention collapses routing, so the MoE's weight
   stream collapses too — never ablate a quantity that feeds the router.
-- Bench `tpot_ms` is the per-SSE-chunk interval, not per-token; use
-  `output_tok_s` plus `VLLM_STEPWALL`'s wall-clock `period`.
+- SSE chunks are not tokens: count from `usage.completion_tokens` or the
+  Prometheus counters, and never treat `tpot_ms` as a token interval. See
+  `optimization_procedure.md` section 3 for the authoritative definitions.

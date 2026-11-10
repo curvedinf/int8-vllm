@@ -27,7 +27,10 @@ no-spec, another TP size, or another concurrency in the
 target recipe. Historical
 experiments are archived (archived logs tarball outside the repo, git history);
 the A/B ledger lives at `docs/recipes/surface_experiments_ledger.jsonl`
-(`logs/` is gitignored).
+(`logs/` is gitignored). Performance work follows
+`docs/recipes/optimization_procedure.md` — mandatory, and it supersedes all
+earlier performance guidance and every throughput number recorded before
+2026-11-10.
 
 ## The one paragraph you must internalize
 
@@ -180,7 +183,11 @@ do not reintroduce it). Install: copy to `/etc/systemd/system/`, `daemon-reload`
 `enable --now`. It conflicts with the old qwen36 unit and the llama-api
 service.
 
-## Testing ladder (run in this order after any stack change)
+## Testing ladder (correctness gate, run after any stack change)
+
+The ladder below verifies correctness and boot integrity. It is **not** a
+performance measurement; performance work follows
+`docs/recipes/optimization_procedure.md`.
 
 1. **Micro** (idle GPU ok): `PYTHONPATH="$PWD:$PWD/../int8-aiter" .venv/bin/python scripts/test_int8_kv_micro.py`
    — int8 per-token-head attention vs fp16 reference.
@@ -188,24 +195,25 @@ service.
    — production shapes (hdim 256, GQA 6:1), varlen causal/non-causal/sliding-window
    attention interface checks, boot import chain against merged aiter, AITER gemm
    whitelist. Expect `4/4 PASS`.
-3. **Serving regression** (all 4 GPUs): boot the qwen38 production script and
-   verify its startup report names AITER W8A8, AITER unified attention, vLLM
-   custom AR, int8 PTH KV on both models, fp32 mamba, TP4, C8, and DFlash2
-   NS=13.
-4. **E2E**: qwen3.8 + DFlash2 via the serve script; check coherence, DFlash2
-   acceptance length, and C8 throughput without changing the target contract.
+3. **Serving regression** (all 4 GPUs): boot the production script and verify
+   its startup report names AITER W8A8, AITER unified attention, vLLM custom
+   AR, int8 PTH KV on both models, fp32 mamba, TP4, the recipe's C and
+   DFlash2 NS.
+4. **E2E**: via the serve script; check coherence and acceptance length
+   without changing the target contract.
 
 Gate tooling: `scripts/kld_gate_boot.sh <tag>` (boot-gate harness),
-`scripts/kld_probe_v2.py` (live diagnostic probe), and the A/B ledger at
-`docs/recipes/surface_experiments_ledger.jsonl` (committed there because
-`logs/` is gitignored).
+`scripts/kld_probe_v2.py` (quality probe; greedy diagnostics only), and the
+A/B ledger at `docs/recipes/surface_experiments_ledger.jsonl` (committed
+there because `logs/` is gitignored).
 
-Validation doctrine: `docs/recipes/README.md` is the baseline record for
-this "get it working" pass; the historical A/B ledger was archived to git
-history (see `logs/` before the fresh-slate commit). Optimization passes
-should re-establish an A/B ledger at
-`docs/recipes/surface_experiments_ledger.jsonl` before tuning. No perf claim
-without a reproducible A/B row.
+Measurement doctrine: `docs/recipes/optimization_procedure.md` is mandatory
+for any performance work. It defines the workload matrix (W1-W5), the metric
+definitions, the three-phase cycle (inference tuning with forced rejection,
+then PTQR, then acceptance tuning) and the acceptance gates. Throughput
+numbers recorded before 2026-11-10 were produced by the retired
+greedy/synthetic procedure and are not production throughput. No perf claim
+without a ledger row carrying the procedure's required fields.
 
 ## Quantizing a model
 
