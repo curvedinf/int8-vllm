@@ -2994,3 +2994,12 @@ payload residual (Bolt decoder_norm), closing the stream.
   5 layers M=96) -> sampling. Next timing slice instruments these phases.
 - The llm_base_proposer subtime edit is dead code for DFlash (Eagle path).
 - Draft graph replay is inside the propose 9.17ms (graphs, not eager).
+
+## PERF LOOP batch 11 draft graph (2026-11-10): 7.16ms of propose
+- Draft graph replay = 7.16ms/step (78% of propose 9.17ms). pre_build +
+  attn_build ~0.2us (negligible CPU glue).
+- Per draft layer 1.43ms vs target 0.62ms (2.3x): draft GEMM launch +
+  int8_block KV dequant at M=96 with its own smaller graphs.
+- Step: graph 30.2 + propose 9.17 (graph 7.16 + rest 2.0) + sampler/
+  collectives/bubbles ~18.4 = 57.8. Both graph and draft share the
+  launch-count prize.
