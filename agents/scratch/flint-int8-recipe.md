@@ -2961,3 +2961,11 @@ payload residual (Bolt decoder_norm), closing the stream.
   (17 layers x ~5 GEMMs x 7 steps = ~600 launches/draft-forward at C12).
   Draft dense microbench at M=12..96 shapes is the next harness.
 - Step: graph 30.2 + propose 9.17 + sampler/collectives/bubbles 18.4 = 57.8.
+
+## PERF LOOP batch 10 draft result (2026-11-10): draft is parallel
+- DFlash2 draft = 1 parallel forward (M=96 = 12 seqs x 8 query tokens), not
+  7 autoregressive forwards. Draft GEMMs: 25 x 110us = 2.75ms of 9.17ms.
+- Remaining propose 6.4ms = draft attention (5 layers, block attn, 2-4k ctx)
+  + sampling + glue. Draft attention is the larger draft item.
+- Next: draft attention microbench at production shapes (M=96, hdim 128,
+  GQA 6:1, ctx 2-4k, int8_block_g128).
