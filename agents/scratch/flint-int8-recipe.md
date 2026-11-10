@@ -3094,6 +3094,20 @@ payload residual (Bolt decoder_norm), closing the stream.
   split worker time from engine-side time. ATTNTRACE in-graph events still
   fault (hipErrorInvalidHandle) and inflate propose to 47ms; do not use for
   perf runs.
+- Closed the accounting with VLLM_STEPTRACE (engine batch-queue loop):
+  sched 0.2-1.2ms | exec 43-70ms (blocking wait on the worker future) |
+  out 0.1-0.7ms. The engine's own output processing is negligible, so the
+  step is worker/GPU-bound; ~10-15ms of the 67.8ms client step is the API
+  server's per-step streaming (12 chunks/step), not engine CPU.
+  Client probe (12x512, warm): steady per-request step 67.8ms (67.2-67.9),
+  acceptance 7.11 of 8 max.
+- rocprofv3 on the live TP4 server WEDGES at worker init (after nccl init:
+  workers D-state, flat IO, and a 2GB stderr flood on kill). Tried from
+  start, deferred via --collection-period, and VLLM_FS_GPU=0: all wedge.
+  Do not retry on the server; use VLLM_STEPPHASE/STEPWALL/STEPTRACE and
+  standalone micro harnesses (rocprofv3 works there).
+- VLLM_GFX908_FUSED_EPILOGUE=1 is dead on flint (crashed in MoE init;
+  unreachable under the int8 payload boundary). Dead block removed.
 
 ## PERF LOOP persistent floor (2026-11-10): 48us vs 118us full
 - W-stream-only kernel at N=6144 (12MB): 48.0us (BN=64). Full GEMM 118us.
