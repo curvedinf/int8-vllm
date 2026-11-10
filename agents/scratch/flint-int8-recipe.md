@@ -4334,3 +4334,18 @@ The serve script now exposes the lever as
 VLLM_ROCM_USE_AITER_CUSTOM_AR (default 0) instead of hardcoding it.
 Bench spread note: warm 2048/256 samples on one boot ranged 535-707 tok/s
 (TPOT 57.6-59.1), so only period or multi-run medians are meaningful.
+
+### Correction to batch 39 + steady-state stability (batch 40)
+The "collectives cost >= 4.5 ms" inference was WRONG. `CAR=1` also disables
+the fused AR+RMSNorm+quant seam (the boot log's `allreduce_rms` fusion only
+exists on the vLLM CUSTOM path), so the 43.42 vs 38.89 ms period difference
+is "CAR + unfused seam" vs "AR + fused seam", not a clean collective size.
+The collective cost therefore remains UNMEASURED; the only way to get it is
+the isolated probe (scripts/bench_ar_collective.py), which is stale past two
+API moves and then needs the native CustomAllreduce wired up.
+Reassurance instead: six consecutive warm runs at C12 2048/256 (seed 62408)
+gave 650.1 / 705.4 / 632.7 / 661.8 / 657.3 / 656.8 tok/s, i.e. **650-705
+tok/s, stable within +-5%**, TTFT 472-898 ms on warm cache. The 535-707
+spread recorded earlier was boot-transient (first runs after a restart), not
+systemic. So single-boot A/Bs need a warm-up run first; the steady state is
+much tighter than the earlier note implied.
