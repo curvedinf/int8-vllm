@@ -2825,3 +2825,17 @@ payload residual (Bolt decoder_norm), closing the stream.
   batch 6: 0/72 all structures). Saves only routing() 386us, not topk.
 - That is a 386us/layer win for a Triton kernel with exact production input
   semantics. Next batch: that kernel only.
+
+## PERF LOOP batch 7 v2 result (2026-11-10): single-program bit-identical but SLOW
+- v4 kernel: FULL bit-identical (hist/off_raw/off_pad/bpm/gather/scatter/
+  gate_scal 0-diff) but 640.9us kernel-only vs production 367.9us.
+  Sort-only is 16.7us; the 256x min-scan + 72x bpm searchsorted in one CU
+  are ~624us. Single-program undoes production's multi-program parallelism.
+- Four Triton attempts total (v1 O(n^2) compile hang, v2 single-prog 697us,
+  v3 static_range hang, v4 bit-identical 641us). The common trap: putting
+  offset/bpm derivation in the same program as the sort.
+- Batch-6 prototype hit 88.4us with grid (cdiv(M*K,64),E) atomics — that
+  shape is the proven base. Next attempt must revive it with the CORRECT
+  tile-unit bpm + prefix-sum offsets semantics. No more single-program loops.
+- Routing structures remain 369us/layer. Throughput incumbent TPOT 57.59ms
+  (seed 62408) stands.
