@@ -3763,3 +3763,5 @@ gate_up reads 256 experts x (2048x256) int8 = 134 MB/layer = 6.3 GB/step
 tile packing cannot help - the traffic is the work.
 => Levers for this block: higher concurrency (more rows per expert) or a
 model-level change (fewer/wider experts). Close the MoE kernel line.
+- Prewarm fix confirmed post-boot: warm C12 59.64/59.26 ms, 605.8/659.0
+  tok/s, acceptance 5.98 - no regression from the widened MoE prewarm list.
