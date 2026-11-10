@@ -3064,3 +3064,12 @@ payload residual (Bolt decoder_norm), closing the stream.
   At 245 GEMMs/step = 6.9-11.8ms/step potential.
 - The kernel itself (LDS-resident W, K-loop restructure) is a full rewrite,
   multi-hour. Floor is proven; build is the next slice's decision.
+
+## PERF LOOP persistent structure verdict (2026-11-10)
+- Triton cannot hold W across M (no LDS exposure). Persistent-column needs
+  a from-scratch GEMM kernel (multi-hour, high risk). Floor with dot ~56us;
+  realistic 65-75us (saves 43-53us/GEMM = 10.5-13ms/step potential).
+- Not started as a config sweep (no config shape gives persistence).
+- Loop checkpoint: this is the last queued bounded experiment. All other
+  mechanisms are closed with measured verdicts. Ledger + scratch are the
+  resumable state.
