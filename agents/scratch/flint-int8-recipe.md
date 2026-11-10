@@ -3036,3 +3036,10 @@ payload residual (Bolt decoder_norm), closing the stream.
 - Next kernel: fuse draft per-layer dense GEMMs (QKV+o_proj already minimal;
   gate_up/down are Qwen-style fused in draft? check). The fused grouped
   MoE kernel is the template for what draft lacks.
+
+## PERF LOOP batch 16 draft MLP audit (2026-11-10): already merged
+- Draft per-layer: 4 GEMMs (qkv, o_proj, gate_up merged, down) + attn.
+  20 GEMMs/graph = 2.2ms of 7.16ms draft graph. Same dataflow constraint
+  as target (attn between qkv and gate_up). No concat prize in draft.
+- The launch-count problem spans both graphs; persistent kernels are the
+  only shape that crosses the attn boundary.
