@@ -2762,3 +2762,11 @@ payload residual (Bolt decoder_norm), closing the stream.
 - Next kernel: Triton direct from (ids,w) with router-order flip. Serving
   A/B must gate on acceptance (+-1pt of 5.95) AND fp output diff scale
   (1ulp reordering of the down-combine sum; int8 q flips at .5 ties ~1e-5).
+
+## PERF LOOP batch 6 v1 result (2026-11-10): Triton direct REJECTED (compile)
+- Per-expert rescans: 256 programs x (1536 hist + 256*1536 offsets + 1536x1536 emit)
+  = ~600M inner iterations. Triton compile hung >3min, killed. Reverted.
+- Next kernel design: single fused sort over (expert<<16)|i keys (copy
+  _routing_compute_indx_fused pattern from aiter), then hist/offsets from
+  sorted runs. No per-expert rescans, no cross-program barrier.
+- Fresh baseline stands: TPOT 57.59ms (seed 62408), acceptance 5.95.
