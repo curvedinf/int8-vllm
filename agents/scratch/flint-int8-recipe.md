@@ -2667,3 +2667,15 @@ payload residual (Bolt decoder_norm), closing the stream.
   within ~3us of each other. The down GEMM is serialization-bound
   (route/scatter/reduce phases), so tile tuning has nothing left to gain:
   the production pin is already the optimum.
+- GS128 collective standalone harness: three attempts died in vLLM's
+  init scaffolding (config context, model-parallel group ceremony) rather
+  than on the collective itself. Probing per-call collectives this way
+  keeps failing on harness setup, not on the measured op; collectives
+  will be assessed through serving A/Bs instead.
+
+## PERF LOOP batch 3 verdict (2026-11-10)
+- 96-token steady decode at the current config: TPOT 58.59 ms,
+  output 87.5 tok/s aggregate (tile/warp experiments do not touch it
+  because router order and draft counts dominate the decode batching).
+- Remaining honest candidates: a Triton persistent-MoE reduction and a
+  blocked-GEMM rewrite of the gate_up/down GEMMs, both kernel builds.
