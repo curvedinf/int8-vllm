@@ -676,7 +676,8 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
 
                 _g8t = getattr(self, "_g8_attntrace", None)
                 if _g8t is None and os.environ.get("VLLM_ATTNTRACE") == "1":
-                    _g8t = self._g8_attntrace = {"k": 0.0, "n": 0}
+                    _g8t = self._g8_attntrace = {"k": 0.0, "n": 0,
+                                                 "ev_pairs": []}
                 _g8ev0 = (
                     torch.cuda.Event(enable_timing=True) if _g8t is not None else None
                 )
@@ -735,6 +736,10 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                                 flush=True,
                             )
                             _g8t.update(k=0.0, n=0)
+                    else:
+                        # Captured into the graph; drained by the model
+                        # runner post-forward (same contract as _attntrace).
+                        _g8t.setdefault("ev_pairs", []).append((_g8ev0, _g8ev1))
                 _at_box = None  # set by the ATTNTRACE branch below
                 _ra8 = os.environ.get("VLLM_UA_READAUDIT_G8") or (
                     os.path.exists(

@@ -54,27 +54,31 @@ def _drain_attntrace(model, torch) -> None:
     if model is None:
         return
     for _, mod in model.named_modules():
-        box = getattr(mod, "_attntrace", None)
-        # The trace box lives on the attention IMPL (per layer), reachable
-        # via Attention.impl. Walk attributes to avoid model-specific imports.
-        if box is None:
-            impl = getattr(mod, "impl", None)
-            box = getattr(impl, "_attntrace", None) if impl is not None else None
-        if box is None:
-            continue
-        pairs = box.get("ev_pairs", [])
-        if not pairs:
-            continue
-        # Events complete after replay; query them in one sync.
-        try:
-            torch.cuda.synchronize()
-            for a, b in pairs:
-                total += a.elapsed_time(b)
-                count += 1
-        except Exception:
-            count = 0
-        box["ev_pairs"] = []
-        box["k"] += 0.0
+        # Aiter branch box (_attntrace) and Triton/g8 branch box
+        # (_g8_attntrace) live on the attention IMPL (per layer), reachable
+        # via Attention.impl. Both share the ev_pairs drain contract.
+        boxes = []
+        for _key in ("_attntrace", "_g8_attntrace"):
+            _b = getattr(mod, _key, None)
+            if _b is None:
+                impl = getattr(mod, "impl", None)
+                _b = getattr(impl, _key, None) if impl is not None else None
+            if _b is not None:
+                boxes.append(_b)
+        for box in boxes:
+            pairs = box.get("ev_pairs", [])
+            if not pairs:
+                continue
+            # Events complete after replay; query them in one sync.
+            try:
+                torch.cuda.synchronize()
+                for a, b in pairs:
+                    total += a.elapsed_time(b)
+                    count += 1
+            except Exception:
+                count = 0
+            box["ev_pairs"] = []
+            box["k"] += 0.0
     # Backend forward runs only at capture (once per graph): one pair per
     # layer total (49). Drain + print whenever pairs exist (per step is
     # fine: sync cost is one synchronize per drain, ~10us, and events are
