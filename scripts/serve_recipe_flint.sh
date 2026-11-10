@@ -125,11 +125,18 @@ serve() {
     --kv-cache-dtype "${KV_DTYPE:-int8_block_g128}"
     --speculative-config "$spec"
     # Flint's template renders <think> reasoning blocks; the qwen3 engine
-    # parser splits them into reasoning_content. No tool-call parser: the
-    # checkpoint's XML tool format has no vLLM parser yet.
+    # parser splits them into reasoning_content.
     --reasoning-parser qwen3
     --override-generation-config '{"temperature":1.0,"top_p":0.95,"top_k":20}'
   )
+  # Flint's tool preamble defines the GLM-4.7 XML call format
+  # (<tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>)
+  # and <|observation|><tool_response> replies, so the glm47 parser applies
+  # unchanged. TOOLPARSER="" boots without tool calling.
+  local toolparser="${TOOLPARSER-glm47}"
+  if [[ -n "$toolparser" ]]; then
+    args+=(--enable-auto-tool-choice --tool-call-parser "$toolparser")
+  fi
   if [[ -n "${PROFILE_DIR:-}" ]]; then
     # torch-profiler diagnostic boot: exposes /start_profile + /stop_profile.
     args+=(--profiler-config "{\"profiler\":\"torch\",\"torch_profiler_dir\":\"${PROFILE_DIR}\"}")

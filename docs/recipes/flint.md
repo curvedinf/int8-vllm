@@ -166,9 +166,12 @@ The MoE block, dense/shared MLP and draft MLP are end-to-end int8:
 
 ## Known deltas
 
-- Skill/tool calling: the checkpoint template defines an XML
-  `<tool_call>` format with no vLLM parser yet; the recipe does not
-  enable tool calling.
+- Tool calling: the template's XML `<tool_call>{name}<arg_key>k</arg_key>
+  <arg_value>v</arg_value></tool_call>` format is GLM-4.7's, so the recipe
+  boots `--enable-auto-tool-choice --tool-call-parser glm47`
+  (`TOOLPARSER=""` disables it). Verified end-to-end: an `auto` tool call
+  parses to JSON arguments, and a streamed `<|observation|>` tool-result
+  turn answers correctly.
 - Reasoning: the template emits `<think>` blocks; the recipe uses
   `--reasoning-parser qwen3`.
 - The draft export keeps the trained bf16-grid surfaces; re-quantizing
