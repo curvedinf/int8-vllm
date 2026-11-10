@@ -2752,3 +2752,13 @@ payload residual (Bolt decoder_norm), closing the stream.
 - Triton kernel matching this is the next build; prototype must use
   tile-unit offsets and scatter-as-gate semantics. ~280us/layer headroom
   (369 -> ~88) = 13.1ms/step if the kernel hits prototype timing.
+
+## PERF LOOP batch 6 result (2026-11-10): torch direct REJECTED
+- Torch eager direct (bincount+cumsum+searchsorted+argsort): 492-540us vs
+  production 369us. Eager loses on launch count. Triton kernel is the only
+  viable route (prototype 88.4us).
+- Fresh-seed baseline (seed 62408): TPOT 57.59ms, 222.8 tok/s, acceptance
+  5.95. Incumbent TPOT is stable across seeds (57.6-60.9).
+- Next kernel: Triton direct from (ids,w) with router-order flip. Serving
+  A/B must gate on acceptance (+-1pt of 5.95) AND fp output diff scale
+  (1ulp reordering of the down-combine sum; int8 q flips at .5 ties ~1e-5).
