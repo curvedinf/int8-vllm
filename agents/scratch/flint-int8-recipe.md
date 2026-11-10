@@ -3634,3 +3634,13 @@ Not prefill, not idle wake. => The warm TTFT floor (~180 ms) is the
 first-step path for a new request. Next: boot with VLLM_STEPPHASE=1 and
 trace a single fresh request's first step (reqs/p_inputs/p_attn/p_state/
 f_tail/s_logits + the propose section) to find where the ~180 ms sits.
+
+### First-step trace attempt (2026-11-10): instrument did not fire
+Boot with VLLM_STEPPHASE=1 (confirmed present in Worker_TP0's environ) and
+220 tiny requests (64-token prompts, max_tokens=2, TTFT mean 180 ms) produced
+ZERO `[pphase]` lines. The pphase counter increments only on steps that reach
+the sampling tail, so a workload of one prefill step + one decode step per
+request lands just under the 200-step print window and never emits.
+Next attempt: either raise the cadence (print every 50) or add a dedicated
+first-step timer behind its own env, then measure a fresh request's first
+step split (reqs/p_inputs/p_attn/p_state/f_tail/s_logits + propose).
