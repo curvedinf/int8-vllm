@@ -241,6 +241,7 @@ class DFlashGroupedConv(nn.Module):
             self._bk_q = q
             self._bk_s = s
             self.base_kernel.data.zero_()
+            self._dequant_planes()
 
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
@@ -277,6 +278,7 @@ class DFlashGroupedConv(nn.Module):
                 self._bk_q = q.to(torch.int8).contiguous()
                 self._bk_s = scale.to(torch.float32).contiguous()
                 self.base_kernel.data.zero_()
+                self._dequant_planes()
                 items.pop("base_kernel", None)
                 loaded |= {"base_kernel.i8", "base_kernel.scale"}
         loaded |= AutoWeightsLoader(self).load_weights(items.items())
@@ -299,6 +301,22 @@ class DFlashGroupedConv(nn.Module):
             )
         return self.kernel_projection(hidden_states)
 
+    def _dequant_planes(self):
+        """Dequantize the int8 base planes once (static weights).
+
+        Rebuilding them per call cost three tiny kernels per conv, four
+        convs per layer; the values are identical (same codes, same scales).
+        """
+        planes = getattr(self, "_bk_planes", None)
+        if planes is None:
+            planes = tuple(
+                (self._bk_q[i].to(torch.float32)
+                 * self._bk_s[i].unsqueeze(-1)).to(self.base_kernel.dtype)
+                for i in range(2)
+            )
+            self._bk_planes = planes
+        return planes
+
     def _convolve(
         self, hidden_states: torch.Tensor, delta: torch.Tensor, side: int
     ) -> torch.Tensor:
@@ -313,10 +331,9 @@ class DFlashGroupedConv(nn.Module):
         if getattr(self, "_bk_q", None) is not None:
             # E4 dequant-on-add: rebuild this side's plane from per-[side,tap]
             # int8 + fp32 scales instead of reading a bf16 base weight.
-            base = (
-                self._bk_q[side].to(torch.float32)
-                * self._bk_s[side].unsqueeze(-1)
-            ).to(delta.dtype)
+            base = self._dequant_planes()[side]
+            if base.dtype != delta.dtype:
+                base = base.to(delta.dtype)
         if os.environ.get("VLLM_DECODE_INT8_INTERMEDIATES") == "1":
             from vllm.model_executor.layers.decode_int8 import DecodeInt8Tensor
 

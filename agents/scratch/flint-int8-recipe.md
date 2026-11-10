@@ -3973,3 +3973,18 @@ Draft component estimate from shapes (not measured): 20 big GEMMs 1.9 ms,
 10 kernel_projection GEMMs (N=1280, K=5120) ~0.12, 20 grouped-conv
 elementwise ~0.2, attention 5 x ~0.02-0.1, norms ~0.05, shared int8 head
 0.31 => ~2.7 ms of the 6.95, leaving ~4.2 ms unattributed.
+
+### Draft conv planes: dequant hoisted (batch 23, +20 us only)
+`_convolve` rebuilt its static base plane from int8 codes + fp32 scales on
+every call (4 convs/layer). Now cached once at load (`_dequant_planes`).
+Measured: draft_graph 6949-6961 -> 6927-6938 us, i.e. ~20 us/step. Kept
+(numerics identical, fewer kernels) but this CORRECTS the estimate that the
+draft's unexplained time is small-kernel overhead.
+Draft budget with measured numbers: 6.93 ms graph / 5 layers = 1.386 ms per
+layer, of which the 4 big GEMMs are ~0.38 ms (microbenched), so ~1.0 ms per
+layer is unattributed. Total draft weight traffic is only 400 MB/step
+=> 58 GB/s effective: the graph is latency bound at ~115 us per kernel if
+~60 kernels, which is implausible, so the graph almost certainly contains
+far more kernels than the 12-per-layer estimate (materialize/quant seams,
+conv sub-kernels). Next instrument: count kernels in one draft replay with
+torch.profiler on an isolated harness, not on the server.
