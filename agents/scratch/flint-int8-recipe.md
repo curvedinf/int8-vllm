@@ -2714,3 +2714,15 @@ payload residual (Bolt decoder_norm), closing the stream.
      buffer reuse without per-block fencing).
 - Acceptance carry-over: every A/B must report mean acceptance length
   vs NS=7 gate 4.95 (+-1pt).
+
+## PERF LOOP batch 5 result (2026-11-10): fused top-K combine ACCEPTED
+- aiter _topk_combine_fused + gated fast path in reduce.py (residual-free
+  combine only; shared-expert q-residual falls back to generic).
+- Microbench M=12: 26.2 vs 54.3us kernel (wrapper 66.4 vs 82.4). Bit-identical.
+- Serving A/B seed 62407: TPOT 60.92->59.36ms, aggregate 177.0->216.9 tok/s
+  (+22.5%, run-var incl.), acceptance 5.57-6.55 PASS.
+- First boot garbled (acceptance 0.2%): fused path silently dropped the
+  shared-expert residual fold-in. Fixed by gating on residual_q is None.
+- Commits: aiter 6aa957b9b8, vllm e975ba70a6.
+- Remaining: persistent MoE verify kernel (gate_up+down+combine in one
+  launch/layer), collectives 96/step, attention+logits GEMM busy.
