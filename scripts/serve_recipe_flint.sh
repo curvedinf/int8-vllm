@@ -122,6 +122,12 @@ serve() {
     # torch-profiler diagnostic boot: exposes /start_profile + /stop_profile.
     args+=(--profiler-config "{\"profiler\":\"torch\",\"torch_profiler_dir\":\"${PROFILE_DIR}\"}")
   fi
+  # Async-scheduling A/B lever (None=default). 0 forces sync, 1 forces on.
+  if [[ "${ASYNC_SCHED:-}" == "0" ]]; then
+    args+=(--no-async-scheduling)
+  elif [[ "${ASYNC_SCHED:-}" == "1" ]]; then
+    args+=(--async-scheduling)
+  fi
   if [[ "${EAGER:-0}" == 1 ]]; then
     args+=(--enforce-eager)
   else
