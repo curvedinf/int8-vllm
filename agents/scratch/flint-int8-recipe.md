@@ -2969,3 +2969,12 @@ payload residual (Bolt decoder_norm), closing the stream.
   + sampling + glue. Draft attention is the larger draft item.
 - Next: draft attention microbench at production shapes (M=96, hdim 128,
   GQA 6:1, ctx 2-4k, int8_block_g128).
+
+## PERF LOOP batch 10 draft result (2026-11-10): lm_head gap, attn exonerated
+- Propose 9.17ms split: draft lm_head bf16 stream ~1.5ms + dense 2.75ms +
+  draft attn ~0.1ms (bytes-bound lower bound) + sampling ~0.5ms + glue ~4.3ms.
+- Draft lm_head is bf16 (quant gap; target head is int8 GS128). Quantizing
+  halves its stream (~0.75ms) but needs a draft-acceptance PTQR gate.
+- Draft attention is ~0.1ms (not the 6.4ms hypothesis). Glue is the open item.
+- Step: graph 30.2 + propose 9.17 (dense 2.75 + head 1.5 + attn 0.1 + rest 4.8)
+  + sampler/collectives/bubbles ~16.8 = 57.8.
