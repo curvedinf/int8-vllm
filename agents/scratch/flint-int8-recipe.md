@@ -3057,3 +3057,10 @@ payload residual (Bolt decoder_norm), closing the stream.
 - Next bounded experiment: persistent-column draft GEMM prototype
   (M=96, K=2048, N=6144, single kernel over N tiles) in aiter, judged on
   us/call vs the 110us launch floor.
+
+## PERF LOOP persistent floor (2026-11-10): 48us vs 118us full
+- W-stream-only kernel at N=6144 (12MB): 48.0us (BN=64). Full GEMM 118us.
+  Headroom 70us/GEMM; realistic persistent target 70-90us (saves 28-48us).
+  At 245 GEMMs/step = 6.9-11.8ms/step potential.
+- The kernel itself (LDS-resident W, K-loop restructure) is a full rewrite,
+  multi-hour. Floor is proven; build is the next slice's decision.
