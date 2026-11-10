@@ -2650,3 +2650,13 @@ payload residual (Bolt decoder_norm), closing the stream.
   because router order and draft counts dominate the decode batching).
 - Remaining honest candidates: a Triton persistent-MoE reduction and a
   blocked-GEMM rewrite of the gate_up/down GEMMs, both kernel builds.
+
+## PERF LOOP batch 4 (2026-11-10): persistent-column decode GEMV
+- hypothesis: a Triton decode GEMV that holds the weight column in
+  registers across a 48-row tile block and streams each token row once
+  (persistent + warp-specialized grouping) beats the 4-K-fragment
+  blockscale GEMM at M=12-96. Status: implemented behind
+  VLLM_AITER_MOE_GEMV=1 env flag (aiter moe_op_gemm_a8w8_blockscale
+  kernels _moe_gemm_persistent), numerically cross-checked vs the
+  blockscale GEMM at M=12/96/2048 (rel 4e-3, accumulation-order only).
+- Not yet A/B'd in production: needs the serving test with Graphs.
