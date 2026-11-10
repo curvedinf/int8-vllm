@@ -4400,3 +4400,44 @@ Other facts established:
   confounded (M=24 falls outside the tuned decode band 65<M<=128, and the
   aiter log shows default-config GEMMs for M=36 shapes).
 - The engine is not CPU-bound (api_server ~4% cpu).
+
+## PHASE 2 PLAN (PTQR, 2026-11-10)
+
+State at phase-2 entry:
+- Recipe boots on `int8_per_token_head` KV (phase-1 win: +21% @2.4k, +57%
+  @18k per stream, equal-or-better acceptance). Server healthy on 8030.
+- Target: `<models>/Flint-GPTQ-INT8-W8A8-GS128-PTQR-r1s40-512k`
+  (`scripts/ptqr_train_flint.py`, rung 1 s40). Draft:
+  `<models>/flint-dflash2-ptqr-r1-int8` (trained by
+  `scripts/ptqr_train_draft_flint_ptqr.py` / `ptqr_draft_r1`).
+- PTQR corpus: `/home/curved/SDGraft/data/flint_longctx/train_tokens.pt`
+  = 7,066,281 tokens; val 71,376. Built by `scripts/ptqr_flint_corpus.py`
+  (tiers: evol-codealpaca code, math, chat-templated agentic legs with tools,
+  chained long-context docs 4k-16k). Trainer defaults: `--seq_len 4096
+  --batch_size 1 --max_steps 200 --lr 1e-5 --temp_start 1.0 --temp_end 0.001
+  --kv_group 128 --weight_group 128`.
+- IMPORTANT: the "512k" in the checkpoint name is the model's serving cap, not
+  the training sequence length. No 512k-scope legs exist in the corpus, and a
+  40B-A2.5B model cannot train at 512k on 4x32 GB. The user's earlier
+  directive ("up to 512k tokens in part of its training") is unmet: extend the
+  corpus with needle-in-haystack legs at 32k-128k and train at the largest
+  seq_len that fits (target: 16k-32k), then gate at 512k serving.
+
+Phase-2 gates (procedure section 4):
+1. Sampled acceptance at temp 1.0, per-position, at 2.4k and 18k (baseline
+   values: 2.84 and 3.42 with the new KV layout).
+2. Draft-vs-target distribution agreement (top-1 vs target argmax, TV/KL at
+   several temperatures) - tool to build; the old draft gate measured top-1
+   vs corpus truth (0.042, meaningless as a quality gate).
+3. KLD vs a bf16-KV reference capture of the same weights (kld_probe_v2),
+   plus the 8-leg quality battery.
+4. Export -> serve -> re-gate; never export unevaluated checkpoints.
+
+Order of work:
+a. Build the draft-vs-target probe and capture the pre-PTQR baseline.
+b. Extend `ptqr_flint_corpus.py` with a needle-in-haystack tier (32k-128k
+   chained docs with placed facts, plus agentic tool-call legs).
+c. Train rungs (lr 1e-5, frozen scales, tau anneal) at the largest seq_len
+   that fits; eval KLD/NLL each rung; export the best.
+d. Draft rung on the new target (target states change if the target changes).
+e. Serve + gates (1-3) + battery.
