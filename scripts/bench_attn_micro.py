@@ -127,9 +127,12 @@ def main():
              (2, -1, "kvh2 full"),
              (2, 2048, "draft-like kvh2 window2048"),
              (1, 2048, "kvh1 window2048")]
+    seqs = int(os.environ.get("ATTN_SEQS", NUM_SEQS))
+    qps = int(os.environ.get("ATTN_QPS", Q_PER_SEQ))
     for ctx in ctxs:
         for kvh, win, tag in cases:
-            t = build(ctx=ctx, kv_heads=kvh, window=win)
+            t = build(ctx=ctx, num_seqs=seqs, q_per_seq=qps,
+                      kv_heads=kvh, window=win)
             try:
                 us = bench(lambda: call(t))
                 print(f"ctx={ctx:5d} {tag:28s}: {us:8.1f} us/layer",

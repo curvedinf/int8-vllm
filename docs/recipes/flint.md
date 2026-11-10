@@ -185,7 +185,7 @@ Step budget (per step, measured from the parts):
 
 | Block | ms | state |
 |---|---|---|
-| Attention (target 47 + draft 5 layers) | ~15 | kernel-rewrite only |
+| Attention kernels (target 47 x 108 µs + draft 5 x 230 µs) | ~6.3 | kernel-rewrite only |
 | Routed MoE (gate_up 186 µs + down 96.9 µs per layer) | 13.3 | at 75-80% of achievable |
 | Dense linears (qkv / o_proj / shared MLP) | 5.5 | at kernel limits |
 | Draft graph minus attention | 2.6 | at kernel limits |
@@ -195,6 +195,17 @@ Attention cost scales at **~6.8 µs per context token per step** (period
 25.85 / 27.40 / 32.79 / 38.89 ms at 128 / 512 / 1024 / 2048 input tokens);
 halving the sequence count removes exactly half of it. It is compute-bound
 (~200 GFLOP/step at ~2% of fp16 peak), not KV-bandwidth-bound.
+
+Isolated with `scripts/bench_attn_micro.py` (CUDA-graph timing of the real
+call at production geometry, per-token-head KV): one target-shaped layer is
+107 µs at 2k context and one draft-shaped (sliding-window) layer is 230 µs,
+so the attention *kernels* are ~6.3 ms of the step. The rest of the raw
+6.8 µs/token slope is the draft attention module's projections/norms plus
+other context-scaled work. Segment count barely matters (4 segs 102.9 µs,
+8 107.7, 16 114.5, 32 144.2). The sliding-window path costs 2.1x the full
+path at decode shapes (230 vs 108 µs) but only 1.03x at prefill shapes
+(445 vs 427 µs), so the penalty is decode-specific and worth at most ~0.6 ms
+for the five draft layers.
 
 **Practical stream ceiling on this mesh is 877-953 GB/s**, not the 1.23
 TB/s nominal. The MoE reads 9.5 GB/step per rank, so its floor is ~10 ms

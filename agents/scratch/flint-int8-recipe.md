@@ -4218,3 +4218,19 @@ with the scales carved out of the padding, too fiddly to rebuild here), so
 treat it as a vehicle for STRUCTURAL ideas and confirm wins in serving.
 NEXT: attack the SLIDING_WINDOW double-cost in the 3D kernel, iterating
 entirely in this harness.
+
+### Harness detail (batch 34): the window penalty is decode-only
+Same harness, prefill-shaped call (1 seq x 2048 q, ctx 2048):
+  full kvh1 427.4 us | full kvh2 432.0 | window kvh2 445.1 | window kvh1 437.7
+i.e. only 1.03x for the windowed path at prefill shapes, against 2.1x at
+decode shapes (12 seqs x 8 q: 217-229 vs 107-108). So the overhead is a
+decode-specific masked loop, not generic mask machinery, and it would NOT
+help TTFT to canonicalise window>=ctx. Worth at most ~0.6 ms (halving the
+draft's five 230 us layers).
+Consequence for the budget: the attention KERNELS are ~6.3 ms/step (target
+5.1 + draft 1.15), not the ~15 ms the period slope suggested. The draft's
+attention MODULE still shows 4.33 ms by ablation, so ~2.7 ms of it is its
+qkv/o_proj/norms - but those microbench at 96 us/layer (0.48 ms for five),
+leaving ~2.2 ms in the module that the harness cannot see. That residual is
+the next thing to measure, and it needs a sub-module ablation (boots), not
+this harness.
