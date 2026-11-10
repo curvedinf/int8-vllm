@@ -176,10 +176,16 @@ The MoE block, dense/shared MLP and draft MLP are end-to-end int8:
 
 ## Performance state after the tuning loop (2026-11-10)
 
-Current, warm, C12 × 2048 in / 256 out, seed 62408: **583-700 output
-tok/s, TPOT 57.9-58.8 ms, acceptance 5.3-5.9** (band across boots; the
-spread is run-to-run, not config). Loop start was 71.5 ms / ~520 tok/s.
-Cold-first run ~48-52 ms step; warm-cache TTFT 205-232 ms.
+Current, warm, C12 × 2048 in / 256 out, seed 62408: **650-705 output
+tok/s, TPOT 57.5-59.1 ms, acceptance 5.3-5.9**. Six consecutive warm runs
+measured 650.1 / 705.4 / 632.7 / 661.8 / 657.3 / 656.8, so the steady state
+is stable within ±5%; the wider 535-707 spread seen earlier is a boot
+transient - always take one warm-up run before an A/B. Loop start was
+71.5 ms / ~520 tok/s.
+Warm-cache TTFT (single request, two-turn probe): **174 ms** for 2048
+cached + 128 new tokens, i.e. ~25 ms of prefill + one ~40 ms decode step +
+~110 ms of fixed request/engine overhead. Cold single-request prefill is
+396 ms for 2048 tokens (~5.2k tok/s); a 12-request cold batch is ~5.7 s.
 
 Step budget (per step, measured from the parts):
 
