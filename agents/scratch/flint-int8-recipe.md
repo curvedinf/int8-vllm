@@ -3588,3 +3588,31 @@ implied by single-stream numbers. The GDS priority
 (prefill_seconds_saved / blocks_freed) must therefore be expressed in
 loaded-prefill seconds; record D ~= 0.0 (no fixed term under load) and
 E ~= 0.22 ms/token for flint at C12, to be re-measured per model.
+
+### FRONTIER: the exact rule that blocks it (verified 2026-11-10)
+`MambaManager.get_num_blocks_to_allocate` reserves the internal checkpoint at
+`checkpoint_position = get_mamba_prefill_checkpoint_position(num_tokens, ...)`
+and stores it under `_checkpoints[req_id] = (position, cdiv(num_tokens,
+block_size) - 2)`. The helper's contract (comment at
+single_type_kv_cache_manager.py:1896-1901) is "returns a boundary strictly
+below its input, so every chunk has one" -- i.e. the state is keyed at a
+PHYSICAL BOUNDARY (< chunk end), never at the exact final token, even though
+the worker's `compute_mamba_prefill_checkpoints` does write the state at the
+chunk end.
+Minimal frontier diff:
+1. In the final chunk (prefill_end and total_computed == total_len), also
+   register `_frontier[ (tail_block_hash, residual_tokens, hash(residual_ids))
+   ] = (state_block, position)`; reserve one extra block for it (the
+   physical_block_cap already has a +1 slot for partial hits/checkpoints).
+2. `find_longest_cache_hit` (MambaManager, 1592+) returns the block-aligned
+   prefix; on a prefix hit look up the frontier key for
+   (hit_len + residual) and, if it matches, report num_computed =
+   prompt_len so the scheduler schedules nothing for the prefix.
+3. Scheduler must accept a mamba hit that is not block-aligned
+   (`cache_hit_alignment_tokens`); gate it on the frontier key match, not on
+   partial hashing (which attention blocks forbid).
+4. Eviction: a frontier entry holds one state block and pins nothing else
+   (attention KV for the prefix is separately hash-keyed), so its GDS
+   priority = loaded_prefill_seconds(residual) / 1 block. That is the unit
+   the shared policy should rank; leaf-last = never evict the most recent
+   frontier of a live session before older inner ones.
