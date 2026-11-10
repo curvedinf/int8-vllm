@@ -3343,3 +3343,14 @@ Remaining options with priors (pick one as the next big slice):
   Cumulative warm step 71.5 -> 63.7 ms (-10.9%).
 - Prefill stays CK: at M=2048 CK wins (qkv 203.4 vs 254.4, gate_up 323.8
   vs 663.4). The 65<M<=128 dispatch band is correct.
+
+## CORRECTED MoE budget (2026-11-10)
+- Per-rank MoE dims matter: moe_intermediate 512/TP4 -> gate_up N=256,
+  down K=128; shared expert 1024/TP4 -> N=512/K=256. Earlier harnesses
+  used the unsharded I=512 and read 4x too slow.
+- Corrected: grouped pair 352.6us/layer (single) / 421.8us inside a
+  47-layer graph -> 19.8 ms/step = ~31% of the 63.7ms step; the largest
+  remaining single block. Padded tiles: 256 experts x 16 rows for 576 real
+  rows (~7x). block_m=8 was slower (latency/occupancy bound, not FLOP).
+- Step budget now: MoE 19.8 | dense GEMMs ~9 | attention+collectives+
+  elementwise+sampler ~15 | API/pipeline ~15 (warm full-C12 63.7ms).
