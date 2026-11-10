@@ -4179,3 +4179,18 @@ query length (NS+1) fixes the captured graph shapes, the MoE prewarm token
 counts and max_num_scheduled_tokens. If NS is ever changed, those must be
 re-derived or the recipe falls off a cliff (3x) instead of degrading
 gracefully. Do not sweep NS again without prewarming the new shape.
+
+### TILE_SIZE cap 64 -> 128 (batch 32): rejected, numerics move
+The 3D kernel's KV loop runs TILE_SIZE = min(64, next_pow2(block_size)) = 64,
+i.e. half a 128-token KV block per iteration, and per-iteration fixed cost
+dominates at 16-row M. Raising the cap to the block size (128) via
+AITER_UA_TILE_CAP measured period 38.41 ms vs 38.89 baseline - inside noise
+- but acceptance fell 5.9 -> 4.35, so the TILE_SIZE == BLOCK_SIZE path does
+not reproduce the same numerics. Rejected and reverted (aiter clean).
+Attention is now closed on EVERY config lever: grid (BLOCK_M 16->8),
+path (force 3D, and 2D via per_token_head), segmentation (already 8-way),
+KV dtype (block scales are not the cost) and tile size (no gain, numerics
+move). The residual ~15 ms/step is the Triton unified-attention kernel's
+per-tile efficiency at 16-row M with int8 KV on gfx908, and the only
+remaining route is a kernel rewrite prototyped offline against
+scripts/test_int8_kv_micro.py before it goes anywhere near serving.
