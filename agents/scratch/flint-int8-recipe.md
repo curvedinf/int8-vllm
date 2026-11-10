@@ -3391,3 +3391,27 @@ Remaining options with priors (pick one as the next big slice):
 - NS recheck at the new 59ms step: NS=9 is much worse (warm 73-198ms,
   acceptance 5.22-5.88, per-position acceptance collapses after position 6).
   NS=7 stays optimal. Do not re-test NS without a draft-quality change.
+
+## LOOP STATE SNAPSHOT (2026-11-10 end of batch 24)
+Current production defaults (all A/B'd, ledger rows carry the numbers):
+- decode band 65<M<=128 -> tuned Triton a8w8_blockscale + group_quant_rn
+  (VLLM_GFX908_DECODE_BLOCKSCALE=1), prefill CK, down_proj exception CK.
+- shared expert on a side stream overlapping the routed gate_up
+  (VLLM_GFX908_SHARED_OVERLAP=1), -4.5ms/step.
+- int8 lm_head (VLLM_GFX908_INT8_LM_HEAD=1), async scheduling, fused top-K
+  combine, parallel-experts routing + bpm fix, NS=7 (NS=9 rechecked, worse).
+Warm full-C12 2048->256 step: 71.5 -> 59.3 ms (-17%); cold-first 55.8 ->
+47.9 ms; acceptance 5.6-6.3 throughout; quality spot check PASS.
+Step budget: MoE grouped 19.8 | dense ~9 | attention+collectives+
+elementwise+sampler ~15 | API/pipeline ~15.
+
+Next (needs a new kernel; no library path remains):
+1. MoE grouped GEMM: multi-expert tile packing or an expert-resident
+   persistent kernel. Config space is closed (block_m 16 optimal, split_k
+   blocked by quant_out, warps/stages flat). 19.8ms/step is the prize.
+2. Non-GEMM ~15ms: attention+collectives+sampler need a decode-step GPU
+   timeline; only STEPPHASE/STEPWALL/STEPTRACE work (rocprofv3 wedges the
+   TP4 server, torch profiler sees no kernels).
+3. Dense decode band: 34.7us(qkv)/26.8(shared gu)/31.7(payload o_proj) are
+   at the kernel's practical limit; a fused two-GEMM or persistent variant
+   would be required for more.
