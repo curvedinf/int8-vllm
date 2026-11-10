@@ -58,7 +58,7 @@ serve() {
   export VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1
   # vLLM CUSTOM all-reduce is the measured fastest on this mesh; AITER CAR is
   # coherent and remains available via VLLM_ROCM_USE_AITER_CUSTOM_AR=1.
-  export VLLM_ROCM_USE_AITER_CUSTOM_AR=0
+  export VLLM_ROCM_USE_AITER_CUSTOM_AR="${VLLM_ROCM_USE_AITER_CUSTOM_AR:-0}"
   # Fused round-to-nearest activation quant (quality default, see
   # INT8_AUDIT_RESULTS.md).
   export VLLM_GFX908_ACT_QUANT=round

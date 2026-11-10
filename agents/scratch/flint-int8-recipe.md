@@ -4314,3 +4314,23 @@ target layer (no effect), so the kernel is saturated at this geometry.
    collectives, est. 2.3 ms if ~25 us each) therefore STAYS UNMEASURED; the
    cheapest remaining bound is the CAR=1 vs AR=1 A/B the recipe already
    supports.
+
+### CAR vs AR collective A/B (batch 39): CAR rejected, but it bounds the AR cost
+`VLLM_ROCM_USE_AITER_CUSTOM_AR=1` (AITER CAR) vs the recipe's 0 (vLLM
+CUSTOM), same protocol at C12:
+  CAR=1: period(2048/128) **43.42 ms**, warm 2048/256 707.0 / 605.7 tok/s,
+         acceptance 4.49
+  AR=1 : period(2048/128) **38.89 ms**, warm 648-673 tok/s, acceptance 5.85
+=> CAR is +4.5 ms/step and costs ~1.4 points of acceptance. Rejected; the
+recipe's AR=1 default stands.
+The useful part: two independent collective implementations differ by
+4.5 ms, so the per-step collective path (94 collectives/step: o_proj payload
++ MoE payload per layer) costs **at least ~4.5 ms** - it is a larger block
+than the ~2.3 ms I had estimated from a 25 us/collective guess, and it is
+inherent to TP4 row-parallel layers. No reduction lever is known: the two
+per-layer collectives sit at different dependency points (o_proj feeds the
+next layer's qkv; the MoE payload feeds the residual), so they cannot fuse.
+The serve script now exposes the lever as
+VLLM_ROCM_USE_AITER_CUSTOM_AR (default 0) instead of hardcoding it.
+Bench spread note: warm 2048/256 samples on one boot ranged 535-707 tok/s
+(TPOT 57.6-59.1), so only period or multi-run medians are meaningful.
