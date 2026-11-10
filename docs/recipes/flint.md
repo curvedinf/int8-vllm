@@ -173,3 +173,68 @@ The MoE block, dense/shared MLP and draft MLP are end-to-end int8:
   `--reasoning-parser qwen3`.
 - The draft export keeps the trained bf16-grid surfaces; re-quantizing
   them would need a new scaled kernel (same exception as Qwen).
+
+## Performance state after the tuning loop (2026-11-10)
+
+Current, warm, C12 × 2048 in / 256 out, seed 62408: **583-700 output
+tok/s, TPOT 57.9-58.8 ms, acceptance 5.3-5.9** (band across boots; the
+spread is run-to-run, not config). Loop start was 71.5 ms / ~520 tok/s.
+Cold-first run ~48-52 ms step; warm-cache TTFT 205-232 ms.
+
+Step budget (per step, measured from the parts):
+
+| Block | ms | state |
+|---|---|---|
+| Attention (target 47 + draft 5 layers) | ~15 | kernel-rewrite only |
+| Routed MoE (gate_up 186 µs + down 96.9 µs per layer) | 13.3 | at 75-80% of achievable |
+| Dense linears (qkv / o_proj / shared MLP) | 5.5 | at kernel limits |
+| Draft graph minus attention | 2.6 | at kernel limits |
+| Sampler | ~1 | — |
+
+Attention cost scales at **~6.8 µs per context token per step** (period
+25.85 / 27.40 / 32.79 / 38.89 ms at 128 / 512 / 1024 / 2048 input tokens);
+halving the sequence count removes exactly half of it. It is compute-bound
+(~200 GFLOP/step at ~2% of fp16 peak), not KV-bandwidth-bound.
+
+**Practical stream ceiling on this mesh is 877-953 GB/s**, not the 1.23
+TB/s nominal. The MoE reads 9.5 GB/step per rank, so its floor is ~10 ms
+and it measures 13.3 — do not expect a 2× there.
+
+### Accepted in the loop
+- MoE down grouped GEMM: `bn=256, num_stages=1` (154.0 -> 96.9 µs/layer;
+  one stage keeps the 32 KB tile so two CTAs are resident per CU).
+- Dense decode band: `bm=16` whenever the grid stays <=120 CTAs
+  (o_proj 30.8->26.6, shared gate_up 24.7->22.3, shared down 18.3->15.2 µs);
+  qkv keeps bm=32.
+- Draft decode tiles: gate_up `bn=256/8 warps` (252.8->214.3 µs), qkv
+  `bm=128/bn=64/ks=4` (79.7->61.3 µs). Payload layers are pinned to
+  bn=128 by the fused int8-scale epilogue and must keep 4 warps
+  (bn=128 + 8 warps measures 7255 µs).
+- Draft grouped-conv base planes dequantized once at load.
+- `KV_DTYPE` passthrough added to the serve script (default
+  `int8_block_g128`); `VLLM_MOE_CFG_LOG=1` reports the effective MoE tile
+  at boot; `VLLM_DRAFTTRACE`/`VLLM_ATTNTRACE` give the draft graph split.
+
+### Closed (measured, do not re-open)
+- **gate_up**: two-K-loop half-tile 199-214 µs vs 186 stock; split-K 236 vs
+  179; persistent kernels 2× slower; bn=64/32 far worse. Its N is one
+  expert because the fused epilogue quantizes in 128-column groups, so
+  2.13 waves (256 tiles / 120 CUs) is inherent.
+- **Attention config surface**: grid (`BLOCK_M` 16->8) worse and flat at
+  long context; forcing the 3D kernel worse and numerics moved; the 3D
+  path already splits the key dimension 8-way; `int8_per_token_head` is
+  slower *and* worse quality, so block dequant is not the cost; TILE_SIZE
+  64->128 gives no gain and moves numerics.
+- **NS** is not a free knob: `NS+1` fixes the captured graph shapes, the
+  MoE prewarm counts and `max_num_scheduled_tokens`. NS=6 and NS=8 fall
+  ~3× onto uncaptured shapes (226-358 tok/s). Keep NS=7.
+
+### Measurement traps on this stack
+- CUDA event pairs recorded inside a hipGraph raise
+  `hipErrorInvalidHandle` at drain — no in-graph kernel timing.
+- Wall-clock around `run_fullgraph` + `synchronize` (`VLLM_GRAPH_SYNC`)
+  drains only part of the queue (it can read *less* than the MoE alone).
+- Ablating the target's attention collapses routing, so the MoE's weight
+  stream collapses too — never ablate a quantity that feeds the router.
+- Bench `tpot_ms` is the per-SSE-chunk interval, not per-token; use
+  `output_tok_s` plus `VLLM_STEPWALL`'s wall-clock `period`.
