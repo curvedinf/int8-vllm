@@ -2850,3 +2850,14 @@ payload residual (Bolt decoder_norm), closing the stream.
   at batch-6 88.4us shape remains the kernel target. Five attempts: v1 hang,
   v2 697us, v3 hang, v4 bit-identical 641us, torch graphsafe 124.4us (tie).
 - Serving incumbent: TPOT 57.59ms (seed 62408), acceptance 5.95.
+
+## PERF LOOP batch 8 result (2026-11-10): two-kernel ACCEPTED (microbench)
+- Two-kernel direct routing: hist 19.4us + offsets_sort 102.8us = 115.8us
+  incl allocs vs production sort-only 128us. BIT-IDENTICAL all structures.
+- Key fix: per-element offset STORES (377us) -> one vector store (19us).
+  Same class as batch-5 reduce fix. The bpm searchsorted loop is 99.6us
+  (next optimization target if needed).
+- Routing total would be 316.8us (topk 201 + 115.8) vs 367.9us (51us/layer
+  = 2.4ms/step). Serving A/B + acceptance gate next. Topk fusion (487us
+  target) is the follow-on.
+- Commits: aiter 211dd94cc4.
