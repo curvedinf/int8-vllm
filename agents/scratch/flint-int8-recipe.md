@@ -2726,3 +2726,19 @@ payload residual (Bolt decoder_norm), closing the stream.
 - Commits: aiter 6aa957b9b8, vllm e975ba70a6.
 - Remaining: persistent MoE verify kernel (gate_up+down+combine in one
   launch/layer), collectives 96/step, attention+logits GEMM busy.
+
+## PERF LOOP batch 6 (2026-11-10): routing dominates MoE
+- _routing_from_topk M=12 = 368.7us (topk 201.5 + sort 128 + scatter/log 39).
+  Per layer: routing 369 > gate_up 140 + down-combine ~213. 47 layers x 369
+  = 17.3ms/step of 59.4ms TPOT (29%). GEMM busy is 15.2ms. Routing is the
+  single largest MoE cost, not the GEMMs.
+- Root cause: routing() re-derives top-K from log(w) logits over 256 experts
+  although the router already computed ids+weights. Direct-from-ids kernel
+  prototype hit 88.4us but mismatched on per-row sort-order semantics
+  (aiter topk does NOT return score-sorted per row; Within-expert rank
+  follows token-major order and the bitmatrix path sorts differently).
+  Reverted; needs a real bit-identical port of sort_tokens_fused semantics.
+- Next: either (a) port sort_tokens_fused exactly with ids+weights as input
+  (no 256-expert scan), or (b) move routing into the gate GEMM epilogue.
+  Both are kernel builds with correctness risk equal to the combine bug
+  in batch 5 (silent residual drop).
