@@ -4118,3 +4118,28 @@ the same shape at int8_per_token_head (no per-128 block scales) vs
 int8_block_g128 in an isolated attention microbench. If the block scales
 are the cost, the lever is the KV layout, not the grid. Split-KV would not
 help a per-tile-bound kernel much and should NOT be built yet.
+
+### CORRECTION + two rejects (batch 29): the 3D kernel is ALREADY KV-segmented
+Reading `aiter/ops/triton/attention/unified_attention.py` properly:
+- The 3D path already splits the key dimension. `MAX_SEGMENTS =
+  min(128, ceil(max_seqlen_k/TILE_SIZE))`, `MIN_SEGMENTS = min(8, ...)`,
+  and `num_segments = clamp(ceil(target_num_prgms/num_2d_prgms), MIN, MAX)`
+  = clamp(ceil(480/60)) = **8** at C12. So the effective program count is
+  60 x 8 = 480, not 60. The "split-KV kernel project" scoped in batch 27 is
+  MOOT - the mechanism exists. Close that line.
+- `use_2d_kernel()` sends sliding-window batches to 2D (the draft, whose 5
+  layers are all sliding_attention), and a batch is "all_decode" only when
+  max_seqlen_q == 1 - which never holds here (NS=7 -> 8 query tokens), so
+  the draft's calls take the PREFILL-shaped 2D config (TILE=32, warps=2,
+  stages=1).
+Two levers tried and REJECTED, both reverted (aiter tree clean):
+1. BLOCK_M 16 -> 8 (BLOCK_Q 2 -> 1, ~108 programs): in=128 period 34.31 vs
+   25.85 baseline, in=2048 38.58 vs 38.89. Splits the QUERY dim, which
+   duplicates the KV read; long-context flat => not occupancy-bound.
+2. AITER_UA_FORCE_3D=1 (send the sliding-window draft to the segmented 3D
+   kernel): period 46.59 vs 38.89 baseline, draft_graph unchanged at
+   6927 us, acceptance 4.31 vs ~5.9 - slower AND numerics moved. Rejected.
+=> Attention's cost is per-tile efficiency, not grid shape, path choice or
+segmentation. Both cheap levers are now closed; what remains is either the
+int8_block_g128 per-tile dequant (untested; needs an isolated microbench
+comparing KV dtypes) or accepting the current kernel.
