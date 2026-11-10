@@ -3574,3 +3574,17 @@ default 0, and Flint's mamba layer does not override
       abstract.py:76 (matches how KDA models do it).
    Then a long prefill can checkpoint mid-chunk and the scheduler's existing
    junction logic (scheduler.py:454+) starts splitting there.
+
+### Prefill cost coefficients for the GDS policy (measured 2026-11-10)
+Single-request TTFT (2 samples each, distinct prompts): 512 -> 317 ms,
+1024 -> 416 ms, 1536 -> 1473 ms (outlier), 2048 -> 280 ms. Not fittable:
+an idle-server TTFT is dominated by a ~250-400 ms fixed cost (scheduler
+wake + first step), and prefix-cache state changes between probes.
+=> Do NOT fit the eviction cost model from single-request TTFT.
+Use the loaded marginal rate instead, which is what eviction actually
+saves: the C12 bench prefills 12 x 2048 in ~5.5 s serialized (~460 ms per
+2048-token request), i.e. ~0.22 ms/token under load vs ~4-5 ms/token
+implied by single-stream numbers. The GDS priority
+(prefill_seconds_saved / blocks_freed) must therefore be expressed in
+loaded-prefill seconds; record D ~= 0.0 (no fixed term under load) and
+E ~= 0.22 ms/token for flint at C12, to be re-measured per model.
