@@ -4165,3 +4165,17 @@ int8_block_g128 recipe (use_2d_kernel routes C12 to 3D), so it has been
 broken since the fork was taken and nothing noticed. Any KV dtype that
 routes to 2D (int8_per_token_head does) crashed the engine at boot with
 NameError. One-line `import os`, committed.
+
+### NS re-sweep at the current build (batch 31): NS=7 confirmed, neighbours collapse
+Same protocol each time (C12, 2048/256, seed 62408, warm runs):
+  NS=7 (default): 583-649 tok/s, TPOT 57.9-58.5, acceptance 5.26-5.90
+  NS=8: 180 / 358 / 279 tok/s, TPOT 68.8 / 120.1 / 141.9, acceptance 3.84
+  NS=6: 243 / 226 / 284 tok/s, TPOT 47.4 / 176.3 / 172.6, acceptance 3.71
+Both neighbours are ~3x slower with TPOT in the 120-176 ms range, which is
+the signature of landing on an uncaptured graph shape / eager fallback
+rather than an acceptance effect (acceptance itself only moves 3.7-3.8).
+=> NS stays 7. IMPORTANT: NS is not a free knob on this build - the draft
+query length (NS+1) fixes the captured graph shapes, the MoE prewarm token
+counts and max_num_scheduled_tokens. If NS is ever changed, those must be
+re-derived or the recipe falls off a cliff (3x) instead of degrading
+gracefully. Do not sweep NS again without prewarming the new shape.
