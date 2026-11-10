@@ -190,7 +190,6 @@ class AttentionRef(nn.Module):
         q_ = (q * self.scale).permute(0, 2, 1, 3)
         k_ = k.permute(0, 2, 1, 3)
         v_ = v.permute(0, 2, 1, 3)
-        scores = torch.matmul(q_, k_.transpose(-1, -2)).float()
         # sink = ONE virtual key in the softmax denominator (upstream
         # kernel semantics), never a broadcast bias on every key.
         # decode_attention.py folds `sink * LOG2E` against the *scaled*
@@ -200,9 +199,7 @@ class AttentionRef(nn.Module):
         finite = torch.isfinite(sink)
         sink_col = torch.where(finite, sink,
                                torch.full_like(sink, float("-inf"))
-                               ).view(1, -1, 1, 1).expand(
-            *scores.shape[:-1], 1)
-        scores = torch.cat([scores, sink_col], dim=-1)
+                               ).view(1, -1, 1, 1)
 
         if getattr(self, "_mask_cache", None) is None or \
                 self._mask_cache.shape[-1] < S or self._mask_cache.device != x.device:
@@ -216,13 +213,25 @@ class AttentionRef(nn.Module):
         allowed = self._mask_cache[:S, :S].to(x.device)
         # sink column is always "allowed" (it IS the virtual key)
         allowed2 = torch.cat(
-            [allowed, allowed.new_ones(S, 1)], dim=-1)[None, None]
+            [allowed, allowed.new_ones(S, 1)], dim=-1)
         dead = ~finite.view(1, -1, 1, 1)
-        attn = torch.softmax(scores.masked_fill(
-            (~allowed2) | dead, float("-inf")), dim=-1)
-        attn = torch.nan_to_num(attn)
-        out = torch.matmul(attn[..., :S].to(v_.dtype), v_) \
-            .permute(0, 2, 1, 3)
+        # Query-slab attention: [B, H, S, S] fp32 OOMs past ~8k tokens.
+        # Mathematically identical to the full form; see StreamedFlintTeacher.
+        qslab = max(1, int(os.environ.get("FLINT_ATTN_QSLAB", "1024")))
+        out = torch.empty(B, self.num_heads, S, self.head_dim,
+                          device=x.device, dtype=v_.dtype)
+        for q0 in range(0, S, qslab):
+            q1 = min(S, q0 + qslab)
+            sc = torch.matmul(q_[:, :, q0:q1],
+                              k_.transpose(-1, -2)).float()
+            sc = torch.cat([sc, sink_col.expand(B, -1, q1 - q0, 1)], dim=-1)
+            m = (~allowed2[q0:q1])[None, None]
+            attn = torch.softmax(
+                sc.masked_fill(m | dead, float("-inf")), dim=-1)
+            attn = torch.nan_to_num(attn)
+            out[:, :, q0:q1] = torch.matmul(attn[..., :S].to(v_.dtype), v_)
+            del sc, attn, m
+        out = out.permute(0, 2, 1, 3)
         out = out.reshape(B, S, self.num_heads * self.head_dim)
         out = self.o(out)
         if getattr(self, "_partial_output", False):
@@ -1127,6 +1136,27 @@ class StreamedFlintTeacher(nn.Module):
         return _tp_gather_logits(logits, dim=-1)
 
     @torch.no_grad()
+    def _head_chunked(self, x, chunk: int = 1024):
+        """Sequence-chunked full-vocab head for the KD-cache sweep.
+
+        `_head` materializes [B, S, V] fp32 on device: 16.3 GiB at S=16384,
+        which OOMs the 32 GB ranks (measured 2026-11-10). Chunking bounds the
+        device logits to `chunk` x V and keeps the per-rank lm_head slice
+        staged once, so long-context rungs can warm their teacher cache.
+        """
+        dev = self.device
+        h = self._rms(x, self._t("model.norm.weight").to(dev))
+        lhw = self._t("lm_head.weight",
+                      None if self.presplit else slice(self.v0, self.v1))
+        lhw = lhw.to(dev).to(h.dtype)
+        outs = []
+        for j in range(0, h.shape[1], chunk):
+            lg = torch.nn.functional.linear(h[:, j:j + chunk], lhw).float()
+            outs.append(_tp_gather_logits(lg, dim=-1).to(torch.float16).cpu())
+            del lg
+        return outs[0] if len(outs) == 1 else torch.cat(outs, dim=1)
+
+    @torch.no_grad()
     def sweep_states(self, batches, exits):
         """Layer-major sweep that captures hidden states after the given
         layer indices (the DFlash2 draft's target exit states) instead of
@@ -1176,7 +1206,7 @@ class StreamedFlintTeacher(nn.Module):
             for i in range(len(xs)):
                 xs[i] = self._apply_layer(li, xs[i], poss[i], W)
             del W
-        return [self._head(x).to(torch.float16).cpu() for x in xs]
+        return [self._head_chunked(x) for x in xs]
 
     @torch.no_grad()
     def forward(self, input_ids, positions=None):
@@ -1279,37 +1309,54 @@ class StreamedFlintTeacher(nn.Module):
         q_ = (q * (hd ** -0.5)).permute(0, 2, 1, 3)       # [B, qh, S, hd]
         k_ = k.permute(0, 2, 1, 3)
         v_ = v.permute(0, 2, 1, 3)
-        scores = torch.matmul(q_, k_.transpose(-1, -2)).float()
         # sink = ONE virtual key in the softmax denominator (upstream
         # kernel semantics); decode_attention.py adds `sink * LOG2E` to the
         # *scaled* logits — the sink is in natural logit units, not raw qk.
         if _abl == "sinks":
             sink = torch.full_like(sink, float("-inf"))
-        if os.environ.get("FLINT_DBG_SCORES") and li == int(
-                os.environ["FLINT_DBG_SCORES"]) and self.rank == 0:
-            mx = scores.amax(dim=-1)
-            print(f"[scores L{li}] head-max: min {mx.min():.2f} "
-                  f"mean {mx.mean():.2f} max {mx.max():.2f} | raw sinks "
-                  f"{W['sink'].min():.2f}..{W['sink'].max():.2f} "
-                  f"scaled {sink.min():.2f}..{sink.max():.2f}", flush=True)
         sink_col = torch.where(torch.isfinite(sink), sink,
                                torch.full_like(sink, float("-inf"))
-                               ).view(1, -1, 1, 1).expand(
-            *scores.shape[:-1], 1)
-        scores = torch.cat([scores, sink_col], dim=-1)
-        qi = torch.arange(S, device=dev)[:, None]
-        ki = torch.arange(S, device=dev)[None, :]
-        mask = ki > qi
-        if self._layer_types[li] == "sliding_attention" and _abl != "window":
-            mask = mask | (qi - ki >= self._window)
-        mask = torch.cat(
-            [mask, mask.new_zeros(S, 1)], dim=-1)[None, None]
+                               ).view(1, -1, 1, 1)
         dead = (~torch.isfinite(sink)).view(1, -1, 1, 1)
-        attn = torch.softmax(
-            scores.masked_fill(mask | dead, float("-inf")), dim=-1)
-        attn = torch.nan_to_num(attn)
-        out = torch.matmul(attn[..., :S].to(v_.dtype), v_) \
-            .permute(0, 2, 1, 3).reshape(B, S, qh * hd)
+        sliding = (self._layer_types[li] == "sliding_attention"
+                   and _abl != "window")
+        ki = torch.arange(S, device=dev)[None, :]
+        # Query-slab attention: materializing [B, qh, S, S] fp32 OOMs the
+        # 32 GB ranks past ~8k tokens (8.0 GiB at S=16384 for 8 heads/rank).
+        # Slabbing the query axis is mathematically identical to the full
+        # form (same fp32 scores, same mask, same sink column) and bounds the
+        # live scores to FLINT_ATTN_QSLAB x S.
+        qslab = max(1, int(os.environ.get("FLINT_ATTN_QSLAB", "1024")))
+        out = torch.empty(B, qh, S, hd, device=dev, dtype=v_.dtype)
+        dbg_mx = None
+        for q0 in range(0, S, qslab):
+            q1 = min(S, q0 + qslab)
+            scores = torch.matmul(
+                q_[:, :, q0:q1], k_.transpose(-1, -2)).float()
+            scores = torch.cat(
+                [scores, sink_col.expand(B, -1, q1 - q0, 1)], dim=-1)
+            qi = torch.arange(q0, q1, device=dev)[:, None]
+            mask = ki > qi
+            if sliding:
+                mask = mask | (qi - ki >= self._window)
+            mask = torch.cat(
+                [mask, mask.new_zeros(q1 - q0, 1)], dim=-1)[None, None]
+            if os.environ.get("FLINT_DBG_SCORES") and li == int(
+                    os.environ["FLINT_DBG_SCORES"]) and self.rank == 0:
+                mx = scores.amax(dim=-1)
+                dbg_mx = mx if dbg_mx is None else torch.cat(
+                    [dbg_mx, mx], dim=-1)
+            attn = torch.softmax(
+                scores.masked_fill(mask | dead, float("-inf")), dim=-1)
+            attn = torch.nan_to_num(attn)
+            out[:, :, q0:q1] = torch.matmul(attn[..., :S].to(v_.dtype), v_)
+            del scores, attn, mask
+        if dbg_mx is not None:
+            print(f"[scores L{li}] head-max: min {dbg_mx.min():.2f} "
+                  f"mean {dbg_mx.mean():.2f} max {dbg_mx.max():.2f} | raw "
+                  f"sinks {W['sink'].min():.2f}..{W['sink'].max():.2f} "
+                  f"scaled {sink.min():.2f}..{sink.max():.2f}", flush=True)
+        out = out.permute(0, 2, 1, 3).reshape(B, S, qh * hd)
         attn_out = torch.nn.functional.linear(out, W["o"])  # partial [B, S, H]
         if _abl == "attn_zero":   # bisect: attention contribution = 0
             attn_out = torch.zeros_like(attn_out)

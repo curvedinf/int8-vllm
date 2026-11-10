@@ -492,7 +492,10 @@ def main():
         if logits_t is None:
             with torch.no_grad():
                 logits_t = teacher(x)
-        t_flat = logits_t.reshape(-1, logits_t.shape[-1]).float()
+        # Keep the teacher logits in their stored dtype: .float() on the
+        # whole tensor costs 2x (16.3 GiB at seq 16384) and OOMed the
+        # long-context rungs. Each loss chunk casts its own slice.
+        t_flat = logits_t.reshape(-1, logits_t.shape[-1])
         y_flat = y.reshape(-1)
         n = y_flat.numel()
         T = args.distill_temperature
@@ -500,11 +503,11 @@ def main():
         kd_sum = torch.zeros((), device=h.device)
         for j in range(0, n, args.logits_chunk):
             sl = slice(j, j + args.logits_chunk)
-            lc = student.head(h[sl])
+            lc = student.head(h[sl]).float()
             ce_sum = ce_sum + F.cross_entropy(lc, y_flat[sl],
                                               reduction="sum")
             lp = F.log_softmax(lc / T, dim=-1)
-            pt = F.softmax(t_flat[sl] / T, dim=-1)
+            pt = F.softmax(t_flat[sl].float() / T, dim=-1)
             kd_sum = kd_sum + F.kl_div(lp, pt, reduction="sum")
         loss = (ce_sum + args.distill_weight * kd_sum) / n
         return loss, (ce_sum / n).detach(), (kd_sum / n).detach()
