@@ -3951,3 +3951,25 @@ the graph replay; there is no Python glue to trim. Inside it: GEMMs ~1.9 ms
 graph kernels that have not been attributed (norms, quant seams, selector).
 Attributing that needs a kernel-level trace, and rocprofv3 on the TP4
 server is still unusable.
+
+### In-graph event tracing does NOT work on this ROCm stack (batch 23)
+Tried to attribute the draft graph's ~4.6 ms with CUDA event pairs recorded
+inside the captured graph (the mechanism the attention trace claims to
+use). Two attempts:
+- events created per call during capture, stashed and drained post-replay:
+  `elapsed_time` raises `hipErrorInvalidHandle` at drain.
+- keeping only the newest capture's pair (warmup captures supersede
+  earlier ones): same error.
+=> torch.cuda.Event record nodes captured into a hipGraph do not produce a
+queryable handle after replay here. Note `_drain_attntrace` is wrapped in
+`try/except Exception: pass`, so any "[attntrace-graph]" output in earlier
+logs came from eager (non-captured) calls; the graph path was never
+actually verified on this stack. Do not retry in-graph event timing.
+Remaining options for the draft graph, in cost order: (a) ablation boots
+(stub the conv planes / the MLP / attention one at a time and read the
+existing `[dsub] draft_graph` number, which is measured OUTSIDE the graph
+and works), (b) rocprofv3, still unusable on the TP4 server.
+Draft component estimate from shapes (not measured): 20 big GEMMs 1.9 ms,
+10 kernel_projection GEMMs (N=1280, K=5120) ~0.12, 20 grouped-conv
+elementwise ~0.2, attention 5 x ~0.02-0.1, norms ~0.05, shared int8 head
+0.31 => ~2.7 ms of the 6.95, leaving ~4.2 ms unattributed.
