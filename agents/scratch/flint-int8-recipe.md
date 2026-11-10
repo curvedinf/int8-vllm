@@ -2879,3 +2879,13 @@ payload residual (Bolt decoder_norm), closing the stream.
   structure derivation.
 - Fast path env flag left in code (default on, bounded M*K<=128); prod
   behavior for M>21 unchanged (falls back to routing()).
+
+## PERF LOOP batch 8 incident (2026-11-10): serving crashes from fast path
+- Direct fast path default-on crashed two boots (profile M=2048, draft M=4096).
+  Patches: bound M*K<=128 + default OFF. Baseline restored TPOT 57.77ms,
+  acceptance 6.09. Fast-path code dormant behind env=1.
+- Dense MoE GEMM analysis: gemm_a8w8_blockscale autotunes BLOCK_M/N/K via
+  _get_config per (M,N,K) with tl.dot inner loop; no per-token persistent
+  state across M tiles (each M-block streams W independently). At decode
+  M=12/96 the GEMM is weight-stream bound: W read dominates, layout wins
+  would need a persistent-column design (batch 4 hypothesis, kernel build).
