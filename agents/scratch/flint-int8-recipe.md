@@ -2641,3 +2641,12 @@ payload residual (Bolt decoder_norm), closing the stream.
   not bringing it up; no microbench data was collected from it.
 - Keep measuring collectives through production A/Bs (per-call Python overhead
   never appears inside CUDA graphs anyway).
+
+## PERF LOOP batch 3 verdict (2026-11-10)
+- The 1024-output warm-run measurement was TTFT-confounded (256-token
+  prefill of cached batches); no throughput change claimed from it.
+- 96-token steady decode at the current config: TPOT 58.59 ms,
+  output 87.5 tok/s aggregate (tile/warp experiments do not touch it
+  because router order and draft counts dominate the decode batching).
+- Remaining honest candidates: a Triton persistent-MoE reduction and a
+  blocked-GEMM rewrite of the gate_up/down GEMMs, both kernel builds.
