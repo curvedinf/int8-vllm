@@ -306,6 +306,13 @@ class A8W8BlockscaleMoEMethod(AutoGPTQMoEMethod):
             swiglu_add_residual=False, quant_out=True, **kw)
         if _dbg:
             print(f"[moe8r] cap={_cap} gateup-done", flush=True)
+        # Join the shared-expert side stream (FlintSparseMoeBlock.forwards
+        # it there so the fused gather hides it). It only has to be done
+        # before the combine epilogue below consumes residual_q/rs.
+        _st = getattr(layer, "_shared_stream", None)
+        if _st is not None:
+            torch.cuda.current_stream().wait_stream(_st)
+            layer._shared_stream = None
         shared = getattr(layer, "_shared_out", None)
         layer._shared_out = None
         rq = rs = None

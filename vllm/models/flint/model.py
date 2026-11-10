@@ -338,7 +338,23 @@ class FlintSparseMoeBlock(nn.Module):
             )
         from vllm.model_executor.layers.residual_int8 import ResidualInt8
 
-        shared = self.shared_expert(hidden_states)
+        # The shared expert is independent of the routed gate_up and is only
+        # needed by the routed down's combine epilogue (it feeds
+        # residual_q/rs). Run it on a side stream so the fused expert gather
+        # hides it; the routed path joins the stream right before the down.
+        _ov = os.environ.get("VLLM_GFX908_SHARED_OVERLAP", "1") == "1"
+        if _ov and hidden_states.is_cuda:
+            st = getattr(self, "_shared_stream", None)
+            if st is None:
+                st = self._shared_stream = torch.cuda.Stream(
+                    device=hidden_states.device)
+            st.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(st):
+                shared = self.shared_expert(hidden_states)
+            _tgt = getattr(self.experts, "routed_experts", self.experts)
+            _tgt._shared_stream = st
+        else:
+            shared = self.shared_expert(hidden_states)
         if not isinstance(shared, ResidualInt8):
             # Non-int8 shared path (other quant backends): keep the branch
             # explicitly instead of dropping it now that the runner no
