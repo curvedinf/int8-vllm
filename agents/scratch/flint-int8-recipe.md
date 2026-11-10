@@ -3311,3 +3311,6 @@ Remaining options with priors (pick one as the next big slice):
 4. MoE grouped-GEMM config: kernel picks block_n=256/block_k=128/split_k=1
    at block_m=16; no external knob; a split-K variant of the grouped kernel
    could help the gate_up (N=1024,K=2048) case.
+- Batch-sharded sampling tested (compute_logits_local + flag): cold 53.98
+  vs 54.15, warm 71.38 vs 70.70 -> no win, default stays off (BATCH_SHARDED=0).
+  compute_logits_local kept (inert without the flag).
