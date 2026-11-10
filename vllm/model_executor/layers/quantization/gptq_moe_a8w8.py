@@ -74,6 +74,10 @@ def _routing_from_topk(topk_ids: torch.Tensor, topk_weights: torch.Tensor,
     if (
         os.environ.get("VLLM_GFX908_DIRECT_ROUTING", "1") == "1"
         and 0 < topk_ids.shape[0] <= 256
+        # _offsets_sort_scatter sorts over LOAD=128 lanes; larger batches
+        # (profile/prefill) never fitted and would fault the GEMM on empty
+        # gather slots. Decode graphs are <=128 tokens by construction.
+        and topk_ids.shape[0] * topk_ids.shape[1] <= 128
     ):
         try:
             from aiter.ops.triton._triton_kernels.moe.reduce import (
