@@ -61,7 +61,77 @@ def _routing_from_topk(topk_ids: torch.Tensor, topk_weights: torch.Tensor,
     ``routing()`` can build the structures without host-side loops (CUDA-
     graph safe; ``routing_torch``'s block_pid_map loop is not).
     """
-    from aiter.ops.triton.moe.moe_routing.routing import routing
+    from aiter.ops.triton.moe.moe_routing.routing import (
+        ExptData,
+        RoutingData,
+        routing,
+    )
+
+    # Two-kernel direct routing (bit-identical, batch 8): reuse the same
+    # logits->topk() step as routing() but run structures via the fused
+    # two-kernel direct over (expt_indx, expt_scal). Env-gated, default on;
+    # falls back to routing() when logits/topk path is unavailable.
+    if (
+        os.environ.get("VLLM_GFX908_DIRECT_ROUTING", "1") == "1"
+        and 0 < topk_ids.shape[0] <= 256
+    ):
+        try:
+            from aiter.ops.triton._triton_kernels.moe.reduce import (
+                _hist_atomic,
+                _offsets_sort_scatter,
+            )
+            from aiter.ops.triton.moe.moe_routing.topk import topk as _topk_fn
+            import triton as _triton
+
+            valid = topk_ids >= 0
+            _ids = torch.where(
+                valid, topk_ids, torch.zeros_like(topk_ids)
+            ).long()
+            _w = torch.where(
+                valid, topk_weights.float(),
+                torch.zeros_like(topk_weights, dtype=torch.float32),
+            )
+            _logits = torch.full(
+                (topk_ids.shape[0], n_expts), float("-inf"),
+                device=topk_ids.device, dtype=torch.float32,
+            )
+            _logits.scatter_(1, _ids, torch.log(_w.clamp_min(1e-30)))
+            _hist_m = _triton.next_power_of_2(topk_ids.shape[0])
+            _expt_scal, _expt_indx, _ = _topk_fn(
+                _logits, topk_ids.shape[1], apply_softmax=True,
+                HIST_BLOCK_M=_hist_m,
+            )
+            _expt_indx = _expt_indx.to(torch.int16)
+            _n_gates = topk_ids.shape[0] * topk_ids.shape[1]
+            _block_m = max(16, min(_triton.next_power_of_2(
+                max(1, _n_gates // n_expts)), 128))
+            _hist = torch.zeros(n_expts, dtype=torch.int32,
+                                device=topk_ids.device)
+            _topk_out = torch.empty(_n_gates, dtype=torch.int32,
+                                    device=topk_ids.device)
+            _gate_idx = torch.empty(_n_gates, dtype=torch.int32,
+                                    device=topk_ids.device)
+            _gate_scal = torch.empty(_n_gates, dtype=torch.float32,
+                                     device=topk_ids.device)
+            _off_raw = torch.empty(n_expts + 1, dtype=torch.int32,
+                                   device=topk_ids.device)
+            _off_pad = torch.empty(n_expts + 1, dtype=torch.int32,
+                                   device=topk_ids.device)
+            _bpm = torch.full((_n_gates,), -1, dtype=torch.int32,
+                              device=topk_ids.device)
+            _hist_atomic[(_triton.cdiv(_n_gates, 64),)](
+                _expt_indx, _hist, topk_ids.shape[0], K=topk_ids.shape[1])
+            _offsets_sort_scatter[(1,)](
+                _expt_indx, _expt_scal.float(), _hist, _topk_out, _gate_idx,
+                _gate_scal, _off_raw, _off_pad, _bpm, topk_ids.shape[0],
+                n_expts, K=topk_ids.shape[1], BLOCK_M=_block_m)
+            _expt_data = ExptData(_hist, _off_raw, _off_pad, _bpm)
+            _rd = RoutingData(
+                _block_m, _gate_scal, _hist, n_expts, topk_ids.shape[1],
+                _expt_data)
+            return _rd, _topk_out.to(torch.uint16), _gate_idx.to(torch.uint16)
+        except Exception:
+            pass
 
     _dbg = os.environ.get("VLLM_MOE_A8W8_DBG")
     if _dbg:
