@@ -3338,3 +3338,8 @@ Remaining options with priors (pick one as the next big slice):
   the tuned path with bm=32; (b) NUM_KSPLIT sweep per shape at the *served*
   C12 shape with 12 streams (contention may shift the optimum); (c) the same
   treatment for the MoE grouped kernel's gate_up.
+- Shape-aware refinement: down_proj (2048x1536) stays CK (25.6 vs 31.7us).
+  After exclusion: cold 52.73, warm 63.71/63.74/64.09, acceptance 5.79/5.91.
+  Cumulative warm step 71.5 -> 63.7 ms (-10.9%).
+- Prefill stays CK: at M=2048 CK wins (qkv 203.4 vs 254.4, gate_up 323.8
+  vs 663.4). The 65<M<=128 dispatch band is correct.
