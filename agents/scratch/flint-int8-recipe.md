@@ -3729,3 +3729,18 @@ construction) is requantized to per-channel int8 at load
 (`VLLM_GFX908_DF2_CODEBOOK_I8=1`). So the draft has no bf16 weight GEMM
 either; the only float surfaces are the audited ones (selector codebooks'
 dequant maths, conv planes, fc).
+
+### MoE grouped GEMM: why "multi-expert tile packing" does NOT trivially help
+Measured facts (C12, per-rank): 576 real gate rows (96 tokens x top-6) over
+256 experts (~2.25 rows/expert). The kernel runs one 16-row tile per touched
+expert -> 256 tiles x 16 rows = 4096 padded rows, ~7x padding.
+Naive packing idea: put ~7 experts in one 16-row tile. Rejected on evidence:
+each output row needs its OWN expert's [K,N] weight slice, so a tile spanning
+experts cannot share a weight tile in a plain GEMM; the kernel would have to
+loop K per expert inside the tile, which is exactly what lowering block_m
+does - and block_m=8 measured 3.5x WORSE on gate_up (705 vs 201us), block_m=4
+worse too. The small-tile regime is launch/scheduling-bound, not FLOP-bound.
+=> A win requires a persistent MoE kernel that dispatches expert tiles from a
+work queue on the same CTAs (no per-tile launch), with the SwiGLU+GS128
+quant epilogue fused. That is a from-scratch kernel (multi-hour), not a
+config or packing change. Until then the 19.8 ms/step block stands.
