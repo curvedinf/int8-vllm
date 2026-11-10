@@ -44,18 +44,20 @@ def quant_per_token_head(x):
 
 
 def build(ctx=CTX, num_seqs=NUM_SEQS, q_per_seq=Q_PER_SEQ, kv_heads=None,
-          window=-1):
+          window=-1, block_size=None, q_heads=None):
+    q_heads = Q_HEADS if q_heads is None else q_heads
     kv_heads = KV_HEADS if kv_heads is None else kv_heads
+    block_size = BLOCK_SIZE if block_size is None else block_size
     dev = "cuda"
     torch.manual_seed(0)
-    q = torch.randn((num_seqs * q_per_seq, Q_HEADS, HEAD_DIM),
+    q = torch.randn((num_seqs * q_per_seq, q_heads, HEAD_DIM),
                     dtype=DTYPE, device=dev) / 8
-    max_blocks = (ctx + BLOCK_SIZE - 1) // BLOCK_SIZE
+    max_blocks = (ctx + block_size - 1) // block_size
     num_blocks = num_seqs * max_blocks + 1
-    k_cache = torch.zeros((num_blocks, BLOCK_SIZE, kv_heads, HEAD_DIM),
+    k_cache = torch.zeros((num_blocks, block_size, kv_heads, HEAD_DIM),
                           dtype=torch.int8, device=dev)
     v_cache = torch.zeros_like(k_cache)
-    k_scale = torch.ones((num_blocks, BLOCK_SIZE, kv_heads), device=dev)
+    k_scale = torch.ones((num_blocks, block_size, kv_heads), device=dev)
     v_scale = torch.ones_like(k_scale)
     block_table = torch.zeros((num_seqs, max_blocks), dtype=torch.int32,
                               device=dev)
@@ -63,17 +65,22 @@ def build(ctx=CTX, num_seqs=NUM_SEQS, q_per_seq=Q_PER_SEQ, kv_heads=None,
                       device=dev) / 8
     value = torch.randn((num_seqs, ctx, kv_heads, HEAD_DIM), dtype=DTYPE,
                         device=dev) / 8
+    interleave = os.environ.get("ATTN_INTERLEAVE") == "1"
     for s in range(num_seqs):
         kq, ks = quant_per_token_head(key[s])
         vq, vs = quant_per_token_head(value[s])
         for b in range(max_blocks):
-            blk = s * max_blocks + b
+            # Contiguous per sequence vs round-robin across sequences (the
+            # engine interleaves blocks between concurrent requests and the
+            # draft uses private slot rows).
+            blk = b * num_seqs + s if interleave else s * max_blocks + b
             block_table[s, b] = blk
-            lo = b * BLOCK_SIZE
-            k_cache[blk] = kq[lo:lo + BLOCK_SIZE]
-            v_cache[blk] = vq[lo:lo + BLOCK_SIZE]
-            k_scale[blk] = ks[lo:lo + BLOCK_SIZE]
-            v_scale[blk] = vs[lo:lo + BLOCK_SIZE]
+            lo = b * block_size
+            hi = lo + block_size
+            k_cache[blk] = kq[lo:hi]
+            v_cache[blk] = vq[lo:hi]
+            k_scale[blk] = ks[lo:hi]
+            v_scale[blk] = vs[lo:hi]
     out = torch.zeros_like(q)
     q_lens = torch.full((num_seqs,), q_per_seq, dtype=torch.int32, device=dev)
     cu_q = torch.cat([torch.zeros(1, dtype=torch.int32, device=dev),
@@ -127,12 +134,17 @@ def main():
              (2, -1, "kvh2 full"),
              (2, 2048, "draft-like kvh2 window2048"),
              (1, 2048, "kvh1 window2048")]
+    if os.environ.get("ATTN_UNSHARDED") == "1":
+        cases.append((8, 2048, "draft UNSHARDED qh32 kvh8 win2048"))
     seqs = int(os.environ.get("ATTN_SEQS", NUM_SEQS))
     qps = int(os.environ.get("ATTN_QPS", Q_PER_SEQ))
     for ctx in ctxs:
         for kvh, win, tag in cases:
             t = build(ctx=ctx, num_seqs=seqs, q_per_seq=qps,
-                      kv_heads=kvh, window=win)
+                      kv_heads=kvh, window=win,
+                      block_size=int(os.environ.get("ATTN_BLOCK", "0")) or None,
+                      q_heads=32 if os.environ.get("ATTN_UNSHARDED") == "1"
+                      and kvh == 8 else None)
             try:
                 us = bench(lambda: call(t))
                 print(f"ctx={ctx:5d} {tag:28s}: {us:8.1f} us/layer",

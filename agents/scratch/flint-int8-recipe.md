@@ -4234,3 +4234,23 @@ qkv/o_proj/norms - but those microbench at 96 us/layer (0.48 ms for five),
 leaving ~2.2 ms in the module that the harness cannot see. That residual is
 the next thing to measure, and it needs a sub-module ablation (boots), not
 this harness.
+
+### Draft attention module decomposed (batch 35): 3.29 call + 1.04 rest
+Ablations against the working [dsub] draft_graph timer (full 6930 us):
+  whole self_attn stubbed    -> 2600 us  => module costs 4.33 ms
+  only self.attn(q,k,v) stub -> 3645 us  => the ATTENTION CALL is 3.29 ms,
+                                            projections/norms/rope 1.04 ms
+So the draft's attention kernel call is the item (3.29 ms), not its GEMMs.
+But the offline harness puts the same shape at 230 us/layer = 1.15 ms for
+five layers, so in-graph the call costs **2.9x the isolated measurement**.
+Ruled out as explanations (all measured in scripts/bench_attn_micro.py):
+  - block-table locality: interleaving blocks across sequences 230 -> 234 us
+  - KV block size: block 128/64/32/16 -> 232/234/223/264 us (draft shape)
+  - head sharding: 32 q / 8 kv heads ("unsharded draft") 261 us, not ~650
+  - segment count: 4/8/16/32 -> 103/108/115/144 us
+Not yet ruled out: the block_g128 KV dtype (the harness can only build
+per-token-head caches - the block-g128 cache is a packed tensor with the
+scales carved out of the padding), bf16 vs fp16 q/k/v, the in-graph KV
+cache update that the harness omits, and L2 contention with the preceding
+layers. Next: reproduce with block_g128 KV, which likely means instantiating
+the backend's scale-view carving rather than hand-building the cache.
