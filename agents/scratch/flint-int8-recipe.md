@@ -2921,3 +2921,15 @@ payload residual (Bolt decoder_norm), closing the stream.
 - Step coverage now: CPU 6.44 + MoE 15.2 + collectives 1.15 + dense ~27 +
   attn/logits ~14 = 63.8 (overcovers 57.77 by 6ms; dense 110us is an
   upper bound at M=96 padding 128).
+
+## PERF LOOP batch 10 result (2026-11-10): graph GPU time 30.2ms/step
+- Around-replay CUDA events (in-graph pairs fail hipErrorInvalidHandle on
+  cross-replay query; around-replay works): total graph GPU 30.2ms/step.
+- Step split: in-graph kernels 30.2ms + non-graph 27.6ms = 57.8ms TPOT.
+  In-graph covers ALL model compute (attn+dense+MoE GEMMs). Non-graph is
+  draft forward, sampler, GS128 collectives outside graphs, pipeline bubbles.
+- Dense MoE GEMM busy 15.2ms > in-graph remainder (~15ms for dense+attn);
+  consistent with apex: graph kernels total 30.2ms.
+- Next lever: non-graph 27.6ms (draft verify propose path, sampling, AR
+  outside graphs). Propose is 2.3ms CPU (pphase); sampler s_logits+reject
+  ~1.8ms CPU. The GPU part of non-graph needs its own events.
