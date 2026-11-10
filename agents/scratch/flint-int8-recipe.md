@@ -3754,3 +3754,12 @@ latency-bound (as the bm=8 regression indicates) both cases cost the same,
 so it cannot separate the hypotheses. Deprioritised - the bm=8 evidence
 already says the small-tile regime is overhead-bound, which is what a
 persistent kernel would fix.
+
+### MoE is expert-weight-bandwidth bound at C12 (2026-11-10, closes the kernel line)
+gate_up reads 256 experts x (2048x256) int8 = 134 MB/layer = 6.3 GB/step
+(47 layers). At ~1.2 TB/s that is a ~5.3 ms/step floor; measured 9.8 ms
+(54% of peak). down reads 67 MB/layer (~3.2 GB/step, ~2.6 ms floor, measured
+6.6 ms). With ~2.25 rows/expert there is no reuse, so a persistent kernel or
+tile packing cannot help - the traffic is the work.
+=> Levers for this block: higher concurrency (more rows per expert) or a
+model-level change (fewer/wider experts). Close the MoE kernel line.
