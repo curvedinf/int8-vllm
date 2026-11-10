@@ -2337,7 +2337,6 @@ class EngineArgs:
             ),
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
             mamba_block_size=self.mamba_block_size,
-            mamba_block_size=self.mamba_block_size,
             prefix_match_unit=self.prefix_match_unit,
             prefix_cache_checkpoint_tokens=self.prefix_cache_checkpoint_tokens,
             enable_mamba_shared_prefix_checkpoint=(
