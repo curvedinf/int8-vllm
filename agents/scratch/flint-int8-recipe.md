@@ -3554,3 +3554,23 @@ Plan (minimal, model-agnostic):
 4. Prefill export: with `has_prefill_checkpoint_blocks` already on, allow a
    chunk to run past a checkpoint position (FlashStates' --mamba-prefill-
    export analogue). Verify `num_prefill_checkpoint_blocks > 0` for flint.
+
+### Prefill-export status for flint (verified)
+`num_prefill_checkpoint_blocks` is only set by the KDA linear-attention
+models (glm5next/common/kda.py:174, kimi_k3/*/kda.py) via
+`int(alignment is not None)`. Flint's MambaSpec is built in
+vllm/model_executor/layers/mamba/abstract.py:76 and leaves it at the
+default 0, and Flint's mamba layer does not override
+`get_prefill_checkpoint_alignment()` (returns None today), so
+`get_mamba_prefill_checkpoint_alignment()` short-circuits to None and
+`MambaManager.has_prefill_checkpoint_blocks` is False.
+=> To get FlashStates' prefill export for flint:
+   1. implement `get_prefill_checkpoint_alignment()` on Flint's mamba mixer
+      (return the token grid the backend can export a state on, e.g. 128);
+   2. implement a `MambaPrefillCheckpointExporter` for it (mirror
+      vllm/model_executor/layers/mamba/kda_checkpoint.py, which wraps the
+      KDA kernel's checkpoint output);
+   3. pass `num_prefill_checkpoint_blocks=int(alignment is not None)` in
+      abstract.py:76 (matches how KDA models do it).
+   Then a long prefill can checkpoint mid-chunk and the scheduler's existing
+   junction logic (scheduler.py:454+) starts splitting there.
