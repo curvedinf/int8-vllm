@@ -4093,3 +4093,28 @@ ms/step (~25% of the step). This is the largest remaining item in the
 recipe and it is in OUR aiter fork, not upstream.
 Caveat: the recipe mandates AITER unified attention, so this must be a
 change to that kernel, not a backend swap.
+
+### Attention: query-split does NOT work (batch 28); the occupancy model is wrong
+Tested the cheap lever before writing a split-KV kernel: the 3D kernel's
+grid is (kv_heads, q_blocks) with BLOCK_M=16 -> BLOCK_Q=2 -> 60 programs at
+C12. Forcing BLOCK_M=8 (BLOCK_Q=1) takes it to ~108 programs.
+  in=128  period 34.31 ms (baseline 25.85) - WORSE by 8.5 ms
+  in=2048 period 38.58 ms (baseline 38.89) - FLAT
+  recipe 2048/256: 37.98 ms period, no gain
+Reverted (the aiter knob is gone again; the change is not in the tree).
+Why this matters more than the numbers: BLOCK_M=8 splits the QUERY
+dimension, so every program re-reads the whole KV - total KV traffic
+doubles - and yet the long-context time did not move. If the kernel were
+occupancy-bound (60 of 120 CUs idle), doubling the programs should have
+helped even with the extra traffic. It did not.
+=> The earlier "60 programs on 120 CUs so it is occupancy-starved" story is
+NOT supported. Per-tile cost is the real anomaly: at 0.29 ms per layer with
+~17 KV tiles per program, each 16x128x128 tile costs ~17 us against a
+~1-2 us expectation (~10x off), which points at per-tile work rather than
+program count - prime suspects are the int8_block_g128 KV dequant and the
+block-table indirection inside the tile loop.
+NEXT (before any split-KV kernel): measure per-tile cost directly - compare
+the same shape at int8_per_token_head (no per-128 block scales) vs
+int8_block_g128 in an isolated attention microbench. If the block scales
+are the cost, the lever is the KV layout, not the grid. Split-KV would not
+help a per-tile-bound kernel much and should NOT be built yet.
