@@ -3418,3 +3418,34 @@ Next (needs a new kernel; no library path remains):
 3. Dense decode band: 34.7us(qkv)/26.8(shared gu)/31.7(payload o_proj) are
    at the kernel's practical limit; a fused two-GEMM or persistent variant
    would be required for more.
+
+## NEW WORK (2026-11-10): FlashStates-style caching for Flint
+Measured baseline (single request, greedy): turn1 2048 new -> TTFT 391 ms;
+turn2 same 2048 + 128 new -> TTFT 1165 ms (3x SLOWER than the miss);
+turn3 different 1024-token prefix + 64 new -> 3519 ms.
+=> Flint's warm-cache path rebuilds the mamba state over the cached prefix.
+
+FlashStates (github.com/FutureMLS-Lab/FlashStates) mechanisms to port:
+1. Frontier checkpoint (ASC): save the recurrent state at the exact end of
+   each request's prompt/prefill and resume there next turn.
+2. Cost-aware eviction (GreedyDual): evict whole resumable states (state +
+   the KV blocks only they need) by prefill-seconds-saved per block freed;
+   --prefill-cost-coefficients D E; leaf-last with idle demotion S.
+3. Prefill export: allow a chunk to run past a checkpoint position and have
+   the backend write the state there.
+4. Mooncake host tier with unit-level eviction (host store); this fork has
+   the TieringOffloadingSpec CPU tier instead - same idea, wire the policy.
+Skip: FlashStates' linear-attention specifics; this fork's own
+linear-attention work is out of scope for this task.
+
+Existing fork machinery to build on (do not duplicate):
+- MambaManager align mode with prefill checkpoint blocks, partial hash
+  hits, producer partial tails, shared-prefix checkpoint
+  (vllm/v1/core/single_type_kv_cache_manager.py:1551+,
+  kv_cache_manager.py:140-200, scheduler.py:497+, flag
+  --enable-mamba-shared-prefix-checkpoint).
+- `mamba_cache_mode` default is "none"; the flint recipe sets no mamba
+  cache flags. First question: does align mode work with the v2 runner +
+  DFlash2 spec decode for flint? Check the gates in vllm/config/vllm.py:3427.
+- Tiering/offloading spec with CPU tier (TieringOffloadingSpec) - the
+  natural home for the GDS policy + leaf-last demotion.
