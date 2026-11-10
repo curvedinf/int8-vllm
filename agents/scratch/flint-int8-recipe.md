@@ -4293,3 +4293,24 @@ Stopped the service, ran the AGENTS.md ladder on an idle box, restarted:
 down tile, dense bm rule, draft tiles, conv dequant cache, aiter import fix).
 Attention block size closed too: 128/256/512 -> 107.4/107.3/108.6 us per
 target layer (no effect), so the kernel is saturated at this geometry.
+
+### Two dead ends recorded (batch 38)
+1. **KV block size is not a lever**: 128/256/512 -> 107.4/107.3/108.6 us per
+   target attention layer in the harness. Together with segments, tile,
+   dtype, layout and head sharding, the attention kernel is saturated at
+   this geometry.
+2. **The block_g128 harness rebuild was abandoned**: the packed cache needs
+   the kernel's 5-D view (the launcher sniffs `num_blocks, nkv, _, bs, x`
+   and takes `BLOCK_SIZE = k.shape[1]` for a 4-D tensor, which divides by
+   zero), so reproducing it means re-deriving the backend's entire
+   as_strided carving. Payoff would be a *diagnosis* of the draft's 2.9x
+   in-graph gap with no fix attached - stopped.
+3. **The AR collective probe is stale**: scripts/bench_ar_collective.py
+   predates two API moves (`set_current_vllm_config` is now a context
+   manager; `init_distributed_environment` must run before
+   `initialize_model_parallel`) and then needs the native CustomAllreduce
+   object wired to build ResidualG128Allreduce. Reverted rather than commit
+   a half-fixed script that cannot run. The per-step collective cost (~94
+   collectives, est. 2.3 ms if ~25 us each) therefore STAYS UNMEASURED; the
+   cheapest remaining bound is the CAR=1 vs AR=1 A/B the recipe already
+   supports.
