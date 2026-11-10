@@ -1291,6 +1291,19 @@ class FlintForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
 
+    def compute_logits_local(
+        self, hidden_states: torch.Tensor
+    ) -> torch.Tensor | None:
+        """Vocab-shard logits without the TP all-gather.
+
+        Consumed by the batch-sharded sampler: each rank runs the head only
+        for the rows it owns and the all-to-all exchanges vocab shards, so the
+        per-step full-vocab gather (28.8MB/rank at C12) disappears.
+        """
+        return self.logits_processor(
+            self.lm_head, hidden_states, skip_gather=True
+        )
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         if self.gguf_path is not None:
             device = next(self.parameters()).device

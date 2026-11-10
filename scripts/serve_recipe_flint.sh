@@ -134,6 +134,12 @@ serve() {
   elif [[ "${ASYNC_SCHED:-}" == "1" ]]; then
     args+=(--async-scheduling)
   fi
+  # Batch-sharded sampling: each rank runs the int8 head only for the rows it
+  # owns and an all-to-all exchanges vocab shards, replacing the per-step
+  # full-vocab logits all-gather. Requires compute_logits_local (Flint has it).
+  if [[ "${BATCH_SHARDED:-0}" == "1" ]]; then
+    args+=(--enable-batch-sharded-sampling)
+  fi
   if [[ "${EAGER:-0}" == 1 ]]; then
     args+=(--enforce-eager)
   else
