@@ -3765,3 +3765,17 @@ tile packing cannot help - the traffic is the work.
 model-level change (fewer/wider experts). Close the MoE kernel line.
 - Prewarm fix confirmed post-boot: warm C12 59.64/59.26 ms, 605.8/659.0
   tok/s, acceptance 5.98 - no regression from the widened MoE prewarm list.
+
+## RESUME HERE (2026-11-10, end of this stretch)
+Service: default recipe, healthy. Last verified: cold C12 2048/256 TTFT
+5850 ms, TPOT 49.35 ms; warm 59.3 ms step, ~600-700 tok/s, acceptance
+5.0-6.3; battery 4/4. Closed since the last snapshot: MoE prewarm for C12
+token counts (151->6 mid-inference JIT warnings), payload-variant warmup,
+MNBT=4096 rejected, MoE bandwidth bound (40-54% of peak), int8 router
+confirmed already-on, draft int8 coverage confirmed.
+NEXT ACTION (single item): write the bandwidth-optimised routed-expert
+gate_up kernel (target: raise the 54%-of-peak weight streaming toward
+80%, worth ~3-4 ms/step). Build it standalone under /tmp against
+aiter/configs shapes, validate numerics vs moe_gemm_a8w8_blockscale on the
+prod M=576/N=256/K=2048 case, then A/B. Do not re-measure anything else
+first - every other lever in this file is closed with numbers.
