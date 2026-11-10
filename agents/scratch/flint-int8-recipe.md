@@ -4417,11 +4417,16 @@ State at phase-2 entry:
   --batch_size 1 --max_steps 200 --lr 1e-5 --temp_start 1.0 --temp_end 0.001
   --kv_group 128 --weight_group 128`.
 - IMPORTANT: the "512k" in the checkpoint name is the model's serving cap, not
-  the training sequence length. No 512k-scope legs exist in the corpus, and a
-  40B-A2.5B model cannot train at 512k on 4x32 GB. The user's earlier
-  directive ("up to 512k tokens in part of its training") is unmet: extend the
-  corpus with needle-in-haystack legs at 32k-128k and train at the largest
-  seq_len that fits (target: 16k-32k), then gate at 512k serving.
+  the training sequence length. The corpus DOES include a 512k
+  needle-in-haystack tier (tier 5, `--n-xlong 8`, ~4.1M of the 7.07M tokens),
+  but the trainer only ever samples `--seq_len` windows from it. A 40B-A2.5B
+  model cannot train at 512k on 4x32 GB: measured 2026-11-10, seq_len 16384
+  OOMs because the unchunked teacher full-vocab logits need 8.1 GiB/rank
+  (4k -> 2.0 GiB, which is what the rung-1 s40 run used). Ceiling with the
+  current trainer is ~8192; 16k+ needs a chunked teacher head in the KD-cache
+  warm plus a per-chunk float cast in `one_batch`. The user's earlier
+  directive ("up to 512k tokens in part of its training") is therefore only
+  partially met: the corpus has the scope, the trainer does not.
 
 Phase-2 gates (procedure section 4):
 1. Sampled acceptance at temp 1.0, per-position, at 2.4k and 18k (baseline
