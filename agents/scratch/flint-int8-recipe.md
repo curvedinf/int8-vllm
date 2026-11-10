@@ -2805,3 +2805,14 @@ payload residual (Bolt decoder_norm), closing the stream.
   change, graph-safe if single launch). (b) is the bounded slice.
 - vLLM hook: _routing_from_topk fast path gated on (ids,w) + precomputed
   structures from the router; fall back to routing() otherwise.
+
+## PERF LOOP batch 7 hookpoint (2026-11-10)
+- Chain: moe_runner -> router.select_experts -> FusedTopKRouter._compute_routing
+  -> fused_topk(sigmoid) -> (w, ids) -> routed_experts.forward_modular
+  -> A8W8BlockscaleMoEMethod.apply -> _routing_from_topk -> routing().
+- The dispatch sees ONLY (weights, ids); the gate logits tensor is upstream
+  and discarded. Fused kernel target: one Triton launch over logits[M,256]
+  emitting (ids, w) + RoutingData structures, replacing topk_sigmoid
+  (101us) + routing() (386us) = 487us/layer saving potential.
+- Next slice: prototype the fused logits kernel + _routing_from_topk fast
+  path with fallback to routing() when logits are unavailable.
