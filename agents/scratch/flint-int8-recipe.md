@@ -4276,3 +4276,20 @@ lead worth a turn, and only if someone intends to then change the KV path,
 which is a quality decision (block_g128 was chosen for acceptance).
 Harness now supports ATTN_BF16, ATTN_BLOCK, ATTN_INTERLEAVE, ATTN_UNSHARDED,
 ATTN_SEQS/ATTN_QPS/ATTN_CTX for offline shape work.
+
+### Full validation ladder run (batch 37, after this session's changes)
+Stopped the service, ran the AGENTS.md ladder on an idle box, restarted:
+- `scripts/test_int8_kv_micro.py`: **OVERALL PASS** (prefill_2d 3.9e-2,
+  decode_3d 3.9e-3, mixed 3.5e-2, noncausal_int8_pth 2.4e-4).
+- `scripts/battery_gfx908.py`: **4 PASS, 0 FAIL** (int8 PTH prod shapes,
+  flash-attn interface, aiter symbol compat, a16w16 GEMM).
+- Serving startup report: Aiter Unified Attention backend on all 4 ranks,
+  int8_block_g128 KV on target AND draft ("draft compute dtype bf16"),
+  fp16 group scales active, Mamba mode=align, scheduler block=128,
+  custom fusions norm_quant/act_quant/allreduce_rms enabled.
+- E2E warm C12 2048/256: 648.4 / 666.9 tok/s, TPOT 57.86 / 57.89 ms,
+  acceptance 5.85. Cold-first run 209.3 tok/s as expected.
+=> Stack validated end to end after this session's accepted changes (MoE
+down tile, dense bm rule, draft tiles, conv dequant cache, aiter import fix).
+Attention block size closed too: 128/256/512 -> 107.4/107.3/108.6 us per
+target layer (no effect), so the kernel is saturated at this geometry.
