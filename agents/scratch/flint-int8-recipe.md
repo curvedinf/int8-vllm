@@ -3359,3 +3359,21 @@ Remaining options with priors (pick one as the next big slice):
   block_m=8 slower, num_warps/stages flat. Only an algorithm change
   (multi-expert tile packing / expert-resident persistent kernel) can move
   the 19.8ms/step block.
+
+## NEXT EXPERIMENT (queued): overlap the shared-expert branch with the routed gate_up
+- Confirmed with correct per-rank dims: grouped pair 351 us/layer at
+  block_m=16; block_m=8 makes the swiglu+quant epilogue 3.5x worse
+  (gate_up 705us), block_m=4 worse too. block_m=16 is optimal -> the
+  grouped kernel has no config headroom left.
+- The MoE layer runs the shared expert (gate_up N=512 ~27us + down
+  N=2048/K=256 payload ~40us) sequentially with the routed experts
+  (gate_up 201us). The shared branch is independent of the routed gate_up
+  and only needs to be complete before the routed down's combine epilogue
+  (it feeds residual_q/rs). Running it on a side stream inside the captured
+  graph should hide ~65us/layer = ~3 ms/step (~5%).
+- Implementation point: vllm/model_executor/layers/quantization/
+  gptq_moe_a8w8.py `_run` (shared branch is computed by the caller and
+  stashed on `layer._shared_out`), so the overlap belongs in
+  FlintSparseMoeBlock.forward where the shared branch and the routed
+  experts are dispatched. Needs graph-capture-safe stream fork/join
+  (torch.cuda.stream + wait_stream inside the capture works).
