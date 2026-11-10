@@ -69,8 +69,13 @@ def scrape() -> dict[str, float]:
 
 async def one(client, prompt, n_out, tool_mode, temp, top_p, top_k, t0):
     if tool_mode:
+        if isinstance(prompt, tuple):
+            msgs = [{"role": "system", "content": prompt[0]},
+                    {"role": "user", "content": prompt[1]}]
+        else:
+            msgs = [{"role": "user", "content": prompt}]
         body = {"model": "flint",
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": msgs,
                 "max_tokens": n_out, "ignore_eos": True, "stream": True,
                 "stream_options": {"include_usage": True}, "tools": TOOLS,
                 "tool_choice": "none",
@@ -178,14 +183,14 @@ def build(args) -> tuple[list[str], bool, str]:
     if args.mode == "cold":
         step = 9000
         return [text[i * step:i * step + 8000] for i in range(args.n)], False, "W2-cold"
-    # agent-steady / long / mixed share a prefix (default 64k chars ~= 16k tokens)
+    # agent-shaped: the shared prefix is the SYSTEM message (cached), the
+    # per-request suffix is a short user turn, matching agent traffic.
     prefix = text[:args.prefix_chars]
     base = args.prefix_chars
     suffixes = [text[base + i * 700:base + i * 700 + 600] for i in range(args.n)]
-    prompts = [prefix + s for s in suffixes]
+    prompts = [(prefix, s) for s in suffixes]
     if args.warm:
-        # warm the shared prefix with different suffixes, then measure
-        warm = [prefix + text[base + 90000 + i * 700:base + 90000 + i * 700 + 600]
+        warm = [(prefix, text[base + 90000 + i * 700:base + 90000 + i * 700 + 600])
                 for i in range(args.n)]
         return prompts, True, "W1-agent", warm
     return prompts, True, "W1-agent"

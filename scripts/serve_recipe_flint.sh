@@ -130,12 +130,16 @@ serve() {
     # PTQR-era int8_block_g128 is the gated KV dtype for target AND draft
     # (fp16 draft KV is measured broken; bf16 is banned by int8-first).
     --kv-cache-dtype "${KV_DTYPE:-int8_block_g128}"
-    --speculative-config "$spec"
     # Flint's template renders <think> reasoning blocks; the qwen3 engine
     # parser splits them into reasoning_content.
     --reasoning-parser qwen3
     --override-generation-config '{"temperature":1.0,"top_p":0.95,"top_k":20}'
   )
+  # SPEC=0 boots without speculative decoding (diagnostic bisection only:
+  # changes M from C*(NS+1) to C and removes the draft forward).
+  if [[ "${SPEC:-1}" == "1" ]]; then
+    args+=(--speculative-config "$spec")
+  fi
   # Flint's tool preamble defines the GLM-4.7 XML call format
   # (<tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>)
   # and <|observation|><tool_response> replies, so the glm47 parser applies

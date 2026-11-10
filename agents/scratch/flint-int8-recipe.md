@@ -4362,3 +4362,41 @@ prefix cache. The served path measures 28.8-29.6 tok/s at acceptance ~1.1; the
 step-period measurement above (36.85 ms single stream) is the useful part.
 Do not cite the 650-705 figure as throughput; see
 optimization_procedure.md.
+
+## PHASE 1 CYCLE (2026-11-10, procedure from scratch)
+
+Procedure: `docs/recipes/optimization_procedure.md`. Harness:
+`scripts/bench_cycle.py` (W1-W5). Isolation lever: `FORCE_REJECT=1` on the
+serve script -> `rejection_sample_method=synthetic` with zero rates; verified
+acceptance exactly 1.0, 255 steps for 256 tokens, M=C*(NS+1) preserved.
+
+Baseline (forced rejection, unless noted):
+- W5 C1 witness: step 38.78 ms, 25.8 tok/s, TTFT 309 ms.
+- W1 C12, ~18k prompt: step 149.7 / 155.0 / 160.4 ms -> median ~155 ms;
+  per-stream 6.2-6.7 tok/s; aggregate overlap 75-80 tok/s.
+- Context sweep C12 (step ms): 2.4k 101.2, 4.7k 93.8, 9.7k 110.9, 18k 155.0,
+  37k 227.7. C1 controls: 2.4k 40.6, 18k 51.7.
+- MoE at M=96 with the tuned tiles confirmed via VLLM_MOE_CFG_LOG=1
+  (gate_up block_m16/bn256/w8/s2; down bm16/bn256/w8/s1):
+  gate_up 254.8 us, down 109.4 us per layer -> ~17.1 ms/step.
+- GPU busy during W1: mean 88-90%, median 100%, 89% of samples >=90% ->
+  the step is real kernel work, not idle gaps. pphase CPU phases ~1.6 ms.
+
+Flint geometry correction: 49 layers = 14 full_attention + 35
+sliding_attention with sliding_window 513 (no mamba/GDN layers; the
+`mamba-cache-mode align` flag in the recipe is inert for this model).
+Attention micro (per-token-head KV, 12 seqs x 8 q): 2k 111 us/layer, 16k
+1192 us, 32k 2445 us; draft-window 2048 247-294 us. Scaled to 14 full +
+35 sliding(513) that predicts ~21 ms attention at 18k, which does NOT explain
+the measured +54 ms context slope -> prime hypothesis: the serving
+block_g128 packed KV is ~2.5-3x slower than the micro's per-token-head path,
+or another context-scaled kernel is unaccounted. An in-serving kernel trace
+is the next step (rocprofv3 attach fails: librocprofiler-sdk-rocattach
+status 1 under the patched 7.2 runtime; boot-under-rocprofv3 being tried).
+
+Other facts established:
+- NS is not the lever: NS=1 (M=24) did not reduce the 18k step
+  (166.8 vs 155.0 ms) and its 2.4k boot measured 164.6 ms, but that boot is
+  confounded (M=24 falls outside the tuned decode band 65<M<=128, and the
+  aiter log shows default-config GEMMs for M=36 shapes).
+- The engine is not CPU-bound (api_server ~4% cpu).
