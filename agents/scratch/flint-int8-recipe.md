@@ -3027,3 +3027,12 @@ payload residual (Bolt decoder_norm), closing the stream.
   (b) draft graph launch-count (~7ms), (c) draft lm_head int8 (~0.75ms, gated).
   All are multi-hour kernel builds. Needs user direction: authorized to
   start the persistent kernel, or remain in analysis/loop mode?
+
+## PERF LOOP batch 15 graph structure (2026-11-10): draft graph is 1 replay/round
+- Draft graph = single run_fullgraph per round (5 draft layers, M=96).
+  ~25-30 in-graph kernels in 7.16ms. Per draft layer 1.43ms vs target 0.62ms:
+  draft has no fused grouped GEMM (6 separate dense GEMMs/layer) while target
+  MoE amortizes gate_up/down into fused grouped launches.
+- Next kernel: fuse draft per-layer dense GEMMs (QKV+o_proj already minimal;
+  gate_up/down are Qwen-style fused in draft? check). The fused grouped
+  MoE kernel is the template for what draft lacks.
