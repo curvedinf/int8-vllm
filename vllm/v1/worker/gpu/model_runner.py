@@ -2873,6 +2873,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 _drain_attntrace(self.model, torch)
             except Exception:
                 pass
+            # Around-replay step timer (events in CudaGraphManager).
+            try:
+                _mgr = self.cudagraph_manager
+                _pairs = getattr(_mgr, "_gtrace_pairs", None)
+                if _pairs:
+                    torch.cuda.synchronize()
+                    _tot = 0.0
+                    for _a, _b in _pairs:
+                        _tot += _a.elapsed_time(_b)
+                    print(f"[graphtime] {len(_pairs)} replays | "
+                          f"graph {(_tot/len(_pairs))*1000:8.1f} us/step",
+                          flush=True)
+                    _mgr._gtrace_pairs = []
+            except Exception as _ex:
+                print(f"[graphtime] failed: {_ex!r}", flush=True)
         return async_output
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:

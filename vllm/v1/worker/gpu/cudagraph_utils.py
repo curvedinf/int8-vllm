@@ -574,7 +574,22 @@ class CudaGraphManager:
         # cannot see. Without this, replay could overwrite static buffers
         # while those copies are still in flight.
         get_offloader().sync_prev_onload()
-        self.graphs[desc].replay()
+        # Graph-safe timing (VLLM_ATTNTRACE=1): events AROUND replay measure
+        # total graph GPU time per step (not per-kernel; in-graph pairs fail
+        # with hipErrorInvalidHandle on cross-replay query, measured).
+        import os as _os
+        _gtrace = _os.environ.get("VLLM_ATTNTRACE") == "1"
+        if _gtrace:
+            _e0 = torch.cuda.Event(enable_timing=True)
+            _e0.record()
+            self.graphs[desc].replay()
+            _e1 = torch.cuda.Event(enable_timing=True)
+            _e1.record()
+            # Stash on the manager; runner reads post-step without sync.
+            self._gtrace_pairs = getattr(self, "_gtrace_pairs", [])
+            self._gtrace_pairs.append((_e0, _e1))
+        else:
+            self.graphs[desc].replay()
 
     def init_breakable_cg_runner(
         self, model: nn.Module, key_fn: Callable[..., Hashable] | None = None
