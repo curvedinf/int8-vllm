@@ -3100,3 +3100,11 @@ payload residual (Bolt decoder_norm), closing the stream.
   extra-args passthrough. A/B needs a script lever (ASYNC_SCHED) mirroring
   EAGER/PROFILE_DIR, then full boot + bench per leg (~4min boot each).
 - A/B metric: TPOT delta on steady C12 (same seed pair), acceptance +-1pt.
+
+## PERF LOOP async A/B ACCEPTED (2026-11-10): -5.23ms (-8.6%)
+- Sync 60.54ms vs async 55.31ms (same seed, same trace overhead). p95
+  77.48 -> 59.42. Acceptance 6.21 -> 6.23 PASS.
+- Async was already the default; the explicit flag confirms it should stay.
+  Commits: aa72e50e5f (lever) + fff895d62f (ledger).
+- Step now ~55.3ms TPOT with async on. The 15.6ms idle was the round-trip;
+  async recovers 5.23ms of it. Remaining idle ~10ms (D2H path).
