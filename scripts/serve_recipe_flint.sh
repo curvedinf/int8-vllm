@@ -110,6 +110,13 @@ serve() {
 
   local spec
   spec="$("${ROOT_DIR}/.venv/bin/python" -c 'import json,sys; print(json.dumps(dict(method="dflash",model=sys.argv[1],num_speculative_tokens=int(sys.argv[2]),kv_cache_dtype=sys.argv[3])))' "$DRAFT_MODEL_DIR" "${NS:-7}" "${KV_DTYPE:-int8_block_g128}")"
+  # Phase-1 isolation (docs/recipes/optimization_procedure.md section 4):
+  # synthetic rejection at zero rates keeps the draft forward and the
+  # C*(NS+1) verify batch intact while accepting nothing, so step time is
+  # measured with acceptance pinned at 1. Never a production setting.
+  if [[ "${FORCE_REJECT:-0}" == "1" ]]; then
+    spec="$("${ROOT_DIR}/.venv/bin/python" -c 'import json,sys; d=json.loads(sys.argv[1]); d["rejection_sample_method"]="synthetic"; d["synthetic_acceptance_rates"]=[0.0]*int(d["num_speculative_tokens"]); print(json.dumps(d))' "$spec")"
+  fi
   local args=(
     -m vllm.entrypoints.openai.api_server
     --model "$MODEL_DIR" --served-model-name flint
