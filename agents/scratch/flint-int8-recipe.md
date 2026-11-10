@@ -2910,3 +2910,14 @@ payload residual (Bolt decoder_norm), closing the stream.
   fusion / persistent columns. Kernel build, ~10-20ms potential.
 - Attention budget still unmeasured (49 layers unified attn, ctx 2-4k).
   Next: attention microbench at production shapes.
+
+## PERF LOOP batch 9 trace result (2026-11-10): ATTNTRACE graph gap
+- VLLM_ATTNTRACE=1 boot: no [attntrace] lines. The eager tracing branch
+  synchronizes only when not capturing; under FULL_DECODE_ONLY the decode
+  runs inside capture. f_tail 44.6ms confirms graph mode. TPOT 58.97ms
+  (vs 57.77 baseline; noise + trace overhead).
+- Attention cost stays inside the ~14ms attn/logits remainder. A graph-safe
+  trace (events on replay stream, read post-hoc) is the unblocking step.
+- Step coverage now: CPU 6.44 + MoE 15.2 + collectives 1.15 + dense ~27 +
+  attn/logits ~14 = 63.8 (overcovers 57.77 by 6ms; dense 110us is an
+  upper bound at M=96 padding 128).
