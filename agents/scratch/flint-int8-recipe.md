@@ -3218,3 +3218,24 @@ payload residual (Bolt decoder_norm), closing the stream.
 - Note: a full AIS-cache boot currently takes ~8 min (71% at 5 min), so
   budget boots accordingly; wedged-looking workers are usually the repack
   load, not a hang (check the progress bar line in the log).
+
+## PERF LOOP batch 19 (2026-11-10): profiling routes exhausted
+- Torch-profiler lever: trace covers only the API-server process (CPU
+  frames, no kernels); /stop_profile blocks >900s and wedges the server.
+  Rejected for perf work.
+- In-graph GEMM harness (49 x prod-shape int8 GEMMs, M=96, captured):
+  replays 89ms, dominated by synthetic-weight grouped MoE (~1.2ms/layer)
+  that is 2-3x the whole real graph -> layout/kernel mismatch, rejected
+  for calibration. Eager single calls at M=96 are dispatch-bound
+  (CK 57us, per-token quant 82us); M=1536 CK = 200us (37 TFLOP/s) is the
+  compute-bound calibration point.
+- Neither rocprofv3 (server wedge), torch profiler (no kernels), nor a
+  synthetic harness (wrong weight layout) can produce the in-graph kernel
+  budget. Remaining option for attribution is ablations, or directly build
+  the next mechanism and measure end-to-end.
+- Consequence for the loop: stop chasing attribution; pick mechanisms with
+  an independent prior and A/B them end-to-end (each boot ~8-9 min now).
+  Highest-prior items left: (1) persistent/launch-cut GEMM path for the
+  49-layer loop, (2) MoE grouped-GEMM tile/config verification against the
+  real packed checkpoint layout (the harness suggests the experts are the
+  biggest GEMM block), (3) sampler/s_tail glue (6.6ms).
