@@ -3988,3 +3988,21 @@ layer is unattributed. Total draft weight traffic is only 400 MB/step
 far more kernels than the 12-per-layer estimate (materialize/quant seams,
 conv sub-kernels). Next instrument: count kernels in one draft replay with
 torch.profiler on an isolated harness, not on the server.
+
+### DRAFT ATTENTION IS THE MISSING 4.3 ms (batch 24, ablation)
+Ablation (VLLM_DRAFT_ABLATE=attn stubs the draft's self_attn; acceptance
+collapses to 1.00 as expected): `[dsub] draft_graph` 6927-6961 us ->
+**2596-2607 us**. So the draft's 5 attention layers cost **4.33 ms/step**
+(0.87 ms per layer) and everything else in the draft graph is 2.60 ms
+(4 big GEMMs 1.9 + conv ~0.3 + kp GEMMs + norms).
+That is ~58x its bytes bound (per rank ~14 MB of int8 KV per layer -> ~15 us
+at 950 GB/s) and ~300x its compute bound (~226 MMAC/layer). Shape is
+M=96 rows over 12 sequences x ~2300 keys, 8 q / 2 kv heads per rank,
+head_dim 128, int8_block_g128 KV, block tables. A decode-shaped kernel at
+this size has almost no parallelism, but 0.87 ms/layer means something is
+pathological, not just small: candidates in order of plausibility -
+(a) seqused_k / max_seqlen_k not bounding the KV walk (padded to a large
+number), (b) the int8 KV dequant path, (c) block-table gather with 12
+sequences and 8 queries each, (d) the per-layer sliding-window/causal mask.
+NEXT: microbench the draft attention call at that exact shape and sweep the
+backend/flags; a 4x win would be ~3 ms/step, the largest item left.
