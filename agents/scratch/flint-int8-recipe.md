@@ -3043,3 +3043,17 @@ payload residual (Bolt decoder_norm), closing the stream.
   as target (attn between qkv and gate_up). No concat prize in draft.
 - The launch-count problem spans both graphs; persistent kernels are the
   only shape that crosses the attn boundary.
+
+## PERF LOOP checkpoint (2026-11-10): step budget closed
+- Graph 30.2ms (target) + propose 9.17ms (draft graph 7.16ms) + sampler/
+  collectives/bubbles ~18.4ms = 57.8ms TPOT. Untraced reconfirm 56.2ms.
+- Accepted in-loop: fused top-K combine (batch 5, +22% aggregate run-var).
+- Closed without win: routing structures (4 Triton attempts + prod gap),
+  dense tile tuning (flat), concat (dataflow veto), KV hoist (GEMM-only),
+  stream overlap (dependency serial), attention trace (graph events).
+- Remaining: persistent per-layer kernels (target ~10-20ms + draft),
+  draft lm_head int8 (~0.75ms, PTQR-gated), sampler/collective GPU events.
+  All are multi-hour kernel builds or PTQR retrains.
+- Next bounded experiment: persistent-column draft GEMM prototype
+  (M=96, K=2048, N=6144, single kernel over N tiles) in aiter, judged on
+  us/call vs the 110us launch floor.
