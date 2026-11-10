@@ -3659,3 +3659,16 @@ would have to be handoff otherwise.
 Next experiment to separate them: run the pphase window on a workload of ONLY
 prefill steps (many distinct 64-token prompts, max_tokens=1 with immediate
 stop) and compare its average `f_tail`/`p_*` with the decode-step window.
+
+### TOP TARGET (2026-11-10): ~22 ms per-iteration handoff
+Measured (prefill-only workload, both tracers on):
+  worker: f_tail 28.7 ms (eager prefill; decode steps are 12.9 ms)
+  engine: exec 50.7-52.4 ms  =>  ~22 ms handoff per iteration
+The same ~22 ms is inside the C12 step (59.3 ms total, ~40 ms worker), so
+cutting the handoff to ~2 ms would take C12 decode to ~40 ms (-33%) and
+warm TTFT to ~100 ms. Investigate next: where the 22 ms sits between the
+worker's execute_model return and future.result() in the engine - worker-side
+D2H/output serialization, the shm broadcast, or the engine's wake path.
+Candidates: per-step torch.cuda.synchronize in the sampler/output path,
+ModelRunnerOutput pickling of sampled ids/logprobs, or the PG/DP dispatch
+(dispatch_cg_and_sync_dp) in the step path.
