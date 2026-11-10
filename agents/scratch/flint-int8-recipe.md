@@ -3265,3 +3265,14 @@ payload residual (Bolt decoder_norm), closing the stream.
   checkout (JIT build failed on a missing .so copy). Retry the build, sweep
   candidates for (96,1280,2048)/(96,3072,2048)/(96,2048,1024) and only then
   decide whether to bypass gemm_a8w8_CK.
+- hipb/hipBLASLt split-K route is dead on this stack: module builds
+  (ninja must be on PATH), API accepts [K,N] weights + (1,N) scale_b, but
+  findallsols aborts with HIPBLAS_STATUS_NOT_INITIALIZED at
+  gradlib/csrc/hipbsolgemm.cu:248 for int8 on gfx908. A K-partitioned
+  dense kernel must be written, not selected.
+- Sampler path observation (next candidate): every step all-gathers the
+  full-vocab logits ([96,150144] bf16 = 28.8MB/rank via
+  tensor_model_parallel_gather) and then the rejection sampler copies them
+  to fp32 (57.6MB). Vocab-parallel sampling would remove the gather; a
+  cheap variant is keeping bf16 through the sampler. Parked until the
+  kernel-level work is chosen.
