@@ -2797,6 +2797,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.sampler, input_batch.idx_mapping
                 )
             with use_workspace_lane(self._draft_workspace_lane):
+                # Non-graph timing (VLLM_ATTNTRACE=1): wall around propose
+                # splits the ~27ms non-graph block into draft GPU time vs
+                # Python glue. Sync per step is bounded by pphase cadence.
+                _gt = os.environ.get("VLLM_ATTNTRACE") == "1"
+                _e0 = torch.cuda.Event(enable_timing=True) if _gt else None
+                _e1 = torch.cuda.Event(enable_timing=True) if _gt else None
+                _t0g = time.perf_counter() if _gt else 0.0
+                if _e0 is not None:
+                    _e0.record()
                 draft_tokens = self.speculator.propose(
                     input_batch,
                     attn_metadata,
@@ -2813,6 +2822,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     dp_sync_state=dp_sync_state,
                     mm_inputs=mm_inputs,
                 )
+                if _e1 is not None:
+                    _e1.record()
+                    torch.cuda.synchronize()
+                    _wall = (time.perf_counter() - _t0g) * 1000
+                    _gpu = _e0.elapsed_time(_e1) * 1000
+                    self._prop_trace = getattr(self, "_prop_trace", 0.0)
+                    self._prop_trace_n = getattr(self, "_prop_trace_n", 0) + 1
+                    self._prop_trace = self._prop_trace + _gpu
+                    if self._prop_trace_n % 200 == 0:
+                        print(f"[proptime] n={self._prop_trace_n} | "
+                              f"propose {self._prop_trace/self._prop_trace_n:8.1f} us/step "
+                              f"(wall {_wall:8.1f} us)", flush=True)
+                        self._prop_trace = 0.0
+                        self._prop_trace_n = 0
             if _kvl and not self._in_dummy_run:
                 try:
                     self._kvline_snap(
