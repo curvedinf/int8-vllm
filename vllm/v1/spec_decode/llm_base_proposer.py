@@ -551,6 +551,12 @@ class SpecDecodeBaseProposer:
             )
             assert target_hidden_states.shape[-1] == self.hidden_size
 
+        # Sub-step timing (VLLM_ATTNTRACE=1): split set_inputs / attn-build /
+        # draft-forward GPU inside propose.
+        _gt = os.environ.get("VLLM_ATTNTRACE") == "1"
+        if _gt:
+            import time as _t
+            _t0 = _t.perf_counter()
         num_tokens, token_indices_to_sample, common_attn_metadata = (
             self.set_inputs_first_pass(
                 target_token_ids=target_token_ids,
@@ -562,10 +568,18 @@ class SpecDecodeBaseProposer:
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
             )
         )
+        if _gt:
+            print(f"[subtime] set_inputs {(_t.perf_counter()-_t0)*1000:7.1f} us",
+                  flush=True)
+            _t0 = _t.perf_counter()
 
         per_group_attn_metadata, per_layer_attn_metadata = (
             self.build_per_group_and_layer_attn_metadata(common_attn_metadata)
         )
+        if _gt:
+            print(f"[subtime] attn_build {(_t.perf_counter()-_t0)*1000:7.1f} us",
+                  flush=True)
+            _t0 = _t.perf_counter()
 
         cudagraph_runtime_mode, num_input_tokens, num_tokens_across_dp = (
             self._determine_batch_execution_and_padding(num_tokens)
