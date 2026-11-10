@@ -3253,3 +3253,15 @@ payload residual (Bolt decoder_norm), closing the stream.
   has split_k configs) in-graph; target ~30us/call = ~6ms/step.
 - Router gate is bf16 by construction (`GateLinear(quant_config=None)`),
   not int8 CK as assumed in the synthetic harness.
+- Blockscale (dense Triton) vs CK, in-graph M=96: qkv 72.5/64.8,
+  o_proj 39.7/41.6, gate_up 82.7/70.4, down 52.2/25.6, lm_head 432.9/227.4
+  -> blockscale rejected; CK stays. Single-kernel graph replay carries
+  ~25-30us overhead (a bare pertoken_quant measures 31-36us), so use
+  multi-kernel graphs for absolute budgets and single-kernel graphs only
+  for A/B of the same op.
+- Next lever for the occupancy-limited dense GEMMs: K-partitioned kernels.
+  `aiter.ops.gradlib.hipb_findallsols/hipb_mm` exposes hipBLASLt solutions
+  (may include splitK), but `module_hipbsolgemm` is not built in this
+  checkout (JIT build failed on a missing .so copy). Retry the build, sweep
+  candidates for (96,1280,2048)/(96,3072,2048)/(96,2048,1024) and only then
+  decide whether to bypass gemm_a8w8_CK.
