@@ -3239,3 +3239,17 @@ payload residual (Bolt decoder_norm), closing the stream.
   49-layer loop, (2) MoE grouped-GEMM tile/config verification against the
   real packed checkpoint layout (the harness suggests the experts are the
   biggest GEMM block), (3) sampler/s_tail glue (6.6ms).
+
+## PERF LOOP batch 20 (2026-11-10): dense GEMM in-graph budget
+- In-graph (captured, replayed) per-call at M=96, TP4 prod shapes:
+  qkv 64.8us | o_proj 41.7 | gate_up 69.5 | down 26.2 | lm_head 228.8.
+  Per-layer dense set 268.5us -> 13.2ms/step over 49 layers (+0.23 lm_head)
+  = 35-45% of the 30-38ms graph.
+- splitK=1..8 all fail (no CK instance) -> the tuned-CSV lever is dead for
+  these shapes.
+- Root cause: occupancy. qkv = 0.5 GFLOP in 64.8us = 7.7 TFLOP/s; N=1280 /
+  tile_n 128 leaves ~10 CTAs on 120 CUs and M=96 can't fill them.
+- Next: same five shapes through `gemm_a8w8_blockscale` (dense Triton,
+  has split_k configs) in-graph; target ~30us/call = ~6ms/step.
+- Router gate is bf16 by construction (`GateLinear(quant_config=None)`),
+  not int8 CK as assumed in the synthetic harness.
