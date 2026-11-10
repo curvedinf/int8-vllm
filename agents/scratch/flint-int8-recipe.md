@@ -3835,3 +3835,39 @@ plus a separate SwiGLU/quant epilogue (~512-1024 tiles -> 85-95% waves,
 est. -25 us/layer).
 Live-config check: `VLLM_MOE_CFG_LOG=1` prints the effective gate_up/down
 configs once per boot from `_prewarm` (down confirmed bn 256 / w 8 / s 1).
+
+### Closed in batch 19 (do not redo)
+- **split-K for gate_up**: the stock kernel's SPLIT_K path is correct (sk2
+  max rel diff 0.0032 = bf16 rounding) but slower: sk1 179.0 us,
+  sk2 236.5, sk4 244.6 in-graph, because the generic reduce pass over the
+  split axis costs more than the wave gain (the prize was only ~25 us).
+- **Persistent grid-stride MoE kernels**: 2x slower (221-284 us on down) -
+  a serial tile loop defeats the cross-CTA overlap the hardware already
+  gets. `tl.range(num_stages=2)` changes nothing.
+- **Small MoE tiles**: bn=64/32 are 233-746 us on down (far worse than
+  bn=256's 96.9).
+- **gate_up occupancy trick does not apply**: its LDS is 32 KB at s=1
+  (2 CTAs/CU) but s=1 also removes K-loop double buffering, so the wave
+  gain cancels exactly (186.2 vs 187.3). It needs both 2 CTAs/CU and a
+  pipelined K-loop, i.e. a hand-written tile that streams one 128-column
+  half at a time (two K-loops into two accumulators, then the SwiGLU
+  epilogue). Scoped, not started.
+
+### Step accounting (2026-11-10, VLLM_STEPPHASE=1 + VLLM_STEPWALL=1)
+Decisive correction to the old "15.6 ms idle" note: driver CPU per step is
+~1.5 ms total (reqs 0.05, p_inputs 0.06, s_logits 0.13, s_reject 0.09,
+s_tail 0.24, propose 0.10, f_replay 0.46-0.65 = enqueue only), and the step
+period is 36.85 ms in steady decode (63.6 ms in the cold/first run). So the
+step is GPU-bound (36.85 - 1.5 ~= 35 ms of GPU work) and kernel cuts pay.
+The bench's `tpot_ms` is the per-SSE-chunk interval, not per-token - do not
+compare it with the pphase period directly. Use wall_s + output_tok_s +
+period.
+Remaining GPU blocks per step (measured, M=96): MoE gate_up 8.7 ms
+(186 us/layer, wave-limited, see above), MoE down 4.6 ms (96.9 us),
+dense linears ~6 ms (118.8 us/layer: qkv 34.7 + shared gu 26.8 + o_proj
+31.7 + CK down 25.6), draft graph 7.16 ms, combine 1.3 ms, lm_head 0.23 ms.
+Dense at M=96 is dispatch/latency bound, not bandwidth bound: o_proj
+(N=2048,K=2048) launches 48 CTAs into 240 slots at NUM_KSPLIT=1 (4 MB in
+31.7 us = 133 GB/s); shared gate_up (512,2048) is 1 MB in 26.8 us
+(37 GB/s). Lever is fewer launches (the batch-12/13 fusion line), or
+NUM_KSPLIT on the wide-N shapes - measure before changing.
