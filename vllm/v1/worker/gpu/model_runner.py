@@ -41,6 +41,45 @@ def _asm_out_flush(pid: int) -> None:
     _ASM_OUT.clear()
 
 
+def _drain_attntrace(model, torch) -> None:
+    """Query in-graph attention event pairs stashed during capture.
+
+    VLLM_ATTNTRACE=1 records CUDA events around each unified_attention call;
+    under FULL graphs the events are captured into the graph at capture time
+    and fire on replay. Python forward does not run on replay, so the pairs
+    are queried here, post-forward, every 100 steps. No-op when empty.
+    """
+    total = 0.0
+    count = 0
+    if model is None:
+        return
+    for _, mod in model.named_modules():
+        box = getattr(mod, "_attntrace", None)
+        # The trace box lives on the attention IMPL (per layer), reachable
+        # via Attention.impl. Walk attributes to avoid model-specific imports.
+        if box is None:
+            impl = getattr(mod, "impl", None)
+            box = getattr(impl, "_attntrace", None) if impl is not None else None
+        if box is None:
+            continue
+        pairs = box.get("ev_pairs", [])
+        if not pairs:
+            continue
+        # Events complete after replay; query them in one sync.
+        try:
+            torch.cuda.synchronize()
+            for a, b in pairs:
+                total += a.elapsed_time(b)
+                count += 1
+        except Exception:
+            count = 0
+        box["ev_pairs"] = []
+        box["k"] += 0.0
+    if count >= 4900:
+        print(f"[attntrace-graph] {count} calls | kernel "
+              f"{total/count*1000:8.1f} us/call", flush=True)
+
+
 def _asm_ring_flush(pid: int) -> None:
     out_dir = os.environ.get("VLLM_ASM_RING")
     if not out_dir or not _ASM_RING:
@@ -2808,6 +2847,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for k in _t:
                     if k != "n":
                         _t[k] = 0.0
+        # Graph-safe attention trace: drain in-graph event pairs stashed by
+        # the backend during capture and query them post-replay (env-gated).
+        if os.environ.get("VLLM_ATTNTRACE") == "1":
+            try:
+                _drain_attntrace(self.model, torch)
+            except Exception:
+                pass
         return async_output
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
