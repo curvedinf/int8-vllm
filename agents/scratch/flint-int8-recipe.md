@@ -3325,3 +3325,16 @@ Remaining options with priors (pick one as the next big slice):
   freed once _ck_q exists) - costs ~0.7GB of weight memory; (c) dispatch
   65<=M<=128 to blockscale, prefill stays CK. Acceptance gate applies
   (per-channel -> per-128-group scales, closer to the checkpoint).
+
+## ACCEPTED (2026-11-10): decode-band blockscale — warm step 70.7 -> 64.2 ms
+- 65<M<=128 now runs tuned Triton a8w8-blockscale + group_quant_rn
+  (VALM_GFX908_DECODE_BLOCKSCALE=1 default); prefill stays CK; GS128
+  originals retained (+~0.7GB, KV unchanged at 16.7GiB).
+- Tuned cfg: bm=32 bn=128 bk=128 GROUP_M=4, NUM_KSPLIT=4 for N<=1536 else 1.
+- Warm runs 63.9-65.5ms (baseline 70.7-71.5), cold 53.2 (baseline 54.2).
+  First two warm benches after boot read 74-80ms (JIT of new variants).
+- Acceptance 6.26/5.64/5.06 vs baseline 6.36/6.10/5.74/5.66 -> in band.
+- Next candidates in this direction: (a) also keep M in 33..64 (C4-C8) on
+  the tuned path with bm=32; (b) NUM_KSPLIT sweep per shape at the *served*
+  C12 shape with 12 streams (contention may shift the optimum); (c) the same
+  treatment for the MoE grouped kernel's gate_up.
