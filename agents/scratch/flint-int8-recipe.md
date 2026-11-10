@@ -3276,3 +3276,38 @@ payload residual (Bolt decoder_norm), closing the stream.
   to fp32 (57.6MB). Vocab-parallel sampling would remove the gather; a
   cheap variant is keeping bf16 through the sampler. Parked until the
   kernel-level work is chosen.
+
+## LOOP STATE (2026-11-10, after batch 21): what is closed, what is left
+Closed this pass (all with ledger rows):
+- routing structures: parallel-experts kernel shipped (default on), bpm
+  tile truncation fixed and bit-identical to routing() up to 128 tiles.
+- int8 LM head: shipped as recipe default (=-1.1ms cold, -0.5ms warm).
+- async scheduling: measured -5.23ms, default on.
+- fused top-K combine: -1.56ms, shipped.
+- fused AR+RMS epilogue: dead on flint (crash + unreachable under the int8
+  payload boundary); dead block removed.
+- Profiling routes: rocprofv3 wedges the TP4 server, torch profiler sees no
+  kernels, synthetic in-graph GEMM harness mispredicts grouped MoE. Use
+  STEPPHASE/STEPWALL/STEPTRACE + in-graph single-op captures only.
+- Dense kernel alternatives: Triton blockscale loses on 4/5 shapes; CK
+  splitK has no instances; hipBLASLt int8 is not initialised on gfx908.
+  bf16 would only win qkv (barred by doctrine). Dense GEMMs stay ~11-13ms
+  of the step; the machine runs them at 8-18 TFLOP/s at M=96.
+
+Step accounting (warm full-C12, 12x2048->256): step 68-72ms; sched 0.2-1.2,
+exec 43-70 (worker), out 0.1-0.7, ~10-15ms API streaming per step. Target
+graph 30-38ms (instrumented). Sampler section 6.6ms (logits 1.27 + reject
+0.87 + glue). Propose 2.4ms CPU + hidden draft graph. 98 collectives/step.
+
+Remaining options with priors (pick one as the next big slice):
+1. Persistent/fused per-layer kernel: the only route to attack the 11-13ms
+   dense block + 245 launches. Needs a new kernel (Triton lacks LDS control
+   for the W-stream floor seen earlier; LDS floor measured 48us/GEMM at
+   W-stream, 118us full).
+2. Vocab-parallel sampling: removes the per-step full-vocab logits
+   all-gather (28.8MB/rank) + fp32 copy (57.6MB). Est 1-2ms/step.
+3. Sampler glue: 6.6ms section, needs a per-phase timer inside sample()
+   before choosing a mechanism.
+4. MoE grouped-GEMM config: kernel picks block_n=256/block_k=128/split_k=1
+   at block_m=16; no external knob; a split-K variant of the grouped kernel
+   could help the gate_up (N=1024,K=2048) case.
