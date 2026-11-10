@@ -2861,3 +2861,21 @@ payload residual (Bolt decoder_norm), closing the stream.
   = 2.4ms/step). Serving A/B + acceptance gate next. Topk fusion (487us
   target) is the follow-on.
 - Commits: aiter 211dd94cc4.
+
+## PERF LOOP batch 8 serving verdict (2026-11-10): REJECTED (production gap)
+- Fast path (VLLM_GFX908_DIRECT_ROUTING=1) shipped bit-identical at M<=21 in
+  microbench (after bpm 128-bound fix). Serving A/B: TWO boot crashes.
+  Boot 1: profile_run M=2048 faulted (pre-bound). Boot 2 (bounded): draft
+  warmup GS128 700 async fault from M=4096 prefill chunk (LOAD=128 sort
+  overflow -> garbage gather -> GEMM illegal access).
+- Root production gap: LOAD=128 sort covers M<=21 only. Production decode
+  batches are M=96 (576 gates) and prefill chunks M=2048 (12288 gates).
+  At M=96 the 2048-sort path projects to ~164us > production sort 128us.
+  The direct path cannot win where production actually runs.
+- Routing structures step is CLOSED: production sort_tokens_fused/sort_tokens
+  at 128us with full M coverage is not beatable by vectorized direct
+  variants within bounded effort. Remaining routing prize (if any) needs
+  a NEW mechanism (e.g. expert residency + different GEMM traversal), not
+  structure derivation.
+- Fast path env flag left in code (default on, bounded M*K<=128); prod
+  behavior for M>21 unchanged (falls back to routing()).
