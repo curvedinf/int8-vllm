@@ -143,6 +143,12 @@ serve() {
   if [[ -n "${MAMBA_MODE}" ]]; then
     args+=(--mamba-cache-mode "${MAMBA_MODE}")
   fi
+  # Mamba group block size. It must exceed the prefix hash unit (64) for
+  # partial (sub-block) Mamba hits, i.e. for a warm hit to resume at 64-token
+  # granularity instead of a 128-token boundary.
+  if [[ -n "${MAMBA_BLOCK:-}" ]]; then
+    args+=(--mamba-block-size "${MAMBA_BLOCK}")
+  fi
   # Async-scheduling A/B lever (None=default). 0 forces sync, 1 forces on.
   if [[ "${ASYNC_SCHED:-}" == "0" ]]; then
     args+=(--no-async-scheduling)
