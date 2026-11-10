@@ -3616,3 +3616,13 @@ Minimal frontier diff:
    priority = loaded_prefill_seconds(residual) / 1 block. That is the unit
    the shared policy should rank; leaf-last = never evict the most recent
    frontier of a live session before older inner ones.
+
+### PRIORITY CHANGE (2026-11-10): warm TTFT is fixed-cost bound, not recompute bound
+Probe (2048-token prefix cached, then same prefix + N new):
+  N=64 -> 204 ms, N=128 -> 232 ms, N=256 -> 227 ms  (flat!)
+So after align caching the residual recompute is <30 ms; ~205 ms of a warm
+TTFT is fixed per-request cost (~120-140 ms beyond a small prefill step).
+=> Next TTFT lever is that fixed cost (engine wake / first-step latency),
+   NOT the frontier checkpoint. Keep the frontier for the agentic case with
+   a large uncached residual (tens of thousands of tokens), where the
+   recompute term dominates again.
