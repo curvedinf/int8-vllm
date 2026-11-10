@@ -3094,3 +3094,9 @@ payload residual (Bolt decoder_norm), closing the stream.
 - If default-on holds, the round-trip overlap is already present and the
   15.6ms idle is elsewhere (D2H copy path). The explicit flag A/B (full boot
   each) is queued. Next experiment: --async-scheduling vs --no-async-scheduling.
+
+## PERF LOOP async A/B plan (2026-11-10)
+- CLI flag is --async-scheduling (BooleanOptional). Serve script has no
+  extra-args passthrough. A/B needs a script lever (ASYNC_SCHED) mirroring
+  EAGER/PROFILE_DIR, then full boot + bench per leg (~4min boot each).
+- A/B metric: TPOT delta on steady C12 (same seed pair), acceptance +-1pt.
