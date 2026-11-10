@@ -3354,3 +3354,8 @@ Remaining options with priors (pick one as the next big slice):
   rows (~7x). block_m=8 was slower (latency/occupancy bound, not FLOP).
 - Step budget now: MoE 19.8 | dense GEMMs ~9 | attention+collectives+
   elementwise+sampler ~15 | API/pipeline ~15 (warm full-C12 63.7ms).
+- MoE grouped split: gate_up 209.6us + down 154.6us per layer. Config
+  space closed: split_k blocked by quant_out (bf16-out variant no faster),
+  block_m=8 slower, num_warps/stages flat. Only an algorithm change
+  (multi-expert tile packing / expert-resident persistent kernel) can move
+  the 19.8ms/step block.
