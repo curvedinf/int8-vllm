@@ -2933,3 +2933,13 @@ payload residual (Bolt decoder_norm), closing the stream.
 - Next lever: non-graph 27.6ms (draft verify propose path, sampling, AR
   outside graphs). Propose is 2.3ms CPU (pphase); sampler s_logits+reject
   ~1.8ms CPU. The GPU part of non-graph needs its own events.
+
+## PERF LOOP batch 10 result (2026-11-10): step split complete
+- Graph GPU 30.2ms + non-graph 27.6ms = 57.8ms TPOT. Non-graph: draft
+  propose (full 7-token DFlash2 autoregressive forward, GPU unmeasured,
+  largest item), sampler (~1.8ms CPU), GS128 collectives outside graphs.
+- In-graph kernels already at 30.2ms; dense GEMM launch-count is the
+  largest in-graph block (~15ms of the 30.2). Propose/sampler/collective
+  timing needs CUDA events around speculator.propose() + sampler GPU
+  phases (not pphase CPU).
+- Next slice: events around propose + sampler GPU sub-phases.
