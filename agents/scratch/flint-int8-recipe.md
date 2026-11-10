@@ -2952,3 +2952,12 @@ payload residual (Bolt decoder_norm), closing the stream.
 - Step now: graph 30.2 + propose 9.17 + sampler/GS128/bubbles ~18.4 = 57.8.
   Next: draft GEMM launch-count (draft dense GEMMs at M=12..96) OR sampler/
   collective GPU events. Draft launch-count is the kernel-build target.
+
+## PERF LOOP batch 10 overlap verdict (2026-11-10): propose is serial by dependency
+- Propose consumes verify hidden_states, which complete only when the graph
+  finishes. Side-stream overlap with graph replay is impossible for the same
+  step (data dependency). The 9.17ms is inherent serial latency per round.
+- Reducible only by making the draft cheaper: draft GEMM launch-count
+  (17 layers x ~5 GEMMs x 7 steps = ~600 launches/draft-forward at C12).
+  Draft dense microbench at M=12..96 shapes is the next harness.
+- Step: graph 30.2 + propose 9.17 + sampler/collectives/bubbles 18.4 = 57.8.
