@@ -2889,3 +2889,13 @@ payload residual (Bolt decoder_norm), closing the stream.
   state across M tiles (each M-block streams W independently). At decode
   M=12/96 the GEMM is weight-stream bound: W read dominates, layout wins
   would need a persistent-column design (batch 4 hypothesis, kernel build).
+
+## PERF LOOP batch 9 (2026-11-10): step-budget recap, CK probe gap
+- Step: CPU 6.44 + MoE GEMM 15.2 + collectives ~1.15 = 22.8 of 57.77ms.
+  ~35-40ms is dense GEMM (245/step: QKV+o_proj+shared+gate x 49 layers) +
+  attention (49 layers unified), but the aiter blockscale proxy cannot
+  attribute it (production is CK, different kernel).
+- Dense GEMM microbench gap: need production AiterW8A16LinearKernel (CK W8A8)
+  timing at decode shapes (M=96, K=2048, N in {256..4096}).
+- Next slice: CK microbench harness + attention decode microbench at
+  production shapes (hdim 128, GQA 6:1, ctx 2-4k). Then attribute the 40ms.
