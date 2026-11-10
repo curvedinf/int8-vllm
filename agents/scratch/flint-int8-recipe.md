@@ -3644,3 +3644,18 @@ request lands just under the 200-step print window and never emits.
 Next attempt: either raise the cadence (print every 50) or add a dedicated
 first-step timer behind its own env, then measure a fresh request's first
 step split (reqs/p_inputs/p_attn/p_state/f_tail/s_logits + propose).
+
+### Reconciliation open question (2026-11-10): what is the 30ms in `exec`?
+Engine `exec` is 43-46 ms per iteration for tiny requests while the worker's
+phase sum measures ~12.9 ms. Two candidate explanations, not yet separated:
+(a) per-iteration handoff/IPC overhead (~30 ms, abnormal - should be <1 ms);
+(b) the measured 12.9 ms window covered only graphed decode steps, and the
+    EAGER prefill step is the expensive one (~40 ms for 64 tokens: 245
+    launches x ~50 us + MoE + attention).
+Evidence favouring (b): TTFT scales with prompt length at ~0.25 ms/token in
+the 64..512 range (64 -> 180 ms, 512 -> ~317 ms in the noisy probe), which is
+eager-prefill territory, and the C12 step's own 15-30 ms "pipeline" overhead
+would have to be handoff otherwise.
+Next experiment to separate them: run the pphase window on a workload of ONLY
+prefill steps (many distinct 64-token prompts, max_tokens=1 with immediate
+stop) and compare its average `f_tail`/`p_*` with the decode-step window.
