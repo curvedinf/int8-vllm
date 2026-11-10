@@ -769,10 +769,18 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 _at_box = getattr(self, "_attntrace", None) \
                     if _at else None
                 if _at and _at_box is None:
-                    _at_box = self._attntrace = {"k": 0.0, "w": 0.0, "n": 0}
+                    _at_box = self._attntrace = {"k": 0.0, "w": 0.0, "n": 0,
+                                                 "ev_pairs": [],
+                                                 "ev_stride": 0}
                 _ev0 = torch.cuda.Event(enable_timing=True) if _at_box else None
+                _capturing = torch.cuda.is_current_stream_capturing()
                 if _ev0 is not None:
                     _ev0.record()
+                # Graph-safe trace: when capturing, event.record() is captured
+                # INTO the graph and fires on replay. Stash the pair per call
+                # (one event pair per attention layer per step) and query the
+                # elapsed times after replay without synchronizing per step.
+                _ev1 = torch.cuda.Event(enable_timing=True) if _at_box else None
                 self.unified_attention(
                 q=query[:num_actual_tokens],
                 k=key_cache,
@@ -798,9 +806,9 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 shuffled_kv_cache=self._use_shuffle_kv,
             )
             if _at_box is not None:
-                _ev1 = torch.cuda.Event(enable_timing=True)
-                _ev1.record()
-                if not torch.cuda.is_current_stream_capturing():
+                if _ev1 is not None:
+                    _ev1.record()
+                if not _capturing:
                     torch.cuda.synchronize()
                     _at_box["k"] += _ev0.elapsed_time(_ev1)
                     _at_box["w"] += 0.0
@@ -812,6 +820,25 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                               f"maxk {max_seqlen_k} maxq {max_seqlen_q}",
                               flush=True)
                         _at_box.update(k=0.0, w=0.0, n=0)
+                else:
+                    # Captured into the graph: stash the pair and read back
+                    # post-replay from the model runner's next step.
+                    _at_box["ev_pairs"].append((_ev0, _ev1))
+                    if len(_at_box["ev_pairs"]) >= 4900:  # 49 layers x 100 steps
+                        pairs = _at_box["ev_pairs"]
+                        _at_box["ev_pairs"] = []
+                        # Query elapsed without sync storm: batch sync once.
+                        try:
+                            torch.cuda.synchronize()
+                            tot = 0.0
+                            for (a, b) in pairs:
+                                tot += a.elapsed_time(b)
+                            print(f"[attntrace-graph] {len(pairs)} calls | "
+                                  f"kernel {tot/len(pairs)*1000:8.1f} us/call",
+                                  flush=True)
+                        except Exception as e:
+                            print(f"[attntrace-graph] query failed: {e}",
+                                  flush=True)
             import os as _os
             _ra = _os.environ.get("VLLM_UA_READAUDIT")
             if _ra and not torch.cuda.is_current_stream_capturing():
