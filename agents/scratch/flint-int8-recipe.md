@@ -2987,3 +2987,10 @@ payload residual (Bolt decoder_norm), closing the stream.
 - The gap must be draft GEMM launch + glue (set_inputs + attn metadata build
   in Python per step). Next: events around set_inputs_first_pass + the
   draft model forward itself (already have propose total).
+
+## PERF LOOP batch 11 DFlash structure (2026-11-10): sub-steps mapped
+- DFlash propose: prepare_dflash_inputs -> _precompute_context_kv ->
+  dispatch_cg_and_sync_dp (DP collective) -> run_fullgraph (draft graphs,
+  5 layers M=96) -> sampling. Next timing slice instruments these phases.
+- The llm_base_proposer subtime edit is dead code for DFlash (Eagle path).
+- Draft graph replay is inside the propose 9.17ms (graphs, not eager).
