@@ -3129,3 +3129,11 @@ payload residual (Bolt decoder_norm), closing the stream.
   Variance is prompt content (random token-id prompts), not config.
 - Same-seed A/Bs remain the only valid comparison method (harness docs).
 - Step budget unchanged: graph 30.2 + propose 9.17 + sampler/bubbles ~16.
+
+## PERF LOOP parallel-experts prototype (2026-11-10): 121.9us at M=96 bit-identical
+- Per-expert rank via vectorized cumsum (grid E, in-register scans, no HBM
+  nested loops). Full M=96 coverage (576 gates), all structures bit-identical.
+- Closes the batch-8 production gap (LOAD=128 bound). Committed kernels are
+  M*K<=128; this prototype covers up to M=341 (LOAD=2048).
+- Next: commit to aiter + fast path bound update + serving A/B at C12.
+  Topk (201us) still runs upstream; total routing would be ~323us.
