@@ -3003,3 +3003,10 @@ payload residual (Bolt decoder_norm), closing the stream.
 - Step: graph 30.2 + propose 9.17 (graph 7.16 + rest 2.0) + sampler/
   collectives/bubbles ~18.4 = 57.8. Both graph and draft share the
   launch-count prize.
+
+## PERF LOOP batch 12 concat microbench (2026-11-10): 5.1ms/step prize
+- Concat QKV(6144)+gate_up(1024) -> N=7168: 229.8 -> 125.5us/layer
+  (saves 104.3us x 49 = 5.1ms/step, 8.8% of TPOT). Same for MoE-gate concat.
+- Pure launch-count win (flat GEMM cost across N). Implementation: concat
+  weights at load (one GEMM, split outputs) + serving A/B + acceptance gate.
+- Same pattern applies to draft graph (5 layers, 7.16ms).
