@@ -2770,3 +2770,13 @@ payload residual (Bolt decoder_norm), closing the stream.
   _routing_compute_indx_fused pattern from aiter), then hist/offsets from
   sorted runs. No per-expert rescans, no cross-program barrier.
 - Fresh baseline stands: TPOT 57.59ms (seed 62408), acceptance 5.95.
+
+## PERF LOOP batch 6 v2 result (2026-11-10): single-program Triton REJECTED
+- v2 single-program (tl.sort + 256x tl.min offset loop in one CU): 697.7us,
+  2x slower than production. Offsets also wrong (190/257). Reverted.
+- The 88.4us prototype in batch 6 used multi-program atomics (grid
+  (cdiv(M*K,64), E)) — that parallelism is the whole point. Next attempt:
+  multi-program hist (atomic) + barrier-correct offset/emit phases with
+  tile-unit bpm and router-order gather/scatter. No single-program loops.
+- Or: move routing INTO the gate GEMM epilogue (one kernel writes
+  hist/offsets/gather while computing gate logits). Same win, fewer lanes.
