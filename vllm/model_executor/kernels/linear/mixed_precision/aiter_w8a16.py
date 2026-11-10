@@ -458,6 +458,22 @@ class AiterW8A16LinearKernel(MPLinearKernel):
                             dtype=dtype,
                             config=cfg,
                         )
+                        if getattr(layer, "_gfx908_payload_out", False):
+                            # The int8-payload epilogue (o_proj, shared down)
+                            # forces bn=128/ks=1 and an int8 output with
+                            # scales; a generic warmup config leaves that
+                            # variant to JIT mid-inference.
+                            pcfg = dict(cfg)
+                            pcfg["BLOCK_SIZE_N"] = 128
+                            pcfg["NUM_KSPLIT"] = 1
+                            y8 = torch.empty((M, N), dtype=torch.int8,
+                                             device=device)
+                            s8 = torch.empty((M, N // 128),
+                                             dtype=torch.float32,
+                                             device=device)
+                            gemm_a8w8_blockscale(
+                                x_q, w_q, x_s, w_s, dtype=torch.int8,
+                                y=y8, output_scales=s8, config=pcfg)
                     except Exception as e:
                         import warnings
 
