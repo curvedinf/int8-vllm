@@ -289,16 +289,10 @@ class FlintSparseMoeBlock(nn.Module):
             getattr(_routed, "quant_method", None), A8W8BlockscaleMoEMethod
         ):
             self.experts.moe_config.skip_final_all_reduce = True
-            # One device-side boundary per layer: the GS128 collective fused
-            # with the residual+RMSNorm+quant epilogue (ar_rms_g128). The
-            # linear leaves partials on each rank; get_ar_rms returns None
-            # unless the library is present.
-            self._fused_ar_rms = (
-                os.environ.get("VLLM_GFX908_FUSED_EPILOGUE", "0") == "1"
-                and get_tensor_model_parallel_world_size() == 4
-            )
-            if self._fused_ar_rms:
-                self.self_attn.o_proj.skip_reduce = True
+            # NOTE: the fused AR+RMSNorm bf16-partials epilogue
+            # (VLLM_GFX908_FUSED_EPILOGUE=1) is wired on the decoder layer,
+            # not here: it needs self_attn.o_proj, and it is unreachable while
+            # the int8 payload boundary (VLLM_GFX908_O_PROJ_I8=1) is on.
         shared_down = self.shared_expert.down_proj
         shared_down._gfx908_int8_out = True
         shared_down._gfx908_payload_out = True

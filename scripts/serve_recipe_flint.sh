@@ -141,7 +141,22 @@ serve() {
     # expert ids -1 are zero-weighted, not wrapped to expert 255).
     args+=(--compilation-config "{\"mode\":0,\"cudagraph_mode\":\"FULL_DECODE_ONLY\",\"cudagraph_capture_sizes\":[${CUDAGRAPH_SIZES:-16,32,48,64,96,128}]}")
   fi
-  "${ROOT_DIR}/.venv/bin/python" "${args[@]}" &
+  local _launch=()
+  if [[ "${ROCPROF:-0}" == "1" ]]; then
+    # rocprofv3 boot: kernel dispatch trace for whole-process-tree (graphs
+    # included; HIP graph replay dispatches are traced individually). CSV is
+    # written incrementally so a SIGTERM stop still leaves usable data.
+    local _pdir="${ROCPROF_DIR:-${LOG_DIR}/rocprof}"
+    mkdir -p "$_pdir"
+    local _period=()
+    if [[ -n "${ROCPROF_PERIOD:-}" ]]; then
+      # e.g. ROCPROF_PERIOD=420:90:0 -> collect from t=420s for 90s, once.
+      # Keeps boot untraced (tracing during weight load wedges the workers).
+      _period=(--collection-period "${ROCPROF_PERIOD}")
+    fi
+    _launch=(rocprofv3 --kernel-trace -f csv -d "$_pdir" "${_period[@]}" --)
+  fi
+  "${_launch[@]}" "${ROOT_DIR}/.venv/bin/python" "${args[@]}" &
   child=$!
   wait "$child"
 }
