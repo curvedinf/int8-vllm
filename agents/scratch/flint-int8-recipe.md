@@ -2978,3 +2978,12 @@ payload residual (Bolt decoder_norm), closing the stream.
 - Draft attention is ~0.1ms (not the 6.4ms hypothesis). Glue is the open item.
 - Step: graph 30.2 + propose 9.17 (dense 2.75 + head 1.5 + attn 0.1 + rest 4.8)
   + sampler/collectives/bubbles ~16.8 = 57.8.
+
+## PERF LOOP batch 11 draft structure (2026-11-10): parallel confirm
+- Propose = 1 DFlash forward (M=96) + lm_head + sampling. The 7-step
+  autoregressive loop is skipped via parallel_drafting early exit.
+- Per-layer draft cost = 9.17ms / 5 layers = 1.83ms incl attn+GEMM+sampling.
+  Target attention per layer is ~0.1ms (bytes bound); draft layers are ~18x.
+- The gap must be draft GEMM launch + glue (set_inputs + attn metadata build
+  in Python per step). Next: events around set_inputs_first_pass + the
+  draft model forward itself (already have propose total).
