@@ -4143,3 +4143,25 @@ Two levers tried and REJECTED, both reverted (aiter tree clean):
 segmentation. Both cheap levers are now closed; what remains is either the
 int8_block_g128 per-tile dequant (untested; needs an isolated microbench
 comparing KV dtypes) or accepting the current kernel.
+
+### Attention line CLOSED (batch 30): KV dtype is not the cost; 2D path had a bug
+Tested the last hypothesis with the recipe's own lever (added `KV_DTYPE`
+passthrough to the serve script, default int8_block_g128):
+  KV_DTYPE=int8_per_token_head at C12/2048/out=128: period **41.96 ms**
+  vs block_g128's 38.89, and acceptance 4.27 vs ~5.9.
+So dropping the per-128 block scales makes attention SLOWER and quality
+worse - the block-dequant hypothesis is dead. Together with the earlier
+rejects (BLOCK_M query-split, AITER_UA_FORCE_3D) and the discovery that the
+3D path already segments 8-way, every cheap lever on the attention path is
+now closed: grid shape, kernel path, segmentation, KV dtype.
+=> The residual ~15 ms/step is the Triton unified-attention kernel's own
+per-tile efficiency on this shape (16-row M, int8 KV, gfx908). Improving it
+means rewriting that kernel in our aiter fork; nothing config-level remains.
+
+REAL BUG FOUND EN ROUTE (fixed in aiter): `select_2d_config` in
+`aiter/ops/triton/attention/unified_attention.py` calls `os.environ` but the
+module never imported `os`. The 2D path is never taken under the deployed
+int8_block_g128 recipe (use_2d_kernel routes C12 to 3D), so it has been
+broken since the fork was taken and nothing noticed. Any KV dtype that
+routes to 2D (int8_per_token_head does) crashed the engine at boot with
+NameError. One-line `import os`, committed.

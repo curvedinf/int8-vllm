@@ -109,7 +109,7 @@ serve() {
   export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 
   local spec
-  spec="$("${ROOT_DIR}/.venv/bin/python" -c 'import json,sys; print(json.dumps(dict(method="dflash",model=sys.argv[1],num_speculative_tokens=int(sys.argv[2]),kv_cache_dtype="int8_block_g128")))' "$DRAFT_MODEL_DIR" "${NS:-7}")"
+  spec="$("${ROOT_DIR}/.venv/bin/python" -c 'import json,sys; print(json.dumps(dict(method="dflash",model=sys.argv[1],num_speculative_tokens=int(sys.argv[2]),kv_cache_dtype=sys.argv[3])))' "$DRAFT_MODEL_DIR" "${NS:-7}" "${KV_DTYPE:-int8_block_g128}")"
   local args=(
     -m vllm.entrypoints.openai.api_server
     --model "$MODEL_DIR" --served-model-name flint
@@ -122,7 +122,7 @@ serve() {
     --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.90}"
     # PTQR-era int8_block_g128 is the gated KV dtype for target AND draft
     # (fp16 draft KV is measured broken; bf16 is banned by int8-first).
-    --kv-cache-dtype int8_block_g128
+    --kv-cache-dtype "${KV_DTYPE:-int8_block_g128}"
     --speculative-config "$spec"
     # Flint's template renders <think> reasoning blocks; the qwen3 engine
     # parser splits them into reasoning_content. No tool-call parser: the
