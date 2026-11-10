@@ -51,6 +51,8 @@ def _drain_attntrace(model, torch) -> None:
     """
     total = 0.0
     count = 0
+    found = 0
+    paired = 0
     if model is None:
         return
     for _, mod in model.named_modules():
@@ -66,16 +68,21 @@ def _drain_attntrace(model, torch) -> None:
             if _b is not None:
                 boxes.append(_b)
         for box in boxes:
+            found += 1
             pairs = box.get("ev_pairs", [])
             if not pairs:
                 continue
+            paired += len(pairs)
             # Events complete after replay; query them in one sync.
             try:
                 torch.cuda.synchronize()
                 for a, b in pairs:
                     total += a.elapsed_time(b)
                     count += 1
-            except Exception:
+            except Exception as _ex:
+                if count == 0 and paired:
+                    print(f"[attntrace-graph] query failed: {_ex!r}",
+                          flush=True)
                 count = 0
             box["ev_pairs"] = []
             box["k"] += 0.0
@@ -83,6 +90,10 @@ def _drain_attntrace(model, torch) -> None:
     # layer total (49). Drain + print whenever pairs exist (per step is
     # fine: sync cost is one synchronize per drain, ~10us, and events are
     # already complete post-replay).
+    if not getattr(_drain_attntrace, "_dbg", False) and found:
+        _drain_attntrace._dbg = True
+        print(f"[attntrace-graph] boxes={found} pairs={paired} "
+              f"counted={count}", flush=True)
     if count >= 49:
         print(f"[attntrace-graph] {count} calls | kernel "
               f"{total/count*1000:8.1f} us/call", flush=True)
