@@ -3788,3 +3788,12 @@ first - every other lever in this file is closed with numbers.
   pair split via reshape+where needs checking against the interleaved
   layout; (c) the clamp lacks round-to-nearest. Fix these before extending
   to the persistent grid.
+- MoE gate_up prototype diagnostic (attempt 2): the GEMM output itself is
+  wrong (max|diff| 16.1, rel 1.3) - so the bug is upstream of the SwiGLU
+  epilogue. Reference now accumulates per K group with that group's scales,
+  matching the kernel. Remaining suspects, in order: (a) tl.dot int8 operand
+  handling (maybe needs explicit tl.int8 casts after load / a different
+  out_dtype path), (b) the ws layout ([E, K/G, N] with stride_n=1 and
+  group = k0//128), (c) xs semantics (per-token) vs the reference. Next step:
+  zero-out w_scale and compare raw int32 dot for a single K block (128x256)
+  to isolate (a).
