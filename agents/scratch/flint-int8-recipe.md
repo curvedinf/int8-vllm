@@ -4060,3 +4060,36 @@ in-graph timing on this stack.
    the one cost that scales with the recipe's 2304-token context.
 => Next time: measure attention with bench observables (throughput/TTFT vs
 context), never with in-graph timers or attention ablations on this stack.
+
+### ATTENTION IS ~15 ms/step AND RUNS AT 60 PROGRAMS ON 120 CUs (batch 27)
+Measured with plain wall-clock `period` (VLLM_STEPWALL), which is immune to
+the in-graph timer bugs and to the acceptance confound:
+  in=128   period 25.85 ms | in=512  27.40 | in=1024 32.79 | in=2048 38.89
+  (n=12, out=128, seed 5150). Slope ~6.8 us per context token per step
+  => at the recipe's ~2200 tokens that is **~15 ms of the step**.
+Confirmation without a profiler: halving the sequence count at fixed
+context (n=12 46.67 -> n=6 38.67 ms period) removes 8.0 ms, i.e. half of
+the ~15 ms, while the MoE (weight-bound, row-independent) must not change.
+So the context cost is per-sequence attention, not per-row work.
+
+Mechanism: arithmetic, not bandwidth. Per step the target's attention is
+47 layers x 12 seqs x 8 queries x 2176 keys x 128 dim x 2 x 8 q heads/rank
+= ~200 GFLOP; at 15 ms that is ~13 TFLOP/s over 4 GPUs = ~1.8% of fp16 peak,
+while the KV stream it reads is only ~1.5 GB/step (~1.6 ms at the 950 GB/s
+ceiling). The kernel is occupancy-starved:
+`aiter/ops/triton/attention/unified_attention.py` launches
+grid = (NUM_KV_HEADS, total_query_blocks) with
+BLOCK_M=16, num_queries_per_kv=8 -> BLOCK_Q=2 ->
+total_query_blocks = 96/2 + 12 = 60. At C12 on this rank that is
+**60 programs for 120 CUs**, and each scans ~2176 keys serially in
+TILE_SIZE steps with no split over the key dimension.
+
+=> NEXT BIG ITEM (scoped): a flash-decoding-style key-dimension split in
+the fork's unified attention - add a KV-split axis to the launcher's grid
+plus a combine pass (precedent: ultraquant_attn / rocm_octave_attn already
+carry max_num_kv_splits). 4 splits would take 60 -> 240 programs; the
+measured attention share is ~15 ms, so 3-4x on the kernel is worth ~9-11
+ms/step (~25% of the step). This is the largest remaining item in the
+recipe and it is in OUR aiter fork, not upstream.
+Caveat: the recipe mandates AITER unified attention, so this must be a
+change to that kernel, not a backend swap.
