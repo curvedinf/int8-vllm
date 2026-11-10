@@ -1,5 +1,8 @@
 # Flint int8 recipe — design map (goal work, 2026-11-06)
 
+USER PREFERENCE (standing, 2026-11-10): reply to the user in ENGLISH only.
+Do not write Chinese in replies, ledger entries or notes.
+
 Target: RecursiveSI/flint (39.8B-A2.5B MoE) + incoai/Flint-DFlash2 draft,
 official fork recipe at C8, int8 PTQR both, full int8 opt-in engine.
 Foundation: upstream v0.33.0 merged (d8a365e164) — Flint model lives at
