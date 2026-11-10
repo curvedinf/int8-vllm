@@ -3377,3 +3377,14 @@ Remaining options with priors (pick one as the next big slice):
   FlintSparseMoeBlock.forward where the shared branch and the routed
   experts are dispatched. Needs graph-capture-safe stream fork/join
   (torch.cuda.stream + wait_stream inside the capture works).
+
+## ACCEPTED (2026-11-10): shared-expert stream overlap — warm 63.7 -> 59.3 ms
+- Shared expert (gate_up N=512 + down N=2048/K=256) now runs on a side
+  stream inside the captured graph; the routed path joins it right before
+  the down's combine epilogue. -4.5ms warm (-7%), more than the 3ms
+  predicted (the shared down overlaps as well).
+- Cumulative: warm full-C12 step 71.5 -> 59.3 ms (-17%); cold 55.8 -> 48.8.
+  Acceptance 5.81/5.82 (in band).
+- Same pattern may apply elsewhere: (a) the draft model's own shared path,
+  (b) the o_proj/attn chain vs the next layer's router GEMM, (c) the
+  sampler's logits head vs the draft prepare.
