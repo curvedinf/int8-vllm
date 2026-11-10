@@ -2686,3 +2686,10 @@ payload residual (Bolt decoder_norm), closing the stream.
   because router order and draft counts dominate the decode batching).
 - Remaining honest candidates: a Triton persistent-MoE reduction and a
   blocked-GEMM rewrite of the gate_up/down GEMMs, both kernel builds.
+
+## PERF LOOP batch 3 verdict (2026-11-10)
+- 96-token steady decode at the current config: TPOT 58.59 ms,
+  output 87.5 tok/s aggregate (tile/warp experiments do not touch it
+  because router order and draft counts dominate the decode batching).
+- Remaining honest candidates: a Triton persistent-MoE reduction and a
+  blocked-GEMM rewrite of the gate_up/down GEMMs, both kernel builds.
