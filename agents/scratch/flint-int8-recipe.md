@@ -3779,3 +3779,12 @@ gate_up kernel (target: raise the 54%-of-peak weight streaming toward
 aiter/configs shapes, validate numerics vs moe_gemm_a8w8_blockscale on the
 prod M=576/N=256/K=2048 case, then A/B. Do not re-measure anything else
 first - every other lever in this file is closed with numbers.
+- MoE gate_up kernel prototype: first cut at agents/tmp/moe_proto1.py (not
+  gitignored content - agents/tmp is disposable, so copy it out before it
+  matters). Single-expert 16x256 tile, K-loop with tl.dot int8, per-token x
+  scale, GS128 weight scale, SwiGLU+quant epilogue. Numerics FAIL
+  (codes max|diff| 242) - known issues: (a) the weight scale must be indexed
+  by the K group (k//128), the prototype uses group 0 only; (b) the SwiGLU
+  pair split via reshape+where needs checking against the interleaved
+  layout; (c) the clamp lacks round-to-nearest. Fix these before extending
+  to the persistent grid.
