@@ -3206,3 +3206,15 @@ payload residual (Bolt decoder_norm), closing the stream.
   Fallback preserved for M*K>2048.
 - Step ~55.0ms TPOT with async + fast path. Remaining: dense launch-count,
   draft graph, sampler/collective sub-phases, D2H idle (~10ms).
+
+## PERF LOOP next (2026-11-10): in-graph kernel budget without rocprofv3
+- Try the existing torch-profiler lever instead (PROFILE_DIR=... ->
+  /start_profile, run C12 bench, /stop_profile, then
+  scripts/analyze_flint_profile.py). Kineto on ROCm 7.2 may expose the
+  graph-replay dispatches individually; if it only shows hipGraphLaunch,
+  fall back to a standalone rocprofv3 harness that replays the layer
+  sequence at prod shapes in one process.
+- Then act on the top kernel of the 38.4ms C12 target graph.
+- Note: a full AIS-cache boot currently takes ~8 min (71% at 5 min), so
+  budget boots accordingly; wedged-looking workers are usually the repack
+  load, not a hang (check the progress bar line in the log).
