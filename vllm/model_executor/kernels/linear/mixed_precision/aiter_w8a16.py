@@ -532,6 +532,9 @@ class AiterW8A16LinearKernel(MPLinearKernel):
             and c.group_size == 128
             and w_q is not None
             and w_q.numel() > 0
+            # mlp down_proj (N=2048, K=1536) is the one shape where CK still
+            # wins at M=96 (25.6 vs 31.7us best Triton), so it stays on CK.
+            and not (N == 2048 and K == 1536)
         )
         if (
             not _decode_bs
