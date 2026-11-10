@@ -3137,3 +3137,14 @@ payload residual (Bolt decoder_norm), closing the stream.
   M*K<=128; this prototype covers up to M=341 (LOAD=2048).
 - Next: commit to aiter + fast path bound update + serving A/B at C12.
   Topk (201us) still runs upstream; total routing would be ~323us.
+
+## PERF LOOP serving A/B (2026-11-10): fast path ACCEPTED (-0.29ms)
+- Boot healthy with parallel-experts kernel + OOB fix (unmasked ExptScal load
+  faulted under prod 90% util; in-process allocator masked it).
+- Same-seed 62408: TPOT 55.02 vs 55.31 async leg = -0.29ms (-0.5%).
+  Theory predicted 2.4ms; realized less (structures run inside graphs at M=96,
+  win partially hidden by replay). Acceptance 5.97 in bench window (PASS).
+- Fast path env flag left ON (default 1 via env unset? No: flag default 0).
+  A/B boot passed ASYNC_SCHED=1 + DIRECT_ROUTING=1 explicitly. Recipe default
+  still routes via routing() until the flag is promoted. Promote next if a
+  second seed confirms.
