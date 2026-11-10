@@ -3913,3 +3913,41 @@ bn=128 with 8 warps measures 7255 us. Draft o_proj/down are already at
 their best tile. The draft GEMMs are CTA-concurrency bound, not
 weight-traffic bound (bm=128 gives 1x weight reads but measures slower).
 Serving: 652.8/670.0 tok/s, TPOT 57.52/57.55, acceptance 5.99-6.30.
+
+### Stale-note correction (batch 22): the draft has NO bf16 lm_head
+"The draft lm_head is bf16 (~1.5 ms stream)" is out of date. The draft
+config has no `has_own_lm_head`, so `spec_decode/dflash/utils.py:131`
+deletes the freshly built ParallelLMHead and **shares the target's int8
+GS128 head** (`VLLM_GFX908_INT8_LM_HEAD=1`). Measured head cost at the
+shared shape is ~310 us/step (M=96, 318 MB/rank int8), not 1.5 ms. Do not
+chase this. The draft's per-step budget is: GEMMs ~1.9 ms (20 kernels),
+head ~0.31, attention ~0.1, and ~4-5 ms of propose-path glue/selection
+which is the open item.
+
+### gate_up CLOSED (batch 22): the two-half tile is slower, 186 us is structural
+Wrote the scoped two-K-loop tile (one 128-column half at a time, 16 KB
+stages, 2 stages = 32 KB LDS -> 2 CTAs/CU *and* a pipelined K-loop, then
+the SwiGLU+GS128 epilogue across both halves). Prototype
+(/tmp/gu_twohalf.py) measures 199.4-214.4 us vs the stock fused 185.6 us,
+so the hypothesis behind this line is wrong.
+Why: the down-kernel win (154 -> 96.9) came from a WIDER N tile (128 ->
+256), not from occupancy -- bn=128/stages=2 was already 32 KB per CTA and
+already ran 2 CTAs/CU. gate_up has no wider tile available: its N is
+exactly one expert (256 = 2 x I_p per rank) because the fused epilogue
+quantizes in 128-column output groups, so the minimum work unit per CTA is
+one whole expert and 256 experts over 120 CUs is inherently 2.13 waves.
+Per wave it already streams at 720 GB/s of the ~950 practical ceiling.
+=> Close the gate_up line. Do not re-open without a fundamentally
+different epilogue contract (e.g. a two-pass quant that would allow
+bn=128 tiles, which then needs a cross-tile amax barrier).
+(The prototype's numerics also fail - tl.join interleaves the halves
+instead of concatenating; irrelevant given it is slower, do not fix it.)
+
+### Draft graph (batch 22): 6.95 ms is in-graph, not CPU
+VLLM_ATTNTRACE=1 on a warm C12 run: pre_build 0.0 us, attn_build 0.2-0.3
+us, draft_graph 6949-6961 us per step. So the draft's whole cost is inside
+the graph replay; there is no Python glue to trim. Inside it: GEMMs ~1.9 ms
+(measured), shared int8 head ~0.31, attention ~0.1, leaving ~4.6 ms in
+graph kernels that have not been attributed (norms, quant seams, selector).
+Attributing that needs a kernel-level trace, and rocprofv3 on the TP4
+server is still unusable.
