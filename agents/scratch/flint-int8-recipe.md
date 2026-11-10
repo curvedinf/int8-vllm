@@ -3797,3 +3797,41 @@ first - every other lever in this file is closed with numbers.
   group = k0//128), (c) xs semantics (per-token) vs the reference. Next step:
   zero-out w_scale and compare raw int32 dot for a single K block (128x256)
   to isolate (a).
+
+## MoE kernel line re-opened (2026-11-10, batch 19)
+Two corrections to the "close the MoE kernel line" entry above:
+- The prototype's "GEMM numerics FAIL (rel 1.3)" was a HARNESS bug, not a
+  kernel bug: the tile kernel was launched with grid=(E,1) so all four
+  experts wrote the same ACC rows and the comparison read expert 3 against
+  expert 0's reference. Raw int8 `tl.dot` on this stack is exact
+  (/tmp/dot_probe.py: max|diff| 0). With a single-expert launch the tile
+  kernel reproduces its reference exactly (acc rel 1e-7, int8 codes
+  bit-identical, scales 6e-8). `agents/tmp/moe_proto1.py` is sound as a
+  16x256 tile; only the harness was wrong.
+- The earlier down-config sweep ("forcing bn=256 faults") was also a
+  harness artifact: the bench passed a 96-row token activation to the down
+  matmul, which indexes GATHERED rows (production feeds gate_up's quant-out
+  [M*top_k=576, I] buffer), so every candidate read out of bounds.
+  `scripts/bench_flint_moe_kernel.py` now uses the gathered shape.
+In-graph bench of the current production configs (M=96 tokens, 576 gathered):
+gate_up bn=256 w=8 s=2 = 187 us / 739 GB/s (60% of peak; 4 warps 196 us;
+s=3 exceeds the 64 KB LDS budget). down numbers land with the fixed sweep.
+
+### MoE down tile (accepted, batch 19): bn=256 + one stage
+Why the old tile was slow: at bn=128/stages 2 each CTA streamed only 16 KB
+of weights and 4096 CTAs ran 34 waves at 449 GB/s. Two isolation probes
+settled the mechanism (/tmp/down_bound.py): the int8 dot for the entire
+2048-tile grid costs 16.6 us/layer (64.8 TOP/s), so the block is pure
+weight streaming; a hand-written persistent grid-stride kernel came out
+2x SLOWER (221-284 us) because the serial loop defeats the hardware's
+cross-CTA overlap (tl.range(num_stages=2) made no difference).
+What works: keep the stock kernel, but shrink LDS per CTA to 32 KB
+(bn=256, num_stages=1) so two CTAs are resident per CU. 96.9 us/layer,
+715 GB/s. bn=512/s=1 (64 KB, one CTA/CU) is 121.8; bn=64/32 are 233-746.
+gate_up cannot use the trick (bn is pinned at 256 by the gated epilogue and
+it has only 256 tiles, so it is wave-quantization limited at 71%; s=1
+measured 186.2 vs 187.3 at s=2). Its remaining lever is a split-K matmul
+plus a separate SwiGLU/quant epilogue (~512-1024 tiles -> 85-95% waves,
+est. -25 us/layer).
+Live-config check: `VLLM_MOE_CFG_LOG=1` prints the effective gate_up/down
+configs once per boot from `_prewarm` (down confirmed bn 256 / w 8 / s 1).

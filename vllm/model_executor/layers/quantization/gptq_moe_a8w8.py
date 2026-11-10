@@ -32,6 +32,7 @@ from vllm.model_executor.layers.quantization.utils import replace_parameter
 _G = 128
 _PACK = 4  # 8-bit GPTQ packs 4 values per int32
 _MOE_ACTIVE_STATS = {"sum": 0, "calls": 0}
+_MOE_CFG_LOGGED = False
 
 
 def _unpack_i8(packed: torch.Tensor) -> torch.Tensor:
@@ -267,6 +268,25 @@ class A8W8BlockscaleMoEMethod(AutoGPTQMoEMethod):
                 w = torch.rand(m, topk, device=dev)
                 w = w / w.sum(-1, keepdim=True)
                 self._run(layer, xd, w, ids, n_expts)
+            global _MOE_CFG_LOGGED
+            if (os.environ.get("VLLM_MOE_CFG_LOG") == "1"
+                    and not _MOE_CFG_LOGGED):
+                from aiter.ops.triton.moe.moe_op_gemm_a8w8_blockscale import (
+                    get_kernel_config,
+                )
+                _ids = torch.randint(0, n_expts, (96, topk), device=dev)
+                _w = torch.rand(96, topk, device=dev)
+                _w = _w / _w.sum(-1, keepdim=True)
+                rd, _, _ = _routing_from_topk(_ids, _w, n_expts)
+                gu = get_kernel_config(96 * topk,
+                                       layer.w13_qweight.shape[2],
+                                       layer.w13_qweight.shape[1], rd, 1)
+                dn = get_kernel_config(96 * topk,
+                                       layer.w2_qweight.shape[2],
+                                       layer.w2_qweight.shape[1], rd, 1)
+                print(f"[moe-cfg] gate_up {gu}\n[moe-cfg] down {dn}",
+                      flush=True)
+                _MOE_CFG_LOGGED = True
         finally:
             if saved is not None:
                 layer._shared_out = saved
@@ -477,9 +497,16 @@ _TUNED_MOE_CONFIGS = {
     # split_k=2 changes results and is excluded).
     (2048, 256, 16): {"block_n": 256, "num_warps": 8, "num_stages": 2,
                       "group_m": 1, "split_k": 1},
-    # down (K=I_p=128, N=2048): the heuristic shrinks block_n to 32 for small
-    # grids; 128 measured 2.3x faster than the heuristic at decode (199 vs 457us).
-    (128, 2048, 16): {"block_n": 128, "num_warps": 8, "num_stages": 2,
+    # down (K=I_p=128, N=2048): block_n=256/num_stages=1 measured 96.9us vs
+    # 154.0us for the old 128-column two-stage tile at C12 decode (M_g=576,
+    # in-graph; 715 vs 449 GB/s). One stage keeps the weight tile at 32 KB,
+    # so two CTAs are resident per CU and the hardware overlaps their HBM
+    # streams -- the kernel is pure weight streaming (the int8 dot itself is
+    # ~17us/layer), and the stock two-stage tile fits only one CTA per CU.
+    # The earlier "forcing 256 faults" note came from a bench that fed the
+    # down matmul token-shaped rows instead of the gathered buffer. 512
+    # columns measured 121.8us (one CTA per CU again).
+    (128, 2048, 16): {"block_n": 256, "num_warps": 8, "num_stages": 1,
                       "group_m": 1, "split_k": 1, "w_cache_modifier": None},
     # Legacy unsharded sweep shapes, kept for non-TP4 runs.
     (2048, 1024, 16): {"block_n": 256, "num_warps": 8, "num_stages": 2,
