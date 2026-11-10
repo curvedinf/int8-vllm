@@ -131,6 +131,36 @@ class Rope:
         return rot(q), rot(k)
 
 
+_ALLOWED_MASKS: dict[tuple, torch.Tensor] = {}
+
+
+def _allowed_mask(S: int, window: int, device) -> torch.Tensor:
+    """Shared causal (optionally windowed) allowed-mask.
+
+    The old per-module cache cost S*S bools PER LAYER (49 x 256 MiB = 12.5 GiB
+    at S=16384) and built it with an int64 [S, S] broadcast (2.0 GiB
+    transient). The mask only depends on (S, window, device), so one shared
+    copy per shape is enough; build it block-wise to bound transients.
+    """
+    key = (S, window, str(device))
+    m = _ALLOWED_MASKS.get(key)
+    if m is not None:
+        return m
+    blk = 1024
+    ki = torch.arange(S, device=device)[None, :]
+    m = torch.empty(S, S, dtype=torch.bool, device=device)
+    for q0 in range(0, S, blk):
+        q1 = min(S, q0 + blk)
+        qi = torch.arange(q0, q1, device=device)[:, None]
+        m[q0:q1] = ki <= qi
+        if window:
+            m[q0:q1] &= (qi - ki < window)
+    while len(_ALLOWED_MASKS) >= 3:
+        _ALLOWED_MASKS.pop(next(iter(_ALLOWED_MASKS)))
+    _ALLOWED_MASKS[key] = m
+    return m
+
+
 class AttentionRef(nn.Module):
     def __init__(self, cfg, layer_idx: int, rope: Rope | None, device):
         super().__init__()
@@ -201,16 +231,7 @@ class AttentionRef(nn.Module):
                                torch.full_like(sink, float("-inf"))
                                ).view(1, -1, 1, 1)
 
-        if getattr(self, "_mask_cache", None) is None or \
-                self._mask_cache.shape[-1] < S or self._mask_cache.device != x.device:
-            big = max(S, 128)
-            q_idx = torch.arange(big, device=x.device)[:, None]
-            k_idx = torch.arange(big, device=x.device)[None, :]
-            m = k_idx > q_idx
-            if self.window > 0:
-                m = m | (q_idx - k_idx >= self.window)
-            self._mask_cache = ~m  # allowed
-        allowed = self._mask_cache[:S, :S].to(x.device)
+        allowed = _allowed_mask(S, self.window, x.device)
         # sink column is always "allowed" (it IS the virtual key)
         allowed2 = torch.cat(
             [allowed, allowed.new_ones(S, 1)], dim=-1)
