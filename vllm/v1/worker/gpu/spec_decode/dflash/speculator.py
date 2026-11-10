@@ -686,6 +686,11 @@ class DFlashSpeculator(DraftModelSpeculator):
             self._precompute_context_kv(0, num_target_tokens, dummy_run)
             return self.draft_tokens[:num_reqs]
 
+        # Sub-step timing (VLLM_ATTNTRACE=1): split dflash propose phases.
+        _dgt = os.environ.get("VLLM_ATTNTRACE") == "1"
+        if _dgt:
+            import time as _t
+            _pt0 = _t.perf_counter()
         batch_sync, num_batch_tokens = (
             self._build_uniform_batch_dp_sync(
                 dp_sync_state,
@@ -695,6 +700,10 @@ class DFlashSpeculator(DraftModelSpeculator):
             if dp_sync_state is not None
             else (None, num_query_tokens)
         )
+        if _dgt:
+            print(f"[dsub] pre_build {(_t.perf_counter()-_pt0)*1000:7.1f} us",
+                  flush=True)
+            _pt0 = _t.perf_counter()
         # Every DFlash step has exactly num_query_per_req tokens, so we can use FULL CGs
         batch_desc, batch_sync = dispatch_cg_and_sync_dp(
             self.query_cudagraph_manager,
@@ -750,7 +759,19 @@ class DFlashSpeculator(DraftModelSpeculator):
 
         if is_full_cudagraph:
             assert self.query_cudagraph_manager is not None
+            if _dgt:
+                print(f"[dsub] attn_build {(_t.perf_counter()-_pt0)*1000:7.1f} us",
+                      flush=True)
+                _pt0 = _t.perf_counter()
+                _e0 = torch.cuda.Event(enable_timing=True)
+                _e0.record()
             self.query_cudagraph_manager.run_fullgraph(batch_desc)
+            if _dgt:
+                _e1 = torch.cuda.Event(enable_timing=True)
+                _e1.record()
+                torch.cuda.synchronize()
+                print(f"[dsub] draft_graph {_e0.elapsed_time(_e1)*1000:7.1f} us",
+                      flush=True)
         else:
             draft_slot_mappings_by_layer = build_slot_mappings_by_layer(
                 self.block_tables.slot_mappings[:, :num_tokens_padded],
