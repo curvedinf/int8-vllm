@@ -4194,3 +4194,27 @@ move). The residual ~15 ms/step is the Triton unified-attention kernel's
 per-tile efficiency at 16-row M with int8 KV on gfx908, and the only
 remaining route is a kernel rewrite prototyped offline against
 scripts/test_int8_kv_micro.py before it goes anywhere near serving.
+
+### Offline attention harness built (batch 33): target attn is 5 ms, not 15
+`scripts/bench_attn_micro.py` builds the target's unified-attention call at
+production geometry (12 seqs x 2048 ctx, 8 q tokens/seq, 8 q / 1 kv head
+per rank, hdim 128, int8 per-token-head KV) and times it in a CUDA graph,
+so kernel ideas iterate without the 4.5-minute boot. Findings:
+- target attention = **107-108 us/layer** at ctx 2048 => **~5.1 ms** for 47
+  layers. The earlier "attention ~15 ms" from the period slope was
+  over-attributed: the slope also contains the draft's attention and other
+  context-scaled work.
+- segment count barely matters: 4 segs 102.9 us, 8 (auto) 107.7, 16 114.5,
+  32 144.2.
+- **the sliding-window path costs 2x the full path at the same shape**:
+  kvh1/window2048 217.9 us and kvh2/window2048 230.3 vs kvh1/full 107.2 and
+  kvh2/full 109.1 - with the window equal to the context, i.e. identical
+  work. All five draft layers are sliding-window, so this is a real kernel
+  pathology worth 1-2 ms/step.
+- BLOCK_M is 16 in the 3D launcher (`num_queries_per_kv <= 16`); the 64/128
+  constants live in the gfx1250-only path. There is no M-padding waste.
+The harness uses per-token-head KV (the block-g128 cache is a packed tensor
+with the scales carved out of the padding, too fiddly to rebuild here), so
+treat it as a vehicle for STRUCTURAL ideas and confirm wins in serving.
+NEXT: attack the SLIDING_WINDOW double-cost in the 3D kernel, iterating
+entirely in this harness.
