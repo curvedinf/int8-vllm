@@ -3626,3 +3626,11 @@ TTFT is fixed per-request cost (~120-140 ms beyond a small prefill step).
    NOT the frontier checkpoint. Keep the frontier for the agentic case with
    a large uncached residual (tens of thousands of tokens), where the
    recompute term dominates again.
+
+### First-token latency is a fixed ~180 ms (2026-11-10)
+64-token prompt: headers 10-19 ms, first token 176-191 ms; identical for a
+2048-cached + 64-new turn and under a concurrent decode load (166-186 ms).
+Not prefill, not idle wake. => The warm TTFT floor (~180 ms) is the
+first-step path for a new request. Next: boot with VLLM_STEPPHASE=1 and
+trace a single fresh request's first step (reqs/p_inputs/p_attn/p_state/
+f_tail/s_logits + the propose section) to find where the ~180 ms sits.
