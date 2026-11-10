@@ -2607,3 +2607,37 @@ payload residual (Bolt decoder_norm), closing the stream.
   VRAM, full pkill) is a barrier. Do NOT use it again this session.
 - NS sweep (seed 91131, C12 2048/256): NS=5 69.44ms/161.7/len4.14,
   NS=7 66.45/172.3/4.95, NS=9 88.88/147.9/6.86, NS=11 102.37/134.2/6.74.
+
+## PERF LOOP batch 1 result (2026-11-09): MoE tile retune at TP4
+- tune_flint_moe_tp4.py swept the a8w8 MoE config at the real shapes
+  (E=256,K=2048,N=256/I=128; M=12 verify rows and M=2048 prefill).
+- Gate_up M=12: best block_n=256, split_k=1, warps=8, stages=2, group_m=1
+  (129.0us) - matches the production pinned config; block_n=128 with
+  group_m=8 ties (129.8). No win available from the tile grid.
+- Down probe crashed an illegal memory access in the AITER kernel at
+  every config (even block_n=256/group_m=1), and stage-3 configs OOM
+  shared memory on gfx908. The probe's routing/tree assumptions differ
+  from production; not pursued. Verdict: gate_up tuning is already
+  optimal; no MoE tile change adopted.
+
+## PERF LOOP batch 2 (2026-11-09 evening)
+- Fused eager epilogue (VLLM_GFX908_FUSED_EPILOGUE=1): TPOT 75.46 vs
+  70.92 default - rejected.
+- Attention budget: AITER_UA_FORCE_2D invalid on gfx908 at these seq lens
+  (no 3D path to forbid). AITER_UA_PIN_TILE=1: 69.86 vs 70.92 - noise,
+  rejected.
+- MNBT 2048 vs 1024 interleaved 2x4 (seed 91167): TPOT 56.5 vs 70.2 ms
+  (1024 wins latency 20%) but aggregate 132.7 vs 175.5 tok/s (1024 loses
+  24%). Tradeoff, not a free win; 2048 stays. Recorded in ledger as
+  FLINT_MNBT_2048_VS_1024_C12_20261109.
+- Staggered 6+6 on the retrained target baseline: wave1 TPOT 68.5,
+  wave2 TPOT 61.2, prompt 1022-679 tok/s.
+- Torch profiling remains unusable (shutdown abort + zombie VRAM).
+
+## PERF LOOP batch 3 (2026-11-10): GS128 collective harness
+- Standalone bench_ar_collective.py (4-GPU, rotated buffers, graph replay)
+  repeatedly fails on vLLM init ceremony (CustomOp config context outside a
+  worker bootstrap). Replicating the two production seams standalone is
+  not bringing it up; no microbench data was collected from it.
+- Keep measuring collectives through production A/Bs (per-call Python overhead
+  never appears inside CUDA graphs anyway).
