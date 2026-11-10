@@ -2693,3 +2693,24 @@ payload residual (Bolt decoder_norm), closing the stream.
   because router order and draft counts dominate the decode batching).
 - Remaining honest candidates: a Triton persistent-MoE reduction and a
   blocked-GEMM rewrite of the gate_up/down GEMMs, both kernel builds.
+
+## PERF LOOP batch 5 (2026-11-10): collective-count audit (96/step)
+- Steady C12 2048/256 (seed 62407): TPOT 60.92ms / 66.25 p95, 177 tok/s,
+  acceptance 5.54. pphase CPU 6.44ms/step; rest is GPU: 96 GS128 TP4
+  collectives/step (49 attn o_proj + 47 MoE combines) + 15.2ms MoE GEMM
+  busy + attention + logits.
+- MoE down split: full 201.6us = GEMM 125.3 + reduce 57.8. Tile grid flat
+  201-206us. Down is optimize-out (max 0.66ms/step even if reduce free).
+- Fused AR+RMS epilogue (VLLM_GFX908_FUSED_EPILOGUE=1) was rejected in
+  batch 2 at TPOT 75.5 vs 70.9. Revisit only with eager-vs-graph split
+  that isolates the per-layer barrier cost under replay.
+- Next hypotheses, ranked:
+  1. Persistent MoE verify kernel (one Triton launch per layer incl.
+     reduce): attacks barrier+launch count AND the 15.2ms GEMM busy.
+  2. Chunk_values 1MiB -> 256KiB for decode AR (n=196KB, single chunk
+     either way; no win expected, verify cheap).
+  3. Non-blocking compute/communicate overlap across layers (DO NOT
+     reorder barriers; the race fix in TURN 83 forbids cross-launch
+     buffer reuse without per-block fencing).
+- Acceptance carry-over: every A/B must report mean acceptance length
+  vs NS=7 gate 4.95 (+-1pt).
