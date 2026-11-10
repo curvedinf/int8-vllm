@@ -3388,3 +3388,6 @@ Remaining options with priors (pick one as the next big slice):
 - Same pattern may apply elsewhere: (a) the draft model's own shared path,
   (b) the o_proj/attn chain vs the next layer's router GEMM, (c) the
   sampler's logits head vs the draft prepare.
+- NS recheck at the new 59ms step: NS=9 is much worse (warm 73-198ms,
+  acceptance 5.22-5.88, per-position acceptance collapses after position 6).
+  NS=7 stays optimal. Do not re-test NS without a draft-quality change.
