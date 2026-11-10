@@ -4254,3 +4254,25 @@ scales carved out of the padding), bf16 vs fp16 q/k/v, the in-graph KV
 cache update that the harness omits, and L2 contention with the preceding
 layers. Next: reproduce with block_g128 KV, which likely means instantiating
 the backend's scale-view carving rather than hand-building the cache.
+
+### Draft attention gap: five candidates ruled out (batch 36)
+The in-graph draft attention call is 3.29 ms while the harness measures the
+same geometry at 1.15 ms (5 x 230 us). Ruled out, all measured in
+scripts/bench_attn_micro.py:
+  1. block-table locality: interleaved blocks 234 us vs contiguous 230
+  2. KV block size: 128/64/32/16 -> 232/234/223/264 us
+  3. head sharding: 32q/8kv ("unsharded") 261 us, not ~650
+  4. segment count: 4/8/16/32 -> 103/108/115/144 us
+  5. dtype: bf16 (serving) 266 us vs fp16 230 - only 15%
+Remaining suspects, in order: (a) the block_g128 packed KV layout (inline
+fp16 group scales in the padding region) - the harness still uses
+per-token-head caches because building the packed form needs the backend's
+own as_strided carving; (b) the in-graph KV cache update that the stub
+skips; (c) genuine in-graph L2 contention, which no isolated replay can
+show.
+STOPPING this chase: five hypotheses have cost most of three turns and the
+item is 3.29 ms of a ~39 ms step. Reproducing (a) is the only remaining
+lead worth a turn, and only if someone intends to then change the KV path,
+which is a quality decision (block_g128 was chosen for acceptance).
+Harness now supports ATTN_BF16, ATTN_BLOCK, ATTN_INTERLEAVE, ATTN_UNSHARDED,
+ATTN_SEQS/ATTN_QPS/ATTN_CTX for offline shape work.

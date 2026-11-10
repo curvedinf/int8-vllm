@@ -33,7 +33,8 @@ Q_HEADS = 8
 KV_HEADS = 1
 HEAD_DIM = 128
 BLOCK_SIZE = 128
-DTYPE = torch.float16
+DTYPE = (torch.bfloat16 if os.environ.get("ATTN_BF16") == "1"
+         else torch.float16)
 
 
 def quant_per_token_head(x):
