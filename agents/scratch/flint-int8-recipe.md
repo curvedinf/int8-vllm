@@ -4006,3 +4006,27 @@ number), (b) the int8 KV dequant path, (c) block-table gather with 12
 sequences and 8 queries each, (d) the per-layer sliding-window/causal mask.
 NEXT: microbench the draft attention call at that exact shape and sweep the
 backend/flags; a 4x win would be ~3 ms/step, the largest item left.
+
+### Draft attention characterisation (batch 25): not a KV scan
+Facts measured on the served recipe (ATTNTRACE, [dsub] draft_graph):
+- Recipe workload (C12, 2048 in / 256 out): draft graph **6974-7117 us**,
+  of which the 5 attention layers are 4.33 ms (ablation, batch 24).
+- 2048 in / 64 out: **4300-4405 us**. 512 in / 64 out: 4300-4400.
+  128 in / 64 out: 4389-4405.
+=> the draft graph is FLAT across a 16x context change (131 -> 2050 keys)
+at out=64, but 62% higher at out=256 with only 9% more context. So the
+draft's cost is not dominated by the KV walk; there is a large component
+that depends on the run/queue shape, not on context. Treat any draft
+claim measured at out=64 as a different regime from the recipe workload.
+- n=6 and n=3 batch runs produce NO [dsub] draft_graph lines: the draft
+  leaves the full-cudagraph path at smaller batches, so those runs cannot
+  be compared against C12 with this timer.
+Draft layer config (from the checkpoint): all 5 layers are
+`sliding_attention`, sliding_window=2048, so causal=True with a 2048
+window at a ~2050-2300 context - i.e. the window barely trims anything at
+the recipe length, and the draft should be strictly cheaper than the
+target's full-causal attention per layer. It measures 20x more
+(0.87 vs ~0.04 ms). NEXT: isolated microbench of the draft attention call
+(q=96 rows over 12 seqs x 8 q tokens, 2 kv heads/rank, hdim 128,
+int8_block_g128, block tables, window 2048, causal) with a variant sweep;
+serving-level tests cannot separate setup cost from scan cost here.
