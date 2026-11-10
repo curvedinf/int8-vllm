@@ -3687,19 +3687,14 @@ admission + eager prefill GPU (~50 ms) + one decode step GPU (~35 ms) + the
 spec/draft work. GPU work (kernels, MoE grouped 19.8 ms, dense ~9 ms) remains
 the lever, exactly where the loop already was.
 
-### Int8 router (doctrine gap) - verified facts (2026-11-10)
-The MoE router is the last bf16 weight GEMM in the forward: the checkpoint
-stores `model.layers.<n>.mlp.gate.weight` as bf16 (no qweight/qzeros/scales;
-verified in model.safetensors.index.json), and FlintSparseMoeBlock builds it
-with `GateLinear(quant_config=None)`.
-To int8 it (user's "only int8 kernels" directive):
-1. load-time requant in FlintSparseMoeBlock.__init__ (mirror
-   _quantize_lm_head_w8a8_): per-channel `_ck_s = amax/127`, `_ck_q`, mark
-   `_gfx908_w8a8_head`-style flag;
-2. route the gate's apply through the same CK W8A8 call used for the lm_head
-   (`torch.ops.vllm.rocm_aiter_pertoken_quant_int8` +
-   `rocm_aiter_gemm_a8w8_ck`) - both already registered and graph-safe;
-3. gate behind an env lever, then the acceptance test (router precision
-   decides expert choice, so this is quality-sensitive).
-Expected perf: small (N=256,K=2048 at M=96 is ~20-25 us/layer, so <1 ms/step);
-the value is doctrine compliance plus removing the last bf16 GEMM.
+### CORRECTION: the int8 router is ALREADY the default (2026-11-10)
+An earlier note here claimed the MoE router was the last bf16 weight GEMM
+because the checkpoint stores `model.layers.<n>.mlp.gate.weight` in bf16 and
+FlintSparseMoeBlock passes `quant_config=None`. That is only the checkpoint
+layout: `GateLinear.forward` (vllm/model_executor/layers/fused_moe/router/
+gate_linear.py:334+) takes an int8 GS128 path by default
+(`VLLM_GFX908_GATE_I8` defaults to "1"), `_int8_forward` (line 284)
+quantizes the weight once at first use and consumes the fused per-group
+prequant stash, exactly like the lm head. The recipe does not need to set
+the env.
+=> There is no bf16 weight GEMM left in the Flint forward. Do not "fix" this.
