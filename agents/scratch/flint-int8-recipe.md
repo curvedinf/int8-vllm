@@ -3449,3 +3449,26 @@ Existing fork machinery to build on (do not duplicate):
   DFlash2 spec decode for flint? Check the gates in vllm/config/vllm.py:3427.
 - Tiering/offloading spec with CPU tier (TieringOffloadingSpec) - the
   natural home for the GDS policy + leaf-last demotion.
+
+## Caching investigation (2026-11-10): root cause of the slow warm TTFT
+Boot log geometry for the flint recipe:
+  `Prefix cache geometry: scheduler block=128, configured block=64,
+   hash unit=64, Mamba mode=none, partial Mamba hits=False,
+   group blocks=[128 x10, 64]`
+=> mamba prefix caching is entirely OFF (mode "none"); the attention KV
+prefix hits, but the recurrent state is rebuilt per request, and the reuse
+path is slower than a miss (1165 vs 391 ms).
+Notes:
+- `--mamba-cache-mode` is deprecated and reports "no effect: Mamba prefix
+  caching follows --enable-prefix-caching", but MambaManager asserts
+  align-or-no-caching, so with caching on and mode "none" the mamba groups
+  simply never cache. Setting `mamba_cache_mode=align` (config, not the
+  deprecated CLI alias) is the switch that turns MambaManager's checkpoint
+  machinery (prefill checkpoint blocks, partial hash hits, shared prefix
+  checkpoint) on.
+- `--prefix-cache-checkpoint-tokens` is only for early positions inside the
+  FIRST physical block (shared-instruction reuse), not end-of-prompt.
+- First experiment next turn: boot with mamba_cache_mode=align (config write
+  or the deprecated alias if it still lands in the config) and re-run the
+  two-turn probe. If that alone fixes warm TTFT, then add the frontier
+  checkpoint + GDS eviction on top.
