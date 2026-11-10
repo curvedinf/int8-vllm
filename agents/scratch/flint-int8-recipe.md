@@ -3058,6 +3058,20 @@ payload residual (Bolt decoder_norm), closing the stream.
   (M=96, K=2048, N=6144, single kernel over N tiles) in aiter, judged on
   us/call vs the 110us launch floor.
 
+## PERF LOOP batch 17 (2026-11-10): collective count verified, bpm fixed
+- Collective count is now verified (not provisional): 98/step =
+  49 o_proj AR + 47 MoE combine AR + 2 dense-MLP down AR. The two extra
+  vs the old 96 are layers 0-1 dense down reductions
+  (model.py:1093-1100); dense layers also keep the normal o_proj AR
+  (model.py:875-881), so both layer kinds issue 2 each.
+- aiter `_routing_experts_parallel` block_pid_map: fixed 8-tile loop could
+  truncate for an expert owning >8*BLOCK_M gates (reachable at M*K=2048).
+  Now one masked 128-lane store. Validated bit-identical vs routing() at
+  M=12/96/256/341 uniform, single-expert (max_tiles=22), half-one
+  (max_tiles=12) — ALL OK.
+- Next: draft lm_head int8 feasibility (PTQR export script currently sets
+  lm_head=False).
+
 ## PERF LOOP persistent floor (2026-11-10): 48us vs 118us full
 - W-stream-only kernel at N=6144 (12MB): 48.0us (BN=64). Full GEMM 118us.
   Headroom 70us/GEMM; realistic persistent target 70-90us (saves 28-48us).

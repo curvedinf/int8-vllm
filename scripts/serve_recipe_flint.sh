@@ -62,6 +62,12 @@ serve() {
   # Fused round-to-nearest activation quant (quality default, see
   # INT8_AUDIT_RESULTS.md).
   export VLLM_GFX908_ACT_QUANT=round
+  # LM head: untied per-channel INT8 weights + per-token activation quant
+  # through the CK W8A8 GEMM (gfx908 int8 doctrine). Micro at TP4 vocab
+  # shard N=37536, K=2048: M=96 bf16 1775us -> int8 310us; M=12 214 -> 144.
+  # The draft proposes through the same head, so verify and propose both
+  # benefit. Default on; =0 restores the bf16 head for rollback.
+  export VLLM_GFX908_INT8_LM_HEAD="${VLLM_GFX908_INT8_LM_HEAD:-1}"
   # Draft MLP: fused gate_up+SwiGLU+GS128 kernel (int8-only draft activations)
   export VLLM_GFX908_DRAFT_GATED_I8="${VLLM_GFX908_DRAFT_GATED_I8:-1}"
   # Routed experts: GPTQ int8-group -> aiter grouped a8w8-blockscale GEMM.
