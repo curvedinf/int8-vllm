@@ -109,7 +109,7 @@ serve() {
   export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 
   local spec
-  spec="$("${ROOT_DIR}/.venv/bin/python" -c 'import json,sys; print(json.dumps(dict(method="dflash",model=sys.argv[1],num_speculative_tokens=int(sys.argv[2]),kv_cache_dtype=sys.argv[3])))' "$DRAFT_MODEL_DIR" "${NS:-7}" "${KV_DTYPE:-int8_block_g128}")"
+  spec="$("${ROOT_DIR}/.venv/bin/python" -c 'import json,sys; print(json.dumps(dict(method="dflash",model=sys.argv[1],num_speculative_tokens=int(sys.argv[2]),kv_cache_dtype=sys.argv[3])))' "$DRAFT_MODEL_DIR" "${NS:-7}" "${KV_DTYPE:-int8_per_token_head}")"
   # Phase-1 isolation (docs/recipes/optimization_procedure.md section 4):
   # synthetic rejection at zero rates keeps the draft forward and the
   # C*(NS+1) verify batch intact while accepting nothing, so step time is
@@ -127,9 +127,14 @@ serve() {
     --max-model-len "${MAXLEN:-524288}"
     --max-num-batched-tokens "${MNBT:-2048}"
     --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.90}"
-    # PTQR-era int8_block_g128 is the gated KV dtype for target AND draft
-    # (fp16 draft KV is measured broken; bf16 is banned by int8-first).
-    --kv-cache-dtype "${KV_DTYPE:-int8_block_g128}"
+    # int8 KV on target and draft (bf16 is banned by int8-first). The
+    # per-token-head layout is the measured fastest int8 layout for Flint:
+    # 3-rep agent-shaped W1 medians 36.1 vs 29.7 tok/s at 2.4k and 33.4 vs
+    # 21.3 at 18k, at equal-or-better acceptance. It is the same quantization
+    # math as block_g128 (one scale per token-head, group = head_dim), so this
+    # is a layout change, not a precision change. Rollback: KV_DTYPE=
+    # int8_block_g128.
+    --kv-cache-dtype "${KV_DTYPE:-int8_per_token_head}"
     # Flint's template renders <think> reasoning blocks; the qwen3 engine
     # parser splits them into reasoning_content.
     --reasoning-parser qwen3

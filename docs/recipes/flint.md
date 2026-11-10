@@ -3,8 +3,9 @@
 Peer recipe to the [Qwen3.8-27B baseline](README.md) and the
 [Nemotron Bolt + LiLiCorr recipe](nemotron_bolt.md). Same int8-native
 doctrine: every dense GEMM is AITER W8A8 INT8 GS128, routed experts run a
-true W8A8 grouped kernel, and KV is `int8_block_g128` on **both** target and
-draft. There is no 16-bit fallback in this recipe.
+true W8A8 grouped kernel, and KV is `int8_per_token_head` on **both** target and
+draft (the same int8 quantization math as block_g128 — one scale per
+token-head — in the measured-fastest layout). There is no 16-bit fallback in this recipe.
 
 - Upstream target: [`RecursiveSI/flint`](https://huggingface.co/RecursiveSI/flint)
 - Upstream draft: [`incoai/Flint-DFlash2`](https://huggingface.co/incoai/Flint-DFlash2)
@@ -61,7 +62,7 @@ surfaces 0.16 %; untouched tensors byte-identical to the bf16 draft.
 | Dense linears | AITER CK W8A8 INT8 GS128 (`AiterW8A16LinearKernel` legacy name dispatches W8A8). Deployed decode band `65<M<=128` (C12 with NS=7) runs the tuned Triton `a8w8_blockscale` off the retained GS128 originals instead (`VLLM_GFX908_DECODE_BLOCKSCALE=1`, bm=32/bn=128, NUM_KSPLIT=4 for N<=1536 else 1, except mlp down_proj which stays CK); prefill (M>128) stays CK. Measured: qkv 95.3->34.7us end to end, shared-expert gate_up 68.3->26.8us. |
 | Routed experts | `vllm/model_executor/layers/quantization/gptq_moe_a8w8.py` — GPTQ int8-group → AITER grouped `a8w8_blockscale` (`[E,K,N]` int8 + per-column GS128 fp32 scales, `w_blockscale_n=1`). Decode-band tiles: gate_up bn=256/warps 8/stages 2 (186 us/layer, 60% of HBM peak — wave-quantization limited, 256 tiles over 120 CUs); down bn=256/warps 8/**stages 1** (96.9 us/layer, 715 GB/s, was 154.0 at bn=128/stages 2 — one stage keeps the 32 KB weight tile so two CTAs are resident per CU). The block is pure weight streaming: the int8 dot for the whole 2048-tile down grid is 16.6 us. Bench: `scripts/bench_flint_moe_kernel.py` (graph-timed, production kwargs; one config per process because a bad tile faults the device). |
 | Attention | AITER unified attention |
-| KV (target + draft) | `int8_block_g128` |
+| KV (target + draft) | `int8_per_token_head` (one scale per token-head; 3-rep agent-shaped W1 medians 36.1 vs 29.7 tok/s at 2.4k and 33.4 vs 21.3 at 18k versus `int8_block_g128`, equal-or-better acceptance. Rollback: `KV_DTYPE=int8_block_g128`) |
 | Prefix cache (hybrid) | Mamba prefix caching **on** (`MAMBA_MODE=align` default; the deprecated `--mamba-cache-mode` now reaches `CacheConfig`). Recurrent checkpoints land on 128-token block boundaries; measured warm-cache TTFT 205-232 ms (was 1165 ms without it) and 269-548 ms on a partial-prefix hit (was 3519 ms). Sub-block (partial) Mamba hits are not reachable: they need every prefix-cacheable group to support fine-grained lookup and the attention groups use 128-token blocks. |
 | All-reduce | vLLM CUSTOM (`VLLM_ROCM_USE_AITER_CUSTOM_AR=0`); residual-stream collects use `residual_g128_all_reduce` on int8 codes+scales |
 | Act quant | `VLLM_GFX908_ACT_QUANT=round` |
@@ -101,8 +102,8 @@ scripts/serve_recipe_flint.sh stop
 
 Recipe contract: TP4, `--max-num-seqs 12` (C12), bf16 compute dtype,
 `--max-model-len 524288` (512k per-request cap), `--max-num-batched-tokens
-2048`, `--gpu-memory-utilization 0.90`, `int8_block_g128` KV, DFlash2
-draft `NS=7` with its own `int8_block_g128` KV, FULL_DECODE_ONLY graphs.
+2048`, `--gpu-memory-utilization 0.90`, `int8_per_token_head` KV, DFlash2
+draft `NS=7` with its own `int8_per_token_head` KV, FULL_DECODE_ONLY graphs.
 
 512k preparation (2026-11-08): the checkpoint documents 262,144 tokens,
 while the release announcement states 512k support (recommended
@@ -177,27 +178,40 @@ The MoE block, dense/shared MLP and draft MLP are end-to-end int8:
 - The draft export keeps the trained bf16-grid surfaces; re-quantizing
   them would need a new scaled kernel (same exception as Qwen).
 
-## Performance state (corrected 2026-11-10)
+## Performance state (phase-1 cycle, 2026-11-10)
 
-Measured under `optimization_procedure.md`. The recipe's served sampling is
-temperature 1.0 / top-p 0.95 / top-k 20 (`--override-generation-config`).
+Measured under `optimization_procedure.md` with the W1 harness
+(`scripts/bench_cycle.py`: agent-shaped system-prefix + short user turn,
+tools present, served sampling temperature 1.0 / top-p 0.95 / top-k 20).
+Three repeats per arm, median reported.
 
-| Measurement | Result |
-|---|---|
-| Single stream, chat+tools, served sampling, ~3k prompt | **28.8-29.6 tok/s**; acceptance 1.04-1.20 |
-| Single stream, real text, greedy diagnostic, 2.3k / 9.4k / 33.5k ctx | 86.9 / 54.8 / 33.7 tok/s; 3.08 / 2.21 / 1.88 tokens/step |
-| C12, real text, served sampling, cold prompts | 101.7 tok/s whole run; TTFT mean 13.5 s |
-| C12, real text, greedy diagnostic, cold | 223.7 tok/s whole run; TTFT 6.47 s |
-| same command immediately re-run (prefix cached) | 552.2 tok/s whole run; TTFT 0.62 s |
+| Measurement (C12 W1, 3 reps) | median per-stream tok/s | acceptance | step ms |
+|---|---|---|---|
+| 2.4k ctx, `int8_per_token_head` (recipe default) | **36.1** | 2.84 | 74-81 |
+| 2.4k ctx, `int8_block_g128` (rollback) | 29.7 | 2.67 | 87-91 |
+| 18k ctx, `int8_per_token_head` | **33.4** | 3.42 | 94-112 |
+| 18k ctx, `int8_block_g128` | 21.3 | 3.02 | 141-150 |
 
-The earlier "650-705 tok/s" figure was a 12-stream aggregate measured greedily
+Phase-1 isolation (forced rejection, acceptance pinned at 1):
+C12 step 101.2 ms (`block_g128`, 2.4k) / 155.0 (18k); 80.0 / 117.8 with
+`per_token_head`; 68.3 / 87.8 with bf16 KV (diagnostic only — bf16 KV is
+banned). So the int8 KV dequant path was the dominant context-scaled cost;
+per-token-head recovers most of the gap while keeping int8 KV.
+Single-stream C1 (forced rejection): 38.8 ms/step at ~3k context.
+
+The retired "650-705 tok/s" figure was a 12-stream aggregate measured greedily
 on random-token prompts with a warm prefix cache. It is void as a production
 number; the procedure document records the audit.
 
-Acceptance is the binding constraint. At served sampling the first draft
-position is accepted 44% of the time and positions >= 2 are ~10% or less, so a
-step yields ~1.1 tokens; greedy on real text yields ~3.1. Single-stream step
-time is roughly unchanged (35-38 ms), so throughput is acceptance / step time.
+Acceptance is corpus-dependent: docs-prose prompts reach ~2.7-3.5, while
+agent/tool traffic measured 1.0-2.4 earlier. W1 is now agent-shaped, and any
+acceptance claim must name the corpus. At served sampling, throughput is
+acceptance / step time.
+
+Warm-cache TTFT (single request, two-turn probe): **174 ms** for 2048 cached +
+128 new tokens, i.e. ~25 ms of prefill + one ~40 ms decode step + ~110 ms of
+fixed request/engine overhead. Cold single-request prefill is 396 ms for 2048
+tokens (~5.2k tok/s) under the retired prompt path; re-measure under W2.
 
 Warm-cache TTFT (single request, two-turn probe): **174 ms** for 2048 cached +
 128 new tokens, i.e. ~25 ms of prefill + one ~40 ms decode step + ~110 ms of
