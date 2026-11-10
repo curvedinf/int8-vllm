@@ -3081,3 +3081,9 @@ payload residual (Bolt decoder_norm), closing the stream.
   unattributed item in the step budget and the unsolved mechanism.
 - Next bounded experiment: cross-stream event ordering for sampler/graph overlap
   without stalling the D2H copy path (postprocess already async).
+
+## PERF LOOP accounting correction (2026-11-10): idle, not other GPU
+- GPU busy = graph 30.2 + propose 9.17 + sampler 1.25 = 40.6ms of 56.2ms TPOT.
+  Idle 15.6ms is CPU-paced (pphase CPU 6.4ms + stream syncs).
+- The "bubble" is CPU-induced GPU idle, not unmeasured kernels. Lever is
+  Python per-step glue (the 6.4ms CPU path), not sampler GEMM micro-opts.
