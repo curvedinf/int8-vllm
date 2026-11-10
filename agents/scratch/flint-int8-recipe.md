@@ -2816,3 +2816,12 @@ payload residual (Bolt decoder_norm), closing the stream.
   (101us) + routing() (386us) = 487us/layer saving potential.
 - Next slice: prototype the fused logits kernel + _routing_from_topk fast
   path with fallback to routing() when logits are unavailable.
+
+## PERF LOOP batch 7 prototype verdict (2026-11-10)
+- Fused-logits kernel rejected at prototype: re-rolling tl.topk key packing
+  (fpval_to_key + bitonic merge + pad) duplicates tested aiter topk.py.
+- Corrected cut: REUSE aiter topk() for (ids,w) (101us, tested) + direct
+  routing-structures kernel over its outputs (bit-identical, numpy-validated
+  batch 6: 0/72 all structures). Saves only routing() 386us, not topk.
+- That is a 386us/layer win for a Triton kernel with exact production input
+  semantics. Next batch: that kernel only.
