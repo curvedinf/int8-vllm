@@ -3018,3 +3018,12 @@ payload residual (Bolt decoder_norm), closing the stream.
   across stages (attn boundary). Persistent per-layer kernels are the only
   shape that captures them (kernel build, not weight concat).
 - Concat prize (5.1ms) is withdrawn as unachievable in the current dataflow.
+
+## PERF LOOP status (2026-11-10): recipe audit + persistent decision pending
+- Flint recipe: C8 in hdr/README is stale; live is C12 512k (script default,
+  2026-11-09 boot). All loop measurements are C12. Doc fix low-value.
+- Step fully attributed: graph 30.2 + propose 9.17 (graph 7.16) + rest 18.4.
+- Remaining prizes: (a) persistent per-layer dense kernel (~10-20ms),
+  (b) draft graph launch-count (~7ms), (c) draft lm_head int8 (~0.75ms, gated).
+  All are multi-hour kernel builds. Needs user direction: authorized to
+  start the persistent kernel, or remain in analysis/loop mode?
