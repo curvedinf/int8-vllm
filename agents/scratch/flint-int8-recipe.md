@@ -3719,3 +3719,13 @@ Remaining levers (all need kernels or engine changes):
   o_proj 31.7 us; down stays CK 25.6).
 - The step is GPU-bound; the earlier "IPC handoff" claim was retracted
   (it is the D2H sync waiting for GPU completion).
+
+### Draft int8 coverage verified (2026-11-10)
+`DFlash2DraftModel` -> `vllm/model_executor/models/qwen3_dflash2.py`
+(`DFlash2Qwen3ForCausalLM`). Its linears take the same quant_config path, and
+the candidate selector's `hidden_projection` (quant_config=None at
+construction) is requantized to per-channel int8 at load
+(`VLLM_GFX908_DF2_W8A8=1`, line 523+), with codebooks as int8 tables
+(`VLLM_GFX908_DF2_CODEBOOK_I8=1`). So the draft has no bf16 weight GEMM
+either; the only float surfaces are the audited ones (selector codebooks'
+dequant maths, conv planes, fc).
