@@ -74,15 +74,16 @@ def _routing_from_topk(topk_ids: torch.Tensor, topk_weights: torch.Tensor,
     if (
         os.environ.get("VLLM_GFX908_DIRECT_ROUTING", "0") == "1"
         and 0 < topk_ids.shape[0] <= 256
-        # _offsets_sort_scatter sorts over LOAD=128 lanes; larger batches
-        # (profile/prefill) never fitted and would fault the GEMM on empty
-        # gather slots. Decode graphs are <=128 tokens by construction.
-        and topk_ids.shape[0] * topk_ids.shape[1] <= 128
+        # Parallel-experts kernel covers M*K <= 2048 (LOAD=2048 lanes), i.e.
+        # decode batches up to M=341 at K=6. Profile/prefill chunks beyond
+        # that fall back to routing(). The old LOAD=128 bound (M<=21) never
+        # fired at production decode M=96; this widens it to the real shape.
+        and topk_ids.shape[0] * topk_ids.shape[1] <= 2048
     ):
         try:
             from aiter.ops.triton._triton_kernels.moe.reduce import (
                 _hist_atomic,
-                _offsets_sort_scatter,
+                _routing_experts_parallel,
             )
             from aiter.ops.triton.moe.moe_routing.topk import topk as _topk_fn
             import triton as _triton
@@ -125,10 +126,10 @@ def _routing_from_topk(topk_ids: torch.Tensor, topk_weights: torch.Tensor,
                               device=topk_ids.device)
             _hist_atomic[(_triton.cdiv(_n_gates, 64),)](
                 _expt_indx, _hist, topk_ids.shape[0], K=topk_ids.shape[1])
-            _offsets_sort_scatter[(1,)](
-                _expt_indx, _expt_scal.float(), _hist, _topk_out, _gate_idx,
-                _gate_scal, _off_raw, _off_pad, _bpm, topk_ids.shape[0],
-                n_expts, K=topk_ids.shape[1], BLOCK_M=_block_m)
+            _routing_experts_parallel[(n_expts,)](
+                _expt_indx, _expt_scal.float(), _topk_out, _gate_idx,
+                _gate_scal, _hist, _off_raw, _off_pad, _bpm,
+                topk_ids.shape[0], K=topk_ids.shape[1], BLOCK_M=_block_m)
             _expt_data = ExptData(_hist, _off_raw, _off_pad, _bpm)
             _rd = RoutingData(
                 _block_m, _gate_scal, _hist, n_expts, topk_ids.shape[1],
