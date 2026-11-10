@@ -3516,3 +3516,41 @@ boundaries ("partial Mamba hits=False"). Levers, in order:
    prompt tail hash, so the next turn resumes with zero prefix recompute.
    Current warm numbers (align on, block boundaries only): turn2 288 ms for
    128 new tokens (a pure 128-token prefill is ~25-30 ms).
+
+### FRONTIER CHECKPOINT design (next implementation slice)
+Goal: at the end of a finished request, keep its recurrent (mamba) state
+exactly at its last token and key it to the prompt's tail hash, so the next
+turn (prompt = previous prompt + more text) resumes with zero recompute.
+vLLM today can only key a state to a *physical block* (=128 tokens), so a
+144-token-new turn recomputes up to 128 tokens (measured 288 ms vs ~30 ms of
+real prefill work).
+
+Where the pieces live (verified):
+- MambaManager: vllm/v1/core/single_type_kv_cache_manager.py:1551+.
+  State: `_checkpoints[req_id] = (position, reserved_block_idx)`,
+  `last_state_block_idx`, `_producer_partial_tail_reqs`,
+  `has_prefill_checkpoint_blocks` (align + num_prefill_checkpoint_blocks>0).
+  Gate for mid-prefill checkpoints: `_needs_internal_checkpoint()` (1797)
+  with `is_mamba_prefill_checkpoint_valid()`.
+- Scheduler stops chunks at junctions: `mamba_prefill_checkpoint_alignment`
+  and `need_mamba_block_aligned_split` (scheduler.py:454+).
+- The "align" mode already copies the state at a *physical* boundary
+  (kv_cache_manager.py:913-940, "align table" blocks / CoW of the last
+  prompt-boundary state).
+Plan (minimal, model-agnostic):
+1. Add a `frontier` table in MambaManager: (tail_block_hash -> state block),
+   allocated from the mamba pool, written at request end when
+   `num_computed == total_len` (the backend already exports the state for
+   the last chunk). Key = the prompt's last *full* block hash + the residual
+   token count (and, to stay safe, the residual token ids' hash).
+2. On a prefix hit, if the tail hash matches and the residual count equals
+   what the new prompt re-sends, seed `num_computed_tokens` past the block
+   boundary and restore the frontier state instead of recomputing.
+3. Cost-aware eviction shared by all models (FlashStates GreedyDual):
+   priority = prefill_seconds_saved / blocks_freed, cost = D + E*tokens
+   (per-model coefficients from the prefill bench), leaf-last ordering with
+   idle demotion. Home: BlockPool eviction + the CPU tier
+   (TieringOffloadingSpec), so any hybrid model benefits.
+4. Prefill export: with `has_prefill_checkpoint_blocks` already on, allow a
+   chunk to run past a checkpoint position (FlashStates' --mamba-prefill-
+   export analogue). Verify `num_prefill_checkpoint_blocks > 0` for flint.
