@@ -3698,3 +3698,24 @@ quantizes the weight once at first use and consumes the fused per-group
 prequant stash, exactly like the lm head. The recipe does not need to set
 the env.
 => There is no bf16 weight GEMM left in the Flint forward. Do not "fix" this.
+
+## LOOP SNAPSHOT (2026-11-10, after caching work)
+Numbers: C12 2048/256 warm step 59.2-60.3 ms (was 71.5 at loop start,
+-17%), aggregate 597-700 tok/s at 256 out, cold-first 48.8-52.7 ms,
+acceptance 4.7-6.3 (text-dependent; gate floor 3.95). Battery 4/4.
+Warm-cache TTFT 205-232 ms (was 1165); partial-prefix hit 269-548 ms
+(was 3519). Quality spot check PASS.
+Production defaults: decode band 65<M<=128 -> tuned Triton blockscale +
+group_quant_rn (down_proj exception, CK); shared expert on a side stream;
+int8 lm_head; int8 router (GATE_I8=1 default, already); mamba align
+caching ON; async scheduling; fused top-K combine; parallel-experts
+routing + bpm fix; NS=7.
+Remaining levers (all need kernels or engine changes):
+- routed-expert grouped GEMM 19.8 ms/step (gate_up 209 + down 142 us per
+  layer). Config space closed: block_m=16 optimal (8 -> 3.5x worse on
+  gate_up), split_k blocked by quant_out, warps/stages/group_m flat.
+  Needs multi-expert tile packing or an expert-resident kernel.
+- dense block ~9 ms at kernel limits (qkv 34.7, shared gu 26.8, payload
+  o_proj 31.7 us; down stays CK 25.6).
+- The step is GPU-bound; the earlier "IPC handoff" claim was retracted
+  (it is the D2H sync waiting for GPU completion).
