@@ -3871,3 +3871,22 @@ Dense at M=96 is dispatch/latency bound, not bandwidth bound: o_proj
 31.7 us = 133 GB/s); shared gate_up (512,2048) is 1 MB in 26.8 us
 (37 GB/s). Lever is fewer launches (the batch-12/13 fusion line), or
 NUM_KSPLIT on the wide-N shapes - measure before changing.
+
+### Practical stream ceiling measured (batch 20) - recalibrates the MoE story
+A pure int8 read kernel over 134 MB measures **877-953 GB/s** on this mesh
+(P=120/240, BLOCK 4096/8192), i.e. ~0.95 TB/s practical, NOT the 1.23 TB/s
+nominal peak. So gate_up's 741 GB/s is ~78% of achievable and down's 715 is
+~75%; the whole MoE block (13.3 ms/step) has only ~3 ms/step of headroom,
+not the ~8 the earlier "54% of peak" framing implied. Do not re-open the
+MoE line expecting 2x.
+Dense decode shapes (in-graph, M=96): the payload layers are pinned to
+bn=128/NUM_KSPLIT=1 by the fused int8 output-scale epilogue
+(`gemm_a8w8_blockscale` raises otherwise), so bm is their only knob; bm=32
+launched 48 CTAs into 240 slots. bm=16 wins where the grid stays <=120:
+o_proj 30.8->26.6us, shared gate_up 24.7->22.3, shared down 18.3->15.2.
+qkv keeps bm=32 (bm=16 puts it exactly on the 240-slot limit, 29.8 vs
+28.0us). Implemented as a grid test in `_get_aiter_w8a8_config`.
+Note: `w_scale` for the dense blockscale kernel is [N, K//128] (the MoE
+grouped kernel uses [E, K/G, N]) - a transposed bench silently asserts.
+Recipe `[pphase] period` is NOT a stable A/B metric: same-boot warm runs
+read 39.7/48.1/42.8 ms while throughput was flat.

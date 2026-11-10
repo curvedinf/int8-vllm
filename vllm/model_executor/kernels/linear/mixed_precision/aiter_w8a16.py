@@ -11,6 +11,7 @@ group sizes.
 import os
 
 import torch
+import triton
 
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.parameter import BasevLLMParameter
@@ -53,8 +54,17 @@ def _get_aiter_w8a8_config(M: int, N: int, K: int, group_size: int):
         # wins on the narrow-N shapes, 1 on the wide ones. In-graph at M=96:
         # qkv 29.4us vs 64.8 CK, gate_up 52.9 vs 70.4.
         num_ksplit = 4 if N <= 1536 else 1
+        # Shrink the M tile to 16 only when that still fits the 240 CTA slots
+        # (2 per CU at 32 KB LDS). It buys latency hiding on the shapes that
+        # otherwise launch 48 CTAs (payload o_proj 30.8 -> 26.6us, shared
+        # gate_up 24.7 -> 22.3, shared down 18.3 -> 15.2 in-graph), but qkv
+        # already has 120 CTAs at bm=32 and lands exactly on the 240-slot
+        # limit at bm=16, where it measures slower (29.8 vs 28.0us).
+        block_m = 32
+        if triton.cdiv(M, 16) * triton.cdiv(N, 128) * num_ksplit <= 120:
+            block_m = 16
         return {
-            "BLOCK_SIZE_M": 32,
+            "BLOCK_SIZE_M": block_m,
             "BLOCK_SIZE_N": 128,
             "BLOCK_SIZE_K": 128,
             "GROUP_SIZE_M": 4,
