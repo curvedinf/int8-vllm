@@ -2889,7 +2889,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     _v["sum"] += _d
                     _v["n"] += 1
             _v["last"] = _now
-        if _pph and _t["n"] % 200 == 0:
+        _pph_every = int(os.environ.get("VLLM_STEPPHASE_EVERY", "200"))
+        if _pph and _t["n"] % _pph_every == 0:
             n = _t["n"]
             parts = " | ".join(
                 f"{k} {1000 * v / n:6.2f}ms"
