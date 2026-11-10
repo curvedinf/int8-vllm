@@ -3087,3 +3087,10 @@ payload residual (Bolt decoder_norm), closing the stream.
   Idle 15.6ms is CPU-paced (pphase CPU 6.4ms + stream syncs).
 - The "bubble" is CPU-induced GPU idle, not unmeasured kernels. Lever is
   Python per-step glue (the 6.4ms CPU path), not sampler GEMM micro-opts.
+
+## PERF LOOP async audit (2026-11-10): default likely on, flag A/B queued
+- Async scheduling is dflash-compatible; None default enables unless PP>1 /
+  disable_padded_drafter_batch / deepep (none hold). Resolved value not logged.
+- If default-on holds, the round-trip overlap is already present and the
+  15.6ms idle is elsewhere (D2H copy path). The explicit flag A/B (full boot
+  each) is queued. Next experiment: --async-scheduling vs --no-async-scheduling.
