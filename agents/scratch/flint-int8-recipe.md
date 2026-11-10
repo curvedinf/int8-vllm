@@ -3123,3 +3123,9 @@ payload residual (Bolt decoder_norm), closing the stream.
   (dead code for dflash, kept harmless).
 - Next queued: persistent GEMM from-scratch (floor 56us, 10.5-13ms potential),
   draft lm_head int8 (~0.75ms, PTQR-gated), D2H overlap for remaining idle.
+
+## PERF LOOP fresh-seed band (2026-11-10): 55.3-61.9ms TPOT
+- Seeds 777001-777016: TPOT 55.3-61.9ms, acceptance 3.63-6.26 (bracket windows).
+  Variance is prompt content (random token-id prompts), not config.
+- Same-seed A/Bs remain the only valid comparison method (harness docs).
+- Step budget unchanged: graph 30.2 + propose 9.17 + sampler/bubbles ~16.
