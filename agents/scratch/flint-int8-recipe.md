@@ -3314,3 +3314,14 @@ Remaining options with priors (pick one as the next big slice):
 - Batch-sharded sampling tested (compute_logits_local + flag): cold 53.98
   vs 54.15, warm 71.38 vs 70.70 -> no win, default stays off (BATCH_SHARDED=0).
   compute_logits_local kept (inert without the flag).
+- BEST MEASURED OPPORTUNITY (2026-11-10): dense GEMMs at M=96 via Triton
+  blockscale with tuned configs beat CK by 2.2x (qkv: 29.4 vs 64.8us) and
+  1.3x (gate_up: 52.9 vs 70.4us). Winning configs: bm=32, bn=128, bk=128,
+  GROUP_SIZE_M=4; NUM_KSPLIT=4 for N<=1536, else 1. Root cause of the old
+  "CK is faster" verdict: `_get_aiter_w8a8_config` maps M>64 to bm=128,
+  which cannot fill the 120 CUs at M=96.
+  Integration (next): (a) add the 65<M<=128 config branch keyed on N;
+  (b) retain GS128 originals for dense linears serving decode M (currently
+  freed once _ck_q exists) - costs ~0.7GB of weight memory; (c) dispatch
+  65<=M<=128 to blockscale, prefill stays CK. Acceptance gate applies
+  (per-channel -> per-128-group scales, closer to the checkpoint).
