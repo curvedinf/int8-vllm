@@ -67,12 +67,12 @@ def _routing_from_topk(topk_ids: torch.Tensor, topk_weights: torch.Tensor,
         routing,
     )
 
-    # Two-kernel direct routing (bit-identical, batch 8): reuse the same
-    # logits->topk() step as routing() but run structures via the fused
-    # two-kernel direct over (expt_indx, expt_scal). Env-gated, default on;
+    # Two-kernel direct routing (bit-identical, batch 8/12/19): reuse the same
+    # logits->topk() step as routing() but run structures via the parallel-
+    # experts kernel over (expt_indx, expt_scal). Env-gated, default on;
     # falls back to routing() when logits/topk path is unavailable.
     if (
-        os.environ.get("VLLM_GFX908_DIRECT_ROUTING", "0") == "1"
+        os.environ.get("VLLM_GFX908_DIRECT_ROUTING", "1") == "1"
         and 0 < topk_ids.shape[0] <= 256
         # Parallel-experts kernel covers M*K <= 2048 (LOAD=2048 lanes), i.e.
         # decode batches up to M=341 at K=6. Profile/prefill chunks beyond
