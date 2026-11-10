@@ -2839,3 +2839,14 @@ payload residual (Bolt decoder_norm), closing the stream.
   tile-unit bpm + prefix-sum offsets semantics. No more single-program loops.
 - Routing structures remain 369us/layer. Throughput incumbent TPOT 57.59ms
   (seed 62408) stands.
+
+## PERF LOOP batch 8 (2026-11-10): torch graphsafe direct TIES sort
+- routing_torch port (sort+argsort+histc+cumsum+searchsorted, fixed grids,
+  no sync): 124.4us GPU-event in-graph vs production sort 128us. Bit-identical
+  + graph capture validated. But routing() total still 367.9us (topk 201us
+  upstream). Win vs routing() = ~0; win vs sort alone = 3.6us.
+- The structures step is now at parity via torch; the remaining 386us prize
+  is fusing topk+structures (487us). Multi-program Triton over topk outputs
+  at batch-6 88.4us shape remains the kernel target. Five attempts: v1 hang,
+  v2 697us, v3 hang, v4 bit-identical 641us, torch graphsafe 124.4us (tie).
+- Serving incumbent: TPOT 57.59ms (seed 62408), acceptance 5.95.
