@@ -3073,3 +3073,11 @@ payload residual (Bolt decoder_norm), closing the stream.
 - Loop checkpoint: this is the last queued bounded experiment. All other
   mechanisms are closed with measured verdicts. Ledger + scratch are the
   resumable state.
+
+## PERF LOOP bubble split (2026-11-10): 17ms is pipeline bubble
+- Non-graph 18.4ms = sampler GEMMs ~1.25ms (target lm_head int8 + draft argmax)
+  + pipeline bubble ~17ms (graph return -> sampler launch serial gap).
+- PACE async overlap regressed spec-on (batch 2). Bubble is the largest single
+  unattributed item in the step budget and the unsolved mechanism.
+- Next bounded experiment: cross-stream event ordering for sampler/graph overlap
+  without stalling the D2H copy path (postprocess already async).
