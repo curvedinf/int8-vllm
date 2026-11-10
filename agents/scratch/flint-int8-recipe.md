@@ -2943,3 +2943,12 @@ payload residual (Bolt decoder_norm), closing the stream.
   timing needs CUDA events around speculator.propose() + sampler GPU
   phases (not pphase CPU).
 - Next slice: events around propose + sampler GPU sub-phases.
+
+## PERF LOOP batch 10 propose result (2026-11-10): propose 9.17ms/step
+- Events around speculator.propose(): 9.17ms/step GPU (wall 43.6us async).
+  33% of the 27.6ms non-graph block. Largest single non-graph item.
+- Draft = 7 autoregressive steps per verify: 1.31ms per draft token-step
+  for the 17-layer DFlash2 draft at C12. Same launch-count class as dense.
+- Step now: graph 30.2 + propose 9.17 + sampler/GS128/bubbles ~18.4 = 57.8.
+  Next: draft GEMM launch-count (draft dense GEMMs at M=12..96) OR sampler/
+  collective GPU events. Draft launch-count is the kernel-build target.
