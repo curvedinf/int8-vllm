@@ -134,6 +134,12 @@ serve() {
     # torch-profiler diagnostic boot: exposes /start_profile + /stop_profile.
     args+=(--profiler-config "{\"profiler\":\"torch\",\"torch_profiler_dir\":\"${PROFILE_DIR}\"}")
   fi
+  # Mamba prefix-cache mode lever (FlashStates-style recurrent-state reuse).
+  # "align" turns on MambaManager's checkpoint machinery so a prefix hit can
+  # restore the recurrent state instead of rebuilding it.
+  if [[ -n "${MAMBA_MODE:-}" ]]; then
+    args+=(--mamba-cache-mode "${MAMBA_MODE}")
+  fi
   # Async-scheduling A/B lever (None=default). 0 forces sync, 1 forces on.
   if [[ "${ASYNC_SCHED:-}" == "0" ]]; then
     args+=(--no-async-scheduling)

@@ -2309,6 +2309,10 @@ class EngineArgs:
             "enable_prefix_caching must be set by this point"
         )
         if self.mamba_cache_mode is not None:
+            # The CLI is kept as the explicit opt-in for Mamba prefix
+            # caching (align mode). It used to be dropped here, which left
+            # `mamba_cache_mode` at "none" and made hybrid models rebuild
+            # the recurrent state on every prefix hit.
             logger.warning_once(_MAMBA_CACHE_MODE_DEPRECATION_MESSAGE)
 
         cache_config = CacheConfig(
@@ -2326,6 +2330,11 @@ class EngineArgs:
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
             swa_bounded_replay=self.swa_bounded_replay,
             mamba_cache_dtype=self.mamba_cache_dtype,
+            mamba_cache_mode=(
+                CacheConfig.fields["mamba_cache_mode"].default
+                if self.mamba_cache_mode is None
+                else self.mamba_cache_mode
+            ),
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
             mamba_block_size=self.mamba_block_size,
             prefix_match_unit=self.prefix_match_unit,
