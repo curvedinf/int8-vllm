@@ -3672,3 +3672,17 @@ D2H/output serialization, the shm broadcast, or the engine's wake path.
 Candidates: per-step torch.cuda.synchronize in the sampler/output path,
 ModelRunnerOutput pickling of sampled ids/logprobs, or the PG/DP dispatch
 (dispatch_cg_and_sync_dp) in the step path.
+
+### CORRECTION (2026-11-10): the "22 ms handoff" is GPU completion, not plumbing
+Re-reading the call structure: the engine's `exec` waits on the *sample_tokens*
+future, and the worker's sampler path does a D2H of the sampled ids - a full
+device sync. The phase timers (f_tail/p_*) measure CPU wall around launches,
+which are async, so they systematically under-report the step's GPU time.
+Evidence: C12 graphtime (event-based, real GPU) is ~38 ms and exec is 43-70 ms
+while the CPU phase sum is ~40 ms; for the prefill probe, f_tail 28.7 ms CPU
+vs exec 50-52 ms (i.e. ~22 ms of GPU tail). That is GPU execution, not IPC.
+=> Do NOT chase a plumbing fix; the step is GPU-bound and the earlier
+"15-30 ms pipeline overhead" claim is retracted. Warm TTFT ~180 ms is then
+admission + eager prefill GPU (~50 ms) + one decode step GPU (~35 ms) + the
+spec/draft work. GPU work (kernels, MoE grouped 19.8 ms, dense ~9 ms) remains
+the lever, exactly where the loop already was.
