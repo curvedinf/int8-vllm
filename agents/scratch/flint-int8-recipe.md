@@ -3744,3 +3744,13 @@ worse too. The small-tile regime is launch/scheduling-bound, not FLOP-bound.
 work queue on the same CTAs (no per-tile launch), with the SwiGLU+GS128
 quant epilogue fused. That is a from-scratch kernel (multi-hour), not a
 config or packing change. Until then the 19.8 ms/step block stands.
+
+### Padding-cost test attempt (2026-10-11): inconclusive, deprioritised
+Tried to bound the MoE grouped GEMM's padding waste by running the same
+kernel with 256 experts x 16 REAL rows (M=4096, K=6). The harness failed at
+that size (routing build / memory), and the design of the test is weak
+anyway: padded FLOPs are equal by construction, and if the kernel is
+latency-bound (as the bm=8 regression indicates) both cases cost the same,
+so it cannot separate the hypotheses. Deprioritised - the bm=8 evidence
+already says the small-tile regime is overhead-bound, which is what a
+persistent kernel would fix.
