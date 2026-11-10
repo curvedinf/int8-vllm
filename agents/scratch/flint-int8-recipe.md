@@ -2742,3 +2742,13 @@ payload residual (Bolt decoder_norm), closing the stream.
   (no 256-expert scan), or (b) move routing into the gate GEMM epilogue.
   Both are kernel builds with correctness risk equal to the combine bug
   in batch 5 (silent residual drop).
+
+## PERF LOOP batch 6 validated (2026-11-10): direct routing == production
+- numpy direct_from_pairs(expt_indx, expt_scal): bit-identical vs
+  routing()/sort_tokens_fused on all 7 structures (M=12 E=256 K=6).
+- Key conventions nailed: TileStart is in TILE units (cdiv(hist,16)),
+  TokenStart in TOKEN units, bpm[(blk<<16)|expert] over max_tiles=72,
+  gather[g]=i / scatter[i]=g over topk linear i, gate order = (expert, i).
+- Triton kernel matching this is the next build; prototype must use
+  tile-unit offsets and scatter-as-gate semantics. ~280us/layer headroom
+  (369 -> ~88) = 13.1ms/step if the kernel hits prototype timing.
