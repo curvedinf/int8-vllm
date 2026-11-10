@@ -3148,3 +3148,10 @@ payload residual (Bolt decoder_norm), closing the stream.
   A/B boot passed ASYNC_SCHED=1 + DIRECT_ROUTING=1 explicitly. Recipe default
   still routes via routing() until the flag is promoted. Promote next if a
   second seed confirms.
+
+## PERF LOOP routing promotion (2026-11-10): direct fast path is default
+- Serving A/B accepted (55.02 vs 55.31 same-seed, healthy boot, 5.97 PASS).
+  Flag default 0 -> 1 (kill-switch VLLM_GFX908_DIRECT_ROUTING=0).
+  Fallback preserved for M*K>2048.
+- Step ~55.0ms TPOT with async + fast path. Remaining: dense launch-count,
+  draft graph, sampler/collective sub-phases, D2H idle (~10ms).
