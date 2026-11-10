@@ -2792,3 +2792,16 @@ payload residual (Bolt decoder_norm), closing the stream.
   compilable Triton replacement. Pivot: investigate moving routing INTO
   the gate GEMM epilogue (gate GEMM already touches every logit; it can
   emit hist/gather/scatter as a side product in the same launch).
+
+## PERF LOOP batch 7 (2026-11-10): gate-epilogue fusion feasibility
+- Gate GEMM + sigmoid topk + renorm (torch fp32): 101.6us at M=12.
+  Dispatch routing() alone: 385.8us. The fusion saves the SECOND call
+  (385us), keeps the first (102us).
+- Fusing hist/gather/scatter into the gate epilogue eliminates 385us/layer
+  = 18.1ms/step of 57.6ms TPOT (31%) if numerics hold (fp-1ulp softmax
+  renorm order; acceptance gate + output-diff scale required in A/B).
+- Implementation routes: (a) aiter HIP topk_sigmoid sidecar outputs
+  (C++ change), or (b) Triton post-process over logits[M,256] (Python
+  change, graph-safe if single launch). (b) is the bounded slice.
+- vLLM hook: _routing_from_topk fast path gated on (ids,w) + precomputed
+  structures from the router; fall back to routing() otherwise.
