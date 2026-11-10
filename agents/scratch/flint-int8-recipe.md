@@ -2780,3 +2780,15 @@ payload residual (Bolt decoder_norm), closing the stream.
   tile-unit bpm and router-order gather/scatter. No single-program loops.
 - Or: move routing INTO the gate GEMM epilogue (one kernel writes
   hist/offsets/gather while computing gate logits). Same win, fewer lanes.
+
+## PERF LOOP batch 6 v3 result (2026-11-10): static_range Triton REJECTED
+- Multi-program v3 with static_range(0,2048) nested scans: compile hang
+  >240s, killed. Same class as v1 (scalar nested loops blow Triton).
+- Batch-6 prototype compiled at 88.4us because loops were over M*K=72
+  (small static range) with vectorized tl ops. Any viable direct kernel
+  MUST use: tl.arange reductions (tl.sum/tl.cumsum/tl.sort), small static
+  bounds (M*K), no scalar nested loops.
+- Three kernel attempts in, routing structures remain 369us/layer with no
+  compilable Triton replacement. Pivot: investigate moving routing INTO
+  the gate GEMM epilogue (gate GEMM already touches every logit; it can
+  emit hist/gather/scatter as a side product in the same launch).
