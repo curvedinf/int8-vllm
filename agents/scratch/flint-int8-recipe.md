@@ -3108,3 +3108,18 @@ payload residual (Bolt decoder_norm), closing the stream.
   Commits: aa72e50e5f (lever) + fff895d62f (ledger).
 - Step now ~55.3ms TPOT with async on. The 15.6ms idle was the round-trip;
   async recovers 5.23ms of it. Remaining idle ~10ms (D2H path).
+
+## PERF LOOP checkpoint 2 (2026-11-10): async accepted, idle ~10ms remains
+- ASYNC_SCHED=1 explicit: -5.23ms vs sync (TPOT 55.31). Default (None->on)
+  was already async; the explicit flag + boot-log verification (False vs True)
+  confirm the default is correct. Commits aa72e50e5f/fff895d62f/21a8d5bcfc.
+- Adaptive NS audit: forces sync, default stays off (trade is net-negative).
+- Step now ~55.3ms TPOT (untraced ~56.2). GPU busy 40.6 + idle 15.6 (async
+  recovers 5.23 of the round-trip; ~10.4 remains, D2H copy path).
+- Fresh-seed band 55.3-61.9ms TPOT, acceptance 4.03-6.23 (content variance).
+  Gate: bracket window within +-1pt of 4.95.
+- Trace instrumentation (all env-gated, inert in prod): ATTNTRACE graph
+  stash + runner drain + graphtime + proptime + dsub (DFlash) + Eagle subtime
+  (dead code for dflash, kept harmless).
+- Next queued: persistent GEMM from-scratch (floor 56us, 10.5-13ms potential),
+  draft lm_head int8 (~0.75ms, PTQR-gated), D2H overlap for remaining idle.
