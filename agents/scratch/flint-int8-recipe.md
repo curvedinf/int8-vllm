@@ -3498,3 +3498,21 @@ boundaries ("partial Mamba hits=False"). Levers, in order:
    blocks_freed, cost = D + E*tokens; leaf-last ordering with idle demotion.
    Home: the prefix-cache eviction in BlockPool + the CPU tier
    (TieringOffloadingSpec) so all models share it.
+
+### Partial Mamba hits: why they stay off (2026-11-10 findings)
+- `--mamba-block-size 128` is passed correctly (the kwarg was already in the
+  CacheConfig constructor; my duplicate-line commit 0a38cb817a was fixed by
+  the dedupe commit). The geometry still reports the mamba group at 64
+  because the *kernel* block is `gcd(alignment.base, block_size)` = 64
+  (kv_cache_interface.py:266), regardless of the spec block size.
+- `--prefix-match-unit 32` makes the hash unit 32 (< mamba kernel block 64)
+  but `partial Mamba hits=False` stays: `partial_hash_hits_enabled()` also
+  requires every prefix-cacheable non-mamba group to support fine-grained
+  lookup or to have its DCP block size equal the hash unit, and the
+  attention groups are 128-token blocks (kv_cache_utils.py:784-792).
+=> Partial hits are not reachable with 128-token attention blocks. The
+   warm-TTFT lever is the FRONTIER (exact-end) checkpoint instead: save the
+   recurrent state at the last token of a finished request and key it to the
+   prompt tail hash, so the next turn resumes with zero prefix recompute.
+   Current warm numbers (align on, block boundaries only): turn2 288 ms for
+   128 new tokens (a pure 128-token prefill is ~25-30 ms).

@@ -149,6 +149,11 @@ serve() {
   if [[ -n "${MAMBA_BLOCK:-}" ]]; then
     args+=(--mamba-block-size "${MAMBA_BLOCK}")
   fi
+  # Prefix hash unit. Must stay below the Mamba kernel block size (64) for
+  # partial (sub-block) Mamba hits -> warm hits resume at this granularity.
+  if [[ -n "${MATCH_UNIT:-}" ]]; then
+    args+=(--prefix-match-unit "${MATCH_UNIT}")
+  fi
   # Async-scheduling A/B lever (None=default). 0 forces sync, 1 forces on.
   if [[ "${ASYNC_SCHED:-}" == "0" ]]; then
     args+=(--no-async-scheduling)
