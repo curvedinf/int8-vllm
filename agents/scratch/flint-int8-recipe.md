@@ -2899,3 +2899,14 @@ payload residual (Bolt decoder_norm), closing the stream.
   timing at decode shapes (M=96, K=2048, N in {256..4096}).
 - Next slice: CK microbench harness + attention decode microbench at
   production shapes (hdim 128, GQA 6:1, ctx 2-4k). Then attribute the 40ms.
+
+## PERF LOOP batch 9 result (2026-11-10): dense GEMM is launch-bound (27ms)
+- Production-config a8w8 at M=96: flat 105-118us across N (256..4096),
+  BLOCK_M/N, warps, stages, split-K. Launch/occupancy bound.
+- Step now: CPU 6.44 + MoE 15.2 + collectives 1.15 + dense ~27 + attn/logits
+  ~14 = covers 57.77ms. Dense is the largest block (47%).
+- Tile tuning exhausted (flattest sweep in the loop: 13us spread).
+  Remaining lever: launch COUNT (245 GEMMs/step) via per-layer GEMM-group
+  fusion / persistent columns. Kernel build, ~10-20ms potential.
+- Attention budget still unmeasured (49 layers unified attn, ctx 2-4k).
+  Next: attention microbench at production shapes.
