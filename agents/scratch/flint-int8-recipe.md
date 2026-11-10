@@ -2660,3 +2660,10 @@ payload residual (Bolt decoder_norm), closing the stream.
   kernels _moe_gemm_persistent), numerically cross-checked vs the
   blockscale GEMM at M=12/96/2048 (rel 4e-3, accumulation-order only).
 - Not yet A/B'd in production: needs the serving test with Graphs.
+- Pair cost at M=12 = 323.5us -> 15.2ms/layer-of-47 => ~14.7ms per decode step
+  of kernel busy time. The rest of the 57-66ms step is launch/sync/collective.
+- Down-tile sweep at the TP4 production shape (M=12, E=256/T=6,K=128,N=2048):
+  block_n 64/128/256 warps 4/8 stages 2 split_k 1/2 group_m 1/8 all land
+  within ~3us of each other. The down GEMM is serialization-bound
+  (route/scatter/reduce phases), so tile tuning has nothing left to gain:
+  the production pin is already the optimum.
