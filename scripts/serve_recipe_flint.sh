@@ -109,7 +109,9 @@ serve() {
   export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 
   local spec
-  spec="$("${ROOT_DIR}/.venv/bin/python" -c 'import json,sys; print(json.dumps(dict(method="dflash",model=sys.argv[1],num_speculative_tokens=int(sys.argv[2]),kv_cache_dtype=sys.argv[3])))' "$DRAFT_MODEL_DIR" "${NS:-7}" "${KV_DTYPE:-int8_per_token_head}")"
+  # DRAFT_KV_DTYPE lets the draft's KV layout differ from the target's
+  # (phase-3 decision lever); default mirrors KV_DTYPE.
+  spec="$("${ROOT_DIR}/.venv/bin/python" -c 'import json,sys; print(json.dumps(dict(method="dflash",model=sys.argv[1],num_speculative_tokens=int(sys.argv[2]),kv_cache_dtype=sys.argv[3])))' "$DRAFT_MODEL_DIR" "${NS:-7}" "${DRAFT_KV_DTYPE:-${KV_DTYPE:-int8_per_token_head}}")"
   # Phase-1 isolation (docs/recipes/optimization_procedure.md section 4):
   # synthetic rejection at zero rates keeps the draft forward and the
   # C*(NS+1) verify batch intact while accepting nothing, so step time is
