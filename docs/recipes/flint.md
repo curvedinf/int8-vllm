@@ -208,15 +208,17 @@ C12 step 101.2/155.0 (`block_g128`), 80.0/117.8 (`per_token_head`) at
 paired, so that comparison stands.
 Single-stream C1 (forced rejection): 38.8 ms/step at ~3k context.
 
-**CORRECTION (2026-11-11): the "bf16 KV is faster" claim is retracted.** It
-came from comparing a single `KV_DTYPE=auto` boot (68.3/87.8 ms) against
-int8 arms measured on other boots - never paired. Isolated on the same
-kernel (12 seqs x 8 q), int8 per-token-head is FASTER than bf16: 109.4 vs
-117.6 us/layer at 2k and 881.2 vs 1016.3 at 16k, at half the KV bytes. The
-auto-dtype boot also selects the same Aiter Unified Attention backend and
-block size, so the dtype does not change kernels. The measured C12
-dtype difference (12-30 ms/step) is far larger than the kernel difference
-(~2 ms over 14 full layers), i.e. it was boot variance, not the KV dtype.
+**CORRECTION (2026-11-11): the "bf16 KV is faster" claim is retracted**, and
+the int8 KV decode path was then fixed. The claim came from comparing a
+single `KV_DTYPE=auto` boot against int8 arms measured on other boots -
+never paired (cross-boot variance 15-30%; auto selects the same backend).
+Isolated, the int8 path was only 7-15% faster than bf16 because the gfx908
+config forced warps=4 / stages=1 / heuristic segments and left the decode
+grid latency-bound (~62 GB/s, 0.5% of peak). After the geometry fix
+(warps=2 / stages=2 / 8 segments for the verify-block shape):
+**int8 is 1.70x faster than bf16 at 2k (69.2 vs 117.6 us/layer) and 1.88x
+at 16k (539.7 vs 1016.3)**. Serving: +20% per stream at 18k (34.5 -> 41.4),
+flat at 2.4k, acceptance unchanged, cold TTFT 7.45 -> 6.70 s.
 
 The retired "650-705 tok/s" figure was a 12-stream aggregate measured greedily
 on random-token prompts with a warm prefix cache. It is void as a production
