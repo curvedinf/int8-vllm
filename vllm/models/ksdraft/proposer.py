@@ -64,3 +64,23 @@ class KSDraftProposer:
             out.append(tok)
             ctx = torch.cat([ctx, tok[:, None]], dim=1)[:, -self.window:]
         return torch.stack(out, dim=1)
+
+    @torch.no_grad()
+    def propose_block(self, tokens: torch.Tensor, n: int,
+                      temperature: torch.Tensor | None = None) -> torch.Tensor:
+        """Parallel block proposal: one trunk forward -> n tokens.
+
+        Offset k is the drafter's distribution for token anchor+k, trained as
+        the parallel block head; no autoregressive rollout.
+        """
+        if tokens.ndim != 2 or tokens.shape[1] == 0:
+            raise ValueError("tokens must be [B, L] with L >= 1")
+        ctx = tokens[:, -self.window:].to(self.device).long()
+        blog = self.model.block_logits(ctx, int(n)).float()      # [B, n, V]
+        if temperature is None or bool((temperature <= 0).all()):
+            return blog.argmax(dim=-1)
+        temp = temperature.to(self.device).float().clamp_min(1e-5)
+        probs = torch.softmax(blog / temp[:, None, None], dim=-1)
+        b, nn, _ = probs.shape
+        return torch.multinomial(
+            probs.reshape(b * nn, -1), 1).reshape(b, nn)

@@ -49,6 +49,9 @@ class KSDraftSpeculator(BaseSpeculator):
         self.window = int(os.environ.get("KSDRAFT_WINDOW",
                                          self.proposer.window if self.proposer
                                          else 16))
+        # Parallel block head is the default proposal path (one forward);
+        # KSDRAFT_AR=1 keeps the autoregressive rollout for comparison.
+        self.use_block = os.environ.get("KSDRAFT_AR", "0") != "1"
         self.draft_tokens = torch.zeros(
             self.max_num_reqs, self.num_speculative_steps,
             dtype=torch.int64, device=device)
@@ -115,7 +118,10 @@ class KSDraftSpeculator(BaseSpeculator):
         toks = torch.gather(rows, 1, pos)
         if self._is_src:
             temp = temperature[:num_reqs].to(self.device).float()
-            out = self.proposer.propose(toks, n, temperature=temp)
+            if self.use_block:
+                out = self.proposer.propose_block(toks, n, temperature=temp)
+            else:
+                out = self.proposer.propose(toks, n, temperature=temp)
             self.draft_tokens[:num_reqs, :n].copy_(out)
         buf = self.draft_tokens[:num_reqs, :n]
         if self._tp.world_size > 1:
