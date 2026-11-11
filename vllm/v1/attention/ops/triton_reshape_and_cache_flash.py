@@ -11,6 +11,8 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.kv_cache_interface import KVQuantMode, is_quantized_kv_cache
 
+from aiter.ops.kv_rotation import enabled as _rot_enabled
+
 FP8_MIN, FP8_MAX = get_fp8_min_max()
 
 _NATIVE_KV_CACHE_DTYPES = {"auto", "float16", "bfloat16", "float32", "half", "float"}
@@ -165,6 +167,37 @@ def reshape_and_cache_kernel_flash(
 # Parametrised by QUANT_MAX / QUANT_MIN so the same code path works
 # for int8 (±127/128), fp8_e4m3 (±448), and other formats.
 # ---------------------------------------------------------------------------
+
+@triton.jit
+def _hadamard_stage(x, H: tl.constexpr, N: tl.constexpr):
+    """One butterfly stage: pair indices differing in bit log2(H)."""
+    lead: tl.constexpr = N // 64
+    g: tl.constexpr = 64 // (2 * H)
+    x = tl.reshape(x, (lead, g, 2, H))
+    x = tl.permute(x, (0, 1, 3, 2))
+    a, b = tl.split(x)
+    x = tl.join(a + b, a - b)
+    x = tl.permute(x, (0, 1, 3, 2))
+    return tl.reshape(x, (lead, 64))
+
+
+@triton.jit
+def _hadamard_blocks(x, N: tl.constexpr):
+    """Normalized 64-wide block Hadamard on a [N] fp32 vector (N % 64 == 0).
+
+    Butterfly in registers: each stage pairs indices differing in one bit, so
+    no matrix is materialized.
+    """
+    x = tl.reshape(x, (N // 64, 64))
+    x = _hadamard_stage(x, 1, N)
+    x = _hadamard_stage(x, 2, N)
+    x = _hadamard_stage(x, 4, N)
+    x = _hadamard_stage(x, 8, N)
+    x = _hadamard_stage(x, 16, N)
+    x = _hadamard_stage(x, 32, N)
+    return tl.reshape(x, (N,)) * 0.125
+
+
 @triton.jit
 def _reshape_cache_per_token_head(
     key_ptr,  # [num_tokens, num_kv_heads, head_size]
@@ -197,6 +230,7 @@ def _reshape_cache_per_token_head(
     QUANT_MAX: tl.constexpr = 127.0,
     QUANT_MIN: tl.constexpr = -128.0,
     IS_INT_QUANT: tl.constexpr = False,
+    ROTATE: tl.constexpr = False,
 ):
     tok = tl.program_id(0)
     head = tl.program_id(1)
@@ -217,6 +251,8 @@ def _reshape_cache_per_token_head(
         mask=k_mask,
         other=0.0,
     ).to(tl.float32)
+    if ROTATE:
+        k_h = _hadamard_blocks(k_h, HEAD_SIZE_PADDED)
 
     k_scale = tl.maximum(tl.max(tl.abs(k_h)) / QUANT_MAX, 1e-6)
     tl.store(
@@ -249,6 +285,8 @@ def _reshape_cache_per_token_head(
         mask=v_mask,
         other=0.0,
     ).to(tl.float32)
+    if ROTATE:
+        v_h = _hadamard_blocks(v_h, HEAD_SIZE_PADDED)
 
     v_scale = tl.maximum(tl.max(tl.abs(v_h)) / QUANT_MAX, 1e-6)
     tl.store(
@@ -531,6 +569,12 @@ def triton_reshape_and_cache_flash_per_token_head_quant(
         QUANT_MAX=quant_max,
         QUANT_MIN=quant_min,
         IS_INT_QUANT=cache_dtype == torch.int8,
+        ROTATE=(
+            cache_dtype == torch.int8
+            and head_size % 64 == 0
+            and head_size_v % 64 == 0
+            and _rot_enabled(head_size)
+        ),
         num_warps=num_warps,
     )
 

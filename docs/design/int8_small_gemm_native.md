@@ -1,6 +1,7 @@
 # int8 native small-kernel system (gfx908)
 
-Status: stage 0 complete (primitive self-test green on gfx908), stage 1 next.
+Status: stage 0 complete; stage 1 native decode kernel correct and 1.54x the
+Triton path at 16k (serving dispatch not yet wired).
 Owner: serving fork (`curvedinf/int8-vllm` + `curvedinf/int8-aiter`).
 Scope: int8 only — there is no non-int8 arm in this design.
 
@@ -130,9 +131,19 @@ Stage 0 (done): header + self-test green on gfx908.
 four-local-adds + xor(16,32) softmax reduction.
 
 
-Stage 1: UA decode native kernel.
-Gates: self-test → ≤100 µs/layer at 16k → serving A/B at C12 2048→256 →
-≤64 µs/layer (80% of theoretical) as the stretch row.
+Stage 1: UA decode native kernel — first version landed.
+`aiter/csrc/kernels/paged_attn_decode_int8_pthead_gfx908.hip` (partition +
+reduce, int8 QK and PV, transposed orientation, 64-token LDS tile, 16
+queries per wave, 4 waves sharing the tile).
+Correctness: 0.0015 max abs vs an fp32 reference over the same quantized
+cache; 1/2/8 segment splits agree.
+Microbench, 12 seqs x 8 queries, int8 PTH, per layer:
+  2k:  Triton 76.4 us -> native 66.9 us (1.14x)
+  16k: Triton 440.6 us -> native 286.6 us (1.54x)
+Fixed cost ~40 us/layer is three launches (pack + partition + reduce).
+Next: fuse the Q pack into the partition kernel, replace the V byte-scatter
+staging with a register transpose, then wire the dispatch behind
+`AITER_INT8_NATIVE=ua_decode` and run the serving gate.
 
 Stage 2: small-M A8W8 GEMM, first as an isolated GEMM A/B at M = 12 and 96
 against Triton blockscale and against CK bpreshuffle, then wire the winner

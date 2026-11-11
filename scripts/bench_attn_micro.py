@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import torch  # noqa: E402
 
+from aiter.ops.kv_rotation import rotate as _rot64  # noqa: E402
 from aiter.ops.triton.attention.unified_attention import unified_attention  # noqa: E402
 
 NUM_SEQS = 12
@@ -68,8 +69,10 @@ def build(ctx=CTX, num_seqs=NUM_SEQS, q_per_seq=Q_PER_SEQ, kv_heads=None,
                         device=dev) / 8
     interleave = os.environ.get("ATTN_INTERLEAVE") == "1"
     for s in range(num_seqs):
-        kq, ks = quant_per_token_head(key[s])
-        vq, vs = quant_per_token_head(value[s])
+        # Mirror the production writer: K/V are rotated before quantization
+        # when the int8 per-token-head cache rotation is enabled.
+        kq, ks = quant_per_token_head(_rot64(key[s]))
+        vq, vs = quant_per_token_head(_rot64(value[s]))
         for b in range(max_blocks):
             # Contiguous per sequence vs round-robin across sequences (the
             # engine interleaves blocks between concurrent requests and the
