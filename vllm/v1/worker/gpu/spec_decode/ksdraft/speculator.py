@@ -44,7 +44,11 @@ class KSDraftSpeculator(BaseSpeculator):
         self._is_src = self._tp.rank_in_group == 0
         self.proposer = (KSDraftProposer(sc.model, device=device, int8=True)
                          if self._is_src else None)
-        self.window = self.proposer.window
+        import os
+
+        self.window = int(os.environ.get("KSDRAFT_WINDOW",
+                                         self.proposer.window if self.proposer
+                                         else 16))
         self.draft_tokens = torch.zeros(
             self.max_num_reqs, self.num_speculative_steps,
             dtype=torch.int64, device=device)
