@@ -203,11 +203,20 @@ below the boot-to-boot variance floor - NS stays 7. Draft-only KV layout
 vector with every run.
 
 Phase-1 isolation (forced rejection, acceptance pinned at 1):
-C12 step 101.2 ms (`block_g128`, 2.4k) / 155.0 (18k); 80.0 / 117.8 with
-`per_token_head`; 68.3 / 87.8 with bf16 KV (diagnostic only — bf16 KV is
-banned). So the int8 KV dequant path was the dominant context-scaled cost;
-per-token-head recovers most of the gap while keeping int8 KV.
+C12 step 101.2/155.0 (`block_g128`), 80.0/117.8 (`per_token_head`) at
+2.4k/18k. The `block_g128` vs `per_token_head` arms were same-session and
+paired, so that comparison stands.
 Single-stream C1 (forced rejection): 38.8 ms/step at ~3k context.
+
+**CORRECTION (2026-11-11): the "bf16 KV is faster" claim is retracted.** It
+came from comparing a single `KV_DTYPE=auto` boot (68.3/87.8 ms) against
+int8 arms measured on other boots - never paired. Isolated on the same
+kernel (12 seqs x 8 q), int8 per-token-head is FASTER than bf16: 109.4 vs
+117.6 us/layer at 2k and 881.2 vs 1016.3 at 16k, at half the KV bytes. The
+auto-dtype boot also selects the same Aiter Unified Attention backend and
+block size, so the dtype does not change kernels. The measured C12
+dtype difference (12-30 ms/step) is far larger than the kernel difference
+(~2 ms over 14 full layers), i.e. it was boot variance, not the KV dtype.
 
 The retired "650-705 tok/s" figure was a 12-stream aggregate measured greedily
 on random-token prompts with a warm prefix cache. It is void as a production
