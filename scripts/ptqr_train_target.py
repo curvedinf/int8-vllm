@@ -298,8 +298,12 @@ class PTQRLinear(nn.Module):
         self._col_range = col_range
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = _PTQRLinFn.apply(x, self.weight, self.scale, self.group, self.tau,
-                               self.scale_fp16)
+        if os.environ.get("PTQR_DEBUG_IDENTITY") == "1":
+            # diagnostic: bypass the int8 fake-quant forward (bf16 identity)
+            out = torch.nn.functional.linear(x, self.weight)
+        else:
+            out = _PTQRLinFn.apply(x, self.weight, self.scale, self.group,
+                                   self.tau, self.scale_fp16)
         if self.row_reduce_group is not None:
             # Row-parallel partial (own column slice of the input): sum the
             # partials across ranks, autograd-exact (_RowParallelSum).

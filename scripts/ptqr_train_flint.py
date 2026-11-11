@@ -54,6 +54,8 @@ import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+_DBG_LOGITS_DONE = False
+
 from ptqr_flint_model import (  # noqa: E402
     FlintRef,
     flint_tiny_config,
@@ -501,9 +503,25 @@ def main():
         T = args.distill_temperature
         ce_sum = torch.zeros((), device=h.device)
         kd_sum = torch.zeros((), device=h.device)
+        global _DBG_LOGITS_DONE
         for j in range(0, n, args.logits_chunk):
             sl = slice(j, j + args.logits_chunk)
             lc = student.head(h[sl]).float()
+            if (_os0.environ.get("PTQR_DEBUG_LOGITS") and not _DBG_LOGITS_DONE
+                    and j == 0):
+                with torch.no_grad():
+                    _s = lc.reshape(-1, lc.shape[-1])
+                    _t = t_flat[sl].float().reshape(-1, t_flat.shape[-1])
+                    _top1 = (_s.argmax(-1) == _t.argmax(-1)).float().mean()
+                    _corr = torch.corrcoef(torch.stack([_s.flatten(),
+                                                        _t.flatten()]))[0, 1]
+                    _ss = _s.sort(dim=-1).values.flatten()
+                    _ts = _t.sort(dim=-1).values.flatten()
+                    _corrs = torch.corrcoef(torch.stack([_ss, _ts]))[0, 1]
+                print(f"[dbg-logits] top1agree {_top1.item():.4f} "
+                      f"corr {_corr.item():.4f} sorted_corr {_corrs.item():.4f}",
+                      flush=True)
+                _DBG_LOGITS_DONE = True
             ce_sum = ce_sum + F.cross_entropy(lc, y_flat[sl],
                                               reduction="sum")
             lp = F.log_softmax(lc / T, dim=-1)
