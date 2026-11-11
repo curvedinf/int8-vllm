@@ -14,6 +14,7 @@ model-wide INT8 tier the gate battery validates.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import torch
@@ -32,8 +33,9 @@ class KSDraftProposer:
         self.model.eval().requires_grad_(False)
         self.device = torch.device(device)
         # Training windows are short (16 tokens); keep the rollout window the
-        # same so proposals see the same context distribution.
-        self.window = int(window or 16)
+        # same so proposals see the same context distribution. KSDRAFT_WINDOW
+        # is the serving-time cost lever (cost scales with the window).
+        self.window = int(os.environ.get("KSDRAFT_WINDOW", window or 16))
 
     @torch.no_grad()
     def propose(self, tokens: torch.Tensor, n: int,

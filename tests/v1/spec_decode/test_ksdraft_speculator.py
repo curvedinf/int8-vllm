@@ -16,6 +16,9 @@ def _spec(window=4, steps=3, reqs=2):
     s.draft_logits = None
     s.draft_token_confidence_probs = torch.zeros_like(s.draft_tokens,
                                                       dtype=torch.float32)
+    s._is_src = True
+    s._tp = SimpleNamespace(world_size=1, rank_in_group=0,
+                            broadcast=lambda *a, **k: None)
     return s
 
 

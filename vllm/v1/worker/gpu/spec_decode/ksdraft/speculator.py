@@ -35,7 +35,15 @@ class KSDraftSpeculator(BaseSpeculator):
         self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.max_model_len = vllm_config.model_config.max_model_len
         self.num_speculative_steps = int(sc.num_speculative_tokens or 1)
-        self.proposer = KSDraftProposer(sc.model, device=device, int8=True)
+        # The draft runs on one rank and the tokens are broadcast: TP ranks
+        # share the request batch, so redundant copies only burn compute and
+        # VRAM (the proposal is ~0.2-0.6 s/step on one MI100).
+        from vllm.distributed.parallel_state import get_tp_group
+
+        self._tp = get_tp_group()
+        self._is_src = self._tp.rank_in_group == 0
+        self.proposer = (KSDraftProposer(sc.model, device=device, int8=True)
+                         if self._is_src else None)
         self.window = self.proposer.window
         self.draft_tokens = torch.zeros(
             self.max_num_reqs, self.num_speculative_steps,
@@ -101,7 +109,11 @@ class KSDraftSpeculator(BaseSpeculator):
         pos = pos.clamp_(min=0).clamp_max_((lens - 1)[:, None])
         rows = token_ids[idx]
         toks = torch.gather(rows, 1, pos)
-        temp = temperature[:num_reqs].to(self.device).float()
-        out = self.proposer.propose(toks, n, temperature=temp)
-        self.draft_tokens[:num_reqs, :n].copy_(out)
-        return self.draft_tokens[:num_reqs, :n]
+        if self._is_src:
+            temp = temperature[:num_reqs].to(self.device).float()
+            out = self.proposer.propose(toks, n, temperature=temp)
+            self.draft_tokens[:num_reqs, :n].copy_(out)
+        buf = self.draft_tokens[:num_reqs, :n]
+        if self._tp.world_size > 1:
+            self._tp.broadcast(buf, src=0)
+        return buf
