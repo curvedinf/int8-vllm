@@ -4468,3 +4468,49 @@ quality battery. Acceptance floor: W1 median not below the r1s40 baseline
 Draft rung (if the target moves materially): regenerate the draft cache from
 the bf16 target (scripts/ptqr_flint_draft_cache.py, 243 seqs) then
 scripts/ptqr_train_draft_flint_ptqr.py --steps 60.
+
+## VERDICT (2026-11-11): FlyDSL for the int8 UA decode kernel — NO
+
+Question: replace the planned hand-written HIP int8 UA decode kernel with
+FlyDSL. Answer: FlyDSL **cannot run its own MMA abstraction for int8 on
+gfx908**; it can only emit the raw instruction through a direct ROCDL op,
+which forfeits every reason to use a DSL. Evidence, measured today:
+
+1. Int8 atom path is a hard compile error on gfx908:
+   `fx.make_mma_atom(fx.rocdl.MFMA(16,16,16, fx.Int8, fx.Int32))` +
+   `fx.gemm` -> `DSLCompileError: failed to legalize operation
+   'fly.mma_atom_call_ssa' ... !fly.mma_atom<!fly_rocdl.cdna3.mfma<
+   16x16x16, (i8,i8)->i32>>`. The only atom factory is
+   `MmaOpCDNA3_MFMAType` (universal.py:157); no CDNA1 variant, no arch knob.
+
+2. Raw ROCDL path works and is exact. `rocdl.mfma_i32_16x16x16i8` (present
+   in the bundled MLIR bindings but NOT wrapped in `expr/rocdl/__init__.py`,
+   which only wraps the `16x16x32_i8` form) emits
+   `v_mfma_i32_16x16x16i8` in the gfx908 ISA (grep of dump
+   `22_final_isa.s`), and the result matches a torch reference exactly
+   (bit-identical up to the accumulator's lane order: `C == ref.T`).
+   Operands must be hand-packed as i32 (4x i8 per lane) via
+   `_split_mfma_operands`; accumulator/lane layout hand-derived.
+   Probe: `agents/tmp/fly_i8_gemm.py` (run with
+   `PYTHONPATH=<vllm checkout>`, `FLYDSL_DEBUG_DUMP_ASM=1`;
+   note dump env is `FLYDSL_DEBUG_DUMP_ASM`, not `FLYDSL_DUMP_ASM`).
+
+3. Therefore FlyDSL scores zero on what we wanted from it: no tiled-MMA /
+   layout partitioning for int8, no operand staging. The direct-op kernel is
+   the same hand-written per-lane code as HIP, in a less documented API, on
+   an arch outside FlyDSL's supported list (gfx942/950/1250/1201).
+
+4. In-tree FlyDSL attention kernels are unusable here: `tq_decode.py` is
+   CDNA4 (16x16x32 bf16 atom, `ds_read_tr16_b64` hardware transpose, scaled
+   MFMA) and `flydsl_turboquant_decode.py` gates on `on_gfx950()`.
+
+5. The instruction FlyDSL would emit (`v_mfma_i32_16x16x16i8`) is exactly
+   the one Triton already emits in our UA kernel, so there is no ISA-level
+   upside; the measured 1-3% dot efficiency is layout/data-movement loss,
+   which any replacement must fix by hand either way.
+
+Consequence: keep the tuned Triton decode path, write the int8 UA decode
+kernel in HIP. `flydsl 0.5.0` remains installed in `.venv` (pure wheel, no
+runtime effect); remove with `pip uninstall flydsl` if the venv should stay
+pristine. Scratch probes: `agents/tmp/fly_i8_gemm.py`,
+`agents/tmp/fly_i8_atom.py`, `agents/tmp/fly_vecadd.py` (tmp, gitignored).
