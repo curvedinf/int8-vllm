@@ -187,10 +187,20 @@ Three repeats per arm, median reported.
 
 | Measurement (C12 W1, 3 reps) | median per-stream tok/s | acceptance | step ms |
 |---|---|---|---|
-| 2.4k ctx, `int8_per_token_head` (recipe default) | **36.1** | 2.84 | 74-81 |
-| 2.4k ctx, `int8_block_g128` (rollback) | 29.7 | 2.67 | 87-91 |
-| 18k ctx, `int8_per_token_head` | **33.4** | 3.42 | 94-112 |
-| 18k ctx, `int8_block_g128` | 21.3 | 3.02 | 141-150 |
+| 2.4k ctx, `int8_per_token_head` (recipe default) | **41.3** (36.6-41.6) | 2.78 | 67-73 |
+| 2.4k ctx, `int8_block_g128` (rollback) | 37.8 (32.7-38.1) | 2.72 | 74-79 |
+| 18k ctx, `int8_per_token_head` | **34.5** (31.6-40.3) | 3.54 | 88-112 |
+| 18k ctx, `int8_block_g128` | 26.1 (20.8-32.0) | 3.35 | 117-142 |
+| W5 witness (single stream, ~3k prompt) | 63.1-67.0 | 2.6-2.8 | 41 |
+| W2 cold, C12 12x2k | TTFT p50 7.4 s / p95 13.6 s; 22.4 | 1.82 | - |
+| W3 long turn, C12 18k to 2048 | 27.1 | 3.17 | 117 (total p50 77.1 s) |
+
+Phase-3 sweeps: NS 5/6/7/8 all land within ~10% of each other at served
+sampling (NS=6 nominally best at 43.5/35.9, NS=7 fresh control 41.3/34.5),
+below the boot-to-boot variance floor - NS stays 7. Draft-only KV layout
+(`DRAFT_KV_DTYPE=int8_block_g128`) changes acceptance by <2%: both stay on
+`int8_per_token_head`. `bench_cycle.py` reports the per-position acceptance
+vector with every run.
 
 Phase-1 isolation (forced rejection, acceptance pinned at 1):
 C12 step 101.2 ms (`block_g128`, 2.4k) / 155.0 (18k); 80.0 / 117.8 with
