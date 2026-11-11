@@ -118,9 +118,19 @@ serve() {
   export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 
   local spec
-  # DRAFT_KV_DTYPE lets the draft's KV layout differ from the target's
-  # (phase-3 decision lever); default mirrors KV_DTYPE.
-  spec="$("${ROOT_DIR}/.venv/bin/python" -c 'import json,sys; print(json.dumps(dict(method="dflash",model=sys.argv[1],num_speculative_tokens=int(sys.argv[2]),kv_cache_dtype=sys.argv[3])))' "$DRAFT_MODEL_DIR" "${NS:-7}" "${DRAFT_KV_DTYPE:-${KV_DTYPE:-int8_per_token_head}}")"
+  # KSDRAFT: swap the DFlash2 draft for a ksdraft export (KSDRAFT_DIR) using
+  # the custom speculator; default remains the recipe's DFlash2 draft.
+  if [[ "${SPEC_METHOD:-dflash}" == "ksdraft" ]]; then
+    if [[ -z "${KSDRAFT_DIR:-}" ]]; then
+      echo 'SPEC_METHOD=ksdraft requires KSDRAFT_DIR=<export dir>' >&2
+      return 2
+    fi
+    spec="$("${ROOT_DIR}/.venv/bin/python" -c 'import json,sys; print(json.dumps(dict(method="ksdraft",model=sys.argv[1],num_speculative_tokens=int(sys.argv[2]))))' "${KSDRAFT_DIR}" "${NS:-7}")"
+  else
+    # DRAFT_KV_DTYPE lets the draft's KV layout differ from the target's
+    # (phase-3 decision lever); default mirrors KV_DTYPE.
+    spec="$("${ROOT_DIR}/.venv/bin/python" -c 'import json,sys; print(json.dumps(dict(method="dflash",model=sys.argv[1],num_speculative_tokens=int(sys.argv[2]),kv_cache_dtype=sys.argv[3])))' "$DRAFT_MODEL_DIR" "${NS:-7}" "${DRAFT_KV_DTYPE:-${KV_DTYPE:-int8_per_token_head}}")"
+  fi
   # Phase-1 isolation (docs/recipes/optimization_procedure.md section 4):
   # synthetic rejection at zero rates keeps the draft forward and the
   # C*(NS+1) verify batch intact while accepting nothing, so step time is
