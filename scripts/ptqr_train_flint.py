@@ -550,7 +550,10 @@ def main():
                 if rank == 0:
                     print(f"eval step {step:4d} kld {kld:.6f} "
                           f"teacher_nll {lm:.4f}", flush=True)
-            if args.save_every and step % args.save_every == 0:
+            # step 0 satisfies the modulo, and a 76 GB save there only
+            # delays the run (measured 2026-11-11); the final save covers
+            # the end of the rung.
+            if args.save_every and step > 0 and step % args.save_every == 0:
                 save_ptqr_checkpoint(student, replaced, Path(args.out_dir),
                                      step, args, rank=rank, world=world,
                                      vocab_size=teacher.cfg.vocab_size)
@@ -577,7 +580,10 @@ def main():
                 if rank == 0:
                     print(f"eval step {step:4d} kld {kld:.6f} "
                           f"teacher_nll {lm:.4f}", flush=True)
-            if args.save_every and step % args.save_every == 0:
+            # step 0 satisfies the modulo, and a 76 GB save there only
+            # delays the run (measured 2026-11-11); the final save covers
+            # the end of the rung.
+            if args.save_every and step > 0 and step % args.save_every == 0:
                 save_ptqr_checkpoint(student, replaced, Path(args.out_dir),
                                      step, args, rank=rank, world=world,
                                      vocab_size=teacher.cfg.vocab_size)
