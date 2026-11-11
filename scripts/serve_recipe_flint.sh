@@ -10,7 +10,8 @@
 #   - routed 256-expert MoE on the gfx908 grouped a8w8-blockscale kernel
 #     (vllm/model_executor/layers/quantization/gptq_moe_a8w8.py)
 #   - AITER unified attention, vLLM CUSTOM all-reduce
-#   - int8_block_g128 KV on BOTH target and draft
+#   - int8 per-token-head KV on BOTH target and draft (measured fastest int8
+#     layout for Flint; int8_block_g128 remains the KV_DTYPE rollback lever)
 #   - TP4 / C12 (twelve concurrent sequences), DFlash2 NS=7
 #   - 512k per-request cap (Flint announcement; card recommends <=256k)
 # No 16-bit fallback: the a8w8 expert path is the production path. Setting
