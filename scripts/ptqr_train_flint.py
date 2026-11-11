@@ -550,7 +550,7 @@ def main():
                 if rank == 0:
                     print(f"eval step {step:4d} kld {kld:.6f} "
                           f"teacher_nll {lm:.4f}", flush=True)
-            # step 0 satisfies the modulo, and a 76 GB save there only
+            # step 0 satisfies the modulo, and an 81 GB save there only
             # delays the run (measured 2026-11-11); the final save covers
             # the end of the rung.
             if args.save_every and step > 0 and step % args.save_every == 0:
@@ -580,7 +580,7 @@ def main():
                 if rank == 0:
                     print(f"eval step {step:4d} kld {kld:.6f} "
                           f"teacher_nll {lm:.4f}", flush=True)
-            # step 0 satisfies the modulo, and a 76 GB save there only
+            # step 0 satisfies the modulo, and an 81 GB save there only
             # delays the run (measured 2026-11-11); the final save covers
             # the end of the rung.
             if args.save_every and step > 0 and step % args.save_every == 0:
