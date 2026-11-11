@@ -17,6 +17,14 @@
 # VLLM_GFX908_MOE_A8W8=0 (WNA16 experts) is a diagnostic lever only and is
 # NOT a supported recipe configuration.
 set -euo pipefail
+
+# int8-only contract: no lever may select a 16-bit KV dtype.
+for _kv in "${KV_DTYPE:-}" "${DRAFT_KV_DTYPE:-}"; do
+  if [[ -n "${_kv}" && "${_kv}" != int8* ]]; then
+    echo "refusing non-int8 KV dtype '${_kv}': this fork is int8-only" >&2
+    exit 2
+  fi
+done
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 MODEL_DIR="${MODEL_DIR:-${HOME}/models/Flint-GPTQ-INT8-W8A8-GS128-PTQR-r1s40-512k}"  # retrained on the 512k-scope corpus (rollback: r1s40-v2)
 DRAFT_MODEL_DIR="${DRAFT_MODEL_DIR:-${HOME}/models/flint-dflash2-ptqr-r1-int8}"

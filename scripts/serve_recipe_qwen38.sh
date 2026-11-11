@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# int8-only contract: no lever may select a 16-bit KV dtype.
+for _kv in "${KV_DTYPE:-}" "${DRAFT_KV_DTYPE:-}"; do
+  if [[ -n "${_kv}" && "${_kv}" != int8* ]]; then
+    echo "refusing non-int8 KV dtype '${_kv}': this fork is int8-only" >&2
+    exit 2
+  fi
+done
+
 ROOT_DIR="${HOME}/int8-vllm"
 VENV="${ROOT_DIR}/.venv"
 MODEL_DIR="${MODEL_DIR:-${HOME}/models/Qwen3.8-27B-PTQR-R10S60}"  # PTQR-retrained (ledger PTQR_P1_R10S60_FINAL: KLD 0.0069 vs 0.0110 deployed, acceptance 3.88)

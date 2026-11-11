@@ -160,7 +160,9 @@ Stage 5: prefill — only after a roofline measurement; no work before that.
 
 ## Non-goals and open questions
 
-* No dtype other than int8. No bf16/fp16 arms, no "fallback dtype" rows.
+* No dtype other than int8. No bf16/fp16 arms, no "fallback dtype" rows. The
+  recipe scripts now hard-fail if `KV_DTYPE`/`DRAFT_KV_DTYPE` select anything
+  that is not int8; 16-bit KV cannot be reached by a lever.
 * No KV cache format change in stage 1: the QK fragment is already
   token-major/contiguous; V transpose is handled in-kernel (byte permute) and
   revisited only if measurement demands an SoA sidecar.
