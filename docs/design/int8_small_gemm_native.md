@@ -1,9 +1,13 @@
 # int8 native small-kernel system (gfx908)
 
-Status: stage 0 complete; stage 1 kernel is correct against references and
-1.54x the Triton path in the microbench, but the serving gate FAILED
-(numerically wrong on real model data). Dispatch exists and is opt-in
-(`AITER_INT8_NATIVE=ua_decode`); production stays on Triton.
+Status: stage 0 complete; stage 1 kernel VALIDATED. The serving failures
+were a broken comparison harness (mutated kwargs) and the Hadamard rotation
+collapsing DFlash2 acceptance, not the kernel: offline Triton vs native on a
+dumped real call agree to 1.6e-2, and served C12 cold the native arm is
+60.1-61.0 ms/step vs Triton 65.3-68.1 at acceptance 1.53 vs 1.71-2.09.
+Dispatch stays opt-in (`AITER_INT8_NATIVE=ua_decode`); rotation now defaults
+OFF (`VLLM_GFX908_KV_ROTATE=1` to enable) because it drops acceptance to 1.0
+until the draft KV-injection path rotates consistently.
 Owner: serving fork (`curvedinf/int8-vllm` + `curvedinf/int8-aiter`).
 Scope: int8 only — there is no non-int8 arm in this design.
 
