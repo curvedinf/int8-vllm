@@ -4446,3 +4446,25 @@ c. Train rungs (lr 1e-5, frozen scales, tau anneal) at the largest seq_len
    that fits; eval KLD/NLL each rung; export the best.
 d. Draft rung on the new target (target states change if the target changes).
 e. Serve + gates (1-3) + battery.
+
+### Phase-2 rung r2_4k (2026-11-11) — commands
+Rung (background): 40 steps, seq_len 4096, lr 1e-5, kd_cache 4, save_every 10,
+eval_every 20, teacher_stream, from the bf16 base (no masters needed).
+Log: /tmp/ptqr_r2_4k.log; out: /home/curved/models/ptqr_flint_r2_4k
+Curve so far: step 0 ce 3.2821 kd 0.0778 (eval KLD 0.105315);
+step 10 ce 3.0781 kd 0.1791 at tau 0.139.
+
+Export (after the run; only the latest step survives the prune):
+  .venv/bin/python scripts/ptqr_export_flint.py \
+    --ckpt_dir /home/curved/models/ptqr_flint_r2_4k --step 40 --world 4 \
+    --src /home/curved/models/flint-bf16 \
+    --out /home/curved/models/Flint-GPTQ-INT8-W8A8-GS128-PTQR-r2 --verify
+Then point the serve script at it:
+  MODEL_DIR=/home/curved/models/Flint-GPTQ-INT8-W8A8-GS128-PTQR-r2 \
+  VLLM_API_KEY=recipe-local bash scripts/serve_recipe_flint.sh restart
+Gates: scripts/bench_cycle.py agent at 2.4k/18k (3 reps), witness, then the
+quality battery. Acceptance floor: W1 median not below the r1s40 baseline
+(2.84 at 2.4k / 3.42 at 18k on int8_per_token_head).
+Draft rung (if the target moves materially): regenerate the draft cache from
+the bf16 target (scripts/ptqr_flint_draft_cache.py, 243 seqs) then
+scripts/ptqr_train_draft_flint_ptqr.py --steps 60.
