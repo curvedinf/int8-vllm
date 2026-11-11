@@ -50,6 +50,12 @@ def init_speculator(
         )
 
         return DFlashSpeculator(vllm_config, device)
+    elif speculative_config.method == "ksdraft":
+        from vllm.v1.worker.gpu.spec_decode.ksdraft.speculator import (
+            KSDraftSpeculator,
+        )
+
+        return KSDraftSpeculator(vllm_config, device, req_states)
     elif speculative_config.method == "dspark":
         from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
             DSparkSpeculator,

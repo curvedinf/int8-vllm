@@ -76,6 +76,7 @@ SpeculativeMethod = Literal[
     "draft_model",
     "suffix",
     "custom_class",
+    "ksdraft",
     EagleModelTypes,
     NgramGPUTypes,
     DSparkModelTypes,
@@ -1330,6 +1331,16 @@ class SpeculativeConfig:
             # TODO: current we still need extract vocab_size from target model
             # config, in future, we may try refactor it out, and set
             # draft related config as None here.
+            self.draft_model_config = self.target_model_config
+            self.draft_parallel_config = self.target_parallel_config
+        elif self.method == "ksdraft":
+            # KSDraft proposer: a custom block-draft model loaded from the
+            # export directory in ``model``. It shares the target's configs
+            # for bookkeeping (the speculator loads the export itself).
+            if self.model is None:
+                raise ValueError(
+                    "method='ksdraft' requires 'model' to be the ksdraft "
+                    "export directory.")
             self.draft_model_config = self.target_model_config
             self.draft_parallel_config = self.target_parallel_config
         elif self.method == "suffix":
