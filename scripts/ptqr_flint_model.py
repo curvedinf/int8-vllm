@@ -153,7 +153,10 @@ def _allowed_mask(S: int, window: int, device) -> torch.Tensor:
         q1 = min(S, q0 + blk)
         qi = torch.arange(q0, q1, device=device)[:, None]
         m[q0:q1] = ki <= qi
-        if window:
+        # window == -1 is the "no sliding window" sentinel: the original
+        # per-module cache tested `self.window > 0`, and a bare truthiness
+        # test here emptied the full-attention masks (zero attention).
+        if window > 0:
             m[q0:q1] &= (qi - ki < window)
     while len(_ALLOWED_MASKS) >= 3:
         _ALLOWED_MASKS.pop(next(iter(_ALLOWED_MASKS)))
