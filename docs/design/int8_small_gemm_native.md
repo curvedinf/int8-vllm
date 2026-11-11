@@ -1,7 +1,9 @@
 # int8 native small-kernel system (gfx908)
 
-Status: stage 0 complete; stage 1 native decode kernel correct and 1.54x the
-Triton path at 16k (serving dispatch not yet wired).
+Status: stage 0 complete; stage 1 kernel is correct against references and
+1.54x the Triton path in the microbench, but the serving gate FAILED
+(numerically wrong on real model data). Dispatch exists and is opt-in
+(`AITER_INT8_NATIVE=ua_decode`); production stays on Triton.
 Owner: serving fork (`curvedinf/int8-vllm` + `curvedinf/int8-aiter`).
 Scope: int8 only — there is no non-int8 arm in this design.
 
