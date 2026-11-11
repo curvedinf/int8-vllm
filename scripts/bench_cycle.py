@@ -67,6 +67,21 @@ def scrape() -> dict[str, float]:
     return out
 
 
+def scrape_positions() -> dict[int, float]:
+    """Per-position accepted-token counters (spec decode)."""
+    import re
+
+    out: dict[int, float] = {}
+    pat = re.compile(
+        r'vllm:spec_decode_num_accepted_tokens_per_pos_total\{[^}]*'
+        r'position="(\d+)"[^}]*\}\s+([0-9.eE+-]+)')
+    for line in httpx.get(f"{BASE}/metrics", timeout=10).text.splitlines():
+        m = pat.search(line)
+        if m:
+            out[int(m.group(1))] = out.get(int(m.group(1)), 0.0) + float(m.group(2))
+    return out
+
+
 async def one(client, prompt, n_out, tool_mode, temp, top_p, top_k, t0):
     if tool_mode:
         if isinstance(prompt, tuple):
@@ -115,7 +130,7 @@ async def one(client, prompt, n_out, tool_mode, temp, top_p, top_k, t0):
             "pt": (usage or {}).get("prompt_tokens", 0)}
 
 
-def summarize(rows, before, after, n_streams, label) -> dict:
+def summarize(rows, before, after, n_streams, label, pos_before=None, pos_after=None) -> dict:
     ok = [r for r in rows if r["ct"] > 1 and r["first"] is not None]
     ttfts = [r["first"] for r in ok]
     totals = [r["end"] for r in ok]
@@ -133,6 +148,18 @@ def summarize(rows, before, after, n_streams, label) -> dict:
         before.get("vllm:prompt_tokens_total", 0.0)
     overlap = max(0.0, min(totals) - max(ttfts)) if ok else 0.0
     acc = 1.0 + d_acc / d_drafts if d_drafts else None
+    per_pos = None
+    if pos_before is not None and pos_after is not None and d_drafts:
+        steps = d_drafts  # one draft event per sequence per step
+        deltas = {i: pos_after.get(i, 0.0) - pos_before.get(i, 0.0)
+                  for i in sorted(set(pos_before) | set(pos_after))}
+        # conditional acceptance: pos0 / steps, pos i / pos i-1
+        rates = []
+        prev = steps
+        for i in sorted(deltas):
+            rates.append(round(deltas[i] / prev, 4) if prev else None)
+            prev = deltas[i]
+        per_pos = rates
     tps = d_gen / d_drafts if d_drafts else None
     # Per-token time is unaffected by start/finish jitter; step time is that
     # times tokens emitted per step.
@@ -158,6 +185,7 @@ def summarize(rows, before, after, n_streams, label) -> dict:
         "steps": int(d_drafts), "step_ms": round(step_ms, 2) if step_ms else None,
         "overlap_s": round(overlap, 3),
         "chunk_interval_p95_ms": round(p95, 1) if p95 else None,
+        "per_position_acceptance": per_pos,
     }
 
 
@@ -223,11 +251,14 @@ async def main() -> None:
     if warm_prompts:
         await run(args, warm_prompts, tool_mode, t0)
     before = scrape()
+    pos_before = scrape_positions()
     t0 = time.monotonic()
     rows = await run(args, prompts, tool_mode, t0,
                      delay=args.delay if args.mode == "mixed" else 0.0)
     after = scrape()
-    out = summarize(rows, before, after, len(prompts), label)
+    pos_after = scrape_positions()
+    out = summarize(rows, before, after, len(prompts), label,
+                    pos_before, pos_after)
     out["corpus_sha"] = corpus()[1]
     out["sampling"] = {"temperature": args.temperature, "top_p": args.top_p,
                        "top_k": args.top_k}
