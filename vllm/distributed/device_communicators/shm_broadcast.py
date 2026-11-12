@@ -868,7 +868,23 @@ class MessageQueue:
         # for readers, `self.current_idx` is the next block to read
         # if this block is not ready,
         # we need to wait until it is written
+        import os as _os
+        _dbg = _os.environ.get("VLLM_RPCTRACE") == "1"
+        if _dbg:
+            import time as _t
+            _w0 = _t.perf_counter()
         self._spin_condition.wait(timeout_ms=read_timeout.timeout_ms())
+        if _dbg:
+            _dt = _t.perf_counter() - _w0
+            _box = getattr(self, "_waittrace", None)
+            if _box is None:
+                _box = self._waittrace = {"w": 0.0, "n": 0}
+            _box["w"] += _dt
+            _box["n"] += 1
+            if _box["n"] % 50 == 0:
+                print(f"[mqread] pid={_os.getpid()} n={_box['n']} | "
+                      f"wait {1000*_box['w']/_box['n']:7.2f}ms", flush=True)
+                _box.update(w=0.0, n=0)
 
         if self.shutting_down:
             raise RuntimeError("cancelled")

@@ -913,6 +913,7 @@ class EngineCore:
                 print(f"[steptrace-bq] n={n} | sched {1000*_st_box['sched']/n:7.2f}ms "
                       f"| send {1000*_st_box.get('send', 0.0)/n:7.2f}ms "
                       f"| sample {1000*_st_box.get('sample', 0.0)/n:7.2f}ms "
+                      f"| depth {len(getattr(self.model_executor, 'futures_queue', ()))} "
                       f"| exec {1000*_st_box['exec']/n:7.2f}ms "
                       f"| out {1000*_st_box['out']/n:7.2f}ms", flush=True)
                 _st_box.update(sched=0.0, send=0.0, sample=0.0, exec=0.0, out=0.0, n=0)

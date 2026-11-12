@@ -4809,3 +4809,11 @@ sched 1.0, send 0.00, exec 56-64 (get_response 27.1, aggregate 0.00),
 out 0.5. Worker: phases 7.5, dequeue 0.05, handle 0.01. The ~40ms is the
 response-MQ wake/delivery + FutureWrapper queue drain, not compute.
 Next: trace the SpinCondition notify->wake path and the future queue depth.
+RESPONSE MQ TRACE 2026-11-12: the shm response-MQ reader wait is 0.00ms
+(SpinCondition busy-spins; the engine pid logged ~2.29M spin iterations in
+the run). Future queue depth 2; exec 56-60ms ~ 2x the 27.1ms per-future
+drain. So the MQ wake is not the latency: the 27ms is the per-rank response
+loop / output unpickle. Workers logged occasional 192ms input waits.
+Fixing this is an engine RPC-path change (batched/zero-copy output), not a
+kernel/config lever. Instrumentation: VLLM_RPCTRACE mqread + steptrace
+depth.
