@@ -4940,3 +4940,7 @@ ms/step). Served C12 unchanged (421-479) because GPU busy fell 95% ->
 87%: the C12 step is now HOST-BOUND in the current machine state. Next
 target: the host-side floor (~7 ms/step) - engine step phases, the async
 batch-queue depth-2 pipeline, output processing.
+CORRECTION 2026-11-12g: the 87% GPU-busy sample came from the
+profiler-enabled boot (that window was ~10% slower on every kernel
+family). A clean boot of the same code is 96% busy, C12 482. The step
+did NOT become host-bound; do not cite the host-bound claim.
