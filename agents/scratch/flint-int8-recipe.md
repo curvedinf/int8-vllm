@@ -4798,3 +4798,8 @@ that the phases miss, overlapping a 27ms response-MQ wait.
 Instrumentation added (all env-gated): VLLM_STEPGPU (g_step),
 VLLM_STEPTRACE send key, VLLM_RPCTRACE (worker dequeue/handle, engine
 resp/agg). Next: section timers inside execute_model to bisect the 42ms.
+VALIDATION (aligned layout) 2026-11-12: battery 4/4 PASS. 40k prompt
+(corpus text, 512 out): TTFT 15.78s (~2.5k tok/s prefill), decode
+63.6 tok/s, coherent output with concrete examples, no repetition. The
+old 42k cold TTFT reference was 41.7-42.6s (~1k tok/s) pre-alignment and on
+a different corpus, so the 2.5x is directional, not a same-corpus A/B.
