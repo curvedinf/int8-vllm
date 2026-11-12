@@ -31,7 +31,7 @@ SITES = {"qkv": (1280, 2048), "o_proj": (2048, 1024),
 def load_launcher():
     lib = ctypes.CDLL(str(_build("gemm_a8w8_m16_gfx908.hip")))
     fn = lib.launch_gemm_a8w8_m16
-    fn.argtypes = [ctypes.c_void_p] * 5 + [ctypes.c_int] * 4 + [ctypes.c_void_p]
+    fn.argtypes = [ctypes.c_void_p] * 6 + [ctypes.c_int] * 6 + [ctypes.c_void_p]
     fn.restype = ctypes.c_int
     return fn
 
@@ -85,9 +85,12 @@ def main():
     torch.manual_seed(0)
     fn = load_launcher()
 
-    def call_native(a, wp, a_s, w_s, out, M, N, K, block_m=0):
+    def call_native(a, wp, a_s, w_s, out, M, N, K, block_m=0, block_n=0,
+                    ksplit=0, partial=None):
         return fn(a.data_ptr(), wp.data_ptr(), a_s.data_ptr(), w_s.data_ptr(),
-                  out.data_ptr(), M, N, K, block_m,
+                  out.data_ptr(),
+                  partial.data_ptr() if partial is not None else 0,
+                  M, N, K, block_m, block_n, ksplit,
                   torch.cuda.current_stream().cuda_stream)
 
     # correctness: several shapes including partial M/N tiles
@@ -124,6 +127,31 @@ def main():
                 a, w, a_s, w_s, dtype=torch.bfloat16, config=cfg))
             print(f"{name:14s} {M:3d} {nat:9.2f} {tri:9.2f} "
                   f"{(1 - nat / tri) * 100:6.1f}%", flush=True)
+
+
+def tile_sweep(call_native):
+    torch.manual_seed(1)
+    print(f"{'site':14s} {'M':>3s} {'BMxBN':>7s} {'native_us':>9s} "
+          f"{'triton_us':>9s} {'gain':>7s}")
+    for name in ("qkv", "o_proj", "lm_head"):
+        N, K = SITES[name]
+        w = torch.randint(-60, 61, (N, K), dtype=torch.int8, device="cuda")
+        w_s = torch.rand(N, K // 128, dtype=torch.float32, device="cuda") * 0.02
+        wp = preshuffle(w)
+        for M in (16, 96):
+            a = torch.randint(-60, 61, (M, K), dtype=torch.int8, device="cuda")
+            a_s = torch.rand(M, K // 128, dtype=torch.float32, device="cuda") * 0.02
+            out = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
+            cfg = _get_aiter_w8a8_config(M, N, K, 128)
+            tri = timed(lambda: gemm_a8w8_blockscale(
+                a, w, a_s, w_s, dtype=torch.bfloat16, config=cfg))
+            part = torch.empty(M * N, dtype=torch.float32, device="cuda")
+            for bm, bn, ks in ((16, 32, 1), (32, 32, 1), (32, 64, 2),
+                               (32, 64, 4), (32, 128, 4), (16, 64, 4)):
+                nat = timed(lambda: call_native(a, wp, a_s, w_s, out, M, N, K,
+                                                bm, bn, ks, part))
+                print(f"{name:14s} {M:3d} {bm:3d}x{bn:<3d}k{ks} {nat:9.2f} "
+                      f"{tri:9.2f} {(1 - nat / tri) * 100:6.1f}%", flush=True)
 
 
 if __name__ == "__main__":

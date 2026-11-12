@@ -214,3 +214,27 @@ Next for stage 2:
    convert kernel (the Triton configs use NUM_KSPLIT=4 there).
 4. Only then re-run the per-site gate and wire winners behind
    `AITER_INT8_NATIVE=gemm_m16`.
+
+## Stage 2 v1.1 (2026-11-12): BLOCK_N and split-K
+
+Added a BLOCK_N template (16/32/64/128), KSPLIT (1/2/4) with an fp32 atomic
+partial buffer plus a convert kernel, and a tile sweep in
+`scripts/bench_native_gemm.py`. Split-K is numerically correct (rel
+2.6e-3 vs the float reference for 32x64k4 and 32x128k4).
+
+Best measured per site (CUDA-graph replay, vs the production Triton call):
+
+| site | M | best native | Triton | gap |
+|---|---|---|---|---|
+| qkv 1280x2048 | 16 | 37.0 us (16x64k4) | 31.7 | -17% |
+| qkv 1280x2048 | 96 | 46.1 us (16x64k4) | 29.2 | -58% |
+| o_proj 2048x1024 | 16 | 27.9 (16x32k1) | 20.5 | -36% |
+| o_proj 2048x1024 | 96 | 35.3 (16x32k1) | 26.3 | -34% |
+| lm_head 37536x2048 | 96 | 888 (32x64k2) | 505 | -76% |
+
+No configuration clears the gate. The 32x64k4 case matches Triton's weight
+traffic (3x) and CTA count at M=96 yet runs 54 us vs 29 us, so the residual
+is per-CTA efficiency, not tiling: the A operand is a 16-sector gather per
+k16 and there is no cross-group software pipeline (Triton stages K). Next
+iteration must add double-buffered staged loads and a pipelined K loop
+before re-running the gate; the kernel stays unwired.
