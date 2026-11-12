@@ -636,32 +636,53 @@ def kernel_unified_attention(
             s_v0 = tl.load(g8_v_scale_ptr + g8_base + 0, mask=tile_mask, other=1.0)
             s_v1 = tl.load(g8_v_scale_ptr + g8_base + 1, mask=tile_mask, other=1.0)
         elif USE_G8:
-            # K tile is (HEAD_SIZE, TILE_SIZE); scale tile same layout.
-            k_g8_off = (
-                physical_block_idx[None, :] * stride_g8_blk
+            # One scale per (token, head, G8_GROUP-dim group). With a single
+            # group (G8_GROUP == HEAD_SIZE, the Flint head-128 case) the
+            # scale is constant across the head dim, so broadcast a per-token
+            # vector instead of gathering a full [HEAD_SIZE, TILE_SIZE] tile
+            # of identical values (128x fewer scale loads, the DFlash2 2D
+            # path's measured 1.6 ms/turn cost).
+            g8_base = (
+                physical_block_idx * stride_g8_blk
                 + kv_head_idx * stride_g8_head
-                + (seq_offset % BLOCK_SIZE)[None, :] * stride_g8_slot
-                + (offs_d // G8_GROUP)[:, None]
+                + (seq_offset % BLOCK_SIZE) * stride_g8_slot
             )
-            k_g8 = tl.load(
-                g8_k_scale_ptr + k_g8_off,
-                mask=dim_mask[:, None] & tile_mask[None, :],
-                other=1.0,
-            ).to(tl.float32)
-            K = (K.to(tl.float32) * k_g8).to(Q.dtype)
-            # V tile is (TILE_SIZE, HEAD_SIZE); scale tile same layout.
-            v_g8_off = (
-                physical_block_idx[:, None] * stride_g8_blk
-                + kv_head_idx * stride_g8_head
-                + (seq_offset % BLOCK_SIZE)[:, None] * stride_g8_slot
-                + (offs_d // G8_GROUP)[None, :]
-            )
-            v_g8 = tl.load(
-                g8_v_scale_ptr + v_g8_off,
-                mask=dim_mask[None, :] & tile_mask[:, None],
-                other=1.0,
-            ).to(tl.float32)
-            V = (V.to(tl.float32) * v_g8).to(Q.dtype)
+            if G8_GROUP == HEAD_SIZE:
+                k_g8 = tl.load(
+                    g8_k_scale_ptr + g8_base, mask=tile_mask, other=1.0
+                ).to(tl.float32)
+                K = (K.to(tl.float32) * k_g8[None, :]).to(Q.dtype)
+                v_g8 = tl.load(
+                    g8_v_scale_ptr + g8_base, mask=tile_mask, other=1.0
+                ).to(tl.float32)
+                V = (V.to(tl.float32) * v_g8[:, None]).to(Q.dtype)
+            else:
+                # K tile is (HEAD_SIZE, TILE_SIZE); scale tile same layout.
+                k_g8_off = (
+                    physical_block_idx[None, :] * stride_g8_blk
+                    + kv_head_idx * stride_g8_head
+                    + (seq_offset % BLOCK_SIZE)[None, :] * stride_g8_slot
+                    + (offs_d // G8_GROUP)[:, None]
+                )
+                k_g8 = tl.load(
+                    g8_k_scale_ptr + k_g8_off,
+                    mask=dim_mask[:, None] & tile_mask[None, :],
+                    other=1.0,
+                ).to(tl.float32)
+                K = (K.to(tl.float32) * k_g8).to(Q.dtype)
+                # V tile is (TILE_SIZE, HEAD_SIZE); scale tile same layout.
+                v_g8_off = (
+                    physical_block_idx[:, None] * stride_g8_blk
+                    + kv_head_idx * stride_g8_head
+                    + (seq_offset % BLOCK_SIZE)[:, None] * stride_g8_slot
+                    + (offs_d // G8_GROUP)[None, :]
+                )
+                v_g8 = tl.load(
+                    g8_v_scale_ptr + v_g8_off,
+                    mask=dim_mask[None, :] & tile_mask[:, None],
+                    other=1.0,
+                ).to(tl.float32)
+                V = (V.to(tl.float32) * v_g8).to(Q.dtype)
 
         # Per-(token, head) scales for INT8 / FP8 per-token-head modes.
         if USE_PER_TOKEN_HEAD_SCALES:

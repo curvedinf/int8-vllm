@@ -4682,3 +4682,18 @@ Consequence: the ~9ms unaccounted step block is not the collectives; it is
 the DRAFT PROPOSE (9.17ms/step by events, graph 7.16ms), which is serial by
 data dependency on the verify. That is the next target.
 Scripts: scripts/bench_g128_collective.py, scripts/bench_ar_xgmi.py.
+DRAFT PROPOSE 2026-11-12: where the 7.16ms goes and the real layout gap.
+- Draft block-g128 graph: 7.15-7.19ms; draft per-token-head graph:
+  5.57-5.62ms (both with VLLM_ATTNTRACE draft_graph, which inflates the
+  step by ~6ms, so use it only for the split).
+- The 1.58ms delta is NOT the scale gather: the 2D kernel that the draft's
+  non-causal path takes (use_3d requires causal for max_seqlen_q>1) gathers
+  a [HEAD_SIZE,TILE_SIZE] scale tile; replacing it with a per-token vector
+  broadcast (exact, G8_GROUP==HEAD_SIZE) only moved the graph 7.16->7.07ms.
+- The rest is row misalignment: int8_block_g128 pads each head to 130 B
+  (2 B scale carved from the pad), so every other K/V tile row is not
+  16-byte aligned and the 2D load de-vectorizes. The target's 3D path is
+  fast on the same layout; the draft is stuck on 2D because it is
+  non-causal.
+- Next structural item: an aligned g8 layout (144 B/half) across the dtype
+  spec, cache writer and both attention paths. Not a config change.
