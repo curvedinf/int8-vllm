@@ -4832,3 +4832,14 @@ qkv, 43.0 o_proj, 82.3 draft gu vs 43.5/36.6/61.1 scalar); ksplit=1 is
 tiling the hand-written kernel stays ~1.5x behind; the missing piece is
 Triton's software-pipelined schedule (num_stages), i.e. a full pipelined
 rewrite. Experimental code reverted; the native GEMM stays unwired.
+ATTENTION DOT DTYPE GAP 2026-11-12 (major): the fork's unified attention
+(vllm/v1/attention/ops/triton_unified_attention.py) runs FLOAT dots for
+block-g128: the USE_G8 branch dequantizes K/V to Q.dtype and calls
+tl.dot(Q,K). Q is bf16 on this recipe -> 92.3 TFLOPS peak vs 184.6 int8
+TOPS. Measured isolated (g8 draft geometry): fp16 Q 262.7us/layer, bf16 Q
+482.1 (1.84x). In-graph the draft attention call is 3583us (716/layer,
+57.6% of the 6215us draft graph). The int8 dot machinery (Q_int8 per
+token, S_int, P requant, int8 PV) exists only in the aiter
+per-token-head kernel; the fork kernel needs the port for the
+single-group g8 layout. This is both the largest remaining draft lever
+and an int8-doctrine gap. NEXT PROJECT.

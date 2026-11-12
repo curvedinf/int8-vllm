@@ -364,7 +364,11 @@ class DFlashQwen3Attention(nn.Module):
 
         if self.v_scale is not None:
             v = v * self.v_scale
-        attn_output = self.attn(q, k, v)
+        if "attn_call" in os.environ.get("VLLM_DFLASH_ABLATE", ""):
+            # Profiling: skip only the attention kernel, keep the projections.
+            attn_output = torch.zeros_like(q)
+        else:
+            attn_output = self.attn(q, k, v)
         if os.environ.get("VLLM_SPEC_DEBUG_DUMP") and not (
             torch.cuda.is_current_stream_capturing()
         ):

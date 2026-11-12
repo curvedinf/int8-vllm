@@ -48,8 +48,9 @@ def quant(x):
 def build():
     dev = "cuda"
     torch.manual_seed(0)
+    qd = torch.bfloat16 if os.environ.get("ATTN_BF16") == "1" else torch.float16
     q = torch.randn((NUM_SEQS * Q_PER_SEQ, Q_HEADS, HEAD_DIM),
-                    dtype=torch.float16, device=dev) / 8
+                    dtype=qd, device=dev) / 8
     max_blocks = (CTX + BLOCK_SIZE - 1) // BLOCK_SIZE
     num_blocks = NUM_SEQS * max_blocks + 1
     kv = torch.zeros((num_blocks, KV_HEADS, BLOCK_SIZE, CONTENT),
