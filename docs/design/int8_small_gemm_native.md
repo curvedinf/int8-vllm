@@ -175,3 +175,42 @@ Stage 5: prefill — only after a roofline measurement; no work before that.
 * CK bpreshuffle is an existing lever for the GEMM band; if it wins at
   M = 96/12 the native GEMM kernel may only be needed where the payload
   epilogue or the draft's M = 12 shapes make CK unsuitable.
+
+## Stage 2 v1 (2026-11-12): correct, not yet competitive
+
+`aiter/csrc/kernels/gemm_a8w8_m16_gfx908.hip` implements the small-M A8W8
+GEMM: one wave per CTA, BLOCK_M x 64 output tile (four 16x16 B/C fragments
+share the lane's A fragment), weights preshuffled into B-fragment order
+(`wp[n_tile][k16][lane] = W32[n_tile*16+lane%16, k16*4+lane/16]`), GS128
+group scales applied every 128 K, bf16 out. Template on BLOCK_M; the
+launcher defaults to 16.
+
+Correctness: rel error <= 3.2e-3 vs a float32 dequantized reference at
+M/N/K = 8/64/256, 12/80/256, 20/64/384, 32/128/256, 96/1280/2048.
+
+Timing (CUDA-graph replay, kernel time; `scripts/bench_native_gemm.py`):
+
+| site | M | native BM16 | Triton | gap |
+|---|---|---|---|---|
+| qkv 1280x2048 | 96 | 67 us | 28 us | 2.4x slower |
+| o_proj 2048x1024 | 96 | 40 | 28 | 1.4x |
+| shared gate_up 2048x2048 | 96 | 70 | 44 | 1.6x |
+| draft gate_up 12288x2048 | 96 | 251 | 154 | 1.6x |
+| lm_head 37536x2048 | 16 | 133 | 133 | tie |
+
+The gate (>=10% over Triton) is NOT met, so no site is wired and
+`AITER_INT8_NATIVE` still exposes only `ua_decode`. The 1.4-2.4x gap is
+consistent with BM16 reading the weights `ceil(M/16)` times vs Triton's
+BM32, plus per-k16 load latency. BLOCK_M 32/64 regress (136 us at qkv
+M=96) from register pressure (32-64 fp32 + equal int32 accumulators plus
+the load batch); a 4-step load batch did not fix it.
+
+Next for stage 2:
+1. BLOCK_N=32 with BLOCK_M=32 (2 n-tiles): matches Triton's 3x weight
+   traffic at full 120-CTA occupancy and fits in registers (~70).
+2. Coalesced A staging: the current per-lane A load is a 16-sector gather
+   per k16; stage a row-major A tile through LDS with a padded transpose.
+3. Split-K (4) for the narrow-N shapes, with an fp32 partial buffer and a
+   convert kernel (the Triton configs use NUM_KSPLIT=4 there).
+4. Only then re-run the per-site gate and wire winners behind
+   `AITER_INT8_NATIVE=gemm_m16`.
