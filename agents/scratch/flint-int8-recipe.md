@@ -4769,3 +4769,14 @@ is GPU work + wait; the 38ms phase-1 budget in the docs is stale. Run
 aggregate 273 tok/s is diluted by early finishes; full-overlap capacity
 implied by period x acceptance is ~500 tok/s. Next: the ~15-25ms GPU
 idle/wait (async round trip / sampler D2H), the open batch-18 item.
+C12 STEP IDLE 2026-11-12: streaming vs non-streaming on the same prompts
+(12 x 256, shared prefix): streaming 340.2 agg vs non-streaming 374.4
+(-9.1%), but the engine worker period is identical (57.4 vs 57.7ms), so
+the SSE path is a client-visible cost only.
+Engine trace: sched 0.2-0.6ms, out 0.1-0.4ms, exec 21-58ms (worker).
+Worker period 57-61ms; GPU critical path: target graph g_wall 4-8ms +
+draft graph 6.2ms + sampler ~1ms = 15-18ms; CPU phases 2.5-5ms. ~35-40ms
+per step is unaccounted: either the worker's eager non-graph work (draft
+prep outside the graph) or the engine<->worker round trip.
+Next: per-step worker sub-phase timers for the target graph (g_wall), the
+eager draft prep, the propose GPU and the sampler D2H.
