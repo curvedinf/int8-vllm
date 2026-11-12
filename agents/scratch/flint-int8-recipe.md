@@ -4952,3 +4952,11 @@ and the end-to-end effect (~1.1%) is below the +-10% boot spread, so
 don't ship it alone - bundle with the next PTQR or the attention kernel
 rewrite. Next project: head-128 single-group decode attention core
 (template gfx908_g128_i8dot.py).
+ATTN LAUNCH HEURISTIC 2026-11-12i (ACCEPTED, bit-identical): 3D decode
+now uses warps=1/stages=1 at nq/kv=8 (target) and warps=2/stages=1 at
+nq/kv=4 (draft), replacing Triton's default 4 warps. Fixed-prompt hash
+unchanged (warps partition the output tile - no cross-warp reduction),
+so phase-1 safe. In-graph attention family 22.5/25.5 -> 18.2 ms per 3
+decode steps (-19..29%); C12 median 482 -> 515-523 across two clean
+boots; C1 flat 26.9-27.1. Also corrected the recipe doc: target has 4
+KV heads (not 8) per the checkpoint config. Battery 4/4, micro PASS.

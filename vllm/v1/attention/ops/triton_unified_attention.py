@@ -1441,6 +1441,17 @@ def unified_attention(
         logger.debug_once("Split-K scratch rows < query tokens; using 2D.")
         use_3d = False
 
+    if use_3d and launch_num_warps is None:
+        # gfx908 3D-decode launch heuristic (measured at the C12 verify
+        # shapes, ctx 2400, splits from the picker): the kernel is
+        # dependency-bound, not bandwidth-bound, so Triton's default 4 warps
+        # is the worst point. num_queries_per_kv 8 (BLOCK_Q=2) prefers
+        # 1 warp / 1 stage (3661 -> 2872 us/step), 4 (BLOCK_Q=4) prefers
+        # 2 warps / 1 stage (3701 -> 3060). Env levers still override.
+        launch_num_warps = 1 if num_queries_per_kv >= 8 else 2
+        if launch_num_stages is None:
+            launch_num_stages = 1
+
     # The kernel signature is the same for 2D and 3D — only the launch
     # grid + a handful of constexpr toggles differ.  Per-token-head scale
     # caches and their strides are passed as ``None`` when the
