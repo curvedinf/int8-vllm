@@ -20,13 +20,46 @@ from pathlib import Path
 import torch
 
 
+def adaptive_draft_len(conf: "torch.Tensor", max_n: int, tau: float = 0.3,
+                       low_load: int = 4, high_load: int = 8,
+                       load: int | None = None) -> int:
+    """EAGLE-Harness-style control loop for the block drafter.
+
+    (a) depth-rising: keep proposing while the mean selected-candidate
+        confidence at the next offset stays above ``tau``;
+    (b) the verification budget is capped by load: full block at <= low_load
+        concurrent requests, half at <= high_load, one token above that
+        (the analog of the harness's tree<=4 / chain>=8 regime switch);
+    (c) at least one draft token is always proposed.
+    """
+    import torch as _t
+
+    if load is None:
+        load = int(conf.shape[0])
+    cap = int(max_n)
+    if load > low_load:
+        cap = max(1, cap // 2)
+    if load > 2 * high_load:
+        cap = 1
+    cap = max(1, min(cap, int(max_n)))
+    if conf.numel() == 0:
+        return cap
+    mean = conf[:, :cap].float().mean(dim=0)
+    k = 0
+    while k < cap and float(mean[k]) >= tau:
+        k += 1
+    return max(1, k)
+
+
 class KSDraftProposer:
     def __init__(self, export_dir: str | Path, device: str | torch.device = "cuda",
                  int8: bool = True, window: int | None = None):
         from ksdraft.export import load_export
 
         self.model = load_export(str(export_dir), device=device)
-        if int8:
+        # An int8 export loads already converted; converting twice would
+        # wrap the surfaces again.
+        if int8 and getattr(self.model, "_int8_tier", None) is None:
             from ksdraft.model import to_int8
 
             self.model = to_int8(self.model)
@@ -66,6 +99,13 @@ class KSDraftProposer:
         return torch.stack(out, dim=1)
 
     @torch.no_grad()
+    def propose_block_with_conf(self, tokens: torch.Tensor, n: int
+                                ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Greedy block walk plus the selected candidate's probability."""
+        ctx = tokens[:, -self.window:].to(self.device).long()
+        return self.model.propose_block_tokens(ctx, int(n), return_conf=True)
+
+    @torch.no_grad()
     def propose_block(self, tokens: torch.Tensor, n: int,
                       temperature: torch.Tensor | None = None) -> torch.Tensor:
         """Parallel block proposal: one trunk forward -> n tokens.
@@ -76,9 +116,10 @@ class KSDraftProposer:
         if tokens.ndim != 2 or tokens.shape[1] == 0:
             raise ValueError("tokens must be [B, L] with L >= 1")
         ctx = tokens[:, -self.window:].to(self.device).long()
-        blog = self.model.block_logits(ctx, int(n)).float()      # [B, n, V]
         if temperature is None or bool((temperature <= 0).all()):
-            return blog.argmax(dim=-1)
+            # DFlash2 pairwise selector walk (greedy path over the unary top-K)
+            return self.model.propose_block_tokens(ctx, int(n))
+        blog = self.model.block_logits(ctx, int(n)).float()      # [B, n, V]
         temp = temperature.to(self.device).float().clamp_min(1e-5)
         probs = torch.softmax(blog / temp[:, None, None], dim=-1)
         b, nn, _ = probs.shape

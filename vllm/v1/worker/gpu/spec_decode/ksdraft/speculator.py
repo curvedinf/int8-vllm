@@ -52,6 +52,13 @@ class KSDraftSpeculator(BaseSpeculator):
         # Parallel block head is the default proposal path (one forward);
         # KSDRAFT_AR=1 keeps the autoregressive rollout for comparison.
         self.use_block = os.environ.get("KSDRAFT_AR", "0") != "1"
+        # EAGLE-Harness-style adaptive scheduling (greedy block path).
+        import os as _os
+
+        self.adapt = _os.environ.get("KSDRAFT_ADAPT", "0") == "1"
+        self.adapt_tau = float(_os.environ.get("KSDRAFT_CONF_TAU", "0.3"))
+        self.adapt_low = int(_os.environ.get("KSDRAFT_LOW_LOAD", "4"))
+        self.adapt_high = int(_os.environ.get("KSDRAFT_HIGH_LOAD", "8"))
         self.draft_tokens = torch.zeros(
             self.max_num_reqs, self.num_speculative_steps,
             dtype=torch.int64, device=device)
@@ -116,13 +123,28 @@ class KSDraftSpeculator(BaseSpeculator):
         pos = pos.clamp_(min=0).clamp_max_((lens - 1)[:, None])
         rows = token_ids[idx]
         toks = torch.gather(rows, 1, pos)
+        n_eff = n
         if self._is_src:
             temp = temperature[:num_reqs].to(self.device).float()
-            if self.use_block:
+            adaptive = (self.adapt and self.use_block
+                        and bool((temp <= 0).all()))
+            if self.use_block and adaptive:
+                from vllm.models.ksdraft.proposer import adaptive_draft_len
+
+                out, conf = self.proposer.propose_block_with_conf(toks, n)
+                n_eff = adaptive_draft_len(
+                    conf, n, tau=self.adapt_tau, low_load=self.adapt_low,
+                    high_load=self.adapt_high, load=int(num_reqs))
+                self.draft_tokens[:num_reqs, :n].copy_(out)
+            elif self.use_block:
                 out = self.proposer.propose_block(toks, n, temperature=temp)
+                self.draft_tokens[:num_reqs, :n].copy_(out)
             else:
                 out = self.proposer.propose(toks, n, temperature=temp)
-            self.draft_tokens[:num_reqs, :n].copy_(out)
+                self.draft_tokens[:num_reqs, :n].copy_(out)
+            if n_eff < n:
+                # the rejection sampler stops at negative draft ids
+                self.draft_tokens[:num_reqs, n_eff:] = -1
         buf = self.draft_tokens[:num_reqs, :n]
         if self._tp.world_size > 1:
             self._tp.broadcast(buf, src=0)
