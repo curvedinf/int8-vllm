@@ -328,7 +328,19 @@ class GateLinear(ReplicatedLinear):
                     f"K={x2.shape[1]}", flush=True)
         else:
             xq, xs = quantize(x2)
-        out = gemm_a8w8_blockscale(xq, wq, xs, ws, dtype=torch.float32)
+        # gfx908: the aiter heuristic picks a 6-CTA grid for the decode gate
+        # shape (M=96 N=256 K=2048) and measures 70.5 us; the fork's tuned
+        # selector (bm=16/bn=128/ksplit=4, 48 CTAs) measures 20.4 us at the
+        # same output. Same math, so use the tuned config on every GPU.
+        from vllm.model_executor.kernels.linear.mixed_precision.aiter_w8a16 import (  # noqa: E501
+            _get_aiter_w8a8_config,
+        )
+
+        cfg = _get_aiter_w8a8_config(
+            xq.shape[0], wq.shape[0], xq.shape[1], 128
+        )
+        out = gemm_a8w8_blockscale(xq, wq, xs, ws, dtype=torch.float32,
+                                   config=cfg)
         return out.reshape(*x.shape[:-1], -1)
 
     def forward(

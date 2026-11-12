@@ -4902,3 +4902,10 @@ harness measured 64 splits and overstated the headroom.
 VLLM_FLASH_DECODING_SPLITS is the diagnostic override. (3) Decode-band
 GEMM tiles already encode the bm=128 A/B (333 vs 256 us) — CTA-bound,
 not traffic-bound; needs a new kernel family, not a config.
+GATE GEMM TUNED 2026-11-12c: router gate called aiter's blockscale GEMM
+with no config (heuristic 6-CTA grid, 70.5 us at M=96,N=256,K=2048).
+Wired the fork's tuned selector (bm16/bn128/ks4, 48 CTAs, 20.4 us,
+bit-identical) => 47 gates/step, C12 median 477 -> 519 (+8.8%), C1 step
+26.8-27.1 -> 26.3-26.8. Battery 4/4, micro PASS, paired acceptance
+2.617. The gate was the last direct aiter call without the tuned config;
+audit the draft MLP/lm_head/MoE prologue next.
