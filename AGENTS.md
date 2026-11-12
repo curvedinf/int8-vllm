@@ -177,11 +177,15 @@ requires the acceptance gate: TP4/C8 greedy bench, acceptance within
 models it must dispatch AITER CK W8A8 for all M.
 `TritonW8A16LinearKernel` is blocklisted by the launcher.
 
-systemd: unit template at `scripts/vllm.service` (unit name `vllm`)
-(hardcoded `/home/curved` paths — `%h` resolves to `/root` in system units,
-do not reintroduce it). Install: copy to `/etc/systemd/system/`, `daemon-reload`,
-`enable --now`. It conflicts with the old qwen36 unit and the llama-api
-service.
+systemd: per-recipe unit templates — `scripts/vllm-flint.service` (unit name
+`vllm-flint`, the Flint recipe) and `scripts/vllm.service` (unit name
+`vllm`, the Qwen3.8 recipe); Bolt's unit (`vllm-bolt.service`) is installed
+from outside this template set. Hardcoded `/home/curved` paths — `%h`
+resolves to `/root` in system units, do not reintroduce it. Install: copy to
+`/etc/systemd/system/`, `daemon-reload`, `enable --now`. Every recipe owns
+the same four MI100s, so the units declare `Conflicts=` against each other
+and **only one may be enabled**; they also conflict with the old qwen36 unit
+and the llama-api service.
 
 ## Testing ladder (correctness gate, run after any stack change)
 
