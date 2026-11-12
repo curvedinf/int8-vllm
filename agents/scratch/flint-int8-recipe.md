@@ -4745,3 +4745,20 @@ the draft's kernels run ~2-2.6x slower in the graph than in single-call
 microbenchmarks. The kernel is NOT the bottleneck.
 Next: a 5-layer sequence graph harness (all draft kernels in one graph,
 cold caches, serialized launches) to reproduce the penalty offline.
+DRAFT IN-GRAPH PENALTY 2026-11-12: cold-weight test (5 distinct weight
+sets cycled in one graph, 15-31MB working set) vs one hot weight at M=96:
+draft qkv 37.6 vs 41.4us (0.91x), draft gate_up 51.2 vs 52.8 (0.97x),
+target qkv 23.3 vs 28.0 (0.84x), o_proj 23.9 vs 28.8 (0.83x). So the
+per-site times are NOT L2-hot artifacts and chaining GEMMs adds no
+overhead. The draft's in-graph penalty (module 2x its isolated GEMMs+attn)
+is therefore in the module's non-GEMM gates (rope/quant/norm/cache ops) or
+the attention kernel's in-graph config, not cold caches or launch chains.
+TARGET G8 ATTENTION ISOLATED 2026-11-12: scripts/bench_attn_target_g8.py
+(target geometry, 3D split-K, aligned g8, causal): full layer (window -1)
+121.1us x 14 = 1695.5us; sliding layer (window 513) 61.0us x 35 =
+2134.2us; total 3.83ms/step (7.8% of the 0.30ms floor). The doc's 6.3ms
+was pre-alignment. Corrected attention block: target 3.83 + draft kernel
+1.32 (module 3.49 in-graph).
+Updated step block list: MoE 13.3 (closed) | draft graph 6.2 | dense 5.5
+| target attention 3.83 | sampler/lm_head ~1.5 | residual ~7.7 (non-graph
+propose + scheduler/CPU; collectives hidden).

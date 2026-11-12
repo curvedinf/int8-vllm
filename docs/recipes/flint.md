@@ -247,10 +247,10 @@ before using them to accept a change.
 
 | Block | ms | state |
 |---|---|---|
-| Attention kernels (target 47 x 108 µs + draft 5 x 230 µs) | ~6.3 | kernel-rewrite only |
+| Attention kernels (target 14 x 121 + 35 x 61 + draft 5 x 263 µs) | 5.2 | aligned-layout pass done |
 | Routed MoE (gate_up 186 µs + down 96.9 µs per layer) | 13.3 | at 75-80% of achievable |
 | Dense linears (qkv / o_proj / shared MLP) | 5.5 | at kernel limits |
-| Draft graph minus attention | 2.6 | at kernel limits |
+| Draft graph (5 layers, aligned g8) | 6.2 (attention module 3.49, MLP 1.11, other 1.61) | at kernel limits |
 | Sampler | ~1 | — |
 
 ### Int8 roofline at C12 W1 (2.4k ctx, M=96 verify)
@@ -265,7 +265,7 @@ weights stream once); FLOPs are 2*M*N*K over the same shapes.
 |---|---|---|---|---|---|
 | Routed MoE (47 layers x 64 experts) | 9.46 GB | 170 | 10.0-10.3 ms | 13.3 ms | 75-77% |
 | Dense linears (qkv/o_proj/shared MLP + lm_head) | 0.40 GB | 78 | 0.44 ms | 5.5 ms | 8% |
-| Attention (target 47 + draft 5) | 0.36 GB KV | 46 | 0.30 ms | 6.3 ms | 5% |
+| Attention (target 49 + draft 5) | 0.36 GB KV | 46 | 0.30 ms | 3.83 target + 1.32 draft kernel | 6% |
 | Draft graph (5 layers, TP4-sharded) | 0.07 GB | 15 | 0.08 ms | 4.25 ms | 1.9% |
 | Sampler | - | - | - | ~1 ms | - |
 
