@@ -4817,3 +4817,11 @@ loop / output unpickle. Workers logged occasional 192ms input waits.
 Fixing this is an engine RPC-path change (batched/zero-copy output), not a
 kernel/config lever. Instrumentation: VLLM_RPCTRACE mqread + steptrace
 depth.
+SHM BUSY-LOOP A/B 2026-11-12: busy_loop_s=0 (event-driven) 425.8 agg,
+exec 52.7-57.3; busy_loop_s=1 426.8, exec 54.5-57.6. Neutral. The engine
+response path is now fully instrumented and every hop is fast (dequeue
+0.05ms, output 0.01ms, unpickle 0.02ms/877B, MQ wait 0.00, send 0.00,
+aggregate 0.00) yet the future drain is ~27ms and the step ~50ms. The
+residual needs a scheduler/stream-level timeline profiler (rocprofv3
+wedges the server; the torch profiler covers only the API process), so the
+engine RPC line is OPEN, not a recipe lever. Knob: VLLM_SHM_BUSY_LOOP_S.

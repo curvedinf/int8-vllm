@@ -661,7 +661,12 @@ class MessageQueue:
             self.remote_socket = None
             assert isinstance(handle.local_notify_addr, str)
             self._spin_condition = SpinCondition(
-                is_reader=True, context=context, notify_address=handle.local_notify_addr
+                is_reader=True, context=context,
+                notify_address=handle.local_notify_addr,
+                # Busy-spin window before falling back to the zmq event
+                # wait. 0 makes every wait event-driven (no sched_yield
+                # spin); tunable for the engine's response-latency profile.
+                busy_loop_s=float(os.environ.get("VLLM_SHM_BUSY_LOOP_S", "1")),
             )
         else:
             self.buffer = None  # type: ignore
@@ -1016,7 +1021,25 @@ class MessageQueue:
                         buffer = buf[buf_offset:offset]
                         # Out-of-band arrays may outlive this reusable ring slot.
                         all_buffers.append(buffer if i == 0 else bytearray(buffer))
+                    import os as _os
+                    if _os.environ.get("VLLM_RPCTRACE") == "1":
+                        import time as _t
+                        _p0 = _t.perf_counter()
                     obj = pickle.loads(all_buffers[0], buffers=all_buffers[1:])
+                    if _os.environ.get("VLLM_RPCTRACE") == "1":
+                        _dt = _t.perf_counter() - _p0
+                        _nb = len(all_buffers[0])
+                        _box = getattr(self, "_unpicktrace", None)
+                        if _box is None:
+                            _box = self._unpicktrace = {"p": 0.0, "n": 0, "b": 0}
+                        _box["p"] += _dt
+                        _box["b"] += _nb
+                        _box["n"] += 1
+                        if _box["n"] % 50 == 0:
+                            print(f"[mqpick] pid={_os.getpid()} n={_box['n']} | "
+                                  f"unpickle {1000*_box['p']/_box['n']:7.2f}ms | "
+                                  f"bytes {_box['b']//_box['n']}", flush=True)
+                            _box.update(p=0.0, b=0, n=0)
             if overflow:
                 obj = MessageQueue.recv(self.local_socket, timeout)
         elif self._is_remote_reader:
