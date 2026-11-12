@@ -4944,3 +4944,11 @@ CORRECTION 2026-11-12g: the 87% GPU-busy sample came from the
 profiler-enabled boot (that window was ~10% slower on every kernel
 family). A clean boot of the same code is 96% busy, C12 482. The step
 did NOT become host-bound; do not cite the host-bound claim.
+ATTN LAUNCH SWEEP 2026-11-12h: decode tile 32 optimal (64/128 worse).
+warps=1 + splits=8 beats the shipped heuristic by 15.5% (target geo
+nkv1) / 11.7% (draft geo nkv2) at C12 shapes; warps=1 wins at both.
+PARKED: it changes reduction order (fingerprint 38f72bc2 -> e10fbbf4)
+and the end-to-end effect (~1.1%) is below the +-10% boot spread, so
+don't ship it alone - bundle with the next PTQR or the attention kernel
+rewrite. Next project: head-128 single-group decode attention core
+(template gfx908_g128_i8dot.py).
