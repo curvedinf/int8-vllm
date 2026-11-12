@@ -97,6 +97,10 @@ def test_grammar_auto_and_forced(sample_tools):
     assert tag.format.type == "triggered_tags"
     assert "<function_calls>" in tag.format.excludes
     assert "<tool_call>" not in tag.format.excludes
+    # End-of-turn markers must stay unmasked or the model cannot stop after a
+    # call and repeats it until max_tokens.
+    assert "<|observation|>" not in tag.format.excludes
+    assert "<|end_of_text|>" not in tag.format.excludes
     Grammar.from_structural_tag(tag)
 
     named = ChatCompletionNamedToolChoiceParam(

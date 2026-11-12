@@ -1166,12 +1166,19 @@ def get_glm_4_7_structural_tag(
     return StructuralTag(format=suffix_tag)
 
 
-# Flint's protocol markers (Recursive's serving kit, ``tool_grammar.py``) plus
-# the XML dialects foreign agent harnesses put in their prompts. A harness that
-# shows Claude Code or Pi tool blocks can make Flint continue that dialect as
-# prose and then close the unbalanced tags at the end of the turn; excluding
-# them keeps tool markup out of the text region. The call envelope is Flint's
-# own (the GLM-4.7 tag this format matches byte for byte).
+# Flint's call/argument/reasoning markers plus the XML dialects foreign agent
+# harnesses put in their prompts. A harness that shows Claude Code or Pi tool
+# blocks can make Flint continue that dialect as prose and then close the
+# unbalanced tags at the end of the turn; excluding them keeps tool markup out
+# of the text region. The call envelope is Flint's own (the GLM-4.7 tag this
+# format matches byte for byte).
+#
+# End-of-turn markers (``<|observation|>``, ``<|user|>``, ``<|end_of_text|>``,
+# ``<|developer|>``) are deliberately NOT excluded. They are the model's stop
+# tokens; the serving kit can exclude them because SGLang hands XGrammar its
+# stop tokens, but vLLM only overrides the stops a request declares, so masking
+# them leaves the model unable to end the turn and it repeats the only
+# structure the grammar still accepts (a tool call) until ``max_tokens``.
 _FLINT_TEXT_EXCLUDES = [
     "<think>",
     "</think>",
@@ -1181,13 +1188,6 @@ _FLINT_TEXT_EXCLUDES = [
     "</arg_key>",
     "<arg_value>",
     "</arg_value>",
-    "<|begin_of_text|>",
-    "<|end_of_text|>",
-    "<|system|>",
-    "<|developer|>",
-    "<|user|>",
-    "<|assistant|>",
-    "<|observation|>",
     "<function_calls>",
     "</function_calls>",
     "<tool_calls>",
