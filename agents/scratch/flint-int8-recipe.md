@@ -4892,3 +4892,13 @@ trace cannot price it. VLLM_GFX908_O_PROJ_I8=0 diagnostic: 473 -> 178
 tok/s — the int8 residual seam is load-bearing (2.7x), never disable it
 for perf. Acceptance variance across boots on identical code is +-0.2
 (2.31-2.69); the 0.38 "QK cost" claim is retracted in the ledger.
+KNOBS CLOSED 2026-11-12b: (1) AR call sites traced with VLLM_AR_TRACE=1:
+47 MoE (gptq_moe_a8w8.py:370) + 49 attention o_proj (model.py:978) +
+2 dense down (model.py:1104) = ~98/step, no duplicate seam; the
+192/step in the profiled window was capture inflation. (2) Decode
+attention splits swept at C12 geometry with the harness: 4/8/16/32/64 =
+4055/3454/3661/3657/3658 us => the heuristic's 8 is optimal; the old
+harness measured 64 splits and overstated the headroom.
+VLLM_FLASH_DECODING_SPLITS is the diagnostic override. (3) Decode-band
+GEMM tiles already encode the bm=128 A/B (333 vs 256 us) — CTA-bound,
+not traffic-bound; needs a new kernel family, not a config.

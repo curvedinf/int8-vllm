@@ -67,6 +67,21 @@ class ResidualG128Allreduce:
         q, s = value.codes, value.scales
         if not q.is_cuda or q.shape[-1] % 128:
             raise ValueError("Decoder GS128 collective requires aligned GPU payloads")
+        if os.environ.get("VLLM_AR_TRACE") == "1":
+            # Call-site attribution: one line per launch (first 400 only).
+            _n = getattr(self, "_trace_n", 0) + 1
+            self._trace_n = _n
+            if _n <= 400:
+                import inspect
+
+                site = "?"
+                for fr in inspect.stack()[1:6]:
+                    f = fr.filename
+                    if "vllm/models" in f or "quantization" in f or "decoder_int8" in f:
+                        site = f"{f.rsplit('vllm/', 1)[-1]}:{fr.lineno}"
+                        break
+                print(f"[artrace] n={_n} shape={tuple(q.shape)} "
+                      f"elems={q.numel()} site={site}", flush=True)
         out, scales = torch.empty_like(q), torch.empty_like(s)
         stream = torch.cuda.current_stream(q.device).cuda_stream
         for start in range(0, q.numel(), self.chunk_values):

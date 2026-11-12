@@ -33,7 +33,7 @@ BLOCK_SIZE = 128
 HS = HEAD_DIM
 PADDED_HS = ((HS + 2) + 15) // 16 * 16
 CONTENT = 2 * PADDED_HS
-SPLITS = 64
+SPLITS = int(os.environ.get("ATTN_SPLITS", "64"))
 
 
 def quant(x):

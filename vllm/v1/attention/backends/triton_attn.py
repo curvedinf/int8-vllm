@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """High-Performance Triton-only Attention layer."""
 
+import os
 from dataclasses import dataclass, replace
 from typing import ClassVar
 
@@ -89,6 +90,13 @@ def _compute_flash_decoding_splits(
     """
     num_tiles = (max_seq_len + tile_size - 1) // tile_size
     max_possible_splits = max(1, num_tiles // MIN_TILES_PER_SPLIT)
+    env_splits = os.environ.get("VLLM_FLASH_DECODING_SPLITS")
+    if env_splits:
+        # Diagnostic/AB override: the heuristic below targets one CTA per CU,
+        # but the decode attention is latency-bound, so oversubscription can
+        # win. Clamp to the KV tiles available and the buffer capacity.
+        return max(1, min(int(env_splits), max_possible_splits,
+                          MAX_FLASH_DECODING_SPLITS))
     base_grid = num_seqs * num_kv_heads
     if base_grid >= target_cus:
         ideal_splits = FLASH_DECODING_SPLIT_COUNTS[0]
