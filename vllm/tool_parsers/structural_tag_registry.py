@@ -1244,4 +1244,19 @@ def get_flint_structural_tag(
             end="</think>",
         )
         return StructuralTag(format=SequenceFormat(elements=[prefix_tag, suffix_tag]))
-    return StructuralTag(format=suffix_tag)
+    # Flint decides per turn whether to reason, and vLLM starts this grammar at
+    # token 0 whenever the prompt already contains a ``</think>`` (every turn
+    # after the first reasoned one in an agent session). Without an optional
+    # think prefix the grammar would mask ``<think>`` there, so the model could
+    # never reason again and its planning spills into content. Recursive's kit
+    # wraps every constraint in exactly this optional block.
+    think_prefix = OptionalFormat(
+        content=TagFormat(
+            begin="<think>",
+            content=AnyTextFormat(excludes=["</think>"]),
+            end="</think>",
+        )
+    )
+    return StructuralTag(
+        format=SequenceFormat(elements=[think_prefix, suffix_tag])
+    )

@@ -94,13 +94,16 @@ def test_grammar_auto_and_forced(sample_tools):
         reasoning=False,
         strict_level=ToolStrictLevel.FUNCTION,
     )
-    assert tag.format.type == "triggered_tags"
-    assert "<function_calls>" in tag.format.excludes
-    assert "<tool_call>" not in tag.format.excludes
+    # Optional think block, then prose-with-calls: the turn may reason even
+    # when the serving gate starts the grammar at token 0.
+    assert [e.type for e in tag.format.elements] == ["optional", "triggered_tags"]
+    calls = tag.format.elements[1]
+    assert "<function_calls>" in calls.excludes
+    assert "<tool_call>" not in calls.excludes
     # End-of-turn markers must stay unmasked or the model cannot stop after a
     # call and repeats it until max_tokens.
-    assert "<|observation|>" not in tag.format.excludes
-    assert "<|end_of_text|>" not in tag.format.excludes
+    assert "<|observation|>" not in calls.excludes
+    assert "<|end_of_text|>" not in calls.excludes
     Grammar.from_structural_tag(tag)
 
     named = ChatCompletionNamedToolChoiceParam(
@@ -113,9 +116,9 @@ def test_grammar_auto_and_forced(sample_tools):
         reasoning=False,
         strict_level=ToolStrictLevel.FUNCTION,
     )
-    assert forced.format.type == "tags_with_separator"
+    assert forced.format.elements[1].type == "tags_with_separator"
     limit_to_single_tool_call(forced)
-    assert forced.format.stop_after_first
+    assert forced.format.elements[1].stop_after_first
     Grammar.from_structural_tag(forced)
 
 
@@ -129,3 +132,34 @@ def test_grammar_reasoning_prefix(sample_tools):
     )
     assert [e.type for e in tag.format.elements] == ["tag", "triggered_tags"]
     Grammar.from_structural_tag(tag)
+
+
+def test_grammar_accepts_think_and_calls(sample_tools, flint_tokenizer):
+    import xgrammar as xgr
+
+    tag = get_model_structural_tag(
+        "flint",
+        sample_tools,
+        "auto",
+        reasoning=False,
+        strict_level=ToolStrictLevel.FUNCTION,
+    )
+    info = xgr.TokenizerInfo.from_huggingface(
+        flint_tokenizer, vocab_size=len(flint_tokenizer.vocab)
+    )
+    ctx = xgr.GrammarCompiler(info).compile_structural_tag(tag)
+    call = (
+        "<tool_call>get_weather<arg_key>city</arg_key>"
+        "<arg_value>Paris</arg_value></tool_call>"
+    )
+    for text, stop in (
+        (f"<think>plan</think>{call}", 150005),
+        (call, 150005),
+        (f"Let me check.{call}", 150005),
+        ("Just an answer.", 150001),
+        ("<think>plan</think>Just an answer.", 150001),
+    ):
+        matcher = xgr.GrammarMatcher(ctx)
+        ids = flint_tokenizer.encode(text, add_special_tokens=False)
+        assert all(matcher.accept_token(t) for t in ids), text
+        assert matcher.accept_token(stop), text
