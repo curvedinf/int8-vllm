@@ -60,9 +60,9 @@ surfaces 0.16 %; untouched tensors byte-identical to the bf16 draft.
 
 | Surface | Path |
 |---|---|
-| Dense linears | AITER CK W8A8 INT8 GS128 (`AiterW8A16LinearKernel` legacy name dispatches W8A8). Deployed decode band `65<M<=128` (C12 with NS=7) runs the tuned Triton `a8w8_blockscale` off the retained GS128 originals instead (`VLLM_GFX908_DECODE_BLOCKSCALE=1`, bm=32/bn=128, NUM_KSPLIT=4 for N<=1536 else 1, except mlp down_proj which stays CK); prefill (M>128) stays CK. Measured: qkv 95.3->34.7us end to end, shared-expert gate_up 68.3->26.8us. |
+| Dense linears | AITER CK W8A8 INT8 GS128 (`AiterW8A16LinearKernel` legacy name dispatches W8A8). Deployed decode band `65<M<=128` (C12 with NS=7) runs the tuned Triton `a8w8_blockscale` off the retained GS128 originals instead (`VLLM_GFX908_DECODE_BLOCKSCALE=1`, bm=32/bn=128, NUM_KSPLIT=4 for N<=1536 else 1, except mlp down_proj which stays CK); prefill (M>128) stays CK. Measured: qkv 95.3->34.7us end to end, shared-expert gate_up 68.3->26.8us. The shared expert's fused gate_up+SwiGLU GEMM (`gemm_silu_quant_out`) picks bm=16/warps 8/stages 2 for m<=128 (aiter cd53c11c6d): at the decode shape M=96, 2N=2048, K=2048 the old bm=64 launched 16 CTAs and measured 143-334 us; the new tile launches 96 and measures 53-68 us. |
 | Routed experts | `vllm/model_executor/layers/quantization/gptq_moe_a8w8.py` — GPTQ int8-group → AITER grouped `a8w8_blockscale` (`[E,K,N]` int8 + per-column GS128 fp32 scales, `w_blockscale_n=1`). Decode-band tiles: gate_up bn=256/warps 8/stages 2 (186 us/layer, 60% of HBM peak — wave-quantization limited, 256 tiles over 120 CUs); down bn=256/warps 8/**stages 1** (96.9 us/layer, 715 GB/s, was 154.0 at bn=128/stages 2 — one stage keeps the 32 KB weight tile so two CTAs are resident per CU). The block is pure weight streaming: the int8 dot for the whole 2048-tile down grid is 16.6 us. Bench: `scripts/bench_flint_moe_kernel.py` (graph-timed, production kwargs; one config per process because a bad tile faults the device). |
-| Attention | AITER unified attention. The 3D-decode launch heuristic (2026-11-12) picks warps/stages by geometry: nq/kv=8 (target, BLOCK_Q=2) -> 1 warp / 1 stage, nq/kv=4 (draft, BLOCK_Q=4) -> 2 warps / 1 stage, versus Triton's default 4 warps. Bit-identical (warps partition the output tile, no cross-warp reduction; fixed-prompt hash unchanged) and measured -19..29% of the attention family in-graph (25.51 -> 18.20 ms per 3 decode steps), C12 median 482 -> 515. `VLLM_GFX908_ATTN_WARPS`/`_STAGES` still override. Since 2026-11-12 the single-group block-g128 path (Flint's head-128 target+draft geometry) keeps K/V **int8 through both dots**: QK with Q RN-quantized per row (`G8_INT8_DOT`, int32 S accumulator, q row scale × k group scale folded post-dot) and PV with P requantized per tile against the tile's largest V group scale (`G8_INT8_PV`). No float matmul remains in the forward. PV costs +59 us/step net on the pair (draft −103, target +162) and lands acceptance back at the float-dot baseline. Levers: `VLLM_G8_INT8_DOT`, `VLLM_G8_INT8_PV`, `VLLM_G8_INT8_DOT_CAUSAL`. |
+| Attention | AITER unified attention. The 3D-decode launch heuristic (2026-11-12) picks warps/stages by geometry: nq/kv=8 (target, BLOCK_Q=2) -> 1 warp / 1 stage, nq/kv=4 (draft, BLOCK_Q=4) -> 2 warps / 1 stage, versus Triton's default 4 warps. Bit-identical (warps partition the output tile, no cross-warp reduction; fixed-prompt hash unchanged) and measured -19..29% of the attention family in-graph (25.51 -> 18.20 ms per 3 decode steps), C12 median 482 -> 515. `VLLM_GFX908_ATTN_WARPS`/`_STAGES` still override. Since 2026-11-12 the single-group block-g128 path (Flint's head-128 target+draft geometry) keeps K/V **int8 through both dots**: QK with Q RN-quantized per row (`G8_INT8_DOT`, int32 S accumulator, q row scale × k group scale folded post-dot) and PV with P requantized per tile against the tile's largest V group scale (`G8_INT8_PV`). No float matmul remains in the forward. PV costs +59 us/step net on the pair (draft −103, target +162) and lands acceptance back at the float-dot baseline. Levers: `VLLM_G8_INT8_DOT`, `VLLM_G8_INT8_PV`, `VLLM_G8_INT8_DOT_CAUSAL`. Prefill runs `VLLM_UA_PREFILL_BLOCKM=128` (BLOCK_Q=16): 2.85k -> 4.73k tok/s on a 2048-token chunk, bit-identical; the prefill-env gate is `max_seqlen_q > 64`, because `> 1` also matches the spec-decode verify batch (q=8) where BLOCK_M=128 collapses decode. |
 | KV (target + draft) | `int8_block_g128` (int8 data + one fp16 scale per 128-dim group). Since 2026-11-12 each half's data row is 16-byte aligned (144 B, content 288 instead of the natural 130/260): the natural padding left alternate K/V rows misaligned and the 2D non-causal draft kernel de-vectorized. Measured after alignment (at the production draft batch, tokens=96): draft graph 7.95 -> 6.22 ms, C1 step 32.4 -> 29.5 ms, W1 265.2 / W2 279.1 agg, acceptance unchanged; KV pool 4.42M -> 3.99M tokens (12 x 512k was already above the pool). Rollback lever: `KV_DTYPE=int8_per_token_head`. |
 | Prefix cache (hybrid) | Mamba prefix caching **on** (`MAMBA_MODE=align` default; the deprecated `--mamba-cache-mode` now reaches `CacheConfig`). Recurrent checkpoints land on 128-token block boundaries; measured warm-cache TTFT 205-232 ms (was 1165 ms without it) and 269-548 ms on a partial-prefix hit (was 3519 ms). Sub-block (partial) Mamba hits are not reachable: they need every prefix-cacheable group to support fine-grained lookup and the attention groups use 128-token blocks. |
 | All-reduce | vLLM CUSTOM (`VLLM_ROCM_USE_AITER_CUSTOM_AR=0`); residual-stream collects use `residual_g128_all_reduce` on int8 codes+scales |
@@ -71,8 +71,9 @@ surfaces 0.16 %; untouched tensors byte-identical to the bf16 draft.
 | Attention/input norm prologue | `residual_norm(emit_pertoken=True)` stashes the CK per-token quant; the CK GEMM consumes `PREQUANT_ATTR` |
 | MoE gate_up | fused SwiGLU + per-128 int8 epilogue in the grouped GEMM (`QUANT_OUT`, interleaved gate/up weights) |
 | MoE down/combine | `reduce_grouped` quant-out: shared branch folded as an int8 residual, combined row quantized per 128; runner float AR disabled, one int8 collective | The shared expert runs on a side CUDA stream and overlaps the routed gate_up (`VLLM_GFX908_SHARED_OVERLAP=1`, -4.5ms/step).
+| MoE routing | The router's top-k ids/weights are consumed directly (`VLLM_GFX908_ROUTING_REUSE_TOPK=1`, default): the synthetic-logits matrix and the second bitmatrix top-k that recovered them are gone (~70 us + fill/scatter per layer). Expert-id sets are identical; the slot order is a permutation and the weights differ by 1 ulp from `tl.softmax`'s reduction order, so it is a phase-0 numerics change (fixed-prompt hash differs) decided before the next PTQR. `=0` restores the reconstruction. |
 | Dense/shared/draft MLP | `gemm_silu_quant_out`: SwiGLU + GS128 int8 output from resident blockscale weights |
-| Router gate, lm_head | int8 GS128 at all batch sizes; norm epilogues hand both consumers their per-group stash |
+| Router gate, lm_head | int8 GS128 at all batch sizes; norm epilogues hand both consumers their per-group stash. The gate GEMM uses the fork's tuned `a8w8_blockscale` config (bm=16/bn=128/ksplit=4 at M=96: 70.5 -> 20.4 us, 47 calls/step, same output to 2.4e-7); `VLLM_GFX908_GATE_UNTUNED=1` restores aiter's heuristic. |
 | Embedding | int8 table, gather-dequant |
 
 Activation doctrine (2026-11-09): every stored activation between
@@ -189,31 +190,46 @@ prompts), the C1 step probe, and the g8 attention harnesses.
 
 | measurement | value |
 |---|---|
-| W1 C12 aggregate / per-stream | **382.2 / 31.9 tok/s** (int8 QK+PV; float dots 284.1, band 223-284) |
-| W1 acceptance / TTFT p50 | **2.466** / 0.46 s (float-dot paired probe 2.690; pair arm 2.589-2.674) |
-| W2 C12 aggregate / per-stream | **327.0 / 27.3 tok/s** (band 217-327) |
-| W2 TTFT p50 / p95 | 3.31 s / 8.5 s |
-| C1 2.4k step (deterministic) | **26.8-27.1 ms** (float dots 28.8-30.0), acceptance 2.46-2.50 |
-| Controlled C12 (12x256, shared prefix) | **484.8 tok/s** (float dots 428-439) |
-| 40k-token prompt | TTFT **12.8 s** (~3.3k tok/s prefill; 15.8 s with float dots), decode 74.8 tok/s |
+| W1 C12 aggregate / per-stream | **328.9-382.2 / 27.4-31.9 tok/s** across boots (float dots 284.1) |
+| W1 acceptance / TTFT p50 | **2.415-2.466** / 0.46-1.78 s (float-dot paired probe 2.690) |
+| W2 C12 aggregate / per-stream | **304.7-327.0 / 25.4-27.3 tok/s** |
+| W2 TTFT p50 / p95 | 3.29-3.31 s / 8.5 s |
+| C1 2.4k step (deterministic) | **26.4-27.3 ms** (float dots 28.8-30.0), acceptance 2.46-2.50 |
+| Controlled C12 (12x256, shared prefix) | **532.3 / 534.9 tok/s** (interleaved A-arm medians; B arm with the gate+routing levers off 479.2 / 499.8) |
+| 40k-token prompt | TTFT **8.05 s** (~5.15k tok/s prefill; 15.8 s with float dots), decode 86-106 tok/s |
 | battery | 4/4 PASS |
+
+The gate-config + routing-reuse pair is verified by an interleaved A,B,A,B boot
+protocol (ledger GATE_ROUTING_INTERLEAVED_AB_20261112): +6.5% controlled C12 and
+-1.5 ms C1 step, winning both pairs with no C1 overlap. Distant boots spread
++-10% (the cards sit at a manual DPM level set outside this repo) while adjacent
+interleaved boots reproduce within ~1%; use A,B,A,B for sub-10% claims.
 
 Block budget at C12 (all measured this session):
 
 | block | ms | state |
 |---|---|---|
-| Routed MoE (9.46 GB/step) | 13.3 | 75-77% of achievable BW; config verified optimal |
-| Draft graph (5 layers, tokens=96) | 5.30 | was 6.22 with float dots; attention module 3.49->2.6 est, MLP 1.11, other 1.61 |
-| Dense linears (qkv/o_proj/shared/dense/lm_head) | 5.5 | 8% of the 0.44 ms floor |
-| Target attention (int8 QK+PV) | 3.66 | 8.6% of the 0.30 ms floor (3.84 with float dots; QK-only 3.50) |
+| Routed MoE GEMM (9.46 GB/step) | 12.1 | 79% of HBM in the last profile; config verified optimal (CTA-bound, not traffic-bound) |
+| Attention, target + draft (int8 QK+PV) | 6.0 | was 7.5-8.5 before the launch heuristic; 5% of its ~0.3 ms HBM floor, latency-bound at 96-192 CTAs |
+| Residual GS128 all-reduce | 5.9 | ~98 calls/step at ~44-60 us; serial on the main stream, peer-rendezvous bound (block count is already at the 64 cap) |
+| Blockscale dense GEMMs (qkv/o_proj/shared/dense/lm_head) | 5.6 | tuned configs, CTA-concurrency bound |
+| Shared gate_up (`_gemm`, fused SiLU) | 3.8 | was 7.3 before aiter bm=16 |
+| Routing (`topkGating` + `routing_experts_parallel`) | 2.4 | top-k reuse removed ~70 us/layer |
+| Norm/quant glue (`_add_norm`, elementwise, materialize) | ~3.4 | 98 seams/step |
 | Sampler / lm_head glue | ~1.5 | - |
-| Engine<->worker RPC residual | ~27-40 at C1 | at C12 the GPUs are 90.5% busy, so this is GPU wait, not host; every hop individually <0.1 ms |
+| Engine<->worker RPC residual | ~27-40 at C1 | at C12 the GPUs are 95-97% busy, so this is GPU wait, not host; every hop individually <0.1 ms |
 
-Int8 dot effect (single-group g8, 2026-11-12): C1 step 28.8-30.0 ->
-26.8-27.1 ms; 40k cold TTFT 15.8 -> 12.8 s; draft attention 2x at bf16 Q
-(481.5 -> 241.5 us/layer isolated); W1 284.1 -> 382.2 agg with
-acceptance in band (paired 2.690 -> 2.589-2.674); controlled C12
-428-439 -> 484.8 tok/s. Acceptance on the int8 arms spans 2.31-2.69
+Kernel shares are from the last full decode-window profile (3 steps, rank 0);
+that boot was in a ~10% slower machine state than the C12 medians above, so use
+the ordering, not the absolute values. Prefill is a different mix: GS128
+all-reduce 34.9%, MoE 17.5%, attention 13.6%, GEMMs 17.4% of a 2048-token chunk.
+
+Optimization effect (2026-11-12, int8 dots + gate + routing + launch
+heuristic + prefill tile): C1 step 28.8-30.0 -> 26.4-27.3 ms; 40k cold
+TTFT 15.8 -> 8.05 s (prefill 2.5k -> 5.15k tok/s); draft attention 2x
+at bf16 Q (481.5 -> 241.5 us/layer isolated); W1 284.1 -> 328.9-382.2
+agg; controlled C12 428-439 -> 532/535 (interleaved A medians; B arm
+479/500). Acceptance on the int8 arms spans 2.31-2.69
 across boots on identical code (batch-composition-dependent sampling),
 so no acceptance difference is established yet; the phase-2 PTQR rung
 remains the clean way to anchor it. See ledger
