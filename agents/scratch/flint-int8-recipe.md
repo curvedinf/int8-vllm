@@ -4665,3 +4665,20 @@ same-process bracketed timing at the production shapes:
 Down-config sweeps must use scripts/probe_flint_moe_down.py: the direct
 kernel call with synthetic _routing_from_topk scatter data illegal-accesses
 (production _run is fine).
+COLLECTIVE PROFILING 2026-11-12 (closes the "~9ms collectives" guess):
+The GS128 payload collective (o_proj/MoE transport, csrc/custom_all_reduce_g128.hip)
+is a group-scaling reduce kernel plus a peer-atomic barrier. Isolated, at
+96x2048 int8 + scales: 136us/call (13.05ms per 98) at the default 16-block
+grid, 74us at 32, 44us at 64; bit-exact codes vs a float64 reference at both
+16 and 64. RCCL on the same payload: 82us eager / 51us in-graph, flat from
+192KB to 1MB; peer-to-peer copies are 44-46GB/s unidirectional (normal one-
+link-direction bandwidth), so the collective is barrier/loop latency, not
+wire time.
+Served A/B (4 boots, 2 per arm): C1 step 32.6-32.9ms in EVERY arm and W1
+229-241 / W2 253-262 within the content band. A 3x faster collective moves
+the step by <0.3ms -> the barrier is hidden by the inter-layer compute.
+Default stays VLLM_GFX908_G128_AR_BLOCKS=16.
+Consequence: the ~9ms unaccounted step block is not the collectives; it is
+the DRAFT PROPOSE (9.17ms/step by events, graph 7.16ms), which is serial by
+data dependency on the verify. That is the next target.
+Scripts: scripts/bench_g128_collective.py, scripts/bench_ar_xgmi.py.
