@@ -4991,3 +4991,12 @@ layer, ~190 us per 1 MB), MoE 17.5% (~72% of the int8 floor), attention
 8.15 -> 8.26) and chunk 1M->8M elements (8.15 -> 7.9, noise). The AR is
 bound by the per-layer peer rendezvous, not by CTA count or launches;
 the fix would be overlap with compute, not a knob.
+INTERLEAVED A/B 2026-11-12n: gate-config + routing-reuse combined.
+A,B,A,B protocol, 3 C12 samples + C1 per boot:
+  A1 532.3 med / C1 26.6-27.0    B1 479.2 / 28.2-28.3
+  A2 534.9 med / C1 26.4-27.3    B2 499.8 / 28.1-28.3
+=> +6.5% C12, -1.5 ms C1, wins both pairs, no overlap on C1.
+IMPORTANT: adjacent interleaved boots reproduce within ~1%; the
++-10% spread seen earlier was between boots far apart in time/machine
+state. Use A,B,A,B for sub-10% claims from now on.
+Levers: VLLM_GFX908_GATE_UNTUNED=1, VLLM_GFX908_ROUTING_REUSE_TOPK=0.
