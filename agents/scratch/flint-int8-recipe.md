@@ -4514,3 +4514,95 @@ kernel in HIP. `flydsl 0.5.0` remains installed in `.venv` (pure wheel, no
 runtime effect); remove with `pip uninstall flydsl` if the venv should stay
 pristine. Scratch probes: `agents/tmp/fly_i8_gemm.py`,
 `agents/tmp/fly_i8_atom.py`, `agents/tmp/fly_vecadd.py` (tmp, gitignored).
+
+## PERF LOOP 2026-11-12: production baseline, int8 roofline, aged-boot trap
+Fresh boot (block_g128 both models, NS=7, C12, T=1.0/top_p .95/top_k 20):
+- W1 (agent-steady, ~2.4k shared prefix, 256 out): 223.8 agg tok/s,
+  18.7/stream, TTFT p50 0.64 s, total p50 4.15 s, acceptance 2.775,
+  TPOT p50 23.2 ms. W2 (12 cold ~2.4k): 217.1 agg, 18.1/stream, TTFT
+  p50 4.52 s / p95 8.48 s, acceptance 3.188.
+- C1 at 2.4k ctx (3 runs): 36.0-36.1 ms/step, acceptance 2.2-2.3,
+  60-65 tok/s per stream, TTFT 0.24-0.29 s warm.
+AGED-BOOT TRAP (operational): the same boot served >1 h, including Triton
+JIT-at-first-request episodes, dropped to W1 30-37 agg / W2 99-110 and C1
+29.7 tok/s. Restarting restored 223.8/217.1 and 60-65. Never take a loop
+baseline on an aged boot; restart first. The 30 tok/s user report matches
+this state, not the recipe.
+HARDWARE CEILINGS (int8-only; do not use 16-bit peaks anywhere):
+MI100/gfx908: INT8 184.6 TOPS per GPU, HBM2 1.2 TB/s, 120 CU / 4 SIMD.
+MOE ROOFLINE: 47 MoE layers x 64 local experts x 3 MB (gate_up 2 MB +
+down 1 MB) = 9.46 GB of expert weights read per step at C12; every local
+expert is hit at M=96 x top-6=576 gates. Weight-read floor = 7.9 ms/step
+at 1.2 TB/s; measured budget ~17.1 ms (gate_up 254.8 + down 109.4 us x 47)
+= 46% of peak bandwidth. Largest absolute gap in the step (~5-7 ms if the
+grouped GEMM reaches 80% of peak).
+
+## DEGRADATION TASK 2026-11-12 (user directive): aged-process slowdown
+Symptom: the 05:20 boot, first request after a 54 min silent idle (no log
+lines at all between 05:23 and 06:17), served W1 37.6 agg / C1 29.7 tok/s;
+the 06:26 rerun was worse (W1 30.6). A restart (06:34 boot) restored
+W1 223.8 and C1 63-68 tok/s immediately.
+Not the trigger: first-request Triton JIT. The fresh 06:34 boot emitted the
+same 11-kernel jit_monitor list at 06:34:37-38 and stayed fast. Triton
+disk-cache entries for _gemm_a8w8_blockscale_kernel were last written
+00:19, so the 06:17 "JIT" warnings were in-process first-use, not compiles.
+Difference between the fast and slow first requests: 0.6 min vs 54 min of
+idle after boot.
+Protocol (running): fresh boot -> 3x C1 probe with 0.5 s sclk/temp/power
+sampling (34.3-34.5 ms/step, 1283-1404 MHz, 53-63 C, 33-114 W). Idle 900 s
+with no requests and no GPU jobs -> identical probe. If 15 min does not
+reproduce, repeat at 30/60 min idle.
+Hypotheses in test order:
+ (a) DPM wake: the first load after deep idle runs at low sclk and never
+     ramps (the idle sample showed 962-1087 MHz at "100% use", 110 W).
+ (b) first-use/autotune path runs cold and picks a slow variant that
+     persists for the process.
+ (c) worker host state (RSS, pinned memory, allocator) changes over idle.
+Fix candidates once reproduced: pin the perf level during warmup
+(rocm-smi --setperflevel high) and verify the wake path; or force an
+explicit warmup request at boot so no first request runs cold.
+UPDATE (2026-11-12): 15 min idle RULED OUT. Fresh boot 06:41 -> 16 min
+silent idle -> identical C1 probe: 33.7/33.8/33.7 ms per step, 69.7-79.0
+tok/s, sclk 1283-1430 under load. Idle is not the trigger.
+Load also ruled out on a healthy boot: full W1+W2 (210.4/254.4 agg) then
+C1 -> 33.8/34.2/33.9 ms. A healthy boot does not degrade under the
+production workload.
+Remaining hypothesis: BORN-SLOW boot (per-process allocation/layout state),
+not time or load. Protocol running: 6 sequential restarts, each probed
+with 3x C1 immediately after health; a boot with >=2 runs >55 ms is the
+degraded state and is left up for diagnosis. Probe now records
+gpu_busy_percent (sysfs, 10 Hz) and package power per arm so a slow boot
+can be classified GPU-bound vs engine/CPU-bound without a profiler:
+  /tmp/boot_loop.sh, /tmp/boot_N.txt, /tmp/gpu_busy_samples.jsonl
+
+## DEGRADATION TASK 2026-11-12: ruled out, remaining evidence, soak
+Ruled out with measurements (all int8 serving, C1 probe = 3x 256-token
+request at 2.4k ctx, recipe sampling):
+- Idle: 16 min idle on a fresh boot -> 33.7/33.8/33.7 ms (fast). Repeated
+  as 15 min idle with the 12-stream W1 as the FIRST workload -> W1 228.7
+  agg / TTFT 1.0 s, C1 33.7-34.2 ms. Idle is not the trigger.
+- Born-slow boots: 6 sequential restarts, 3x C1 each -> 34.1-37.7 ms on
+  every boot, gpu_busy 94-98%. Not per-boot random.
+- Load: full W1+W2 on a healthy boot -> C1 33.8/34.2/33.9 ms after.
+- Host CPU/IO: sar for the original slow window (06:17-06:34) shows
+  runq-sz 5, load ~9, 90% idle, no CPU above 15% busy, mem_avail 37 GB.
+- Cron: the 6-hourly /usr/local/sbin/vllm-reliability-watch.sh fired at
+  06:17:01 and ran until 06:34:15, but its Kimi agent session
+  (wd_curved/session_f3c44176) issued only 92 read-only Bash commands
+  (systemctl/curl health/ps/cat/grep/rocm-smi) and never touched the
+  engine; the cron script itself only snapshots + health-checks. It is
+  noise, not load (a stale watch for the removed qwen38 unit; candidate
+  for removal by the human, it needs root).
+REMAINING ANOMALY (the one to chase): in the slow window the engine
+reported `Running: 1 reqs, Waiting: 0 reqs` while 12 client requests were
+live, and per-request totals were serialized (11.1, 12.6, ..., 47.5 s in
+send order) although all 12 got their first token at the same ~10.4 s.
+Healthy boots run `Running: 6-9, Waiting: 6`. That is not a kernel-speed
+difference; 11 requests were stuck before the scheduler (API server /
+engine input path), and the step wall included that wait. The state
+cleared on the restart at 06:32-06:34 (a worker crash at 06:31:50
+preceded it).
+Protocol running: 20-cycle soak (bench_prod_flint W1+W2 -> 3x C1 with
+gpu_busy sampling -> 20 s) to reproduce the history-dependent production
+form; early stop dumps /tmp/slow_diag.sh (thread states, wchan, per-thread
+CPU, gpu_busy, retired pages). Logs: runs/soak_N.json.

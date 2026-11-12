@@ -252,6 +252,34 @@ before using them to accept a change.
 | Draft graph minus attention | 2.6 | at kernel limits |
 | Sampler | ~1 | — |
 
+### Int8 roofline at C12 W1 (2.4k ctx, M=96 verify)
+
+Ceilings used: INT8 **184.6 TOPS** per GPU (the only compute peak this
+project uses), measured achievable HBM stream **921-953 GB/s** per GPU
+(four-GPU concurrent, 2026-11-10), XGMI 92 GB/s. Bytes are the weights
+actually read per step at C12 (all 64 local experts are hit, every layer's
+weights stream once); FLOPs are 2*M*N*K over the same shapes.
+
+| Block | int8 weight bytes/step | GFLOP/step | Floor (max bytes/BW, flops/TOPS) | Measured | % of floor |
+|---|---|---|---|---|---|
+| Routed MoE (47 layers x 64 experts) | 9.46 GB | 170 | 10.0-10.3 ms | 13.3 ms | 75-77% |
+| Dense linears (qkv/o_proj/shared MLP + lm_head) | 0.69 GB | 31 | 0.73-0.75 ms | 5.5 ms | 13-14% |
+| Attention (target 47 + draft 5) | 0.36 GB KV | 46 | 0.30 ms | 6.3 ms | 5% |
+| Draft graph minus attention | 0.22 GB | 42 | 0.24 ms | 2.6 ms | 9% |
+| Sampler | - | - | - | ~1 ms | - |
+
+Reading: the MoE is the only block close to a bandwidth roofline. The
+dense linears, attention and the draft are all **latency/tile-bound at
+M=96**, one to two orders of magnitude below their roofline: small-M int8
+GEMMs cannot fill the CUs from a single 96-row tile, and the attention
+dots run on 16-row tiles. That is the structural target for the native
+small-GEMM/int8-dot path (`docs/design/int8_small_gemm_native.md`), not a
+bandwidth problem. The ~10 ms not in the table is the 98 per-step
+collectives plus Python/scheduler idle; the CAR A/B bounds the collective
+path but is confounded by the fused AR+RMSNorm seam, so it stays
+unmeasured.
+
+
 Attention cost scales at **~6.8 µs per context token per step** (period
 25.85 / 27.40 / 32.79 / 38.89 ms at 128 / 512 / 1024 / 2048 input tokens) —
 a retired-procedure measurement, directionally useful but not yet reproduced

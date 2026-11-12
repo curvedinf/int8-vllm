@@ -107,6 +107,8 @@ def main():
                 gammas=rd.gate_scal, apply_swiglu=False, **kw)
 
         for name, fn in (("gate_up", gu), ("down", dn)):
+            moe_mod.get_kernel_config = _ORIG
+            true_us = _time(fn)
             _set_cand((256, 1, 8 if block_m > 16 else 4, 2, 4, 8, None))
             base_us = _time(fn)
             rows = []
@@ -125,6 +127,7 @@ def main():
             key = f"{name}_M{M}"
             results[key] = {
                 "block_m": block_m,
+                "true_heuristic_us": round(true_us, 2),
                 "heuristic_like_us": round(base_us, 2),
                 "best_us": round(best[0][0], 2),
                 "best": [
