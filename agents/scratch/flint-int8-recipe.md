@@ -4976,3 +4976,12 @@ side array is SLOWER (generic kernel 64.6 -> 76.1 us/layer nkv=1,
 i+1's 128-B data load already fetches the line holding row i's 2-byte
 scale, so inline scales are free; a side array adds a second stream.
 The packed aligned layout is correct - do not revisit.
+PREFILL BLOCK_M=128 2026-11-12l (ACCEPTED, bit-identical): the 2D
+prefill kernel ran BLOCK_M=16 (BLOCK_Q=2) and 2.85k tok/s at the
+2048-token chunk; bm=128 gives 4.73k (-40%). Recipe sets
+VLLM_UA_PREFILL_BLOCKM=128. 40k cold TTFT 12.6-12.8s -> 8.15s (-35%,
+prefill 5.15k tok/s), fingerprint unchanged, C12 in band 524-550.
+PITFALL: the prefill-env gate was max_seqlen_q > 1, which also matches
+the spec-decode verify batch (q=8) -> BLOCK_M=128 collapsed decode to
+29.7 tok/s at 40k. Gate moved to > 64. Never gate prefill tuning on
+"> 1" in a spec-decode engine.

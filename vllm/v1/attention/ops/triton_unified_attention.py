@@ -1271,8 +1271,11 @@ def unified_attention(
     # gfx908 prefill tuning levers (GOALOPT): the generic defaults
     # (BLOCK_M=16 -> BLOCK_Q=2 at GQA 6:1, KV tile 32, 2 warps) leave the
     # 2D prefill kernel latency-bound at long context on MI100. These envs
-    # only apply when the batch is prefill-shaped (max_seqlen_q > 1).
-    if max_seqlen_q > 1:
+    # only apply to real prefill chunks: the old ``max_seqlen_q > 1`` test
+    # also caught speculative-decode verify batches (q = NS+1 = 8), which
+    # are decode-shaped, and a BLOCK_M=128 there collapses decode
+    # (40k decode 74 -> 30 tok/s). Prefill chunks are >= 512 tokens.
+    if max_seqlen_q > 64:
         _pf_blockm = os.environ.get("VLLM_UA_PREFILL_BLOCKM")
         if _pf_blockm:
             BLOCK_M = max(16, int(_pf_blockm))

@@ -71,6 +71,11 @@ serve() {
   # Fused round-to-nearest activation quant (quality default, see
   # INT8_AUDIT_RESULTS.md).
   export VLLM_GFX908_ACT_QUANT=round
+  # Prefill attention: the generic 2D path defaults to BLOCK_M=16 (2 query
+  # tokens per CTA at GQA 8:1), which measures 2.85k tok/s at the 2048-token
+  # chunk shape. BLOCK_M=128 (16 tokens/CTA) measures 4.73k tok/s (-40%);
+  # warps/stages/tile stay at their measured-optimal defaults.
+  export VLLM_UA_PREFILL_BLOCKM="${VLLM_UA_PREFILL_BLOCKM:-128}"
   # Unified-attention single-group block-g128: keep K/V int8 through both
   # dots (2x the MI100 matrix rate). Both levers default ON: the whole
   # forward has no float matmuls left. PV is +59us/step net on target+draft
