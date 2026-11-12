@@ -4652,3 +4652,16 @@ grew ~0.5/min all day, including the fast soak). The XGMI fabric is
 unhealthy but not the discriminator. No GPU reset/link-down message exists
 in the slow window. Degradation remains a one-off, cleared only by the
 restart that followed the 06:31 worker death.
+MOE CONFIG LINE CLOSED AGAIN, NOW WITH A VALID REFERENCE (2026-11-12):
+same-process bracketed timing at the production shapes:
+  gate_up M=96: production heuristic 128-131us; the isolated sweep's
+  nominal winner (256,1,8,2,1,1,None) 229-230us (78% slower); production
+  without .cg 132-133us (tie). The sweep's ranking was an artifact: the
+  reference timing was discarded with every crashed batch.
+  gate_up M=2048: production 1568-1579us vs 1487-1493us for the same
+  config without .cg - but at block_m=128 the heuristic already picks
+  no-.cg, so that 5% is bracket drift.
+=> no MoE config change; the heuristic is at/near the grid optimum.
+Down-config sweeps must use scripts/probe_flint_moe_down.py: the direct
+kernel call with synthetic _routing_from_topk scatter data illegal-accesses
+(production _run is fine).
