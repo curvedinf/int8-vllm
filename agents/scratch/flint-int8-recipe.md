@@ -4803,3 +4803,9 @@ VALIDATION (aligned layout) 2026-11-12: battery 4/4 PASS. 40k prompt
 63.6 tok/s, coherent output with concrete examples, no repetition. The
 old 42k cold TTFT reference was 41.7-42.6s (~1k tok/s) pre-alignment and on
 a different corpus, so the 2.5x is directional, not a same-corpus A/B.
+RESPONSE PATH 2026-11-12: sample_tokens is NOT a second RPC (sample key
+0.00ms, model_output non-None); one execute_model RPC per step. Engine:
+sched 1.0, send 0.00, exec 56-64 (get_response 27.1, aggregate 0.00),
+out 0.5. Worker: phases 7.5, dequeue 0.05, handle 0.01. The ~40ms is the
+response-MQ wake/delivery + FutureWrapper queue drain, not compute.
+Next: trace the SpinCondition notify->wake path and the future queue depth.

@@ -729,7 +729,11 @@ class EngineCore:
         ):
             model_output = future.result()
             if model_output is None:
+                _tsamp = _time.perf_counter() if _st_box is not None else 0.0
                 model_output = self.model_executor.sample_tokens(grammar_output)
+                if _st_box is not None:
+                    _st_box["sample"] = (_st_box.get("sample", 0.0)
+                                         + _time.perf_counter() - _tsamp)
         if _st_box is not None:
             _t2 = _time.perf_counter()
             _st_box["exec"] += _t2 - _t1
@@ -908,9 +912,10 @@ class EngineCore:
                 n = _st_box["n"]
                 print(f"[steptrace-bq] n={n} | sched {1000*_st_box['sched']/n:7.2f}ms "
                       f"| send {1000*_st_box.get('send', 0.0)/n:7.2f}ms "
+                      f"| sample {1000*_st_box.get('sample', 0.0)/n:7.2f}ms "
                       f"| exec {1000*_st_box['exec']/n:7.2f}ms "
                       f"| out {1000*_st_box['out']/n:7.2f}ms", flush=True)
-                _st_box.update(sched=0.0, send=0.0, exec=0.0, out=0.0, n=0)
+                _st_box.update(sched=0.0, send=0.0, sample=0.0, exec=0.0, out=0.0, n=0)
         self._attach_iteration_details(engine_core_outputs, iteration_details)
         self._attach_weight_version(engine_core_outputs)
 
