@@ -4919,3 +4919,16 @@ reduction order, so it is NOT bit-identical: visible as a different
 greedy hash, though the control boot reproduced the old hash exactly.
 Lever VLLM_GFX908_ROUTING_REUSE_TOPK=0. Phase-0 numerics-changing =>
 needs a >=3-boot acceptance gate before the next PTQR. Battery 4/4.
+MEASUREMENT STATE 2026-11-12e: boot-to-boot spread on identical code is
++-10% (C12 414-565, C1 25.5-29.4) while within-boot samples are tight
+and show no decay. Root cause candidate: the cards sit at
+power_dpm_force_performance_level=manual (root-owned, set outside the
+repo) and under load sit at 962-1283 MHz vs the 1502 MHz top level. Do
+not change clock state without authorization; use interleaved boots
+(A,B,A,B) or within-boot levers for future A/Bs, and treat sub-10%
+single-boot deltas as unresolved.
+REJECTED: shared-expert gate_up split (tuned blockscale + silu pass).
+Isolated 2x faster and bit-identical (codes 100% equal, 0 scale diff),
+but served C12 365-433 vs 414-486 control and the greedy fingerprint
+changed 3f5fa9f7 vs 38f72bc2 => the isolated harness misses in-graph
+behaviour. Reverted; retry only with an in-graph measurement.
