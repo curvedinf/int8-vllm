@@ -4606,3 +4606,49 @@ Protocol running: 20-cycle soak (bench_prod_flint W1+W2 -> 3x C1 with
 gpu_busy sampling -> 20 s) to reproduce the history-dependent production
 form; early stop dumps /tmp/slow_diag.sh (thread states, wchan, per-thread
 CPU, gpu_busy, retired pages). Logs: runs/soak_N.json.
+NEXT HYPOTHESIS (if the soak is clean): per-process Triton specialization.
+The decode band runs Triton `_gemm_a8w8_blockscale` for qkv/o_proj/shared/
+lm_head and the same kernel family for the draft. Triton specializes each
+pointer on 16-byte divisibility; a process whose activation workspace view
+lands at a non-16B offset compiles and runs the scalar (non-vectorized)
+variant for its whole life — a born-slow process, not a time/load effect.
+The 05:20 slow boot showed normal prefill (CK asm, M>128) but 2.4x C1 and
+~6x C12 step, which matches the decode-band Triton path being slow while
+the CK prefill is not. The 6/6 fast boots do not rule out a rare alignment
+state.
+Test (int8 only, after the soak): microbench the blockscale GEMM at the
+production decode shapes with the activation buffer at offsets 0/1/2/4/8
+bytes; if the misaligned variants are 2-4x slower, the fix is to force the
+quantized activation workspace to a 128-byte boundary (or pin the Triton
+specialization) and re-run the boot probe.
+ALIGNMENT HYPOTHESIS REJECTED (2026-11-12): graph-replay timing of the
+production qkv blockscale GEMM (M=96 N=1280 K=2048, the production config)
+with the int8 activation view at offsets 0/1/2/4/8/16/64/128 bytes:
+  0B 27.87us | 1B 31.26 | 2B 31.84 | 4B 31.55 | 8B 31.31 | 16B 27.78 |
+  64B 27.65 | 128B 28.08
+Misalignment costs 12-14%, not the 2-6x of the slow boot. Not the cause.
+Also: a standalone attention microbench measured 1.2-1.5x (not 2.5x) during
+the slow window, so the GPU itself was near-normal; the slowdown was in the
+server process.
+SOAK (2026-11-12): 20 cycles of W1+W2 + 3x C1, 28 min continuous:
+W1 192-254 agg, W2 228-262, 60 C1 probes mean 34.0 ms max 34.6 ms, GPU
+busy 94-98%. Sustained production traffic does not reproduce it.
+54-MIN IDLE TEST running (fresh boot 08:10, W1 as first request at 09:04,
+then C1) - the exact duration of the original slow boot's idle window.
+Stage-2 denominator built: scripts/bench_int8_small_gemm.py (per-site
+decode GEMM times + GB/s/TFLOP/s vs 921 GB/s / 184.6 TOPS); run pending.
+54-MIN IDLE TEST (2026-11-12): fresh boot 08:10:54 -> 54 min idle -> W1 as
+first request 09:05: fast (W1 225.5 agg, TTFT 0.88 s, W2 259.4, C1
+32.7/32.8/32.7 ms, GPU 97-98%). The exact original pattern does NOT
+reproduce the slowdown.
+XGMI FORENSICS: the kernel log shows `XGMI PCS FCInitTimeoutErr` plus
+`N uncorrectable hardware errors detected in xgmi_wafl block` on all four
+GPUs. During the slow boot there were only 2 lines at boot init (05:22:37),
+then 47 min of silence, then a fabric-wide burst at 06:17:26 - 3 s after
+the first request - and 1-5 lines/min through the slow window. The 54-min
+test reproduced the same burst at first traffic (1 -> 8 lines) and stayed
+fast, so the burst is not sufficient and the errors are chronic (counters
+grew ~0.5/min all day, including the fast soak). The XGMI fabric is
+unhealthy but not the discriminator. No GPU reset/link-down message exists
+in the slow window. Degradation remains a one-off, cleared only by the
+restart that followed the 06:31 worker death.

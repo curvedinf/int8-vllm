@@ -49,11 +49,16 @@ def _get_aiter_w8a8_config(M: int, N: int, K: int, group_size: int,
     BLOCK_SIZE_K=128, matching the GPTQ group_size. Microbench shows the same
     large-M config as W8A16 works well.
     """
-    if 64 < M <= 128:
-        # C12 decode (M=96 with NS=7). bm=32/bn=128 keeps ~4x more CTAs busy
-        # than the old M>64 bm=128 branch (which gave grid_m=1); NUM_KSPLIT=4
-        # wins on the narrow-N shapes, 1 on the wide ones. In-graph at M=96:
-        # qkv 29.4us vs 64.8 CK, gate_up 52.9 vs 70.4.
+    if 16 < M <= 128:
+        # C12 decode (M=96 with NS=7) and the C3-C8 tail (M=20-64, where the
+        # narrow 64-column/no-split path used to sit). bm=32/bn=128 keeps ~4x
+        # more CTAs busy than the old M>64 bm=128 branch (which gave grid_m=1);
+        # NUM_KSPLIT=4 wins on the narrow-N shapes, 1 on the wide ones.
+        # In-graph at M=96: qkv 29.4us vs 64.8 CK, gate_up 52.9 vs 70.4.
+        # Extending the band down to 17 rows measured, vs the old M<=64 path:
+        # M=20-32 qkv 64-65%, o_proj 36-39%, gate_up 37-39%, draft gate_up
+        # 53-61%, lm_head 52-61% faster; M=16 stays on the old path because
+        # the 128-column tile loses 18-36% there.
         num_ksplit = 4 if N <= 1536 else 1
         # The draft (hidden 5120) has two shapes outside the target's range
         # that prefer a different tile (in-graph, M=96):

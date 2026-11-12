@@ -307,6 +307,12 @@ measures 13.3 — do not expect a 2× there.
 These were accepted on kernel/step-time measurements under the retired
 procedure; they reduce ms/step and remain sound, but re-validate under W1
 before citing them as throughput gains.
+- Decode band widened to 16<M<=128 (2026-11-12, `_get_aiter_w8a8_config`):
+  the M<=64 narrow/no-split path is 37-65% slower at M=20-32 on every dense
+  site, so the tuned 128-column/split-K tile now covers the C3-C8 tail
+  (M=16 keeps the old path: the wide tile loses 18-36% there). Served C3
+  2.4k/256: 151.2 -> 157.4 agg (+4.1%), step 16.55 -> 15.95 ms, acceptance
+  2.500/2.502 in both arms. C12 (M=96) config is identical before/after.
 - MoE down grouped GEMM: `bn=256, num_stages=1` (154.0 -> 96.9 µs/layer;
   one stage keeps the 32 KB tile so two CTAs are resident per CU).
 - Dense decode band: `bm=16` whenever the grid stays <=120 CTAs
