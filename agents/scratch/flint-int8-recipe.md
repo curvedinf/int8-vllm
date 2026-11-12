@@ -4721,3 +4721,15 @@ Measured: draft graph at C12 4.24-4.28 -> 3.81-3.83ms (per-token-head
 (22.1/stream, acc 2.512), W2 279.1 (23.3/stream, acc 3.453) - best W2
 observed. Cost: KV pool 4.42M -> 3.99M tokens (max 512k concurrency
 8.43 -> 7.61); C12 x 512k was never fully supported.
+DRAFT GRAPH DECOMPOSITION 2026-11-12 (fixed batch, tokens=96):
+The [dsub] draft_graph timer must be filtered to tokens=96; the tail-of-run
+mean samples low-M graphs and understated it ~2x. At the production batch:
+  full 6215us | attention call 3492 (56%) | MLP 1113 (18%) | other 1610 (26%)
+Ablation levers (env-gated, inert by default): VLLM_DFLASH_ABLATE=attn|mlp|
+attn_conv|mlp_conv zeroes that sub-layer; the [dsub] print now carries
+reqs= and tokens=.
+Aligned g8 layout (corrected): natural 130B layout 7950.7us -> aligned
+144B 6215.3us at tokens=96 (-1.74ms, -22%). The earlier 4.24->3.82 record
+was low-M; a correction row is in the ledger.
+Next: the draft attention call is ~3x the offline per-token-head harness
+(230us/layer) at the same geometry; that gap is the next investigation.

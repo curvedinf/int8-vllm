@@ -770,7 +770,8 @@ class DFlashSpeculator(DraftModelSpeculator):
                 _e1 = torch.cuda.Event(enable_timing=True)
                 _e1.record()
                 torch.cuda.synchronize()
-                print(f"[dsub] draft_graph {_e0.elapsed_time(_e1)*1000:7.1f} us",
+                print(f"[dsub] draft_graph {_e0.elapsed_time(_e1)*1000:7.1f} us"
+                      f" reqs={num_reqs} tokens={num_tokens_padded}",
                       flush=True)
         else:
             draft_slot_mappings_by_layer = build_slot_mappings_by_layer(

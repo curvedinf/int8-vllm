@@ -456,23 +456,44 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
                     f"layer{self._audit_layer_idx}_{tag}", hidden=t
                 )
 
+        # Profiling ablations (inert unless VLLM_DFLASH_ABLATE lists them):
+        # "attn" / "mlp" skip the sub-layer compute (zero output keeps the
+        # shapes), "attn_conv" / "mlp_conv" skip the grouped-conv pair.
+        ablate = os.environ.get("VLLM_DFLASH_ABLATE", "")
+
         _dbg("layer_in", residual if residual is not None else hidden_states)
-        hidden_states, coefficients = self.attention_conv.prepare(hidden_states)
-        _dbg("attn_conv_prep", hidden_states)
-        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
+        if "attn_conv" in ablate:
+            coefficients = None
+        else:
+            hidden_states, coefficients = self.attention_conv.prepare(hidden_states)
+            _dbg("attn_conv_prep", hidden_states)
+        if "attn" in ablate:
+            hidden_states = torch.zeros_like(hidden_states)
+        else:
+            hidden_states = self.self_attn(
+                positions=positions, hidden_states=hidden_states
+            )
         _dbg("attn_out", hidden_states)
-        hidden_states = self.attention_conv.finish(hidden_states, coefficients)
-        _dbg("attn_conv_fin", hidden_states)
+        if coefficients is not None:
+            hidden_states = self.attention_conv.finish(hidden_states, coefficients)
+            _dbg("attn_conv_fin", hidden_states)
 
         hidden_states, residual = residual_norm(
             self.post_attention_layernorm, hidden_states, residual
         )
-        hidden_states, coefficients = self.mlp_conv.prepare(hidden_states)
-        _dbg("mlp_conv_prep", hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        if "mlp_conv" in ablate:
+            coefficients = None
+        else:
+            hidden_states, coefficients = self.mlp_conv.prepare(hidden_states)
+            _dbg("mlp_conv_prep", hidden_states)
+        if "mlp" in ablate:
+            hidden_states = torch.zeros_like(hidden_states)
+        else:
+            hidden_states = self.mlp(hidden_states)
         _dbg("mlp_out", hidden_states)
-        hidden_states = self.mlp_conv.finish(hidden_states, coefficients)
-        _dbg("mlp_conv_fin", hidden_states)
+        if coefficients is not None:
+            hidden_states = self.mlp_conv.finish(hidden_states, coefficients)
+            _dbg("mlp_conv_fin", hidden_states)
         return hidden_states, residual
 
 
