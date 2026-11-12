@@ -4960,3 +4960,13 @@ so phase-1 safe. In-graph attention family 22.5/25.5 -> 18.2 ms per 3
 decode steps (-19..29%); C12 median 482 -> 515-523 across two clean
 boots; C1 flat 26.9-27.1. Also corrected the recipe doc: target has 4
 KV heads (not 8) per the checkpoint config. Battery 4/4, micro PASS.
+HEAD-128 CORE = NEGATIVE RESULT 2026-11-12j: wrote a dedicated core
+from the head-256 i8dot template (ROWS=verify_tokens*nq_per_kv, 64-tok
+tiles, int8 QK/PV). After fixing the segment lower-bound mask it matched
+the generic path (max_abs 4e-5), but it is SLOWER in every config (best
+0.93x at qtok=2/tile32/w1) because [ROWS,128] fp32 acc halves the
+register budget per row: ROWS=64 spills (2.5x slower). Deleted.
+Constraint: at head 128 the generic kernel (BLOCK_M=16, BLOCK_Q=2) is
+the right shape. Remaining idea: dense side-array for g8 scales
+(each 2-byte scale currently pulls its own 64-B sector; ~2 KB per array
+per 32-token tile vs 4 KB data).
