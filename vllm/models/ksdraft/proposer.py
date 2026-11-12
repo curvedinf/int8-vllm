@@ -69,6 +69,8 @@ class KSDraftProposer:
         # same so proposals see the same context distribution. KSDRAFT_WINDOW
         # is the serving-time cost lever (cost scales with the window).
         self.window = int(os.environ.get("KSDRAFT_WINDOW", window or 16))
+        # JetSpec++ intra-block self refinement (fixed-point walk passes).
+        self.refine_iters = int(os.environ.get("KSDRAFT_REFINE_ITERS", "0"))
 
     @torch.no_grad()
     def propose(self, tokens: torch.Tensor, n: int,
@@ -103,7 +105,8 @@ class KSDraftProposer:
                                 ) -> tuple[torch.Tensor, torch.Tensor]:
         """Greedy block walk plus the selected candidate's probability."""
         ctx = tokens[:, -self.window:].to(self.device).long()
-        return self.model.propose_block_tokens(ctx, int(n), return_conf=True)
+        return self.model.propose_block_tokens(
+            ctx, int(n), return_conf=True, refine_iters=self.refine_iters)
 
     @torch.no_grad()
     def propose_block(self, tokens: torch.Tensor, n: int,
@@ -118,7 +121,8 @@ class KSDraftProposer:
         ctx = tokens[:, -self.window:].to(self.device).long()
         if temperature is None or bool((temperature <= 0).all()):
             # DFlash2 pairwise selector walk (greedy path over the unary top-K)
-            return self.model.propose_block_tokens(ctx, int(n))
+            return self.model.propose_block_tokens(
+                ctx, int(n), refine_iters=self.refine_iters)
         blog = self.model.block_logits(ctx, int(n)).float()      # [B, n, V]
         temp = temperature.to(self.device).float().clamp_min(1e-5)
         probs = torch.softmax(blog / temp[:, None, None], dim=-1)
