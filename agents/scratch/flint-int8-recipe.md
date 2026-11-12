@@ -4932,3 +4932,11 @@ Isolated 2x faster and bit-identical (codes 100% equal, 0 scale diff),
 but served C12 365-433 vs 414-486 control and the greedy fingerprint
 changed 3f5fa9f7 vs 38f72bc2 => the isolated harness misses in-graph
 behaviour. Reverted; retry only with an in-graph measurement.
+SHARED GATEUP BM (aiter cd53c11c6d) 2026-11-12f: gemm_silu_quant_out
+used bm=64 for m>64 -> 16 CTAs at the shared-expert decode shape
+(M=96, 2N=2048, K=2048), 143-334 us. bm=16/w8/s2 -> 96 CTAs, 53-68 us.
+In-graph `_gemm` family 21.86 -> 11.17 ms per 3 decode steps (-3.6
+ms/step). Served C12 unchanged (421-479) because GPU busy fell 95% ->
+87%: the C12 step is now HOST-BOUND in the current machine state. Next
+target: the host-side floor (~7 ms/step) - engine step phases, the async
+batch-queue depth-2 pipeline, output processing.
