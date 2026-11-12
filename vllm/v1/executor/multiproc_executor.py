@@ -114,7 +114,26 @@ class FutureWrapper(Future):
 
     def _wait_for_response(self):
         try:
-            response = self.aggregate(self.get_response())
+            if os.environ.get("VLLM_RPCTRACE") == "1":
+                import time as _t
+                _r0 = _t.perf_counter()
+                _resp = self.get_response()
+                _r1 = _t.perf_counter()
+                response = self.aggregate(_resp)
+                _r2 = _t.perf_counter()
+                _box = getattr(MultiprocExecutor, "_resptrace", None)
+                if _box is None:
+                    _box = MultiprocExecutor._resptrace = {"r": 0.0, "a": 0.0, "n": 0}
+                _box["r"] += _r1 - _r0
+                _box["a"] += _r2 - _r1
+                _box["n"] += 1
+                if _box["n"] % 50 == 0:
+                    print(f"[rpctrace] n={_box['n']} | resp "
+                          f"{1000*_box['r']/_box['n']:7.2f}ms | agg "
+                          f"{1000*_box['a']/_box['n']:7.2f}ms", flush=True)
+                    _box.update(r=0.0, a=0.0, n=0)
+            else:
+                response = self.aggregate(self.get_response())
             with suppress(InvalidStateError):
                 self.set_result(response)
         except Exception as e:
@@ -1161,8 +1180,22 @@ class WorkerProc:
         """Main busy loop for Multiprocessing Workers."""
         assert self.rpc_broadcast_mq is not None
         while True:
+            if os.environ.get("VLLM_RPCTRACE") == "1":
+                import time as _t
+                _d0 = _t.perf_counter()
             with get_watch_dog().disable():
                 rpc_request = self.rpc_broadcast_mq.dequeue(indefinite=True)
+            if os.environ.get("VLLM_RPCTRACE") == "1":
+                _dq = _t.perf_counter() - _d0
+                _box = getattr(self, "_deqtrace", None)
+                if _box is None:
+                    _box = self._deqtrace = {"d": 0.0, "n": 0}
+                _box["d"] += _dq
+                _box["n"] += 1
+                if _box["n"] % 50 == 0:
+                    print(f"[rpctrace] n={_box['n']} | dequeue "
+                          f"{1000*_box['d']/_box['n']:7.2f}ms", flush=True)
+                    _box.update(d=0.0, n=0)
             self._execute_worker_rpc(rpc_request)
             del rpc_request
 
@@ -1187,7 +1220,22 @@ class WorkerProc:
             watchdog.feed()
 
             if output_rank is None or self.rank == output_rank:
-                self.handle_output(output)
+                if os.environ.get("VLLM_RPCTRACE") == "1":
+                    import time as _t
+                    _h0 = _t.perf_counter()
+                    self.handle_output(output)
+                    _dt = _t.perf_counter() - _h0
+                    _box = getattr(self, "_rpctrace", None)
+                    if _box is None:
+                        _box = self._rpctrace = {"h": 0.0, "n": 0}
+                    _box["h"] += _dt
+                    _box["n"] += 1
+                    if _box["n"] % 50 == 0:
+                        print(f"[rpctrace] n={_box['n']} | handle "
+                              f"{1000*_box['h']/_box['n']:7.2f}ms", flush=True)
+                        _box.update(h=0.0, n=0)
+                else:
+                    self.handle_output(output)
         except Exception as e:
             # Notes have been introduced in python 3.11
             if hasattr(e, "add_note"):

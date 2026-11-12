@@ -4789,3 +4789,12 @@ path is invisible at the end. Worker CPU phases <0.5ms. The step period is
 dominated by the engine<->worker serial round trip, not kernels. Caveat:
 the sync perturbs the async overlap; a controlled single-workload run is
 needed to map the period per phase.
+RPC TRANSPORT MAP 2026-11-12 (controlled 12x256 non-streaming load):
+worker dequeue 0.05ms, execute phases 7.5ms total (incl. g_step 5.8),
+handle_output 0.01ms, but the execute wall (period) is 49.9ms; engine
+sched 1.0, send 0.00, exec wait 55, get_response 27.1, aggregate 0.00,
+out 0.5. No hop is slow: ~42ms is a blocking wait inside execute_model
+that the phases miss, overlapping a 27ms response-MQ wait.
+Instrumentation added (all env-gated): VLLM_STEPGPU (g_step),
+VLLM_STEPTRACE send key, VLLM_RPCTRACE (worker dequeue/handle, engine
+resp/agg). Next: section timers inside execute_model to bisect the 42ms.

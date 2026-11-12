@@ -718,7 +718,10 @@ class EngineCore:
                 pass
             with open(f"{_sx}/sched_{_os.getpid()}.jsonl", "a") as _f:
                 _f.write(_json.dumps({"n": _sx_n, "r": rows}) + "\n")
+        _tsnd = _time.perf_counter() if _st_box is not None else 0.0
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
+        if _st_box is not None:
+            _st_box["send"] = _st_box.get("send", 0.0) + _time.perf_counter() - _tsnd
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
             self.capture_iteration_details(scheduler_output) as iteration_details,
@@ -904,9 +907,10 @@ class EngineCore:
             if _st_box["n"] % 50 == 0:
                 n = _st_box["n"]
                 print(f"[steptrace-bq] n={n} | sched {1000*_st_box['sched']/n:7.2f}ms "
+                      f"| send {1000*_st_box.get('send', 0.0)/n:7.2f}ms "
                       f"| exec {1000*_st_box['exec']/n:7.2f}ms "
                       f"| out {1000*_st_box['out']/n:7.2f}ms", flush=True)
-                _st_box.update(sched=0.0, exec=0.0, out=0.0, n=0)
+                _st_box.update(sched=0.0, send=0.0, exec=0.0, out=0.0, n=0)
         self._attach_iteration_details(engine_core_outputs, iteration_details)
         self._attach_weight_version(engine_core_outputs)
 
