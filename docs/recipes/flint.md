@@ -263,9 +263,9 @@ weights stream once); FLOPs are 2*M*N*K over the same shapes.
 | Block | int8 weight bytes/step | GFLOP/step | Floor (max bytes/BW, flops/TOPS) | Measured | % of floor |
 |---|---|---|---|---|---|
 | Routed MoE (47 layers x 64 experts) | 9.46 GB | 170 | 10.0-10.3 ms | 13.3 ms | 75-77% |
-| Dense linears (qkv/o_proj/shared MLP + lm_head) | 0.69 GB | 31 | 0.73-0.75 ms | 5.5 ms | 13-14% |
+| Dense linears (qkv/o_proj/shared MLP + lm_head) | 0.40 GB | 78 | 0.44 ms | 5.5 ms | 8% |
 | Attention (target 47 + draft 5) | 0.36 GB KV | 46 | 0.30 ms | 6.3 ms | 5% |
-| Draft graph minus attention | 0.22 GB | 42 | 0.24 ms | 2.6 ms | 9% |
+| Draft graph (5 layers, TP4-sharded) | 0.07 GB | 15 | 0.08 ms | 4.25 ms | 1.9% |
 | Sampler | - | - | - | ~1 ms | - |
 
 Reading: the MoE is the only block close to a bandwidth roofline. The
@@ -274,10 +274,21 @@ M=96**, one to two orders of magnitude below their roofline: small-M int8
 GEMMs cannot fill the CUs from a single 96-row tile, and the attention
 dots run on 16-row tiles. That is the structural target for the native
 small-GEMM/int8-dot path (`docs/design/int8_small_gemm_native.md`), not a
-bandwidth problem. The ~10 ms not in the table is the 98 per-step
-collectives plus Python/scheduler idle; the CAR A/B bounds the collective
-path but is confounded by the fused AR+RMSNorm seam, so it stays
-unmeasured.
+bandwidth problem.
+
+CORRECTION (2026-11-12): the first draft of this table used unsharded
+`intermediate_size` shapes for the shared-expert and draft GEMMs. At TP4
+the real per-rank shapes are shared gate_up 512x2048, shared down
+2048x256, draft gate_up 3072x2048 and draft down 2048x1536 (confirmed by
+the boot log's CK warmup shapes), so the weight bytes, floors and rows
+above are corrected. The draft-graph row is now the *whole* graph
+(measured 4.25 ms at C12 block-g128; 3.61 ms with per-token-head KV), and
+it is the furthest from its roofline in relative terms - entirely
+latency/launch/attention, with only 0.08 ms of weight traffic. The
+collectives are *not* part of the residual: four served boots at 16 vs 64
+reduce blocks moved the step by <0.3 ms (barrier latency is hidden by the
+inter-layer compute), so the ~9 ms that used to be attributed to them is
+the draft propose plus sampler/glue.
 
 
 Attention cost scales at **~6.8 µs per context token per step** (period

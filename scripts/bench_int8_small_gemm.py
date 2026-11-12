@@ -28,13 +28,13 @@ from vllm.model_executor.kernels.linear.mixed_precision.aiter_w8a16 import (  # 
 SITES = {
     "target qkv": (1280, 2048),
     "target o_proj": (2048, 1024),
-    "target shared gate_up": (2048, 2048),
-    "target shared down": (2048, 1024),
+    "target shared gate_up": (512, 2048),    # 2*(1024/4) x 2048
+    "target shared down": (2048, 256),       # 2048 x (1024/4)
     "target lm_head": (37536, 2048),
     "draft qkv": (1536, 2048),
     "draft o_proj": (2048, 1024),
-    "draft gate_up": (12288, 2048),
-    "draft down": (2048, 6144),
+    "draft gate_up": (3072, 2048),           # 2*(6144/4) x 2048
+    "draft down": (2048, 1536),              # 2048 x (6144/4)
 }
 BANDWIDTH = 921e9   # measured per-GPU stream ceiling, bytes/s
 TOPS = 184.6e12     # MI100 int8 matrix peak

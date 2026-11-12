@@ -4697,3 +4697,18 @@ DRAFT PROPOSE 2026-11-12: where the 7.16ms goes and the real layout gap.
   non-causal.
 - Next structural item: an aligned g8 layout (144 B/half) across the dtype
   spec, cache writer and both attention paths. Not a config change.
+SHAPE CORRECTION 2026-11-12 (important): the per-site GEMM list used
+UNSHARDED intermediate shapes. TP4 per-rank: shared gate_up 512x2048,
+shared down 2048x256, draft gate_up 3072x2048, draft down 2048x1536
+(matches the boot log CK warmup shapes). Corrected M=96 times: qkv 29.1,
+target o_proj 27.3, shared gu 22.5, shared down 15.1, lm_head 484,
+draft qkv 41.9, draft o_proj 28.7, draft gu 53.2, draft down 33.2 us.
+Roofline rows corrected: dense 0.40GB/0.44ms floor (8% of 5.5ms); the
+draft graph is 0.07GB/0.08ms floor vs 4.25ms measured (1.9%, the worst
+relative block).
+DRAFT GRAPH at C12 (M=96): block-g128 4.24-4.28ms; per-token-head
+3.60-3.66ms -> the padded block-g128 rows cost 0.62ms at C12 (1.58ms at
+C1). An aligned g8 layout is worth ~0.6ms/step. The 7.16ms figure in the
+older notes is the C1/M=8 path, not the production batch.
+The earlier draft-down KSPLIT idea was inert (the real K is 1536, not
+6144) and was reverted.
