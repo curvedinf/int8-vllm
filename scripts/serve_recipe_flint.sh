@@ -165,9 +165,10 @@ serve() {
     # group, 16-byte-aligned rows since 2026-11-12). int8_per_token_head is
     # the rollback lever (per-token-head scale, group = head_dim).
     --kv-cache-dtype "${KV_DTYPE:-int8_block_g128}"
-    # Flint's template renders <think> reasoning blocks; the qwen3 engine
-    # parser splits them into reasoning_content.
-    --reasoning-parser qwen3
+    # Flint's own reasoning parser: the template's <think>…</think> blocks
+    # and the structured-output reasoning gate that holds the tool grammar
+    # until reasoning ends.
+    --reasoning-parser "${REASONING_PARSER:-flint}"
     --override-generation-config '{"temperature":1.0,"top_p":0.95,"top_k":20}'
   )
   # SPEC=0 boots without speculative decoding (diagnostic bisection only:
@@ -177,11 +178,17 @@ serve() {
   fi
   # Flint's tool preamble defines the GLM-4.7 XML call format
   # (<tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>)
-  # and <|observation|><tool_response> replies, so the glm47 parser applies
-  # unchanged. TOOLPARSER="" boots without tool calling.
-  local toolparser="${TOOLPARSER-glm47}"
+  # and <|observation|><tool_response> replies. The `flint` parser is that
+  # format plus Recursive's serving-kit grammar: every request with tools is
+  # constrained by the `flint` structural tag (protocol markers and foreign
+  # harness dialects out of free text, calls only in Flint's envelope, at
+  # least one for tool_choice=required, one total when parallel_tool_calls is
+  # false). `--tool-strict-level function` is that kit default made explicit.
+  # TOOLPARSER="" boots without tool calling.
+  local toolparser="${TOOLPARSER-flint}"
   if [[ -n "$toolparser" ]]; then
-    args+=(--enable-auto-tool-choice --tool-call-parser "$toolparser")
+    args+=(--enable-auto-tool-choice --tool-call-parser "$toolparser"
+           --tool-strict-level "${TOOL_STRICT_LEVEL:-function}")
   fi
   if [[ -n "${PROFILE_DIR:-}" ]]; then
     # torch-profiler diagnostic boot: exposes /start_profile + /stop_profile.

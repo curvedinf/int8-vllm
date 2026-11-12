@@ -28,6 +28,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "deepseek_v3_reasoning_parser",
         "DeepSeekV3ReasoningParser",
     ),
+    "flint": (
+        "flint_reasoning_parser",
+        "FlintReasoningParser",
+    ),
     "deepseek_v4": (
         "deepseek_v4_engine_reasoning_parser",
         "DeepSeekV4ParserReasoningAdapter",

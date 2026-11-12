@@ -62,6 +62,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "glm47_moe_tool_parser",
         "Glm47MoeModelToolParser",
     ),
+    "flint": (
+        "flint_tool_parser",
+        "FlintToolParser",
+    ),
     "glm47": (
         "glm47_moe_tool_parser",
         "Glm47MoeModelToolParser",

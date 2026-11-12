@@ -83,7 +83,7 @@ XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
     }
 )
 VLLM_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
-    {"glm_4_7", "hermes", "hy_v4", "kimi_k3", "longcat", "plamo3"}
+    {"flint", "glm_4_7", "hermes", "hy_v4", "kimi_k3", "longcat", "plamo3"}
 )
 SUPPORTED_STRUCTURAL_TAG_MODELS = (
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS | VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
@@ -1160,6 +1160,87 @@ def get_glm_4_7_structural_tag(
         prefix_tag = TagFormat(
             begin="",
             content=AnyTextFormat(excludes=_GLM_4_7_VALUE_EXCLUDES),
+            end="</think>",
+        )
+        return StructuralTag(format=SequenceFormat(elements=[prefix_tag, suffix_tag]))
+    return StructuralTag(format=suffix_tag)
+
+
+# Flint's protocol markers (Recursive's serving kit, ``tool_grammar.py``) plus
+# the XML dialects foreign agent harnesses put in their prompts. A harness that
+# shows Claude Code or Pi tool blocks can make Flint continue that dialect as
+# prose and then close the unbalanced tags at the end of the turn; excluding
+# them keeps tool markup out of the text region. The call envelope is Flint's
+# own (the GLM-4.7 tag this format matches byte for byte).
+_FLINT_TEXT_EXCLUDES = [
+    "<think>",
+    "</think>",
+    "<tool_call>",
+    "</tool_call>",
+    "<arg_key>",
+    "</arg_key>",
+    "<arg_value>",
+    "</arg_value>",
+    "<|begin_of_text|>",
+    "<|end_of_text|>",
+    "<|system|>",
+    "<|developer|>",
+    "<|user|>",
+    "<|assistant|>",
+    "<|observation|>",
+    "<function_calls>",
+    "</function_calls>",
+    "<tool_calls>",
+    "</tool_calls>",
+    "<invoke",
+    "</invoke>",
+    "<parameter",
+    "</parameter>",
+]
+
+
+@register_vllm_structural_tag("flint")
+def get_flint_structural_tag(
+    function_tools: list[FunctionToolParam],
+    builtin_tools: list[BuiltinToolParam],
+    tool_choice: Any,
+    reasoning: bool,
+    token_suffix: str = "",
+) -> StructuralTag:
+    """Build Flint's structural tag: prose, then calls in Flint's XML format.
+
+    Mirrors Recursive's serving-kit grammar (``build_flint_tool_grammar``):
+    text without protocol markers, then any number of calls for ``auto``, at
+    least one for ``required``, exactly one for a forced function. Each tool's
+    argument schema is pinned by its ``strict`` flag. ``parallel_tool_calls:
+    false`` is applied afterwards by the caller's single-call limiter.
+    """
+    del builtin_tools, token_suffix
+
+    tags = [
+        _glm_4_7_strict_tool_tag(tool)
+        if tool.function.strict
+        else _glm_4_7_tool_tag(tool)
+        for tool in function_tools
+    ]
+    if tool_choice == "auto":
+        # Keep the trigger itself out of the excludes so tag dispatch works.
+        suffix_tag: Any = TriggeredTagsFormat(
+            triggers=["<tool_call>"],
+            tags=tags,
+            excludes=[e for e in _FLINT_TEXT_EXCLUDES if e != "<tool_call>"],
+        )
+    else:
+        suffix_tag = TagsWithSeparatorFormat(
+            tags=tags,
+            separator="",
+            at_least_one=True,
+            stop_after_first=tool_choice == "forced",
+        )
+    if reasoning:
+        prefix_tag = TagFormat(
+            begin="",
+            content=AnyTextFormat(excludes=_FLINT_TEXT_EXCLUDES),
             end="</think>",
         )
         return StructuralTag(format=SequenceFormat(elements=[prefix_tag, suffix_tag]))
