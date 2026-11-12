@@ -8,7 +8,10 @@ The three recipes have separate systemd units:
 | Nemotron Bolt + LiLiCorr | [vllm-bolt.service](../../scripts/vllm-bolt.service) | `vllm-bolt.service` |
 | Flint + Flint-DFlash2 | [vllm-flint.service](../../scripts/vllm-flint.service) | `vllm-flint.service` |
 
-Both services run as `curved`, with primary group `curved`.
+All three services share `127.0.0.1:8020`, the nginx upstream endpoint, so
+switching recipes does not require changing nginx. Only one may run at a time.
+
+All three services run as `curved`, with primary group `curved`.
 The units expect `/home/curved/int8-vllm`, its `.venv`, the sibling `aiter`
 checkout, model assets, and access to the `video` and `render` groups. Prepare
 the environment and checkpoints using the [Qwen recipe](README.md) or

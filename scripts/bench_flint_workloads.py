@@ -115,7 +115,7 @@ def _summary(tag: str, rows: list[dict]) -> dict:
 async def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("workload", choices=["steady", "staggered"])
-    ap.add_argument("--base-url", default="http://127.0.0.1:8030")
+    ap.add_argument("--base-url", default="http://127.0.0.1:8020")
     ap.add_argument("--api-key", default="recipe-local")
     ap.add_argument("--model", default="flint")
     ap.add_argument("--n", type=int, default=12)

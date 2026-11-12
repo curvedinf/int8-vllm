@@ -97,7 +97,7 @@ faults at CUDA-graph capture (fixed 2026-11-08).
 ## Serving
 
 ```bash
-scripts/serve_recipe_flint.sh start    # TP4, C8, port 8030
+scripts/serve_recipe_flint.sh start    # TP4, C8, port 8020
 scripts/serve_recipe_flint.sh status
 scripts/serve_recipe_flint.sh stop
 ```

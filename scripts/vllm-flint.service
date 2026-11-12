@@ -2,8 +2,8 @@
 Description=Flint + Flint-DFlash2 INT8 PTQR API, int8_block_g128 KV (TP4 C12)
 Wants=network-online.target
 After=network-online.target
-# Ports differ (flint 8030, bolt 8020) but all recipes own the same four
-# MI100s, so only one may run at a time.
+# All recipes share port 8020 and the same four MI100s, so only one may
+# run at a time.
 Conflicts=vllm.service vllm-bolt.service vllm-qwen38.service llama-api-4x64k.service vllm-openai-gfx908.service
 
 [Service]

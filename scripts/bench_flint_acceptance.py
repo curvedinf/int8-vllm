@@ -36,7 +36,7 @@ PROMPTS = [
 ]
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--base-url", default="http://127.0.0.1:8030")
+ap.add_argument("--base-url", default="http://127.0.0.1:8020")
 ap.add_argument("--api-key", default=os.environ.get("VLLM_API_KEY", ""))
 ap.add_argument("--model", default="flint")
 ap.add_argument("--max-tokens", type=int, default=256)

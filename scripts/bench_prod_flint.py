@@ -147,7 +147,7 @@ async def run_workload(args, name, prompts, tools):
 
 async def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--base-url", default="http://127.0.0.1:8030")
+    ap.add_argument("--base-url", default="http://127.0.0.1:8020")
     ap.add_argument("--api-key", default="recipe-local")
     ap.add_argument("--output", type=int, default=256)
     ap.add_argument("--corpus", default=str(

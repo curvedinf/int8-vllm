@@ -31,7 +31,7 @@ async def once(client, url, hdr, messages):
 
 async def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--base-url", default="http://127.0.0.1:8030")
+    ap.add_argument("--base-url", default="http://127.0.0.1:8020")
     ap.add_argument("--api-key", default="recipe-local")
     ap.add_argument("--interval", type=float, default=600)
     ap.add_argument("--duration", type=float, default=3600)
