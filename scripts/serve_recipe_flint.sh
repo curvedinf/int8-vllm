@@ -71,12 +71,12 @@ serve() {
   # Fused round-to-nearest activation quant (quality default, see
   # INT8_AUDIT_RESULTS.md).
   export VLLM_GFX908_ACT_QUANT=round
-  # Unified-attention single-group block-g128: keep K/V int8 through the
-  # QK dot (2x the MI100 matrix rate). PV int8 is a separate lever — it
-  # wins on the draft graph but loses on the target decode shape, so it
-  # stays off in the served recipe.
+  # Unified-attention single-group block-g128: keep K/V int8 through both
+  # dots (2x the MI100 matrix rate). Both levers default ON: the whole
+  # forward has no float matmuls left. PV is +59us/step net on target+draft
+  # (draft -103us, target +162us) — kept per the int8-only doctrine.
   export VLLM_G8_INT8_DOT="${VLLM_G8_INT8_DOT:-1}"
-  export VLLM_G8_INT8_PV="${VLLM_G8_INT8_PV:-0}"
+  export VLLM_G8_INT8_PV="${VLLM_G8_INT8_PV:-1}"
   export VLLM_G8_INT8_DOT_CAUSAL="${VLLM_G8_INT8_DOT_CAUSAL:-1}"
   # Deployed decode band (M 65..128, i.e. C12 with NS=7) runs the tuned
   # Triton a8w8-blockscale GEMM off the retained GS128 originals; prefill
@@ -136,7 +136,7 @@ serve() {
   else
     # DRAFT_KV_DTYPE lets the draft's KV layout differ from the target's
     # (phase-3 decision lever); default mirrors KV_DTYPE.
-    spec="$("${ROOT_DIR}/.venv/bin/python" -c 'import json,sys; print(json.dumps(dict(method="dflash",model=sys.argv[1],num_speculative_tokens=int(sys.argv[2]),kv_cache_dtype=sys.argv[3])))' "$DRAFT_MODEL_DIR" "${NS:-7}" "${DRAFT_KV_DTYPE:-${KV_DTYPE:-int8_per_token_head}}")"
+    spec="$("${ROOT_DIR}/.venv/bin/python" -c 'import json,sys; print(json.dumps(dict(method="dflash",model=sys.argv[1],num_speculative_tokens=int(sys.argv[2]),kv_cache_dtype=sys.argv[3])))' "$DRAFT_MODEL_DIR" "${NS:-7}" "${DRAFT_KV_DTYPE:-${KV_DTYPE:-int8_block_g128}}")"
   fi
   # Phase-1 isolation (docs/recipes/optimization_procedure.md section 4):
   # synthetic rejection at zero rates keeps the draft forward and the
@@ -155,14 +155,11 @@ serve() {
     --max-model-len "${MAXLEN:-524288}"
     --max-num-batched-tokens "${MNBT:-2048}"
     --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.90}"
-    # int8 KV on target and draft (bf16 is banned by int8-first). The
-    # per-token-head layout is the measured fastest int8 layout for Flint:
-    # 3-rep agent-shaped W1 medians 36.1 vs 29.7 tok/s at 2.4k and 33.4 vs
-    # 21.3 at 18k, at equal-or-better acceptance. It is the same quantization
-    # math as block_g128 (one scale per token-head, group = head_dim), so this
-    # is a layout change, not a precision change. Rollback: KV_DTYPE=
-    # int8_block_g128.
-    --kv-cache-dtype "${KV_DTYPE:-int8_per_token_head}"
+    # int8 KV on target and draft (bf16 is banned by int8-first). Recipe
+    # default is int8_block_g128 (int8 data + one fp16 scale per 128-dim
+    # group, 16-byte-aligned rows since 2026-11-12). int8_per_token_head is
+    # the rollback lever (per-token-head scale, group = head_dim).
+    --kv-cache-dtype "${KV_DTYPE:-int8_block_g128}"
     # Flint's template renders <think> reasoning blocks; the qwen3 engine
     # parser splits them into reasoning_content.
     --reasoning-parser qwen3

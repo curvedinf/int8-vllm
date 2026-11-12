@@ -4857,3 +4857,23 @@ within an arm; /tmp/paired_acc.py) reads 2.690 float vs 2.309-2.35 int8
 so this is a phase-0 numerics change whose acceptance recovery is a
 phase-2 PTQR rung; W1 paired agg is flat (302 vs 307) until that lands.
 Phase-1 speed is kept: int8 doctrine + C1/step and prefill gains.
+INT8 PV DEFAULT-ON 2026-11-12 (G8_ATTN_INT8_PV_20261112): flipping
+VLLM_G8_INT8_PV=1 (P requantized per tile against the tile's largest V
+group scale) costs +59us/step net on the pair and lands acceptance back
+at the float-dot baseline: paired W1 2.589/2.674 (QK-only 2.309, float
+2.690), W1 served 382.2 agg / acc 2.466 / total p50 5.76s, W2 327.0 /
+3.547, C1 26.8-27.1 ms acc 2.46-2.50, controlled C12 484.8 tok/s (was
+428-439), 40k cold TTFT 12.8s. No float matmul remains in the forward.
+Battery 4/4, micro PASS.
+RECIPE DRIFT FIX: serve_recipe_flint.sh defaulted KV to
+int8_per_token_head while the recipe doc says int8_block_g128 is the
+default; aligned the script (both target and draft defaults) and kept
+per_token_head as the rollback env.
+PROFILING STATE 2026-11-12: live rocprofv3 attach fails (patched ROCm
+7.2 runtime vs /opt/rocm core-7.14 rocprofiler-sdk, attach status 1);
+the /start_profile endpoint only captures the API process (async_llm
+trace, python_function scopes only) and stop_profile hangs -> diagnostic
+boot must use rocprofv3 in launch mode. GPU busy at C12 = 90.5%, so the
+old "engine RPC residual" reading is GPU wait, not host. ~15 ms/step of
+GPU time remains unaccounted vs the graph budget; needs the launch-mode
+trace.

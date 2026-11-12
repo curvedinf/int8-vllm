@@ -1482,12 +1482,12 @@ def unified_attention(
         and k.dtype == torch.int8
         and head_size % 16 == 0
     )
-    g8_int8_pv = g8_int8_dot and os.environ.get("VLLM_G8_INT8_PV", "0") == "1"
+    g8_int8_pv = g8_int8_dot and os.environ.get("VLLM_G8_INT8_PV", "1") == "1"
     # A/B lever: restrict the int8 QK dot to the non-causal (draft verify)
     # calls by gating causal calls off.
     if os.environ.get("VLLM_G8_INT8_DOT_CAUSAL", "1") == "0":
         g8_int8_dot = g8_int8_dot and not use_causal
-        g8_int8_pv = g8_int8_dot and os.environ.get("VLLM_G8_INT8_PV", "0") == "1"
+        g8_int8_pv = g8_int8_dot and os.environ.get("VLLM_G8_INT8_PV", "1") == "1"
     # 3D needs real segm tensors; 2D never touches them.  Pass ``None`` in
     # 2D mode so Triton can skip materialising these pointer arguments.
     segm_output_ptr = softmax_segm_output if use_3d else None
