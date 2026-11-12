@@ -238,3 +238,26 @@ is per-CTA efficiency, not tiling: the A operand is a 16-sector gather per
 k16 and there is no cross-group software pipeline (Triton stages K). Next
 iteration must add double-buffered staged loads and a pipelined K loop
 before re-running the gate; the kernel stays unwired.
+
+## Stage 2 v1.2 (2026-11-12): multi-wave CTA
+
+Added `gemm_a8w8_mw_kernel<BM,BN,KSPLIT,WARPS>`: WARPS waves share a CTA,
+each owning BN/WARPS columns of the BM x BN tile. Routed for
+(32,128,KSPLIT=4), the shape Triton uses on the decode band; 120 CTAs x 4
+warps fills the 480 SIMD16 slots. Correct to 2.6e-3 vs the float reference.
+
+| site | M | best native | Triton | gap |
+|---|---|---|---|---|
+| qkv 1280x2048 | 16 | 33.1 us (32x128k4) | 31.5 | -5.3% |
+| qkv 1280x2048 | 96 | 43.8 (32x128k4) | 28.0 | -57% |
+| o_proj 2048x1024 | 16 | 26.0 (32x128k4) | 20.1 | -30% |
+| o_proj 2048x1024 | 96 | 34.7 (16x32k1) | 27.9 | -24% |
+
+Still no gate clearance. The M=96 gap is now attributable: the four warps
+of a CTA each load the same A fragments (4x duplicate A traffic, ~7.7 MB vs
+Triton's 1.9 MB at qkv M=96) and every operand load is a 4-byte scalar;
+Triton stages A/W through LDS with 128-bit loads and a pipelined K loop.
+
+Next: per-CTA shared LDS staging of the A fragments (one warp loads, a
+double-buffered barrier per 8-k16 group) plus vectorized B loads, then the
+gate. The kernel remains unwired.
