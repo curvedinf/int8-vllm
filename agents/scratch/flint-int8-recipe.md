@@ -4762,3 +4762,10 @@ was pre-alignment. Corrected attention block: target 3.83 + draft kernel
 Updated step block list: MoE 13.3 (closed) | draft graph 6.2 | dense 5.5
 | target attention 3.83 | sampler/lm_head ~1.5 | residual ~7.7 (non-graph
 propose + scheduler/CPU; collectives hidden).
+STEP PHASE 2026-11-12 (aligned layout): VLLM_STEPPHASE/STEPWALL at C12 W1:
+worker period 50-60ms; CPU phases sum 2.5-3.4ms/step (f_replay 0.5-0.85,
+f_tail 1.6-1.9, s_logits+reject+tail 0.5-0.9, propose 0.1-0.16). The step
+is GPU work + wait; the 38ms phase-1 budget in the docs is stale. Run
+aggregate 273 tok/s is diluted by early finishes; full-overlap capacity
+implied by period x acceptance is ~500 tok/s. Next: the ~15-25ms GPU
+idle/wait (async round trip / sampler D2H), the open batch-18 item.
