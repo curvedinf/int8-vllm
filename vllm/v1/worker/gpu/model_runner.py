@@ -2889,6 +2889,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_connector.finalize_step()
         model_runner_output.ec_connector_output = ec_connector_output
 
+        if os.environ.get("VLLM_STEPGPU") == "1":
+            # True device wall of the whole worker step. Forces a sync, so it
+            # perturbs the async overlap - use it for attribution only.
+            _tg0 = time.perf_counter()
+            torch.cuda.synchronize()
+            self._pphase["g_step"] = (
+                self._pphase.get("g_step", 0.0) + time.perf_counter() - _tg0
+            )
         if _pph:
             _t = self._pphase
             _t["post"] += time.perf_counter() - _t0

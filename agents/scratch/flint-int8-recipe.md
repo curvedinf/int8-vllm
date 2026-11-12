@@ -4780,3 +4780,12 @@ per step is unaccounted: either the worker's eager non-graph work (draft
 prep outside the graph) or the engine<->worker round trip.
 Next: per-step worker sub-phase timers for the target graph (g_wall), the
 eager draft prep, the propose GPU and the sampler D2H.
+GPU WALL vs PERIOD 2026-11-12 (VLLM_STEPGPU=1, new g_step timer, per-step
+device sync at the end of execute_model): g_step 1.03-1.22ms, period
+28.7-30.7ms in the late phase (57-60ms in earlier phases/boots). The
+end-of-step sync finds the GPU queue drained: the target graph + draft
+have already been waited on earlier (sampler D2H), so the GPU critical
+path is invisible at the end. Worker CPU phases <0.5ms. The step period is
+dominated by the engine<->worker serial round trip, not kernels. Caveat:
+the sync perturbs the async overlap; a controlled single-workload run is
+needed to map the period per phase.
