@@ -274,3 +274,6 @@ build.stale*
 # Agent skills disposable scratch (dev-skills)
 /agents/tmp/
 /agents/context-paging/
+
+# Benchmark outputs (bench_prod_flint --out runs/...)
+/runs/
