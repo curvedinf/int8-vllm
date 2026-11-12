@@ -179,7 +179,45 @@ The MoE block, dense/shared MLP and draft MLP are end-to-end int8:
 - The draft export keeps the trained bf16-grid surfaces; re-quantizing
   them would need a new scaled kernel (same exception as Qwen).
 
-## Performance state (phase-1 cycle, 2026-11-10)
+## Current performance state (2026-11-12, aligned block-g128)
+
+Shipped recipe: aligned `int8_block_g128` KV on both models (144-byte
+rows), widened decode band (`16<M<=128`), g8 scale broadcast, AITER W8A8
+everywhere, TP4 / C12 / NS=7. Harnesses: `scripts/bench_prod_flint.py`
+(W1 agent-steady with a ~2.4k shared prefix + tools; W2 12 cold ~2.4k
+prompts), the C1 step probe, and the g8 attention harnesses.
+
+| measurement | value |
+|---|---|
+| W1 C12 aggregate / per-stream | **284.1 / 22.1 tok/s** (fresh-boot band 223-284) |
+| W1 acceptance / TTFT p50 | 2.46-2.53 / 0.59-0.80 s |
+| W2 C12 aggregate / per-stream | **308.4 / 23.3 tok/s** (band 217-308) |
+| W2 TTFT p50 / p95 | 3.3-3.7 s / 8.5 s |
+| C1 2.4k step (deterministic) | **28.8-30.0 ms** |
+| 40k-token prompt | TTFT **15.8 s** (~2.5k tok/s prefill), decode 63.6 tok/s |
+| battery | 4/4 PASS |
+
+Block budget at C12 (all measured this session):
+
+| block | ms | state |
+|---|---|---|
+| Routed MoE (9.46 GB/step) | 13.3 | 75-77% of achievable BW; config verified optimal |
+| Draft graph (5 layers, tokens=96) | 6.22 | attention module 3.49, MLP 1.11, other 1.61; 1.9% of its 0.08 ms floor |
+| Dense linears (qkv/o_proj/shared/dense/lm_head) | 5.5 | 8% of the 0.44 ms floor |
+| Target attention (14x121 + 35x61 us) | 3.83 | 7.8% of the 0.30 ms floor |
+| Sampler / lm_head glue | ~1.5 | - |
+| Engine<->worker RPC residual | ~27-40 | every hop individually <0.1 ms; open |
+
+Aligned-layout effect (natural 130 B rows -> aligned 144 B): draft graph
+7.95 -> 6.22 ms at tokens=96; C1 step 32.4 -> 29.5-30.0 ms; W1
+223-265 -> 265-284; W2 217-279 -> 279-308; KV pool 4.42M -> 3.99M
+tokens. The engine step at C12 W1 is ~50-60 ms with the target graph
+~7 ms: the step is dominated by the engine<->worker RPC response path,
+not kernels. A/B ledger: `surface_experiments_ledger.jsonl`.
+
+## Performance state (phase-1 cycle, 2026-11-10) — HISTORICAL
+
+
 
 Measured under `optimization_procedure.md` with the W1 harness
 (`scripts/bench_cycle.py`: agent-shaped system-prefix + short user turn,
@@ -240,10 +278,9 @@ Warm-cache TTFT (single request, two-turn probe): **174 ms** for 2048 cached +
 fixed request/engine overhead. Cold single-request prefill is 396 ms for 2048
 tokens (~5.2k tok/s) under the retired prompt path; re-measure under W2.
 
-Step budget (per step, measured from the parts). The part-level numbers were
-collected under the retired procedure and remain the best available
-attribution, but they are step-time measurements only: re-measure under W1
-before using them to accept a change.
+Step budget (per step, measured from the parts). SUPERSEDED by the block
+budget above (2026-11-12); kept as the phase-1 record. The part-level
+numbers were collected under the retired procedure.
 
 | Block | ms | state |
 |---|---|---|
