@@ -336,9 +336,11 @@ class GateLinear(ReplicatedLinear):
             _get_aiter_w8a8_config,
         )
 
-        cfg = _get_aiter_w8a8_config(
-            xq.shape[0], wq.shape[0], xq.shape[1], 128
-        )
+        cfg = None
+        if os.environ.get("VLLM_GFX908_GATE_UNTUNED") != "1":
+            cfg = _get_aiter_w8a8_config(
+                xq.shape[0], wq.shape[0], xq.shape[1], 128
+            )
         out = gemm_a8w8_blockscale(xq, wq, xs, ws, dtype=torch.float32,
                                    config=cfg)
         return out.reshape(*x.shape[:-1], -1)
