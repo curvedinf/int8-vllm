@@ -4985,3 +4985,9 @@ PITFALL: the prefill-env gate was max_seqlen_q > 1, which also matches
 the spec-decode verify batch (q=8) -> BLOCK_M=128 collapsed decode to
 29.7 tok/s at 40k. Gate moved to > 64. Never gate prefill tuning on
 "> 1" in a spec-decode engine.
+PREFILL PROFILE 2026-11-12m: a 2048-token chunk is AR 34.9% (8 calls/
+layer, ~190 us per 1 MB), MoE 17.5% (~72% of the int8 floor), attention
+13.6%, GEMMs 17%, routing 3%. Two AR knobs null: blocks 16->64 (TTFT
+8.15 -> 8.26) and chunk 1M->8M elements (8.15 -> 7.9, noise). The AR is
+bound by the per-layer peer rendezvous, not by CTA count or launches;
+the fix would be overlap with compute, not a knob.
