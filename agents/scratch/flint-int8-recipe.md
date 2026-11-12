@@ -4970,3 +4970,9 @@ Constraint: at head 128 the generic kernel (BLOCK_M=16, BLOCK_Q=2) is
 the right shape. Remaining idea: dense side-array for g8 scales
 (each 2-byte scale currently pulls its own 64-B sector; ~2 KB per array
 per 32-token tile vs 4 KB data).
+DENSE SCALES = DISPROVEN 2026-11-12k: passing g8 scales as a dense
+side array is SLOWER (generic kernel 64.6 -> 76.1 us/layer nkv=1,
+74.6 -> 94.0 nkv=2, bit-identical). Reason: with 144-byte rows, row
+i+1's 128-B data load already fetches the line holding row i's 2-byte
+scale, so inline scales are free; a side array adds a second stream.
+The packed aligned layout is correct - do not revisit.
