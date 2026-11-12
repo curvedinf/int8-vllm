@@ -213,9 +213,11 @@ Int8 dot effect (single-group g8, 2026-11-12): C1 step 28.8-30.0 ->
 26.8-27.1 ms; 40k cold TTFT 15.8 -> 12.8 s; draft attention 2x at bf16 Q
 (481.5 -> 241.5 us/layer isolated); W1 284.1 -> 382.2 agg with
 acceptance in band (paired 2.690 -> 2.589-2.674); controlled C12
-428-439 -> 484.8 tok/s. QK alone cost 0.38 acceptance on the PTQR
-checkpoints; adding the int8 PV arm (same numerics family) recovered it
-— the phase-2 PTQR rung is still the clean way to re-anchor both.
+428-439 -> 484.8 tok/s. Acceptance on the int8 arms spans 2.31-2.69
+across boots on identical code (batch-composition-dependent sampling),
+so no acceptance difference is established yet; the phase-2 PTQR rung
+remains the clean way to anchor it. See ledger
+G8_ATTN_ACCEPTANCE_CORRECTION_20261112.
 
 Aligned-layout effect (natural 130 B rows -> aligned 144 B): draft graph 7.95 -> 6.22 ms at tokens=96; C1 step 32.4 -> 29.5-30.0 ms; W1
 223-265 -> 265-284; W2 217-279 -> 279-308; KV pool 4.42M -> 3.99M

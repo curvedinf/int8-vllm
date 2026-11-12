@@ -4877,3 +4877,18 @@ boot must use rocprofv3 in launch mode. GPU busy at C12 = 90.5%, so the
 old "engine RPC residual" reading is GPU wait, not host. ~15 ms/step of
 GPU time remains unaccounted vs the graph budget; needs the launch-mode
 trace.
+PROFILE METHOD 2026-11-12: only /start_profile with {"max_iterations": N}
+works (stop_profile hangs on long windows); all four worker traces land
+in PROFILE_DIR. Prefill chunks masquerade as decode steps — a collective
+on a 2048-token chunk splits into 4x 1 MB AR launches, decode into 1, so
+check the AR group size before trusting a window. Live rocprofv3 attach
+fails (patched ROCm 7.2 runtime vs core-7.14 rocprofiler-sdk). C12
+decode window (rank0, 3 steps): MoE GEMM 154 us/call, attention 7%,
+blockscale family 4%, add_norm 1.3%, routing trio (_topk+topkGating+
+_reduce_grouped) ~3.7 ms/step. AR is serial on the main stream; served
+grid is already 64 (env caps only) => ~4.3 ms/step for 98 calls, 5x the
+8.7 us bandwidth floor; profiling inflates per-call AR time ~4x so the
+trace cannot price it. VLLM_GFX908_O_PROJ_I8=0 diagnostic: 473 -> 178
+tok/s — the int8 residual seam is load-bearing (2.7x), never disable it
+for perf. Acceptance variance across boots on identical code is +-0.2
+(2.31-2.69); the 0.38 "QK cost" claim is retracted in the ledger.
