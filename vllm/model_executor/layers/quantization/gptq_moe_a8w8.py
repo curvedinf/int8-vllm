@@ -97,17 +97,28 @@ def _routing_from_topk(topk_ids: torch.Tensor, topk_weights: torch.Tensor,
                 valid, topk_weights.float(),
                 torch.zeros_like(topk_weights, dtype=torch.float32),
             )
-            _logits = torch.full(
-                (topk_ids.shape[0], n_expts), float("-inf"),
-                device=topk_ids.device, dtype=torch.float32,
-            )
-            _logits.scatter_(1, _ids, torch.log(_w.clamp_min(1e-30)))
-            _hist_m = _triton.next_power_of_2(topk_ids.shape[0])
-            _expt_scal, _expt_indx, _ = _topk_fn(
-                _logits, topk_ids.shape[1], apply_softmax=True,
-                HIST_BLOCK_M=_hist_m,
-            )
-            _expt_indx = _expt_indx.to(torch.int16)
+            if os.environ.get("VLLM_GFX908_ROUTING_REUSE_TOPK", "1") == "1":
+                # The synthetic-logits + second top-k existed only to recover
+                # (ids, weights) in the flat (M*K) layout the structure kernel
+                # consumes. The router already produced them: its weights are
+                # normalized (norm_topk_prob) and sorted descending, which is
+                # exactly what topk(apply_softmax=True) recomputes. Feed them
+                # straight through and drop one 70 us kernel + the logits
+                # fill/scatter per MoE layer.
+                _expt_indx = _ids.to(torch.int16).reshape(-1)
+                _expt_scal = _w.reshape(-1)
+            else:
+                _logits = torch.full(
+                    (topk_ids.shape[0], n_expts), float("-inf"),
+                    device=topk_ids.device, dtype=torch.float32,
+                )
+                _logits.scatter_(1, _ids, torch.log(_w.clamp_min(1e-30)))
+                _hist_m = _triton.next_power_of_2(topk_ids.shape[0])
+                _expt_scal, _expt_indx, _ = _topk_fn(
+                    _logits, topk_ids.shape[1], apply_softmax=True,
+                    HIST_BLOCK_M=_hist_m,
+                )
+                _expt_indx = _expt_indx.to(torch.int16)
             _n_gates = topk_ids.shape[0] * topk_ids.shape[1]
             _block_m = max(16, min(_triton.next_power_of_2(
                 max(1, _n_gates // n_expts)), 128))

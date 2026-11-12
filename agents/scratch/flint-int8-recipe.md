@@ -4909,3 +4909,13 @@ bit-identical) => 47 gates/step, C12 median 477 -> 519 (+8.8%), C1 step
 26.8-27.1 -> 26.3-26.8. Battery 4/4, micro PASS, paired acceptance
 2.617. The gate was the last direct aiter call without the tuned config;
 audit the draft MLP/lm_head/MoE prologue next.
+ROUTING REUSE 2026-11-12d: _routing_from_topk used to build a fake
+[M,256] logits matrix + a second topk (70us/layer) just to recover the
+ids/weights it already had. Feeding the router's own tensors directly:
+C12 median 507 -> 545 (+7.5%), C1 26.3-26.8 -> 25.5-25.8 ms, W1 acc
+2.597 (in band), W2 370.1/3.565. Expert id SETS identical; slot order is
+a permutation and the weights differ by 1 ulp (6e-8) from tl.softmax's
+reduction order, so it is NOT bit-identical: visible as a different
+greedy hash, though the control boot reproduced the old hash exactly.
+Lever VLLM_GFX908_ROUTING_REUSE_TOPK=0. Phase-0 numerics-changing =>
+needs a >=3-boot acceptance gate before the next PTQR. Battery 4/4.
