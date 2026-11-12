@@ -62,7 +62,7 @@ surfaces 0.16 %; untouched tensors byte-identical to the bf16 draft.
 |---|---|
 | Dense linears | AITER CK W8A8 INT8 GS128 (`AiterW8A16LinearKernel` legacy name dispatches W8A8). Deployed decode band `65<M<=128` (C12 with NS=7) runs the tuned Triton `a8w8_blockscale` off the retained GS128 originals instead (`VLLM_GFX908_DECODE_BLOCKSCALE=1`, bm=32/bn=128, NUM_KSPLIT=4 for N<=1536 else 1, except mlp down_proj which stays CK); prefill (M>128) stays CK. Measured: qkv 95.3->34.7us end to end, shared-expert gate_up 68.3->26.8us. |
 | Routed experts | `vllm/model_executor/layers/quantization/gptq_moe_a8w8.py` — GPTQ int8-group → AITER grouped `a8w8_blockscale` (`[E,K,N]` int8 + per-column GS128 fp32 scales, `w_blockscale_n=1`). Decode-band tiles: gate_up bn=256/warps 8/stages 2 (186 us/layer, 60% of HBM peak — wave-quantization limited, 256 tiles over 120 CUs); down bn=256/warps 8/**stages 1** (96.9 us/layer, 715 GB/s, was 154.0 at bn=128/stages 2 — one stage keeps the 32 KB weight tile so two CTAs are resident per CU). The block is pure weight streaming: the int8 dot for the whole 2048-tile down grid is 16.6 us. Bench: `scripts/bench_flint_moe_kernel.py` (graph-timed, production kwargs; one config per process because a bad tile faults the device). |
-| Attention | AITER unified attention |
+| Attention | AITER unified attention. Since 2026-11-12 the single-group block-g128 path (Flint's head-128 target+draft geometry) keeps K/V **int8 through the QK dot** (`G8_INT8_DOT`: Q RN-quantized per row, int32 S accumulator, q row scale × k group scale folded post-dot). int8 PV (`G8_INT8_PV`) is implemented but off: it wins on the draft (241.5 vs 241.7 us/layer) and loses on the target decode shape (slide layers 61.4→65.1 us). Levers: `VLLM_G8_INT8_DOT`, `VLLM_G8_INT8_PV`, `VLLM_G8_INT8_DOT_CAUSAL`. |
 | KV (target + draft) | `int8_block_g128` (int8 data + one fp16 scale per 128-dim group). Since 2026-11-12 each half's data row is 16-byte aligned (144 B, content 288 instead of the natural 130/260): the natural padding left alternate K/V rows misaligned and the 2D non-causal draft kernel de-vectorized. Measured after alignment (at the production draft batch, tokens=96): draft graph 7.95 -> 6.22 ms, C1 step 32.4 -> 29.5 ms, W1 265.2 / W2 279.1 agg, acceptance unchanged; KV pool 4.42M -> 3.99M tokens (12 x 512k was already above the pool). Rollback lever: `KV_DTYPE=int8_per_token_head`. |
 | Prefix cache (hybrid) | Mamba prefix caching **on** (`MAMBA_MODE=align` default; the deprecated `--mamba-cache-mode` now reaches `CacheConfig`). Recurrent checkpoints land on 128-token block boundaries; measured warm-cache TTFT 205-232 ms (was 1165 ms without it) and 269-548 ms on a partial-prefix hit (was 3519 ms). Sub-block (partial) Mamba hits are not reachable: they need every prefix-cacheable group to support fine-grained lookup and the attention groups use 128-token blocks. |
 | All-reduce | vLLM CUSTOM (`VLLM_ROCM_USE_AITER_CUSTOM_AR=0`); residual-stream collects use `residual_g128_all_reduce` on int8 codes+scales |
@@ -189,12 +189,12 @@ prompts), the C1 step probe, and the g8 attention harnesses.
 
 | measurement | value |
 |---|---|
-| W1 C12 aggregate / per-stream | **284.1 / 22.1 tok/s** (fresh-boot band 223-284) |
-| W1 acceptance / TTFT p50 | 2.46-2.53 / 0.59-0.80 s |
+| W1 C12 aggregate / per-stream | **284.1 / 22.1 tok/s** (fresh-boot band 223-284); with int8 QK dots 302-315 |
+| W1 acceptance / TTFT p50 | 2.46-2.53 float dots / **2.31-2.35 int8 QK** (paired-seed probe; phase-2 PTQR recovers) |
 | W2 C12 aggregate / per-stream | **308.4 / 23.3 tok/s** (band 217-308) |
-| W2 TTFT p50 / p95 | 3.3-3.7 s / 8.5 s |
-| C1 2.4k step (deterministic) | **28.8-30.0 ms** |
-| 40k-token prompt | TTFT **15.8 s** (~2.5k tok/s prefill), decode 63.6 tok/s |
+| W2 TTFT p50 / p95 | 3.3-3.7 s / 8.5 s (int8 QK: 3.1 s) |
+| C1 2.4k step (deterministic) | 28.8-30.0 ms float dots / **26.7-26.9 ms int8 QK** |
+| 40k-token prompt | TTFT **12.6 s** int8 QK (~3.3k tok/s prefill; 15.8 s with float dots), decode 63.6-115 tok/s |
 | battery | 4/4 PASS |
 
 Block budget at C12 (all measured this session):
@@ -204,12 +204,16 @@ Block budget at C12 (all measured this session):
 | Routed MoE (9.46 GB/step) | 13.3 | 75-77% of achievable BW; config verified optimal |
 | Draft graph (5 layers, tokens=96) | 6.22 | attention module 3.49, MLP 1.11, other 1.61; 1.9% of its 0.08 ms floor |
 | Dense linears (qkv/o_proj/shared/dense/lm_head) | 5.5 | 8% of the 0.44 ms floor |
-| Target attention (14x121 + 35x61 us) | 3.83 | 7.8% of the 0.30 ms floor |
+| Target attention (14x98 + 35x62 us, int8 QK) | 3.50 | 8.6% of the 0.30 ms floor (3.83 with float dots) |
 | Sampler / lm_head glue | ~1.5 | - |
 | Engine<->worker RPC residual | ~27-40 | every hop individually <0.1 ms; open |
 
-Aligned-layout effect (natural 130 B rows -> aligned 144 B): draft graph
-7.95 -> 6.22 ms at tokens=96; C1 step 32.4 -> 29.5-30.0 ms; W1
+Int8 QK-dot effect (single-group g8, 2026-11-12): C1 step 28.8-30.0 ->
+26.7-26.9 ms; 40k cold TTFT 15.8 -> 12.6 s; draft attention 2x at bf16 Q
+(481.5 -> 241.7 us/layer isolated); paired W1 acceptance 2.69 -> 2.31
+(needs phase-2 PTQR against the new dot numerics).
+
+Aligned-layout effect (natural 130 B rows -> aligned 144 B): draft graph 7.95 -> 6.22 ms at tokens=96; C1 step 32.4 -> 29.5-30.0 ms; W1
 223-265 -> 265-284; W2 217-279 -> 279-308; KV pool 4.42M -> 3.99M
 tokens. The engine step at C12 W1 is ~50-60 ms with the target graph
 ~7 ms: the step is dominated by the engine<->worker RPC response path,

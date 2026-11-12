@@ -4843,3 +4843,17 @@ token, S_int, P requant, int8 PV) exists only in the aiter
 per-token-head kernel; the fork kernel needs the port for the
 single-group g8 layout. This is both the largest remaining draft lever
 and an int8-doctrine gap. NEXT PROJECT.
+INT8 QK DOT LANDED 2026-11-12 (G8_ATTN_INT8_DOT_20261112): the port is
+done in triton_unified_attention (G8_INT8_DOT / G8_INT8_PV). Q is
+RN-quantized per row, K stays int8 through the QK dot, q-row x k-group
+scales fold after the int32 accumulator. Isolated draft 481.5 -> 241.7
+us/layer (bf16 Q, 2x); target total 3839.9 -> 3495.2; C1 step 28.8-30.0
+-> 26.7-26.9 ms; 40k cold TTFT 15.8 -> 12.6 s; battery 4/4, micro PASS.
+int8 PV is implemented but OFF: it wins the draft (241.5) and loses the
+target slide layers (61.4 -> 65.1). ACCEPTANCE: paired-seed W1 probe
+(12 shared-prefix prompts, per-request seeds 777000+i, reproducible
+within an arm; /tmp/paired_acc.py) reads 2.690 float vs 2.309-2.35 int8
+(-0.35). The current PTQR checkpoints were trained against float dots,
+so this is a phase-0 numerics change whose acceptance recovery is a
+phase-2 PTQR rung; W1 paired agg is flat (302 vs 307) until that lands.
+Phase-1 speed is kept: int8 doctrine + C1/step and prefill gains.

@@ -274,6 +274,14 @@ def kernel_unified_attention(
     # group scales fold into per-group partial dots instead of a
     # full-tile dequant multiply.
     USE_G8_2GRP: tl.constexpr = False,
+    # Single-group only (G8_GROUP == HEAD_SIZE): keep K/V int8 through both
+    # dots instead of dequantizing to the activation dtype (2x the MI100
+    # matrix rate, minus the per-tile dequant multiplies). Q is quantized
+    # per row with round-half-away-from-zero; P is quantized per tile
+    # against the tile's largest V group scale.
+    G8_INT8_DOT: tl.constexpr = False,
+    # int8 PV dot (requires G8_INT8_DOT): P is requantized per tile.
+    G8_INT8_PV: tl.constexpr = False,
     # ``tl.int64`` cannot be combined with a ``None`` default — Triton's JIT
     # rejects ``Optional[tl.int64]`` / ``tl.int64 | None`` at trace time, and
     # plain ``tl.int64 = None`` raises ``TypeError: 'NoneType' object cannot
@@ -391,6 +399,18 @@ def kernel_unified_attention(
             mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
             other=0.0,
         )
+
+    if G8_INT8_DOT:
+        # Per-row symmetric int8 quantization (round half away from zero,
+        # the VLLM_GFX908_ACT_QUANT=round doctrine). The row scale is
+        # applied after the QK dot together with the per-token K group
+        # scale.
+        q_f32 = Q.to(tl.float32)
+        q_absmax = tl.maximum(tl.max(tl.abs(q_f32), axis=1), 1e-6)
+        q_token_scale = q_absmax / 127.0
+        qi = q_f32 / q_token_scale[:, None]
+        qi = qi + tl.where(qi >= 0, 0.5, -0.5)
+        Q_int8 = tl.floor(qi).to(tl.int8)
 
     block_table_offset = seq_idx * block_table_stride
 
@@ -523,8 +543,13 @@ def kernel_unified_attention(
                 mask=dim_mask[None, :] & tile_mask[:, None],
                 other=0.0,
             )
-        K = _cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
-        V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
+        if G8_INT8_DOT:
+            # Keep the int8 codes; the group scales fold into S / P below.
+            K = K_load
+            V = V_load
+        else:
+            K = _cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
+            V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
 
         # G8: dequant K/V per 8-dim group before the dots.
         if USE_G8_2GRP:
@@ -651,11 +676,13 @@ def kernel_unified_attention(
                 k_g8 = tl.load(
                     g8_k_scale_ptr + g8_base, mask=tile_mask, other=1.0
                 ).to(tl.float32)
-                K = (K.to(tl.float32) * k_g8[None, :]).to(Q.dtype)
                 v_g8 = tl.load(
                     g8_v_scale_ptr + g8_base, mask=tile_mask, other=1.0
                 ).to(tl.float32)
-                V = (V.to(tl.float32) * v_g8[:, None]).to(Q.dtype)
+                if not G8_INT8_DOT:
+                    K = (K.to(tl.float32) * k_g8[None, :]).to(Q.dtype)
+                if not G8_INT8_PV:
+                    V = (V.to(tl.float32) * v_g8[:, None]).to(Q.dtype)
             else:
                 # K tile is (HEAD_SIZE, TILE_SIZE); scale tile same layout.
                 k_g8_off = (
@@ -735,6 +762,12 @@ def kernel_unified_attention(
             # Per-token-head quant: fuse softmax_scale with per-head k_scale
             # to avoid a separate BLOCK_M × TILE_SIZE multiply on S.
             S += tl.dot(Q, K) * (score_scale * k_token_head_scales[None, :])
+        elif G8_INT8_DOT:
+            # int8 QK: the int32 accumulator carries the raw codes; the row
+            # (query) scale and the per-key group scale fold in here.
+            S += tl.dot(Q_int8, K, out_dtype=tl.int32).to(tl.float32) * (
+                (score_scale * q_token_scale)[:, None] * k_g8[None, :]
+            )
         else:
             S += score_scale * tl.dot(Q, K)
 
@@ -780,7 +813,7 @@ def kernel_unified_attention(
                 v0 = tl.where(sw_mask_v, v0, 0.0)
                 v1 = tl.where(sw_mask_v, v1, 0.0)
             else:
-                V = tl.where(sw_mask_v, V, 0.0)
+                V = tl.where(sw_mask_v, V, 0 if G8_INT8_DOT else 0.0)
         if USE_G8_2GRP:
             # V group scales folded onto P per group:
             # O += (P * s_v0) @ V0 + (P * s_v1) @ V1
@@ -790,6 +823,17 @@ def kernel_unified_attention(
             # Per-token-head quant: apply v_scale to P instead of V.
             P_v = (P * v_token_head_scales[None, :]).to(V.dtype)
             acc += tl.dot(P_v, V)
+        elif G8_INT8_PV:
+            # int8 PV: P is in [0, 1], so quantize (P * v_group_scale)
+            # against the tile's largest V scale — the scale then cancels
+            # exactly after the int32 dot.
+            vmax = tl.max(tl.where(tile_mask, v_g8, 0.0))
+            pv_scale = tl.where(vmax > 0, 127.0 / vmax, 1.0)
+            Pq = tl.minimum(tl.floor(P * (v_g8[None, :] * pv_scale) + 0.5), 127.0)
+            acc += (
+                tl.dot(Pq.to(tl.int8), V, out_dtype=tl.int32).to(tl.float32)
+                * (1.0 / pv_scale)
+            )
         else:
             # Keep softmax weights representable when the P @ V dot uses FP8
             # tensor cores. Undo the power-of-two scale after the dot.
@@ -1427,6 +1471,23 @@ def unified_attention(
         g8_k_ptr = None
         g8_v_ptr = None
         g8_blk = g8_head = g8_slot = None
+    # Single-group block-g128 (one fp16 scale per KV head-vector — the
+    # Flint head-128 geometry): keep K/V int8 through both dots. A/B
+    # lever: VLLM_G8_INT8_DOT=0 restores the dequant-then-dot path.
+    g8_int8_dot = (
+        os.environ.get("VLLM_G8_INT8_DOT", "1") != "0"
+        and use_g8
+        and g8_k_scale.shape[-1] == 1
+        and kv_quant_mode == KVQuantMode.INT8_BLOCK_G128
+        and k.dtype == torch.int8
+        and head_size % 16 == 0
+    )
+    g8_int8_pv = g8_int8_dot and os.environ.get("VLLM_G8_INT8_PV", "0") == "1"
+    # A/B lever: restrict the int8 QK dot to the non-causal (draft verify)
+    # calls by gating causal calls off.
+    if os.environ.get("VLLM_G8_INT8_DOT_CAUSAL", "1") == "0":
+        g8_int8_dot = g8_int8_dot and not use_causal
+        g8_int8_pv = g8_int8_dot and os.environ.get("VLLM_G8_INT8_PV", "0") == "1"
     # 3D needs real segm tensors; 2D never touches them.  Pass ``None`` in
     # 2D mode so Triton can skip materialising these pointer arguments.
     segm_output_ptr = softmax_segm_output if use_3d else None
@@ -2062,6 +2123,8 @@ def unified_attention(
         USE_G8=use_g8,
         G8_GROUP=(head_size // g8_k_scale.shape[-1]) if use_g8 else 8,
         USE_G8_2GRP=use_g8 and g8_k_scale.shape[-1] == 2,
+        G8_INT8_DOT=g8_int8_dot,
+        G8_INT8_PV=g8_int8_pv,
         scale=softmax_scale,
         q_scale=q_descale,
         k_scale=k_descale,

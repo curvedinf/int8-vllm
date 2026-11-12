@@ -71,6 +71,13 @@ serve() {
   # Fused round-to-nearest activation quant (quality default, see
   # INT8_AUDIT_RESULTS.md).
   export VLLM_GFX908_ACT_QUANT=round
+  # Unified-attention single-group block-g128: keep K/V int8 through the
+  # QK dot (2x the MI100 matrix rate). PV int8 is a separate lever — it
+  # wins on the draft graph but loses on the target decode shape, so it
+  # stays off in the served recipe.
+  export VLLM_G8_INT8_DOT="${VLLM_G8_INT8_DOT:-1}"
+  export VLLM_G8_INT8_PV="${VLLM_G8_INT8_PV:-0}"
+  export VLLM_G8_INT8_DOT_CAUSAL="${VLLM_G8_INT8_DOT_CAUSAL:-1}"
   # Deployed decode band (M 65..128, i.e. C12 with NS=7) runs the tuned
   # Triton a8w8-blockscale GEMM off the retained GS128 originals; prefill
   # stays on CK. Measured at M=96: qkv 95.3 -> 34.7us end to end (quant +
