@@ -193,8 +193,14 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
                     f"int8_block_g{_g} requires head_size % {_g} == 0, "
                     f"got {spec.head_size}"
                 )
-            content = 2 * (spec.head_size * 1 + 2 * spec.head_size // _g)
-            return replace(spec, state_content_bytes=content)
+            # Align each half's data row to 16 bytes. The natural pad is
+            # 2*hs//g bytes (one fp16 scale per group); head_size 128 / g128
+            # gives 130 B rows, so every other K/V tile row is 16-byte
+            # misaligned and the 2D (non-causal draft) kernel's tile loads
+            # de-vectorize (measured 0.62 ms/step at C12 vs per-token-head).
+            half = spec.head_size + 2 * spec.head_size // _g
+            half = ((half + 15) // 16) * 16
+            return replace(spec, state_content_bytes=2 * half)
         if not mode.is_per_token_head:
             return spec
         hs_k, hs_v = spec.head_size, spec.head_size_v
@@ -279,9 +285,10 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         if self._is_int8_block:
             assert dtype_sz == 1, "int8_block_g* caches must be int8 tensors"
             g = self._block_g
-            # hs + 2*(hs//g) = padded_hs  ->  hs = padded_hs * g // (g + 2)
-            hs = padded_hs * g // (g + 2)
-            assert hs % g == 0 and hs + 2 * (hs // g) == padded_hs, (
+            # The content half is the 16-byte-aligned row: hs data, then one
+            # fp16 group scale per g-dim group, then alignment padding.
+            hs = self.head_size
+            assert hs % g == 0 and hs + 2 * (hs // g) <= padded_hs, (
                 f"int8_block_g{g}: content dim {content} incompatible "
                 f"(hs={hs}, pad={padded_hs - hs})"
             )

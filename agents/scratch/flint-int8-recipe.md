@@ -4712,3 +4712,12 @@ C1). An aligned g8 layout is worth ~0.6ms/step. The 7.16ms figure in the
 older notes is the C1/M=8 path, not the production batch.
 The earlier draft-down KSPLIT idea was inert (the real K is 1536, not
 6144) and was reverted.
+ALIGNED G8 LAYOUT ACCEPTED 2026-11-12: each half's data row is now
+16-byte aligned (natural 130 B -> 144 B; content 288 instead of 260) in
+AttentionBackend.customize_spec, with the scale views carved from
+self.head_size instead of the packed g+2 formula. Numerically exact.
+Measured: draft graph at C12 4.24-4.28 -> 3.81-3.83ms (per-token-head
+3.60-3.66); clean C1 step 32.2-33.1 -> 29.5/29.5/30.0ms; W1 265.2 agg
+(22.1/stream, acc 2.512), W2 279.1 (23.3/stream, acc 3.453) - best W2
+observed. Cost: KV pool 4.42M -> 3.99M tokens (max 512k concurrency
+8.43 -> 7.61); C12 x 512k was never fully supported.
