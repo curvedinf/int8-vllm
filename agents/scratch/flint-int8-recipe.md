@@ -4733,3 +4733,15 @@ Aligned g8 layout (corrected): natural 130B layout 7950.7us -> aligned
 was low-M; a correction row is in the ledger.
 Next: the draft attention call is ~3x the offline per-token-head harness
 (230us/layer) at the same geometry; that gap is the next investigation.
+DRAFT G8 ATTENTION ISOLATED 2026-11-12: scripts/bench_attn_g8_micro.py
+builds the real aligned block-g128 cache (144B rows, inline fp16 scales)
+and calls the same fork wrapper as the backend for the draft geometry
+(12 seqs x 8 q, kvh2/qh8 per rank, ctx 2400, window 2048, non-causal):
+263.3us/layer (1316.6us for 5). In-graph the attention module is 3492us
+(698/layer) incl. projections (~71 isolated) and the kernel (263
+isolated) -> the in-graph module is ~2x the sum of its isolated parts.
+The MLP shows the same factor (1113 in-graph vs 430 isolated = 2.6x), so
+the draft's kernels run ~2-2.6x slower in the graph than in single-call
+microbenchmarks. The kernel is NOT the bottleneck.
+Next: a 5-layer sequence graph harness (all draft kernels in one graph,
+cold caches, serialized launches) to reproduce the penalty offline.
