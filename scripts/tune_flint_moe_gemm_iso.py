@@ -136,8 +136,9 @@ def main():
                 payload = [None] + [list(c) for c in batch] + [None]
                 got = run_batch(M, kernel, payload)
                 if got is not None:
-                    refs = [r[1] for r in got if r[0] is None]
-                    if refs and max(refs) > min(refs) * 1.10:
+                    refs = [r[1] for r in got
+                            if r[0] is None and isinstance(r[1], (int, float))]
+                    if len(refs) == 2 and max(refs) > min(refs) * 1.10:
                         print(f"  [{key}] reference drift {refs}", flush=True)
                     rows.extend(r for r in got if r[0] is not None)
                 else:
