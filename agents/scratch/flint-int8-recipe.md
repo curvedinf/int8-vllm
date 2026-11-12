@@ -4825,3 +4825,10 @@ aggregate 0.00) yet the future drain is ~27ms and the step ~50ms. The
 residual needs a scheduler/stream-level timeline profiler (rocprofv3
 wedges the server; the torch profiler covers only the API process), so the
 engine RPC line is OPEN, not a recipe lever. Knob: VLLM_SHM_BUSY_LOOP_S.
+NATIVE GEMM VECTORIZATION 2026-11-12: shared-A LDS staging neutral (43.5
+vs 43.8us qkv M=96); coalesced lane-major int4 B preshuffle WORSE (50.7
+qkv, 43.0 o_proj, 82.3 draft gu vs 43.5/36.6/61.1 scalar); ksplit=1 is
+78.2us because only 30 CTAs. Triton reference 29.2/26.5/52.7. At equal
+tiling the hand-written kernel stays ~1.5x behind; the missing piece is
+Triton's software-pipelined schedule (num_stages), i.e. a full pipelined
+rewrite. Experimental code reverted; the native GEMM stays unwired.
