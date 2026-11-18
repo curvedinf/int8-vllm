@@ -154,7 +154,6 @@ the second column identifies the models and architectures each path supports.
 
 ## Documentation
 
-- [Qwen recipe](docs/recipes/README.md) and [Bolt recipe](docs/recipes/nemotron_bolt.md) — configuration, benchmarks and validation.
 - [INT8 coverage audit](INT8_AUDIT_RESULTS.md) — precision choices and floating-point exceptions.
 - [Experiment ledger](docs/recipes/surface_experiments_ledger.jsonl) — measured changes and adoption decisions.
 - [Incremental builds](docs/contributing/incremental_build.md) — development workflow.
