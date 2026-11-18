@@ -4730,9 +4730,14 @@ class rocm_aiter_ops:
         from vllm.platforms.rocm import on_gfx908
 
         if on_gfx908():
-            from aiter.ops.triton.attention.mha import flash_attn_varlen_func
+            from aiter.ops.triton.attention.mha import (
+                flash_attn_varlen_func,
+                mha_set_impl,
+            )
 
-            # Triton version doesn't accept min_seqlen_q
+            # AITER's bundled FA2 implementation supports CDNA1 and right
+            # window bounds. Its other MHA implementation has no gfx908 config.
+            mha_set_impl("dao_ai")
             return flash_attn_varlen_func(
                 q=q,
                 k=k,

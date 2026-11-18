@@ -57,6 +57,26 @@ def _int8_embedding_gather(
     return rows.to(scale.dtype) * scale[input_].unsqueeze(-1)
 
 
+def _quantize_vocab_rows(
+    weight: torch.Tensor, scale_dtype: torch.dtype, min_amax: float, min_code: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # A full-vocabulary FP32 temporary for Qwen TP1 exceeds 4 GiB.
+    # Each row has an independent scale, so the conversion can be chunked.
+    rows, width = weight.shape
+    chunk_rows = max(1, (16 << 20) // (4 * width))
+    codes = torch.empty((rows, width), dtype=torch.int8, device=weight.device)
+    scales = torch.empty((rows, 1), dtype=scale_dtype, device=weight.device)
+    for start in range(0, rows, chunk_rows):
+        sl = slice(start, start + chunk_rows)
+        block = weight[sl].float()
+        scale = (block.abs().amax(dim=1, keepdim=True).clamp_min_(min_amax) / 127).to(
+            scale_dtype
+        )
+        scales[sl].copy_(scale)
+        codes[sl].copy_((block / scale.float()).round_().clamp_(min_code, 127))
+    return codes, scales
+
+
 def _quantize_embedding_int8_(layer: torch.nn.Module) -> None:
     """In-place int8 conversion of an embedding table (gfx908 int8 doctrine).
 
@@ -64,11 +84,9 @@ def _quantize_embedding_int8_(layer: torch.nn.Module) -> None:
     measured the distribution cost at +0.0022 KLD). Halves gather bandwidth
     and the vocab-sharded table's HBM footprint.
     """
-    w = layer.weight.data.float()
-    scale = (w.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8) / 127.0).to(
-        layer.weight.dtype
+    q, scale = _quantize_vocab_rows(
+        layer.weight.data, layer.weight.dtype, min_amax=1e-8, min_code=-128
     )
-    q = (w / scale.float()).round_().clamp_(-128, 127).to(torch.int8)
     replace_parameter(layer, "weight", torch.nn.Parameter(q, requires_grad=False))
     layer._int8_embedding = True
     layer._int8_embedding_scale = scale.squeeze(-1).contiguous()
@@ -82,11 +100,8 @@ def _quantize_lm_head_w8a8_(layer: torch.nn.Module) -> None:
     fp32 scale per output row (the `_ck_q/_ck_s` contract used by
     gemm_a8w8_CK); activations are per-token quantized at apply time.
     """
-    w = layer.weight.data.float()
-    wmax = w.abs().amax(dim=1, keepdim=True).clamp(min=1e-12)
-    layer._ck_s = (wmax / 127.0).to(torch.float32).contiguous()
-    layer._ck_q = (
-        (w / layer._ck_s).round_().clamp_(-127, 127).to(torch.int8).contiguous()
+    layer._ck_q, layer._ck_s = _quantize_vocab_rows(
+        layer.weight.data, torch.float32, min_amax=1e-12, min_code=-127
     )
     layer._gfx908_w8a8_head = True
 

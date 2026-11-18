@@ -1450,7 +1450,7 @@ def seed_spec_window_kernel(
     zero_bias = steps * 0
     _copy_mamba_state_block(
         state_idx_flat,
-        batch_idx,
+        req_state_idx,
         src_col,
         dst_col,
         zero_bias,  # identity copy of the running state

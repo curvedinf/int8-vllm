@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Post-sync validation battery for the gfx908 stack (merged aiter + FA 2.8.4).
+"""Post-sync validation battery for the gfx908 stack (vLLM and sibling int8-aiter).
 
 Runs on one idle GPU alongside the Qwen3.8 quantization. Covers:
  1. int8 per-token-head KV attention at Qwen3.6/3.8 production shapes
     (head_dim 256, GQA 6:1 per TP4 rank, block 32) -- the existing micro test
     only covered head_size=64.
- 2. flash_attn 2.8.4 (aiter triton backend): varlen causal GQA hdim 256,
+ 2. vLLM AITER varlen interface (gfx908 Triton backend): varlen causal GQA hdim 256,
     non-causal, sliding window.
  3. Symbol compatibility: every aiter entry point referenced by the merged
     vllm tree exists in the merged aiter tree.
@@ -21,7 +21,7 @@ import traceback
 from pathlib import Path
 
 sys.path.insert(0, os.environ.get(
-    "AITER_HOME", str(Path(__file__).resolve().parent.parent.parent / "aiter")))
+    "AITER_HOME", str(Path(__file__).resolve().parent.parent.parent / "int8-aiter")))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
@@ -60,7 +60,9 @@ def t1_int8_prod_shapes():
 
 
 def t2_fa_interface():
-    from flash_attn import flash_attn_varlen_func
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    flash_attn_varlen_func = rocm_aiter_ops.flash_attn_varlen_func
 
     torch.manual_seed(0)
     dev = "cuda"
@@ -70,15 +72,20 @@ def t2_fa_interface():
     v = torch.randn(2048, 4, 256, dtype=torch.float16, device=dev)
     cu = torch.tensor([0, 1024, 2048], dtype=torch.int32, device=dev)
 
-    def ref(causal):
+    def ref(causal, window=None):
         outs = []
         for s, e in zip(cu[:-1], cu[1:]):
             n = e - s
             qs = q[s:e].transpose(0, 1)          # [24, n, 256]
             ks = k[s:e].transpose(0, 1).repeat_interleave(6, dim=0)
             vs = v[s:e].transpose(0, 1).repeat_interleave(6, dim=0)
+            mask = None
+            if window is not None:
+                positions = torch.arange(qs.shape[1], device=dev)
+                distance = positions[:, None] - positions[None, :]
+                mask = (distance >= 0) & (distance <= window)
             o = torch.nn.functional.scaled_dot_product_attention(
-                qs, ks, vs, is_causal=causal)
+                qs, ks, vs, attn_mask=mask, is_causal=causal and mask is None)
             outs.append(o.transpose(0, 1))
         return torch.cat(outs)
 
@@ -86,8 +93,10 @@ def t2_fa_interface():
     e_c = (o_c - ref(True)).abs().max().item()
     o_n = flash_attn_varlen_func(q, k, v, cu, cu, 1024, 1024, causal=False)
     e_n = (o_n - ref(False)).abs().max().item()
-    o_w = flash_attn_varlen_func(q, k, v, cu, cu, 1024, 1024, causal=True, window_size=(2048, 0))
-    e_w = (o_w - ref(True)).abs().max().item()  # 1024 < window: same as causal
+    o_w = flash_attn_varlen_func(
+        q, k, v, cu, cu, 1024, 1024, causal=True, window_size=(127, 0)
+    )
+    e_w = (o_w - ref(True, window=127)).abs().max().item()
     assert e_c < 0.05 and e_n < 0.05 and e_w < 0.05, (e_c, e_n, e_w)
     return f"(causal {e_c:.4f} noncausal {e_n:.4f} window {e_w:.4f})"
 
@@ -144,7 +153,7 @@ def t4_gemm():
 
 print(f"torch {torch.__version__} | GPU: {torch.cuda.get_device_name(0)}")
 check("t1_int8_pth_prod_shapes", t1_int8_prod_shapes)
-check("t2_flash_attn_2.8.4_interface", t2_fa_interface)
+check("t2_aiter_varlen_interface", t2_fa_interface)
 check("t3_aiter_symbol_compat_merged_vllm", t3_symbol_compat)
 check("t4_gemm_a16w16", t4_gemm)
 

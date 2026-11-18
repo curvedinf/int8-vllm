@@ -1,0 +1,46 @@
+services:
+  serve:
+    image: int8-vllm:mi100
+    build:
+      context: ../..
+      dockerfile: docker/mi100/Dockerfile
+      args:
+        MAX_JOBS: ${MAX_JOBS:-4}
+    init: true
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    shm_size: ${MI100_SHM_SIZE:-32gb}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "${MI100_BIND:-127.0.0.1}:${PORT:-8020}:8020"
+    env_file:
+      - path: ${MI100_ENV_FILE:-recipe.env}
+        required: false
+    environment:
+      MI100_RECIPE: ${MI100_RECIPE:-qwen38}
+      MI100_CARDS: ${MI100_CARDS:-4}
+      MI100_XGMI: ${MI100_XGMI:-on}
+      HOST: 0.0.0.0
+      PORT: 8020
+      MAX_JOBS: ${MAX_JOBS:-4}
+      MODELS_DIR: /models
+      XDG_CACHE_HOME: /cache
+      HF_HOME: /cache/huggingface
+      VLLM_CACHE_ROOT: /cache/vllm
+      TORCHINDUCTOR_CACHE_DIR: /cache/torchinductor
+      TRITON_CACHE_DIR: /cache/triton
+    volumes:
+      - ${MODELS_DIR:-${HOME:-}/models}:/models:ro
+      - cache:/cache
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8020/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: ${MI100_START_PERIOD:-3h}
+    stop_grace_period: 2m
+volumes:
+  cache:

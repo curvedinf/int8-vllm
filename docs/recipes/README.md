@@ -1,5 +1,7 @@
 # Qwen3.8-27B + DFlash2 Int8-Native Serving Recipe (gfx908 / 4x MI100)
 
+For Docker, two- or three-card PCIe deployments, and host troubleshooting, see the [MI100 installation guide](mi100-install.md).
+
 **This is the canonical baseline.** Everything here is ON by intent. Do not
 disable features listed here without explicit user instruction — they are
 load-bearing for the int8-native doctrine and were each gated by KLD/bench

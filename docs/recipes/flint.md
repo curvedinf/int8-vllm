@@ -1,5 +1,7 @@
 # Flint + Flint-DFlash2 Int8 PTQR Recipe (gfx908 / 4x MI100)
 
+For Docker, two- or three-card PCIe deployments, and host troubleshooting, see the [MI100 installation guide](mi100-install.md).
+
 Peer recipe to the [Qwen3.8-27B baseline](README.md) and the
 [Nemotron Bolt + LiLiCorr recipe](nemotron_bolt.md). Same int8-native
 doctrine: every dense GEMM is AITER W8A8 INT8 GS128, routed experts run a

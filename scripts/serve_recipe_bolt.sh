@@ -67,7 +67,7 @@ serve() {
   export PYTHONPATH="${ROOT_DIR}/python_startup:${ROOT_DIR}:${ROOT_DIR}/../int8-aiter:${PYTHONPATH:-}"
   export ROCM_PATH=/opt/rocm HIP_PATH=/opt/rocm LD_LIBRARY_PATH="/opt/rocm/lib:${LD_LIBRARY_PATH:-}"
   export GPU_ARCHS=gfx908 PYTORCH_ROCM_ARCH=gfx908 VLLM_TARGET_DEVICE=rocm
-  export HIP_VISIBLE_DEVICES=0,1,2,3 CUDA_VISIBLE_DEVICES=0,1,2,3
+  export HIP_VISIBLE_DEVICES="${MI100_DEVICES:-0,1,2,3}" CUDA_VISIBLE_DEVICES="${MI100_DEVICES:-0,1,2,3}"
   export VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1
   export VLLM_ROCM_USE_AITER_CUSTOM_AR=0 VLLM_GFX908_ACT_QUANT=round
   export VLLM_TP_SAMPLE_SYNC=1
@@ -131,20 +131,8 @@ serve() {
   # is not a calibration of this draft.
   export VLLM_GFX908_DF2_W8A8=0
   export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
-  # EngineCore/worker processes do not reliably inherit the fork-local
-  # VLLM_* switches; publish them for both entry points to apply.
-  "${ROOT_DIR}/.venv/bin/python" - <<'PY'
-import json, os
-data = {
-    k: v
-    for k, v in os.environ.items()
-    if k.startswith("VLLM_") and k != "VLLM_API_KEY"
-}
-with open("/dev/shm/vllm_bolt_runtime_env.json", "w") as fh:
-    json.dump(data, fh)
-PY
   local spec
-  spec="$("${ROOT_DIR}/.venv/bin/python" -c 'import json,sys; print(json.dumps(dict(method="dflash",model=sys.argv[1],num_speculative_tokens=7,kv_cache_dtype="int8_block_g128")))' "$DRAFT_MODEL_DIR")"
+  spec="$("${ROOT_DIR}/.venv/bin/python" -c 'import json,sys; print(json.dumps(dict(method="dflash",model=sys.argv[1],num_speculative_tokens=int(sys.argv[2]),kv_cache_dtype="int8_block_g128")))' "$DRAFT_MODEL_DIR" "${NS:-7}")"
   local args=(
     -m vllm.entrypoints.openai.api_server
     --model "$MODEL_DIR" --served-model-name nemotron-bolt
@@ -157,7 +145,7 @@ PY
     --limit-mm-per-prompt '{"image":1,"video":1}'
     --video-pruning-rate 0.5
     --media-io-kwargs '{"video":{"fps":2,"num_frames":256}}'
-    --tensor-parallel-size 4 --max-num-seqs 8 --dtype bfloat16
+    --pipeline-parallel-size "${MI100_PP_SIZE:-1}" --tensor-parallel-size "${TPS:-4}" --max-num-seqs "${C:-8}" --dtype bfloat16
     --max-model-len "${MAX_MODEL_LEN:-262144}"
     --max-num-batched-tokens "${MAX_BATCHED_TOKENS:-8512}"
     --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.90}"
@@ -170,6 +158,7 @@ PY
     --speculative-config "$spec"
     --kv-transfer-config "{\"kv_connector\":\"OffloadingConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"cpu_bytes_to_use\":${KV_OFFLOAD_BYTES:-25769803776}}}"
   )
+  if [[ "${AR:-1}" == 0 ]]; then args+=(--disable-custom-all-reduce); fi
   # The pipeline shares ~247 tokens before its per-page URL/HTML. Physical
   # 4256-token pages cannot match that prefix. Keep bounded early states and
   # the normal replay tail; 8-token hashes include the draft lookahead proof.
@@ -197,7 +186,7 @@ PY
   if [[ "${PREFETCH:-1}" == 1 ]]; then
     export VLLM_BOLT_WAIT_PREFETCH=1
     "${ROOT_DIR}/.venv/bin/python" "${ROOT_DIR}/scripts/prefetch_bolt_cache.py" \
-      --model-dir "${MODEL_DIR}" --tp-size 4 \
+      --model-dir "${MODEL_DIR}" --tp-size "${TPS:-4}" \
       --threads "${PREFETCH_THREADS:-8}" \
       --seconds "${PREFETCH_SECONDS:-300}" \
       --done-file "${VLLM_BOLT_PREFETCH_DONE}" >> "${LOG_DIR}/prefetch.log" 2>&1 &
@@ -205,6 +194,19 @@ PY
   else
     unset VLLM_BOLT_WAIT_PREFETCH
   fi
+  # Scope the snapshot to this process tree. A shared file could apply a
+  # previous Bolt boot's switches to a subsequent Qwen or Flint worker.
+  local runtime_env
+  runtime_env="$("${ROOT_DIR}/.venv/bin/python" - <<'PYTHON'
+import json
+import os
+print(json.dumps({
+    k: v for k, v in os.environ.items()
+    if k.startswith("VLLM_") and k not in {"VLLM_API_KEY", "VLLM_BOLT_RUNTIME_ENV_JSON"}
+}))
+PYTHON
+)"
+  export VLLM_BOLT_RUNTIME_ENV_JSON="$runtime_env"
   "${ROOT_DIR}/.venv/bin/python" "${args[@]}" &
   child=$!
   wait "$child"

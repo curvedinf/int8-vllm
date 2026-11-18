@@ -107,12 +107,13 @@ def _as_mock(value: object) -> MagicMock:
     "window,extra_retained", [(128, 0), (128, 3), (256, 1), (256, 3)]
 )
 @pytest.mark.parametrize("boundary", [3840, 3904, 3968])
-@pytest.mark.parametrize("eagle", [False, True])
+@pytest.mark.parametrize("draft", ["none", "eagle", "dflash"])
 @pytest.mark.parametrize("left_state", ["present", "missing", "pending", "loading"])
 def test_swa_offload_window_covers_unaligned_hit(
-    boundary, eagle, left_state, window, extra_retained
+    boundary, draft, left_state, window, extra_retained
 ):
     """A smaller SWA group can move the hit inside another group's CPU chunk."""
+    eagle = draft == "eagle"
     groups = []
     for i, (block_size, group_window) in enumerate(
         [(256, None), (64, window), (8, 128)]
@@ -130,7 +131,9 @@ def test_swa_offload_window_covers_unaligned_hit(
             )
         )
         groups.append(
-            KVCacheGroupSpec([f"layer{i}"], kv_spec, is_eagle_group=eagle and i == 1)
+            KVCacheGroupSpec(
+                [f"layer{i}"], kv_spec, is_eagle_group=draft != "none" and i == 1
+            )
         )
     manager = CPUOffloadingManager(num_chunks=100)
     spec = SimpleNamespace(
@@ -157,7 +160,11 @@ def test_swa_offload_window_covers_unaligned_hit(
         get_manager=lambda: manager,
     )
     config = SimpleNamespace(
-        speculative_config=None,
+        speculative_config=(
+            SimpleNamespace(use_dflash=lambda: True, use_eagle_block_drop=lambda: False)
+            if draft == "dflash"
+            else None
+        ),
         cache_config=SimpleNamespace(
             enable_prefix_caching=True, prefix_cache_retention_interval=None
         ),
@@ -229,6 +236,7 @@ def _make_partial_tail_scheduler(
     recurrent_only: bool = False,
     eagle: bool = False,
     cache_hit_alignment_tokens: int | None = 4,
+    dflash_window: int | None = None,
 ) -> OffloadingConnectorScheduler:
     vllm_config = _make_vllm_config(extra_config={"self_describing_kv_events": True})
     vllm_config.cache_config.prefix_match_unit = None if recurrent_only else 4
@@ -241,6 +249,22 @@ def _make_partial_tail_scheduler(
     kv_cache_config.cache_hit_alignment_tokens = cache_hit_alignment_tokens
     # The drafter shares the full-attention group, as in Qwen3-Next MTP.
     kv_cache_config.kv_cache_groups[0].is_eagle_group = eagle
+    if dflash_window:
+        vllm_config.speculative_config = SimpleNamespace(
+            use_dflash=lambda: True, use_eagle_block_drop=lambda: False
+        )
+        kv_cache_config.kv_cache_groups.append(
+            KVCacheGroupSpec(
+                ["draft_window"],
+                SlidingWindowSpec(
+                    block_size=16,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=dflash_window,
+                ),
+            )
+        )
     if recurrent_only:
         kv_cache_config.kv_cache_groups = kv_cache_config.kv_cache_groups[1:]
     spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
@@ -265,6 +289,51 @@ def _make_partial_tail_request(
     request.is_finished.return_value = False
     scheduler.on_new_request(request)
     return request
+
+
+def test_single_page_dflash_window_stores_completed_prefill_chunk():
+    scheduler = _make_partial_tail_scheduler(dflash_window=8)
+    request = _make_partial_tail_request(scheduler)
+    request.num_computed_tokens = 0
+    request.shared_prefix_boundary = 0
+    state = scheduler._req_status[request.request_id]
+    state.update_offload_keys()
+    for i, group in enumerate(state.group_states):
+        group.block_ids[:] = [10 + i]
+    _as_mock(scheduler.manager.prepare_store).side_effect = lambda keys, _: (
+        generate_store_output(keys)
+    )
+    output = SimpleNamespace(num_scheduled_tokens={"req": 16}, finished_req_ids=set())
+    scheduler._build_store_jobs(output)
+    keys = _as_mock(scheduler.manager.prepare_store).call_args.args[0]
+    assert state.group_states[2].offload_keys[0] in keys
+
+
+@pytest.mark.parametrize("missing", ["none", "window", "dense"])
+def test_dflash_partial_restore_after_sparse_mamba_history(missing):
+    scheduler = _make_partial_tail_scheduler(dflash_window=16)
+    request = _make_partial_tail_request(scheduler)
+    request.num_prompt_tokens = request.num_tokens = 78
+    request.all_token_ids = list(range(78))
+    request.block_hashes = [BlockHash(f"h{i}".encode()) for i in range(19)]
+    state = scheduler._req_status[request.request_id]
+    state.update_offload_keys()
+    dense, _, window = [group.offload_keys for group in state.group_states]
+    # Only the current Mamba checkpoint survives. The 16-token window at 68
+    # crosses the page starting at 64 and needs the previous page as well.
+    keys = set(dense[:4]) | {window[3]}
+    keys.update(
+        scheduler._make_boundary_key(request, i, 68, state.req_context)
+        for i in range(3)
+    )
+    if missing == "window":
+        keys.remove(window[3])
+    elif missing == "dense":
+        keys.remove(dense[1])
+    _as_mock(scheduler.manager.lookup).side_effect = lambda key, _: (
+        LookupResult.HIT if key in keys else LookupResult.MISS
+    )
+    assert scheduler._lookup(state) == (68 if missing == "none" else 0)
 
 
 def test_create_req_context_preserves_kv_hints():
@@ -5744,6 +5813,7 @@ def _shared_kv_mtp_config():
     whose drafter layer merges into a target KV-cache group, so no group
     self-identifies as a drafter group (issue #52735)."""
     spec = MagicMock(name="shared_kv_mtp_spec")
+    spec.use_dflash.return_value = False
     spec.use_eagle.return_value = True
     spec.use_eagle_block_drop.return_value = True
     spec.use_multi_module_mtp.return_value = False
@@ -5799,11 +5869,13 @@ class TestSharedGroupMTPOffload:
             generate_store_output(keys)
         )
         runner.run(decoded_tokens=[0])
+        # Verify rounds can rewrite the target's last decode chunk. Its store
+        # becomes safe at finish; the later load still reaches the same prefix.
         runner.run(
             decoded_tokens=[0] * (block_size * 3 + 2),
-            expected_stored=(0, 1, 2, 3, 4, 5),
+            expected_stored=(0, 1, 2, 3, 4),
         )
-        runner.run(decoded_tokens=[EOS_TOKEN_ID])
+        runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=(5,))
 
         runner.scheduler.reset_prefix_cache()
 

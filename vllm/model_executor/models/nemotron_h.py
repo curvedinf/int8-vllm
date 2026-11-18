@@ -623,6 +623,8 @@ ALL_DECODER_LAYER_TYPES = {
     }
 )
 class NemotronHModel(nn.Module, EagleModelMixin):
+    supports_aux_hidden_states_over_pp = True
+
     def __init__(
         self,
         *,
@@ -701,9 +703,12 @@ class NemotronHModel(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+        aux_hidden_states: list[torch.Tensor] = []
+        if get_pp_group().is_first_rank:
+            self._maybe_add_hidden_state(aux_hidden_states, 0, hidden_states, residual)
         for idx, layer in enumerate(
-            islice(self.layers, self.start_layer, self.end_layer)
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
         ):
             hidden_states, residual = layer(
                 positions=positions,
@@ -723,10 +728,17 @@ class NemotronHModel(nn.Module, EagleModelMixin):
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
+                }
             )
         hidden_states = final_norm(self.norm_f, hidden_states, residual)
 
+        if self._aux_upstream_total_cached:
+            remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
+            aux_hidden_states = remote_aux + aux_hidden_states
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states

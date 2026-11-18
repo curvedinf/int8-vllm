@@ -980,6 +980,8 @@ class Qwen3NextDecoderLayer(nn.Module):
 
 @support_torch_compile
 class Qwen3NextModel(nn.Module, EagleModelMixin):
+    supports_aux_hidden_states_over_pp = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
             # weight_name: (param_name, shard_id)
@@ -1067,7 +1069,9 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             hidden_states = sequence_parallel_chunk(hidden_states)
             assert residual is None
 
-        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+        aux_hidden_states: list[torch.Tensor] = []
+        if get_pp_group().is_first_rank:
+            self._maybe_add_hidden_state(aux_hidden_states, 0, hidden_states, residual)
         _lp = _layerprobe_proj(self)
         _ids_flat = (
             input_ids.flatten() if (_lp is not None and input_ids is not None)
@@ -1177,7 +1181,11 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
+                }
             )
         if _sbk:
             _sbk.end_step()
@@ -1194,6 +1202,9 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             else:
                 hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
                 hidden_states = hidden_states[:full_num_tokens]
+        if self._aux_upstream_total_cached:
+            remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
+            aux_hidden_states = remote_aux + aux_hidden_states
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states

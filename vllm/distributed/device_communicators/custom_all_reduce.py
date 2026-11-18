@@ -365,7 +365,7 @@ class CustomAllreduce:
             self.meta_ptrs, self.rank_data, rank, self.fully_connected
         )
         ops.register_buffer(self._ptr, self.buffer_ptrs)
-        if envs.VLLM_GFX908_RESIDUAL_INT8:
+        if envs.VLLM_GFX908_RESIDUAL_INT8 and self.world_size == 4:
             from .residual_g128_all_reduce import ResidualG128Allreduce
 
             self.residual_g128 = ResidualG128Allreduce(self)

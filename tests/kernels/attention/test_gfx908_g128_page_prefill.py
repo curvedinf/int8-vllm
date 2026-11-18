@@ -52,6 +52,21 @@ def _inputs(lengths, prefixes, *, block_size=4256):
     )
 
 
+def test_causal_int8_pv_ignores_masked_future_scale(monkeypatch):
+    monkeypatch.setenv("VLLM_G8_INT8_DOT", "1")
+    monkeypatch.setenv("VLLM_G8_INT8_PV", "1")
+    monkeypatch.setenv("VLLM_G8_INT8_DOT_CAUSAL", "1")
+    data = _inputs([65], [0], block_size=64)
+    before = torch.empty_like(data["q"])
+    after = torch.empty_like(before)
+    ua.unified_attention(out=before, **data)
+    first_page = data["block_table"][0, 0]
+    data["g8_v_scale"][first_page, 15] = 100.0
+    ua.unified_attention(out=after, **data)
+    # Queries 0..14 cannot attend to token 15, even within the same tile.
+    torch.testing.assert_close(before[:15], after[:15], rtol=0, atol=0)
+
+
 def _pair(monkeypatch, data):
     from vllm.platforms import rocm
 

@@ -1,5 +1,7 @@
 # Nemotron Bolt with official packed weights on MI100
 
+For Docker, two- or three-card PCIe deployments, and host troubleshooting, see the [MI100 installation guide](mi100-install.md).
+
 This peer recipe runs the official NVIDIA Nemotron 3.5 Bolt 74B-A9B 24GB
 checkpoint and its LiLiCorr draft on four MI100 GPUs. Static dense projections
 convert once to INT8 GS128 and release their original packed GPU tensors and

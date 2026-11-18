@@ -43,8 +43,8 @@ try:
     import pytest
 
     _cuda_required = pytest.mark.skipif(
-        not current_platform.is_cuda(),
-        reason="precopy_mamba_align_fused_kernel needs CUDA/Triton",
+        not current_platform.is_cuda_alike(),
+        reason="precopy_mamba_align_fused_kernel needs a CUDA or ROCm GPU with Triton",
     )
     _parametrize = pytest.mark.parametrize
 except ModuleNotFoundError:  # allow running directly as ``python <thisfile>``
@@ -299,6 +299,31 @@ def test_v2_postprocess_indexes_block_tables_by_req_slot(conv_state_dim_first):
     for layer in range(NUM_LAYERS):
         torch.testing.assert_close(convs[layer], conv_ref[layer], rtol=0, atol=0)
         torch.testing.assert_close(ssms[layer], ssm_ref[layer], rtol=0, atol=0)
+
+
+@_cuda_required
+def test_seed_spec_window_uses_request_slot():
+    # The first live request occupies the last free slot. Row zero can
+    # belong to a different request even when there is just one batch row.
+    device = torch.device("cuda")
+    bt = torch.arange(8, device=device, dtype=torch.int32).view(2, 4)
+    convs, ssms = _build_state(8, device, False)
+    expected = [state.clone() for state in (*convs, *ssms)]
+    for state in expected:
+        state[6].copy_(state[5])
+    meta = _build_meta(convs, ssms, device, False)
+    worker_mamba_utils.seed_spec_window_kernel[(1, NUM_LAYERS * 2, 1)](
+        torch.tensor([0, 1], device=device, dtype=torch.int32),
+        torch.zeros(2, device=device, dtype=torch.int32),
+        torch.tensor([0, 8], device=device, dtype=torch.int32),
+        torch.tensor([bt.data_ptr()], device=device, dtype=torch.int64),
+        bt.stride(0),
+        *meta,
+        torch.tensor([1], device=device, dtype=torch.int32),
+        1, 7, COPY_BLOCK_SIZE=1024, CONV_STATE_DIM_FIRST=False, TEMPORAL_TILES=1,
+    )
+    for state, reference in zip((*convs, *ssms), expected):
+        torch.testing.assert_close(state, reference, rtol=0, atol=0)
 
 
 def test_ds_conv_copy_spec_reproduces_multi_accept_assert(monkeypatch):

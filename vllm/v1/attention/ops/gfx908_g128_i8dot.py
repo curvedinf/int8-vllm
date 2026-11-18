@@ -100,8 +100,7 @@ def _g128_i8dot_kernel(
         s = amax / 127.0
         qi = x / s[:, None]
         qi = qi + tl.where(qi >= 0, 0.5, -0.5)
-        qi = tl.floor(qi)
-        qi = tl.minimum(tl.maximum(qi, -128.0), 127.0).to(tl.int8)
+        qi = qi.to(tl.int8)
         if gi == 0:
             q8_lo = qi
             sq_lo = s

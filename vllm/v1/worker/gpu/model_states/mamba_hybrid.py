@@ -224,7 +224,7 @@ class MambaHybridModelState(DefaultModelState):
         num_reqs = input_batch.num_reqs
         if num_reqs == 0:
             return
-        _, mamba_spec = self._get_mamba_group_info(kv_cache_config)
+        mamba_group_ids, mamba_spec = self._get_mamba_group_info(kv_cache_config)
         ctx = self._mamba_ctx
         assert ctx is not None
 

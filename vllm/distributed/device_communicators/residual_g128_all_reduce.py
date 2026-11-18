@@ -105,10 +105,24 @@ class ResidualG128Allreduce:
 def all_reduce(value):
     from vllm.distributed import get_tp_group
 
-    native = get_tp_group().device_communicator.ca_comm
-    if native is None or native.residual_g128 is None:
-        raise RuntimeError("Decoder GS128 collective was not initialized")
-    return native.residual_g128.all_reduce(value)
+    group = get_tp_group()
+    if group.world_size == 1:
+        return value
+    native = group.device_communicator.ca_comm
+    if native is not None and native.residual_g128 is not None:
+        return native.residual_g128.all_reduce(value)
+
+    # RCCL sums tensors. Each rank's GS128 codes have different scales,
+    # so reduce their FP32 values and quantize the global sum once.
+    from vllm.model_executor.layers.quantization.gptq_moe_a8w8 import group_quant_rn
+    from vllm.model_executor.layers.residual_int8 import ResidualInt8, materialize
+
+    local = materialize(ResidualInt8(value.codes, value.scales, torch.float32))
+    total = group.all_reduce(local)
+    q, s = group_quant_rn(total.reshape(-1, total.shape[-1]))
+    return ResidualInt8(
+        q.view_as(value.codes), s.view_as(value.scales), value.compute_dtype
+    )
 
 
 def all_reduce_pair(a, b):

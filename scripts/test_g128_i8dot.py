@@ -5,11 +5,12 @@
 import os
 import sys
 import time
+from pathlib import Path
 
 import torch
 
-sys.path.insert(0, "/home/curved/int8-aiter")
-sys.path.insert(0, "/home/curved/int8-vllm")
+root = Path(__file__).resolve().parents[1]
+sys.path[:0] = [str(root), str(root.parent / "int8-aiter")]
 
 from vllm.v1.attention.ops.triton_unified_attention import reduce_segments  # noqa: F401
 from vllm.v1.attention.ops.gfx908_g128_i8dot import _g128_i8dot_kernel  # noqa: E402
@@ -160,6 +161,10 @@ if __name__ == "__main__":
     assert torch.isfinite(got).all()
     # INT8 Q quantization introduces bounded error against unquantized Q.
     assert (got - ref).abs().mean() / ref.abs().mean() < 0.04
+    # Symmetric query rounding preserves QK when both factors change sign.
+    # Negative queries rounded with floor after a signed half offset fail here.
+    flipped = run_kernel(packed, -k, v, g8, g8v, -q, CTX).float()
+    torch.testing.assert_close(flipped, got, rtol=0, atol=0)
     again = run_kernel(packed, k, v, g8, g8v, q, CTX).float()
     assert torch.equal(got, again), "query-tile stores must not race"
     if os.environ.get("I8_CHECK_ONLY") == "1":

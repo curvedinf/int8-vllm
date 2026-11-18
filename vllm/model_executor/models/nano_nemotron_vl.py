@@ -38,12 +38,14 @@ from vllm.model_executor.models.interfaces import (
     SupportsLoRA,
     SupportsMultiModal,
     SupportsMultiModalPruning,
+    SupportsPP,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.nemotron_h import NemotronHForCausalLM
 from vllm.model_executor.models.parakeet import ParakeetExtractor, ProjectedParakeet
 from vllm.model_executor.models.radio import RadioModel, calc_seq_lens
 from vllm.model_executor.models.utils import (
+    StageMissingLayer,
     WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,
@@ -932,6 +934,7 @@ class NemotronH_Nano_VL_V2(
     SupportsEagle3,
     SupportsMultiModal,
     SupportsMultiModalPruning,
+    SupportsPP,
     SupportsLoRA,
 ):
     requires_sequential_video_encoding = True
@@ -988,6 +991,9 @@ class NemotronH_Nano_VL_V2(
                 hf_config=config.text_config,
                 prefix=maybe_prefix(prefix, "language_model"),
             )
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors
+        )
         llm_dtype = self.language_model.config.dtype
         assert isinstance(llm_dtype, torch.dtype)
         self.llm_dtype = llm_dtype
@@ -1602,9 +1608,12 @@ class NemotronH_Nano_VL_V2(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         mm_config = self.model_config.multimodal_config
         assert mm_config is not None
-        load_multimodal_weights = not all(
-            mm_config.get_limit_per_prompt(modality) == 0
-            for modality in ("image", "video", "audio")
+        load_multimodal_weights = (
+            not isinstance(self.mlp1, StageMissingLayer)
+            and any(
+                mm_config.get_limit_per_prompt(modality) != 0
+                for modality in ("image", "video", "audio")
+            )
         )
         adapter_dict = dict(self.mlp1.named_parameters())
         vision_norm_params = (

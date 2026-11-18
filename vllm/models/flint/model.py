@@ -1094,9 +1094,13 @@ class FlintDecoderLayer(nn.Module):
             hidden_states, residual = self.post_attention_layernorm(
                 hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
-        if isinstance(hidden_states, ResidualInt8) and (
-                get_tensor_model_parallel_world_size() > 1):
-            # Dense-MLP down is row-parallel: its payload is a TP partial.
+        if (
+            isinstance(hidden_states, ResidualInt8)
+            and not isinstance(self.mlp, FlintSparseMoeBlock)
+            and get_tensor_model_parallel_world_size() > 1
+        ):
+            # The dense down-projection returns a TP partial. The routed
+            # MoE has already reduced its shared and routed branches.
             from vllm.distributed.device_communicators import (
                 residual_g128_all_reduce as _rgd,
             )
@@ -1106,6 +1110,8 @@ class FlintDecoderLayer(nn.Module):
 
 
 class FlintModel(nn.Module, EagleModelMixin):
+    supports_aux_hidden_states_over_pp = True
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -1132,6 +1138,30 @@ class FlintModel(nn.Module, EagleModelMixin):
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
+        from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
+
+        self.packed_pp = (
+            vllm_config.parallel_config.pipeline_parallel_size > 1
+            and isinstance(quant_config, AutoGPTQConfig)
+            and _stream_i8()
+            and os.environ.get("VLLM_GFX908_RESIDUAL_INT8") == "1"
+        )
+        self.pp_dtype = vllm_config.model_config.dtype
+        if self.packed_pp:
+            self.make_empty_intermediate_tensors = self._make_packed_intermediates
+
+    def _make_packed_intermediates(self, batch_size, dtype, device):
+        # The runner also uses these buffers for profiling and graph capture.
+        width = self.config.hidden_size
+        tensors = {}
+        for key in ("hidden_states", "residual"):
+            tensors[key] = torch.zeros(
+                batch_size, width, dtype=torch.int8, device=device
+            )
+            tensors[key + "_scales"] = torch.zeros(
+                batch_size, width // 128, dtype=torch.float32, device=device
+            )
+        return IntermediateTensors(tensors)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1146,6 +1176,17 @@ class FlintModel(nn.Module, EagleModelMixin):
         if intermediate_tensors is not None:
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
+            if self.packed_pp:
+                from vllm.model_executor.layers.residual_int8 import ResidualInt8
+
+                hidden_states = ResidualInt8(
+                    hidden_states,
+                    intermediate_tensors["hidden_states_scales"],
+                    self.pp_dtype,
+                )
+                residual = ResidualInt8(
+                    residual, intermediate_tensors["residual_scales"], self.pp_dtype
+                )
         else:
             hidden_states = (
                 inputs_embeds
@@ -1182,8 +1223,9 @@ class FlintModel(nn.Module, EagleModelMixin):
             if _do:
                 if torch.cuda.is_current_stream_capturing():
                     continue  # capture pass: host sync / save not allowed
-                _full = (hidden_states if residual is None
-                         else hidden_states + residual)
+                _full = _mat8(hidden_states)
+                if residual is not None:
+                    _full = _full + _mat8(residual)
                 if _want and _full.shape[0] != _want:
                     _do = False  # dummy run for another batch size
                     continue
@@ -1191,16 +1233,30 @@ class FlintModel(nn.Module, EagleModelMixin):
                     _do = False  # dummy/warmup step (zero inputs)
                 else:
                     import torch.distributed as _dist
-                    if not _dist.is_initialized() or _dist.get_rank() == 0:
+                    from vllm.distributed import get_tensor_model_parallel_rank
+
+                    if (
+                        not _dist.is_initialized()
+                        or get_tensor_model_parallel_rank() == 0
+                    ):
                         torch.save(_full.detach().float().cpu(),
                                    f"{_dump}.{_li}.pt")
                         _saved += 1
         if _saved:
             self._hidden_dumped = True
         if self.end_layer != len(self.layers):
-            return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
-            )
+            tensors = self.pack_local_aux_hidden_states(aux_hidden_states)
+            for key, value in (
+                ("hidden_states", hidden_states),
+                ("residual", residual),
+            ):
+                if self.packed_pp:
+                    value = _to_payload(value)
+                    tensors[key] = value.codes
+                    tensors[key + "_scales"] = value.scales
+                else:
+                    tensors[key] = value
+            return IntermediateTensors(tensors)
         from vllm.model_executor.layers.residual_int8 import (
             ResidualInt8 as _RI8b,
         )
@@ -1215,6 +1271,9 @@ class FlintModel(nn.Module, EagleModelMixin):
                 _to_payload(residual), allow_2048=True)
         else:
             hidden_states, _ = self.norm(hidden_states, residual)
+        if self._aux_upstream_total_cached:
+            remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
+            aux_hidden_states = remote_aux + aux_hidden_states
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states

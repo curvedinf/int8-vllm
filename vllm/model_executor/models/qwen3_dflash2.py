@@ -11,7 +11,7 @@ from torch import nn
 from vllm.compilation.backends import set_model_tag
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import ReplicatedLinear, UnquantizedLinearMethod
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.residual_int8 import (
@@ -220,6 +220,9 @@ class DFlashGroupedConv(nn.Module):
         if os.environ.get("VLLM_GFX908_DF2_W8A8", "1") != "1":
             return
 
+        if not isinstance(self.kernel_projection.quant_method, UnquantizedLinearMethod):
+            # Packed checkpoint bytes belong to the projection's quantizer.
+            return
         w = self.kernel_projection.weight.data.float()
         wmax = w.abs().amax(dim=1, keepdim=True).clamp(min=1e-12)
         self._kp_s = (wmax / 127.0).to(torch.float32).contiguous()
@@ -397,12 +400,15 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
             group_size=int(draft_config["conv_group_size"]),
             # Query tokens per request: the bonus token plus the mask tokens.
             block_size=1 + speculative_config.num_speculative_tokens,
-            # Fork doctrine: conv params follow the draft checkpoint dtype
-            # (bf16). Forcing the target's dtype overflows the draft residual
-            # stream (fixed 2026-08-24, do not regress), and the projection
-            # stays dense here — the fork's own W8A8 requant in
-            # DFlashGroupedConv.process_weights_after_loading owns quantization.
+            # The PTQR GPTQ exports store their conv projections in the
+            # draft's float dtype for W8A8 conversion after loading. Other
+            # checkpoint formats may supply packed projections or exclusions.
             params_dtype=speculative_config.draft_model_config.dtype,
+            quant_config=(
+                None
+                if quant_config and quant_config.get_name() in ("gptq", "auto_gptq")
+                else quant_config
+            ),
         )
         self.attention_conv = DFlashGroupedConv(
             **conv_args, prefix=maybe_prefix(prefix, "attention_conv")
@@ -501,7 +507,7 @@ def _codebook_lookup(table, ids: torch.Tensor) -> torch.Tensor:
     """Gather codebook rows, dequantizing int8 tables after the lookup."""
     if isinstance(table, tuple):
         q, s = table
-        return (q[ids].float() * s[ids].unsqueeze(-1)).to(torch.bfloat16)
+        return (q[ids].float() * s[ids]).to(torch.bfloat16)
     return table[ids]
 
 

@@ -6,7 +6,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.model_executor.models.qwen3_dflash2 import _grouped_conv, _score_edges
+from vllm.model_executor.models.qwen3_dflash2 import (
+    _codebook_lookup,
+    _grouped_conv,
+    _score_edges,
+)
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
@@ -244,6 +248,15 @@ def test_beam_fp8_context_cache_matches_backend_and_replays(rows, cache_dtype):
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
+def test_quantized_codebook_lookup_preserves_candidate_dimensions():
+    codes = torch.randint(-127, 128, (32, 8), dtype=torch.int8)
+    row_scales = torch.rand(32, 1, dtype=torch.float16)
+    candidate_ids = torch.randint(32, (2, 13, 16))
+    expected = (codes.float() * row_scales).to(torch.bfloat16)[candidate_ids]
+    actual = _codebook_lookup((codes, row_scales), candidate_ids)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 def test_selector_edges_match_sequential_reference():
     torch.manual_seed(1)
     batch, steps, top_k, rank = 2, 4, 3, 5
@@ -459,6 +472,8 @@ def _mock_draft_configs(monkeypatch, hf_config):
         speculative_config=SimpleNamespace(
             draft_model_config=SimpleNamespace(
                 hf_config=hf_config,
+                dtype=torch.float32,
+                max_model_len=1024,
                 quantization=None,
             ),
             num_speculative_tokens=4,
@@ -649,8 +664,11 @@ def test_conv_projections_use_draft_quant_config(monkeypatch):
     )
     layer = DFlash2Qwen3DecoderLayer(
         SimpleNamespace(
-            speculative_config=SimpleNamespace(num_speculative_tokens=7),
-            model_config=SimpleNamespace(dtype=torch.bfloat16),
+            speculative_config=SimpleNamespace(
+                num_speculative_tokens=7,
+                draft_model_config=SimpleNamespace(dtype=torch.bfloat16),
+            ),
+            model_config=SimpleNamespace(dtype=torch.float16),
         ),
         config=SimpleNamespace(
             hidden_size=16,

@@ -277,8 +277,8 @@ def kernel_unified_attention(
     # Single-group only (G8_GROUP == HEAD_SIZE): keep K/V int8 through both
     # dots instead of dequantizing to the activation dtype (2x the MI100
     # matrix rate, minus the per-tile dequant multiplies). Q is quantized
-    # per row with round-half-away-from-zero; P is quantized per tile
-    # against the tile's largest V group scale.
+    # per query row with round-half-away-from-zero. The PV dot uses a
+    # separate scale per query row and key tile.
     G8_INT8_DOT: tl.constexpr = False,
     # int8 PV dot (requires G8_INT8_DOT): P is requantized per tile.
     G8_INT8_PV: tl.constexpr = False,
@@ -410,7 +410,8 @@ def kernel_unified_attention(
         q_token_scale = q_absmax / 127.0
         qi = q_f32 / q_token_scale[:, None]
         qi = qi + tl.where(qi >= 0, 0.5, -0.5)
-        Q_int8 = tl.floor(qi).to(tl.int8)
+        # FP-to-int truncates toward zero after the signed half offset.
+        Q_int8 = qi.to(tl.int8)
 
     block_table_offset = seq_idx * block_table_stride
 
@@ -824,16 +825,15 @@ def kernel_unified_attention(
             P_v = (P * v_token_head_scales[None, :]).to(V.dtype)
             acc += tl.dot(P_v, V)
         elif G8_INT8_PV:
-            # int8 PV: P is in [0, 1], so quantize (P * v_group_scale)
-            # against the tile's largest V scale — the scale then cancels
-            # exactly after the int32 dot.
-            vmax = tl.max(tl.where(tile_mask, v_g8, 0.0))
-            pv_scale = tl.where(vmax > 0, 127.0 / vmax, 1.0)
-            Pq = tl.minimum(tl.floor(P * (v_g8[None, :] * pv_scale) + 0.5), 127.0)
-            acc += (
-                tl.dot(Pq.to(tl.int8), V, out_dtype=tl.int32).to(tl.float32)
-                * (1.0 / pv_scale)
-            )
+            # Quantize the scaled probabilities actually used by each query.
+            # Masked/future rows and high scores in earlier online-softmax
+            # tiles must not set the scale for this dot product.
+            weighted_p = P * v_g8[None, :]
+            pv_scale = tl.maximum(tl.max(weighted_p, axis=1), 1e-20) / 127.0
+            Pq = tl.minimum(weighted_p / pv_scale[:, None] + 0.5, 127.0)
+            acc += tl.dot(Pq.to(tl.int8), V, out_dtype=tl.int32).to(
+                tl.float32
+            ) * pv_scale[:, None]
         else:
             # Keep softmax weights representable when the P @ V dot uses FP8
             # tensor cores. Undo the power-of-two scale after the dot.

@@ -2331,7 +2331,7 @@ class EngineArgs:
             swa_bounded_replay=self.swa_bounded_replay,
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_cache_mode=(
-                CacheConfig.fields["mamba_cache_mode"].default
+                get_field(CacheConfig, "mamba_cache_mode").default
                 if self.mamba_cache_mode is None
                 else self.mamba_cache_mode
             ),

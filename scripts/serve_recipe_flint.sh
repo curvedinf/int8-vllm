@@ -10,8 +10,7 @@
 #   - routed 256-expert MoE on the gfx908 grouped a8w8-blockscale kernel
 #     (vllm/model_executor/layers/quantization/gptq_moe_a8w8.py)
 #   - AITER unified attention, vLLM CUSTOM all-reduce
-#   - int8 per-token-head KV on BOTH target and draft (measured fastest int8
-#     layout for Flint; int8_block_g128 remains the KV_DTYPE rollback lever)
+#   - int8_block_g128 KV on both target and draft
 #   - TP4 / C12 (twelve concurrent sequences), DFlash2 NS=7
 #   - 512k per-request cap (Flint announcement; card recommends <=256k)
 # No 16-bit fallback: the a8w8 expert path is the production path. Setting
@@ -63,7 +62,7 @@ serve() {
   export PYTHONPATH="${ROOT_DIR}/python_startup:${ROOT_DIR}:${ROOT_DIR}/../int8-aiter:${PYTHONPATH:-}"
   export ROCM_PATH=/opt/rocm HIP_PATH=/opt/rocm LD_LIBRARY_PATH="/opt/rocm/lib:${LD_LIBRARY_PATH:-}"
   export GPU_ARCHS=gfx908 PYTORCH_ROCM_ARCH=gfx908 VLLM_TARGET_DEVICE=rocm
-  export HIP_VISIBLE_DEVICES=0,1,2,3 CUDA_VISIBLE_DEVICES=0,1,2,3
+  export HIP_VISIBLE_DEVICES="${MI100_DEVICES:-0,1,2,3}" CUDA_VISIBLE_DEVICES="${MI100_DEVICES:-0,1,2,3}"
   export VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1
   # vLLM CUSTOM all-reduce is the measured fastest on this mesh; AITER CAR is
   # coherent and remains available via VLLM_ROCM_USE_AITER_CUSTOM_AR=1.
@@ -121,8 +120,8 @@ serve() {
     export VLLM_RESIDUAL_G128_LIBRARY="${VLLM_RESIDUAL_G128_LIBRARY:-${ROOT_DIR}/vllm/_residual_g128.so}"
     if [[ ! -f "$VLLM_RESIDUAL_G128_LIBRARY" ]]; then
       bash "${ROOT_DIR}/scripts/build_residual_g128.sh" "$VLLM_RESIDUAL_G128_LIBRARY" || {
-        echo 'Failed to build the GS128 collective; disabling payload mode' >&2
-        export VLLM_GFX908_O_PROJ_I8=0 VLLM_GFX908_RESIDUAL_INT8=0
+        echo 'Flint requires the GS128 projection. Check hipcc and run scripts/build_residual_g128.sh.' >&2
+        return 1
       }
     fi
   fi
@@ -154,7 +153,7 @@ serve() {
     -m vllm.entrypoints.openai.api_server
     --model "$MODEL_DIR" --served-model-name flint
     --host "$HOST" --port "$PORT"
-    --tensor-parallel-size "${TPS:-4}"
+    --pipeline-parallel-size "${MI100_PP_SIZE:-1}" --tensor-parallel-size "${TPS:-4}"
     --max-num-seqs "${C:-12}"
     --dtype bfloat16
     --max-model-len "${MAXLEN:-524288}"
@@ -171,6 +170,7 @@ serve() {
     --reasoning-parser "${REASONING_PARSER:-flint}"
     --override-generation-config '{"temperature":1.0,"top_p":0.95,"top_k":20}'
   )
+  if [[ "${AR:-1}" == 0 ]]; then args+=(--disable-custom-all-reduce); fi
   # SPEC=0 boots without speculative decoding (diagnostic bisection only:
   # changes M from C*(NS+1) to C and removes the draft forward).
   if [[ "${SPEC:-1}" == "1" ]]; then

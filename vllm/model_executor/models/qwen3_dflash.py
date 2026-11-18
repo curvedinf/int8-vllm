@@ -1064,6 +1064,9 @@ class DFlashQwen3Model(nn.Module):
 
 
 class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
+    # The last pipeline stage shares the target embedding unless a checkpoint
+    # supplies a draft copy (process_eagle_weight sets this flag when loading).
+    has_own_embed_tokens = False
     model_cls = DFlashQwen3Model
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

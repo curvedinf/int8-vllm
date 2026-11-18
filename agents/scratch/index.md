@@ -2,8 +2,6 @@
 
 - [Bolt INT8 residuals](bolt-residual-int8.md): requested text-path conversion and live gates.
 
-- [Short prefix cache repair](prefix-cache.md): active Bolt validation and proxy restoration.
-
 - [Shared timers](timers.json): periodic maintenance state.
 - [Disclosure policy](security-policy.md): approved disclosure conditions.
 - [dev-skills installation record](dev-skills-install.md): source revision and destination mapping.
@@ -12,3 +10,4 @@
 - [Bolt boot optimization](boot-optimization.md): boot-time profile and optimizations.
 - [Flint int8 recipe](flint-int8-recipe.md): active goal design map and measurements.
 - [Upstream v0.33.0 merge](upstream-v0330-merge.md): merge state, resolutions and gates.
+- [Flint startup diagnostics](flint-server-recovery-20261112.md) records the compiler disk-quota failure.

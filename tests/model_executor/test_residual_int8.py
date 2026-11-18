@@ -171,3 +171,27 @@ def test_direct_normalized_payload(shape):
     torch.testing.assert_close(packed.scales, s, atol=0, rtol=0)
     torch.testing.assert_close(actual_r.codes, expected_r.codes, atol=0, rtol=0)
     assert packed.flatten_rows()[0].data_ptr() == packed.codes.data_ptr()
+
+
+@pytest.mark.parametrize("sparse", [False, True])
+def test_flint_reduces_only_rank_local_mlp_outputs(monkeypatch, sparse):
+    from unittest.mock import Mock
+
+    from vllm.distributed.device_communicators import residual_g128_all_reduce
+    from vllm.models.flint import model as flint
+
+    hidden = torch.zeros(1, 128)
+    payload = ResidualInt8(hidden.to(torch.int8), torch.ones(1, 1), torch.bfloat16)
+    mlp = Mock(spec=flint.FlintSparseMoeBlock if sparse else torch.nn.Linear)
+    mlp.return_value = payload
+    if sparse:
+        mlp.forward_ll.return_value = None
+    layer = SimpleNamespace(
+        mlp=mlp, _fused_ar_rms=False, post_attention_layernorm=lambda x, r: (x, r)
+    )
+    reduce = Mock(return_value=payload)
+    monkeypatch.setattr(flint, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(residual_g128_all_reduce, "all_reduce", reduce)
+    result, _ = flint.FlintDecoderLayer._post_attention(layer, hidden, hidden)
+    assert result is payload
+    assert reduce.call_count == (0 if sparse else 1)

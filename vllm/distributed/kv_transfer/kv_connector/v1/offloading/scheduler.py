@@ -124,6 +124,10 @@ class GroupOffloadConfig(NamedTuple):
     # Unlike is_eagle_group this changes ONLY the trailing-chunk store
     # exclusion — no drop semantics, no reachable-tail adjustments.
     spec_volatile_tail: bool = False
+    # DFlash reprojects its sliding-window draft KV during decode. Only
+    # prefill snapshots are stable. Its KV depends on target hidden states,
+    # so a restored prefill boundary needs no extra EAGLE proof block.
+    is_dflash_group: bool = False
 
     def load_window_size_in_chunks(self, num_tokens: int) -> int | None:
         window = self.sliding_window_size_in_chunks
@@ -241,25 +245,14 @@ class SchedulerOffloadConfig(NamedTuple):
                 "KV-cache group is annotated as a drafter group; treating "
                 "all groups as non-draft for offloading."
             )
+        dflash_groups: set[int] = set()
         if (
-            not eagle_groups
-            and vllm_config.speculative_config is not None
+            vllm_config.speculative_config is not None
             and vllm_config.speculative_config.use_dflash()
         ):
-            # is_eagle_group is only ever set for DeepSeek V4 upstream, and
-            # dflash never enables eagle block drop, so without this the
-            # dflash draft groups would go unflagged. A catch-all that marks
-            # EVERY group as draft attention misaligns the per-group hit
-            # boundaries the connector reconciles against on a hybrid mamba
-            # model, corrupting restored state on resume under concurrent
-            # load (the acceptance-collapse garble + engine wedges;
-            # 2026-08-30 bisect: 3-5 collapse windows per concurrent round
-            # with the catch-all, 0 with the tier off), and applies EAGLE
-            # drop semantics to groups whose finders never drop (Mamba's).
-            # For dflash-family drafters the draft KV is exactly its
-            # sliding-window layers; flag those groups only
-            # (qwen38-27b-rtx3090 issue #33).
-            eagle_groups = {
+            # Older DFlash checkpoints/configurations do not annotate the
+            # draft group. The deployed hybrid recipes use SWA for the draft.
+            dflash_groups = eagle_groups or {
                 group.group_id
                 for group in spec.config.groups
                 if isinstance(
@@ -267,6 +260,7 @@ class SchedulerOffloadConfig(NamedTuple):
                     SlidingWindowSpec,
                 )
             }
+            eagle_groups = set()
 
         if eagle_groups:
             logger.info(
@@ -329,6 +323,7 @@ class SchedulerOffloadConfig(NamedTuple):
                     manager_cls=manager_cls,
                     kv_event_group_spec=get_offloading_event_group_spec(kv_cache_group),
                     is_eagle_group=group_id in eagle_groups,
+                    is_dflash_group=group_id in dflash_groups,
                     spec_volatile_tail=(
                         vllm_config.speculative_config is not None
                     ),
@@ -346,8 +341,9 @@ class SchedulerOffloadConfig(NamedTuple):
             for config in kv_group_configs
         )
         # Partial tails currently require one physical block per offload chunk
-        # and uniform, non-windowed groups so one boundary identifies every
-        # group's source. EAGLE groups key their partial tail at a proof
+        # and uniform blocks so one boundary identifies each source. DFlash
+        # windows also verify the preceding chunks their load needs.
+        # EAGLE groups key their partial tail at a proof
         # position past the boundary. DCP needs additional hand-off semantics.
         supports_partial_tail = (
             spec.blocks_per_chunk == 1
@@ -356,6 +352,7 @@ class SchedulerOffloadConfig(NamedTuple):
             and all(
                 config.sliding_window_size_in_chunks is None
                 or config.requires_cow_source
+                or config.is_dflash_group
                 for config in kv_group_configs
             )
             and vllm_config.parallel_config.decode_context_parallel_size == 1
@@ -556,7 +553,7 @@ class RequestOffloadState:
             # out of the CPU tier entirely (attention groups still store) so
             # the recurrent pool is never CoW-migrated mid-decode.
             num_chunks = 0
-        if group_config.is_eagle_group and is_decoding:
+        if is_decoding and group_config.is_dflash_group:
             # G1 finalgate evidence (3a14094120): the draft group's KV is
             # rewritten by the ctx-KV precompute EVERY round across its whole
             # sliding window — not just the trailing chunk. Any stored draft
@@ -724,6 +721,10 @@ class OffloadingConnectorScheduler:
             and config.is_eagle_group
             and not config.requires_cow_source
         }
+        self._windowed_dflash_tail = self.config.supports_partial_tail and any(
+            group.is_dflash_group and isinstance(group.kv_cache_spec, SlidingWindowSpec)
+            for group in self.config.kv_group_configs
+        )
         self._max_eagle_proof_margin = max(
             self._eagle_proof_margins.values(), default=0
         )
@@ -1197,12 +1198,16 @@ class OffloadingConnectorScheduler:
         # asynchronous lookup and would defer the request forever.
         if os.environ.get("VLLM_OFFLOAD_NO_LOADS"):
             return 0
+        local_tokens = req_status.num_locally_computed_tokens
+        if self._windowed_dflash_tail and local_tokens % self._partial_tail_block_size:
+            # Loading further bytes into a shared partial local block would
+            # require a separate copy-on-write destination.
+            return 0
         complete_hit = self._lookup_complete_chunks(req_status, max_num_new_tokens)
         req_status.partial_tail_boundary = None
         if complete_hit is None or not self.config.supports_partial_tail:
             return complete_hit
 
-        local_tokens = req_status.num_locally_computed_tokens
         complete_boundary = local_tokens + complete_hit
         tokens_per_hash = self.config.tokens_per_hash
         # A partial tail carries its own EAGLE proof, so it may also lie in
@@ -1211,6 +1216,16 @@ class OffloadingConnectorScheduler:
         block_end = complete_boundary + (
             num_search_blocks * self._partial_tail_block_size
         )
+        if self._windowed_dflash_tail and self._full_attention_groups:
+            # A sparse Mamba cache can retain just the final partial state.
+            # All earlier full-attention pages must still be available. The
+            # complete lookup visits these groups before the recurrent state.
+            dense_pages = min(
+                req_status.group_states[i].lookup_hit_end_chunk_idx
+                for i in self._full_attention_groups
+            )
+            dense_end = (dense_pages + 1) * self._partial_tail_block_size
+            block_end = max(block_end, dense_end)
         max_boundary = min(req_status.req.num_prompt_tokens - 1, block_end - 1)
         if self._max_eagle_proof_margin:
             # The proof key needs a hash of this request past the boundary.
@@ -1240,7 +1255,7 @@ class OffloadingConnectorScheduler:
         # Bridge keys that the complete-chunk lookup did not confirm.
         unconfirmed_bridge_keys: list[tuple[GroupOffloadConfig, OffloadKey]] = []
         pending = False
-        if max_boundary >= bridge_boundary:
+        if max_boundary >= bridge_boundary and not self._windowed_dflash_tail:
             for group_config, group_state in zip(
                 self.config.kv_group_configs, req_status.group_states
             ):
@@ -1259,6 +1274,8 @@ class OffloadingConnectorScheduler:
                 pending |= result is not LookupResult.HIT
         bridge_pending = pending
         for boundary in range(max_boundary, complete_boundary, -tokens_per_hash):
+            if self._windowed_dflash_tail and boundary % block_size == 0:
+                continue  # Aligned entries were checked by the complete lookup.
             loads_bridge = boundary >= bridge_boundary
             hit, boundary_pending = self._lookup_partial_tail(
                 req_status, boundary, loads_bridge and bridge_pending
@@ -1312,6 +1329,30 @@ class OffloadingConnectorScheduler:
                 return False, pending
             pending |= result is not LookupResult.HIT
             boundary_keys.append((group_config, key_tokens, key))
+
+        if self._windowed_dflash_tail:
+            # Sparse Mamba checkpoints can leave several pages between the
+            # best complete hit and this state. Verify every complete source
+            # the load will need, including a window spanning two pages.
+            for group, state in zip(
+                self.config.kv_group_configs, req_status.group_states
+            ):
+                if group.requires_cow_source:
+                    continue
+                end = cdiv(boundary, group.tokens_per_chunk)
+                start = req_status.num_locally_computed_tokens // group.tokens_per_chunk
+                window = group.load_window_size_in_chunks(boundary)
+                if window is not None:
+                    start = max(start, end - window)
+                for key in state.offload_keys[start : end - 1]:
+                    result = self.manager.lookup(key, req_context)
+                    if result is LookupResult.MISS:
+                        return False, pending
+                    pending |= result is not LookupResult.HIT
+                    pending |= key in (self._chunks_being_loaded or ())
+            pending |= any(
+                key in (self._chunks_being_loaded or ()) for _, _, key in boundary_keys
+            )
 
         if pending:
             return False, True
@@ -1835,6 +1876,12 @@ class OffloadingConnectorScheduler:
                 else group_states[group.group_idx].block_ids[block_idx]
                 for group in self.config.kv_group_configs
             ]
+            if self._windowed_dflash_tail and any(
+                group.is_dflash_group and block_id == 0
+                for group, block_id in zip(self.config.kv_group_configs, block_ids)
+            ):
+                # The window advanced before the recurrent handoff arrived.
+                continue
             assert all(block_id != 0 for block_id in block_ids)
 
             store_output = self.manager.prepare_store(keys, req_status.req_context)
@@ -2044,7 +2091,7 @@ class OffloadingConnectorScheduler:
                 # 58-62). Skip the running chunk's KEY while the request is
                 # live; the finish-time store captures it once writes stop.
                 mamba_skip_last_chunk = (
-                    group_config.sliding_window_size_in_chunks == 1
+                    isinstance(group_config.kv_cache_spec, MambaSpec)
                     and not req.is_finished()
                 )
                 last_storable_chunk = (

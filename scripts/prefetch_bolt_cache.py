@@ -68,12 +68,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-dir", required=True)
     parser.add_argument("--tp-size", type=int, default=4)
-    parser.add_argument("--ranks", type=int, nargs="+", default=[0, 1, 2, 3])
+    parser.add_argument("--ranks", type=int, nargs="+")
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument("--chunk-mb", type=int, default=2)
     parser.add_argument("--seconds", type=float, default=300.0)
     parser.add_argument("--done-file", default=os.environ.get("VLLM_BOLT_PREFETCH_DONE", DEFAULT_DONE))
     args = parser.parse_args()
+    if args.ranks is None:
+        args.ranks = range(args.tp_size)
     global CHUNK
     CHUNK = args.chunk_mb << 20
 
@@ -89,7 +91,10 @@ def main() -> int:
         meta_path = os.path.join(root, f"rank{rank}.meta.fast.json")
         if not os.path.exists(meta_path):
             print(f"no fast manifest for rank {rank}: {meta_path}", file=sys.stderr)
-            return 1
+            # First boot has nothing to prefetch. Release workers immediately.
+            with open(args.done_file, "w") as fh:
+                fh.write("cold cache\n")
+            return 0
         per_rank[rank] = non_expert_ranges(meta_path)
     # Round-robin by range index so every rank's early tensors are warm first.
     width = max(len(r) for r in per_rank.values())

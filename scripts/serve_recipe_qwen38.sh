@@ -9,22 +9,28 @@ for _kv in "${KV_DTYPE:-}" "${DRAFT_KV_DTYPE:-}"; do
   fi
 done
 
-ROOT_DIR="${HOME}/int8-vllm"
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV="${ROOT_DIR}/.venv"
 MODEL_DIR="${MODEL_DIR:-${HOME}/models/Qwen3.8-27B-PTQR-R10S60}"  # PTQR-retrained (ledger PTQR_P1_R10S60_FINAL: KLD 0.0069 vs 0.0110 deployed, acceptance 3.88)
 SERVED_MODEL_NAME="qwen3.8-27b-gptq8"
-LOG_DIR="${ROOT_DIR}/logs/serve_recipe_qwen38"
+LOG_DIR="${LOG_DIR:-${ROOT_DIR}/logs/serve_recipe_qwen38}"
 PID_FILE="${LOG_DIR}/server.pid"
-API_KEY_FILE="/etc/llama/llama-api.key"
+API_KEY_FILE="${API_KEY_FILE:-/etc/llama/llama-api.key}"
 WORKDIR="/tmp"
 
-HOST="127.0.0.1"
+HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8020}"
 # Cover mixed/prefill shapes as well as the small decode-only graphs.
 CGSIZES="${CGSIZES:-[1,2,4,8,16,24,32,40,48,56,64,72,80,128,256,512,1024,2048]}"
 STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-2400}"
 STOP_TIMEOUT=20
-CPUSET="0-47"
+# Preserve the deployed cap on larger hosts and respect smaller cpusets.
+cpu_threads=$(nproc)
+if ((cpu_threads > 48)); then cpu_threads=48; fi
+if [[ -z "${CPUSET:-}" ]]; then
+  CPUSET=$("${VENV}/bin/python" -c \
+    'import os; print(",".join(map(str, sorted(os.sched_getaffinity(0))[:48])))')
+fi
 # Orphaned kv_tier pruning (see prune_kv_tier): daily wall-clock prune time
 # and its timezone (the machine itself runs UTC), plus the grace window
 # (hours) protecting freshly written trees.
@@ -60,17 +66,16 @@ COMMON_ENV=(
   GPU_ARCHS="gfx908"
   PYTORCH_ROCM_ARCH="gfx908"
   BUILD_TARGET="rocm"
-  MAX_JOBS="48"
+  MAX_JOBS="${MAX_JOBS:-$cpu_threads}"
   LD_LIBRARY_PATH="/opt/rocm/lib:${LD_LIBRARY_PATH:-}"
-  PYTHONPATH="${ROOT_DIR}/python_startup:${ROOT_DIR}:${HOME}/aiter:${PYTHONPATH:-}"
-  HF_HOME="${HOME}/.cache/huggingface"
-  OMP_NUM_THREADS="48"
-  MKL_NUM_THREADS="48"
-  OPENBLAS_NUM_THREADS="48"
-  NUMEXPR_NUM_THREADS="48"
-  HIP_VISIBLE_DEVICES="0,1,2,3"
-  CUDA_VISIBLE_DEVICES="0,1,2,3"
-  ROCR_VISIBLE_DEVICES="0,1,2,3"
+  PYTHONPATH="${ROOT_DIR}/python_startup:${ROOT_DIR}:${ROOT_DIR}/../int8-aiter:${PYTHONPATH:-}"
+  HF_HOME="${HF_HOME:-${HOME}/.cache/huggingface}"
+  OMP_NUM_THREADS="${OMP_NUM_THREADS:-$cpu_threads}"
+  MKL_NUM_THREADS="${MKL_NUM_THREADS:-$cpu_threads}"
+  OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-$cpu_threads}"
+  NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-$cpu_threads}"
+  HIP_VISIBLE_DEVICES="${MI100_DEVICES:-0,1,2,3}"
+  CUDA_VISIBLE_DEVICES="${MI100_DEVICES:-0,1,2,3}"
   HSA_ENABLE_IPC_MODE_LEGACY="0"
   VLLM_TARGET_DEVICE="rocm"
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="1800"
@@ -130,7 +135,7 @@ ARGS=(
   --served-model-name "${SERVED_MODEL_NAME}"
   --host "${HOST}"
   --port "${PORT}"
-  --tensor-parallel-size "${TPS:-4}"
+  --pipeline-parallel-size "${MI100_PP_SIZE:-1}" --tensor-parallel-size "${TPS:-4}"
   # Target compute dtype. DEFAULT bfloat16 since 2026-09-01: the fp16 residual
   # stream overflows (>65504) when a repetition attractor grows activations at
   # long context, producing inf -> NaN logits and the token-1023 'duct' lock
@@ -138,8 +143,8 @@ ARGS=(
   # is input-dtype-agnostic. Revert per-boot via the DTYPE flag file.
   --dtype "${DTYPE:-bfloat16}"
   --max-model-len "${MAXLEN:-262144}"
-  --max-num-seqs 6
-  --gpu-memory-utilization 0.92
+  --max-num-seqs "${C:-6}"
+  --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.92}"
   # KVMEM flag file / env: pin the KV arena size in bytes. A fixed
   # --kv-cache-memory overrides --gpu-memory-utilization; leave headroom
   # for transient runtime allocations. ${LOG_DIR}/KVMEM overrides the env.
@@ -331,7 +336,7 @@ if [[ -f "${_kvmem_flag}" ]]; then
   KVMEM="$(tr -d '[:space:]' < "${_kvmem_flag}")"
 fi
 KVMEM="${KVMEM:-19000000000}"
-ARGS+=(--kv-cache-memory "${KVMEM}")
+if [[ "$KVMEM" != auto ]]; then ARGS+=(--kv-cache-memory "$KVMEM"); fi
 # EAGERALL flag file: --enforce-eager (diagnostic; target python-side
 # instrumentation like the GDN state ring needs non-replayed rounds).
 if [[ -f "${LOG_DIR}/EAGERALL" ]]; then
@@ -586,7 +591,7 @@ if [[ "${AR}" != "1" ]]; then
 fi
 
 usage() {
-  printf 'usage: %s {start|stop|restart|status|supervise|prune}\n' "$0"
+  printf 'usage: %s {start|stop|restart|status|supervise|serve|prune}\n' "$0"
 }
 
 is_pid_running() {
@@ -674,58 +679,42 @@ prune_kv_tier() {
   return 0
 }
 
-start_server() {
-  [[ -x "${VENV}/bin/vllm" ]] || { printf 'missing vLLM executable: %s\n' "${VENV}/bin/vllm" >&2; exit 1; }
-  [[ -d "${MODEL_DIR}" ]] || { printf 'missing model directory: %s\n' "${MODEL_DIR}" >&2; exit 1; }
-
-  if is_running; then
-    printf 'already running pid=%s url=http://%s:%s log=%s/server.log\n' \
-      "$(cat "${PID_FILE}")" "${HOST}" "${PORT}" "${LOG_DIR}"
-    return 0
-  fi
-
-  # The CPU tier mmaps /dev/shm. Clean leftovers only after confirming no
-  # server is running: status and stop must never unlink a live tier's files.
-  find /dev/shm -maxdepth 1 -user "$(id -un)" \
-    \( -name 'vllm_offload_*.mmap' -o -name 'psm_*' \) -delete 2>/dev/null || true
-
-  # Orphaned disk-tier roots from previous DISKROOT/config-hash eras; the fs
-  # tier manager never reclaims directories outside the configured root.
-  prune_kv_tier || true
-
-  mkdir -p "${LOG_DIR}"
-  rm -f "${PID_FILE}"
-  rotate_log
-
-  printf 'starting recipe Qwen3.8 server: url=http://%s:%s cpuset=%s log=%s/server.log\n' \
-    "${HOST}" "${PORT}" "${CPUSET}" "${LOG_DIR}"
-  printf '%s\n' 'contract: PTQR-retrained target+DFlash2 GS128; AITER W8A8/UA/custom-AR; INT8-G128 KV/fp32 Mamba/quant-out; TP4/C6; CPU KV tier '"${CPUTIER:-8589934592}"'B'
-
+launch_server() {
+  # G1 numerics-unification levers (2026-09-14, ledger G1_PROD_GATE_SEEDS_
+  # PARTIAL → G2_PHASEB_CAR_ENVELOPE_AND_OFFLOAD_FIX): VLLM_TP_AR_FP32=car1
+  # + VLLM_TP_CAR_MAX_BYTES=40MB (ALL ARs — decode and prefill chunks — ride
+  # the CAR 1-stage kernel: fixed rank-order fp32 accumulate, single
+  # downcast, message-size-invariant), VLLM_OFFLOAD_TRITON_STORES=classic
+  # (GPU→CPU KV stores via per-descriptor hipMemcpyAsync — the driver batch
+  # API races compute on gfx908 and the Triton host-store kernel corrupts
+  # long outputs; classic verified clean by full-read 4k legs),
+  # VLLM_GDN_PREFILL_EXACT=1 (exact-recurrence GDN prefill),
+  # AITER_UA_FORCE_2D=1 + AITER_UA_PIN_TILE=1 (decode shares the prefill 2D
+  # attention kernel and tile). Production gates: seeds 301/307/305 clean;
+  # cfix-nonce legs 91/61 lines read in full; seam 0/256 ×2.
   local api_key
   api_key="$(read_api_key)"
-
-  (
-    # car1 mode needs CAR pinned to the order-preserving 1-stage kernel
-    # (VLLM_CUSTOM_ALLREDUCE_ALGO=1stage) so the dispatch never selects
-    # the order-rotating 2-stage kernel. Default it when car1 is requested.
-    if [[ "${VLLM_TP_AR_FP32:-}" == "car1" && -z "${VLLM_CUSTOM_ALLREDUCE_ALGO:-}" ]]; then
-      export VLLM_CUSTOM_ALLREDUCE_ALGO=1stage
-    fi
-    cd "${WORKDIR}"
-    # The residual-INT8 decoder seam is a Bolt/LiLiCorr stack feature
-    # (hidden 1024/4096). Pin it OFF for this Qwen recipe: the flag was
-    # observed arriving set in workers with no in-tree/script/env setter
-    # found (2026-11-06 open diagnostic); the seam code now also
-    # self-disables for hidden 2048, but the explicit pin removes the
-    # whole class of drift.
-    export VLLM_GFX908_RESIDUAL_INT8="${VLLM_GFX908_RESIDUAL_INT8:-0}"
-    # Bolt-only scheduler levers: pin off for the Qwen recipe (same phantom-
-    # env containment as the residual seam).
-    export VLLM_BOLT_SHORT_PREFILL_COHORT="${VLLM_BOLT_SHORT_PREFILL_COHORT:-0}"
-    exec setsid taskset -c "${CPUSET}" env -u HSA_OVERRIDE_GFX_VERSION \
-      VLLM_API_KEY="${api_key}" \
+  # car1 mode needs CAR pinned to the order-preserving 1-stage kernel
+  # (VLLM_CUSTOM_ALLREDUCE_ALGO=1stage) so the dispatch never selects
+  # the order-rotating 2-stage kernel. Default it when car1 is requested.
+  if [[ "${VLLM_TP_AR_FP32:-}" == "car1" && -z "${VLLM_CUSTOM_ALLREDUCE_ALGO:-}" ]]; then
+    export VLLM_CUSTOM_ALLREDUCE_ALGO=1stage
+  fi
+  cd "${WORKDIR}"
+  # The residual-INT8 decoder seam is a Bolt/LiLiCorr stack feature
+  # (hidden 1024/4096). Pin it OFF for this Qwen recipe: the flag was
+  # observed arriving set in workers with no in-tree/script/env setter
+  # found (2026-11-06 open diagnostic); the seam code now also
+  # self-disables for hidden 2048, but the explicit pin removes the
+  # whole class of drift.
+  export VLLM_GFX908_RESIDUAL_INT8="${VLLM_GFX908_RESIDUAL_INT8:-0}"
+  # Bolt-only scheduler levers: pin off for the Qwen recipe (same phantom-
+  # env containment as the residual seam).
+  export VLLM_BOLT_SHORT_PREFILL_COHORT="${VLLM_BOLT_SHORT_PREFILL_COHORT:-0}"
+  exec "$@" taskset -c "${CPUSET}" env -u HSA_OVERRIDE_GFX_VERSION \
+    VLLM_API_KEY="${api_key}" \
   VLLM_GFX908_RESIDUAL_INT8="${VLLM_GFX908_RESIDUAL_INT8}" \
-      "${COMMON_ENV[@]}" \
+    "${COMMON_ENV[@]}" \
   VLLM_SPEC_DEBUG_DUMP="${VLLM_SPEC_DEBUG_DUMP:-}" \
   VLLM_CAND_RING="${VLLM_CAND_RING:-}" \
   VLLM_DF_CACHE_BYPASS="${VLLM_DF_CACHE_BYPASS:-}" \
@@ -817,21 +806,45 @@ start_server() {
   VLLM_OFFLOAD_LAYOUT_DUMP="${VLLM_OFFLOAD_LAYOUT_DUMP:-}" \
   VLLM_OFFLOAD_NO_LOADS="${VLLM_OFFLOAD_NO_LOADS:-}" \
   VLLM_DFLASH_DRAFT_EAGER="${VLLM_DFLASH_DRAFT_EAGER:-}" \
-      VLLM_DFLASH_AUDIT="${VLLM_DFLASH_AUDIT:-}" \
-      ${PROFILER_WRAPPER:-} "${VENV}/bin/vllm" "${ARGS[@]}"
-  # G1 numerics-unification levers (2026-09-14, ledger G1_PROD_GATE_SEEDS_
-  # PARTIAL → G2_PHASEB_CAR_ENVELOPE_AND_OFFLOAD_FIX): VLLM_TP_AR_FP32=car1
-  # + VLLM_TP_CAR_MAX_BYTES=40MB (ALL ARs — decode and prefill chunks — ride
-  # the CAR 1-stage kernel: fixed rank-order fp32 accumulate, single
-  # downcast, message-size-invariant), VLLM_OFFLOAD_TRITON_STORES=classic
-  # (GPU→CPU KV stores via per-descriptor hipMemcpyAsync — the driver batch
-  # API races compute on gfx908 and the Triton host-store kernel corrupts
-  # long outputs; classic verified clean by full-read 4k legs),
-  # VLLM_GDN_PREFILL_EXACT=1 (exact-recurrence GDN prefill),
-  # AITER_UA_FORCE_2D=1 + AITER_UA_PIN_TILE=1 (decode shares the prefill 2D
-  # attention kernel and tile). Production gates: seeds 301/307/305 clean;
-  # cfix-nonce legs 91/61 lines read in full; seam 0/256 ×2.
-  ) >"${LOG_DIR}/server.log" 2>&1 </dev/null &
+    VLLM_DFLASH_AUDIT="${VLLM_DFLASH_AUDIT:-}" \
+    ${PROFILER_WRAPPER:-} "${VENV}/bin/vllm" "${ARGS[@]}"
+}
+
+start_server() {
+  [[ -x "${VENV}/bin/vllm" ]] || { printf 'missing vLLM executable: %s\n' "${VENV}/bin/vllm" >&2; exit 1; }
+  [[ -d "${MODEL_DIR}" ]] || { printf 'missing model directory: %s\n' "${MODEL_DIR}" >&2; exit 1; }
+
+  if is_running; then
+    printf 'already running pid=%s url=http://%s:%s log=%s/server.log\n' \
+      "$(cat "${PID_FILE}")" "${HOST}" "${PORT}" "${LOG_DIR}"
+    return 0
+  fi
+
+  # A crashed CPU tier can strand a large mmap. Other instances and
+  # applications may share this tmpfs, including Python's psm_* segments.
+  local file users status
+  if command -v fuser >/dev/null; then
+    for file in /dev/shm/vllm_offload_*.mmap; do
+      [[ -f "$file" && ! -L "$file" && -O "$file" ]] || continue
+      if users=$(fuser "$file" 2>&1); then continue; else status=$?; fi
+      if [[ "$status" == 1 && -z "$users" ]]; then rm -f -- "$file"; fi
+    done
+  fi
+
+  # Orphaned disk-tier roots from previous DISKROOT/config-hash eras; the fs
+  # tier manager never reclaims directories outside the configured root.
+  prune_kv_tier || true
+
+  mkdir -p "${LOG_DIR}"
+  rm -f "${PID_FILE}"
+  rotate_log
+
+  printf 'starting recipe Qwen3.8 server: url=http://%s:%s cpuset=%s log=%s/server.log\n' \
+    "${HOST}" "${PORT}" "${CPUSET}" "${LOG_DIR}"
+  printf 'Qwen serving geometry TP=%s PP=%s C=%s NS=%s, CPU KV budget %s bytes\n' \
+    "${TPS:-4}" "${MI100_PP_SIZE:-1}" "${C:-6}" "${NS:-6}" "${CPUTIER:-8589934592}"
+
+  launch_server setsid >"${LOG_DIR}/server.log" 2>&1 </dev/null &
 
   printf '%s\n' "$!" >"${PID_FILE}"
 }
@@ -932,6 +945,7 @@ supervise_server() {
 }
 
 case "${1:-}" in
+  serve) launch_server ;;
   start)
     start_server
     wait_ready
