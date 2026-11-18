@@ -5,7 +5,7 @@
 # int8-vllm
 
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
-![Hardware](https://img.shields.io/badge/hardware-4%C3%97%20AMD%20MI100%20(gfx908)-red)
+![Hardware](https://img.shields.io/badge/hardware-2x--4x%20AMD%20MI100%20(gfx908)-red)
 
 **vLLM with opt-in INT8 acceleration for AMD Instinct MI100.**
 
