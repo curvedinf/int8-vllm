@@ -22,9 +22,8 @@ decoding to reduce memory traffic and accelerate serving.
 
 ## Supported models and optimized recipes
 
-Stock vLLM model support extends beyond this table. These are the model pairs
-with dedicated tuning and validation; each recipe uses a target model and its
-matching speculative draft.
+This fork is compatible with all stock vLLM-supported models, but the following recipes
+have been heavily optimized and tested.
 
 | Model | Checkpoints | Concurrent sequences | Speculative tokens | Sequence Context Length | Total Context Tokens | Recipe |
 | --- | --- | --- | --- | --- | --- | --- |
