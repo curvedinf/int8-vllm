@@ -91,11 +91,5 @@ Full 12-tier reports:
 - Phase-0 default-config baseline (used as comparison point):
   `~/mi100-llm-testing/Model_Reports/benchmark_Qwen3.5-122B-A10B-GPTQ-4bit_round8_phase0_baseline.md`
 
-Build:
-```
-docker build -t btbtyler09/vllm-rocm-gfx908:v0.20.0rc1.dev \
-             -t btbtyler09/vllm-rocm-gfx908:latest \
-             -f docker/Dockerfile.mi100.round8 .
-```
-
-Source: `mi100-optimized` HEAD (round-8 commit).
+The historical round-8 Docker build is preserved in commit `ec452b82ac`.
+For the current MI100 image, see the [installation guide](../recipes/mi100-install.md).
