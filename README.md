@@ -45,10 +45,10 @@ documented in the linked recipes.
 
 ## Getting started
 
-Choose how many MI100 cards to use, whether they share an XGMI mesh, and which model to serve. For example, start Qwen on two PCIe cards from the root of this checkout:
+From the root of this checkout, start Qwen on four MI100 cards connected in a full XGMI mesh.
 
 ```bash
-MI100_CARDS=2 MI100_XGMI=off MI100_RECIPE=qwen38 \
+MI100_CARDS=4 MI100_XGMI=on MI100_RECIPE=qwen38 \
   docker compose -f docker/mi100/compose.yaml up --build -d
 ```
 
