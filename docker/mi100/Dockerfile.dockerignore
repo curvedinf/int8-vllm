@@ -18,6 +18,7 @@
 !scripts/serve_recipe_flint.sh
 !scripts/serve_recipe_bolt.sh
 !scripts/build_residual_g128.sh
+!scripts/fs_gpu_probe.py
 !scripts/prefetch_bolt_cache.py
 !scripts/test_int8_kv_micro.py
 !scripts/battery_gfx908.py

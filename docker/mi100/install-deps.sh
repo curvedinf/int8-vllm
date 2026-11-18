@@ -15,7 +15,17 @@ install() {
   "$py" -m pip install --dry-run "$@" && "$py" -m pip install "$@"
 }
 install -c "$work/constraints.txt" --extra-index-url "$index/rocm7.1" torch torchvision torchaudio
-install -c "$work/constraints.txt" -r requirements/rocm.txt 'cmake>=3.26,<4' ninja pybind11 einops wheel /opt/rocm/share/amd_smi
+install -c "$work/constraints.txt" -r requirements/rocm.txt 'cmake>=3.26,<4' ninja pybind11 einops wheel
+smi_dir="${ROCM_PATH:-/opt/rocm}/share/amd_smi"
+if [[ -f "$smi_dir/pyproject.toml" || -f "$smi_dir/setup.py" ]]; then
+  install -c "$work/constraints.txt" "$smi_dir"
+else
+  # ROCm 10.2 ships the importable package without Python build metadata.
+  test -f "$smi_dir/amdsmi/__init__.py"
+  site_dir=$("$py" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
+  printf '%s\n' "$smi_dir" > "$site_dir/amd_smi.pth"
+fi
+"$py" -c 'import amdsmi'
 # Some optional packages depend on the PyPI triton distribution. Both
 # distributions install the same import tree; restore the ROCm owner last.
 if "$py" -m pip show triton >/dev/null 2>&1; then

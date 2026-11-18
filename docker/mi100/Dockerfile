@@ -1,7 +1,7 @@
-FROM rocm/dev-ubuntu-24.04:7.2.1-complete@sha256:3db551c4e1229aac1857ac44fcb6141bb749f41348eb572452f11279153c13c3
+FROM rocm/dev-ubuntu-24.04:10.2.0-full@sha256:21801c0ba1bc4aba31f81ab11fe576c43daa7f2c7f42bac7baaa4d2f75273f86
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    build-essential ca-certificates curl git libclang-dev libnuma-dev libssl-dev \
+    amdrocm-hipfile10.2=10.2.0-2 build-essential ca-certificates curl git libclang-dev libnuma-dev libssl-dev \
     pkg-config python3.12-dev python3.12-venv && rm -rf /var/lib/apt/lists/*
 WORKDIR /opt/int8-vllm
 ENV ROCM_PATH=/opt/rocm HIP_PATH=/opt/rocm PYTORCH_ROCM_ARCH=gfx908 GPU_ARCHS=gfx908 \
@@ -12,7 +12,8 @@ RUN curl -fsSLo /tmp/rustup.sh https://sh.rustup.rs && sh /tmp/rustup.sh -y --pr
 RUN python3.12 -m venv .venv
 COPY requirements/ requirements/
 COPY docker/mi100/install-deps.sh docker/mi100/
-RUN --mount=type=cache,target=/root/.cache/pip docker/mi100/install-deps.sh
+RUN --mount=type=cache,target=/root/.cache/pip docker/mi100/install-deps.sh \
+    && .venv/bin/python -c 'import ctypes, torch; ctypes.CDLL("libhipfile.so.0")'
 ARG AITER_REV=4bd8f95f3a5cd3016592fd34ed5fb2cefc9670f0
 RUN git init /opt/int8-aiter && cd /opt/int8-aiter && git remote add origin https://github.com/curvedinf/int8-aiter.git \
     && git fetch --depth=1 origin "$AITER_REV" && git checkout --detach FETCH_HEAD \
@@ -37,5 +38,5 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 COPY python_startup/ python_startup/
 COPY scripts/ scripts/
 ENV PYTHONPATH=/opt/int8-vllm/python_startup:/opt/int8-vllm:/opt/int8-aiter \
-    AITER_JIT_DIR=/cache/aiter/${AITER_REV}-gfx908
+    AITER_JIT_DIR=/cache/aiter/${AITER_REV}-gfx908-rocm10.2.0
 ENTRYPOINT ["scripts/mi100-serve.sh"]
