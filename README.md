@@ -31,16 +31,7 @@ have been heavily optimized and tested.
 | NVIDIA Nemotron 3.5 Bolt 74B-A9B-24GB | [Official packed target](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB) + [LiLiCorr draft](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr) | 8 | 7 | 262,144 | ~1.99M | [Bolt setup](docs/recipes/nemotron_bolt.md) |
 | Flint | [INT8 PTQR target](https://huggingface.co/voodooquant/Flint-GPTQ-INT8-PTQR) + [DFlash2 draft](https://huggingface.co/voodooquant/Flint-DFlash2-GPTQ-INT8-PTQR) | 12 | 7 | 524,288 | ~4.4M | [Flint setup](docs/recipes/flint.md) |
 
-Qwen uses INT8 weights retrained against a BF16 reference. Bolt loads the
-official packed checkpoints, converts dense weights to INT8 and caches INT8
-expert weights. Flint ships PTQR INT8 weights for target and draft, runs
-AITER W8A8 dense GEMMs plus a grouped W8A8 expert kernel, and keeps INT8 KV
-on both models. All recipes use grouped INT8 KV for the target and draft
-and AITER attention kernels. Four-card XGMI uses custom all-reduce. PCIe tensor-parallel configurations use RCCL.
-
-These recipes are tested on **4 × MI100 (gfx908), with XGMI full mesh**.
-Model-specific precision choices, validation results and limitations are
-documented in the linked recipes.
+These recipes are tested on **2 to 4 MI100 (gfx908), with XGMI and without**.
 
 ## Getting started
 
