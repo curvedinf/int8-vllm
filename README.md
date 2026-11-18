@@ -26,11 +26,11 @@ Stock vLLM model support extends beyond this table. These are the model pairs
 with dedicated tuning and validation; each recipe uses a target model and its
 matching speculative draft.
 
-| Model | Checkpoints | Concurrent sequences | Speculative tokens | Recipe |
-| --- | --- | --- | --- | --- |
-| Qwen3.8-27B | [INT8 PTQR target](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128-PTQR) + [DFlash2 draft](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128-PTQR) | 8 | 13 | [Qwen setup](docs/recipes/README.md) |
-| NVIDIA Nemotron 3.5 Bolt 74B-A9B-24GB | [Official packed target](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB) + [LiLiCorr draft](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr) | 8 | 7 | [Bolt setup](docs/recipes/nemotron_bolt.md) |
-| Flint | [INT8 PTQR target](https://huggingface.co/voodooquant/Flint-GPTQ-INT8-PTQR) + [DFlash2 draft](https://huggingface.co/voodooquant/Flint-DFlash2-GPTQ-INT8-PTQR) | 12 | 7 | [Flint setup](docs/recipes/flint.md) |
+| Model | Checkpoints | Concurrent sequences | Speculative tokens | Total shared GPU context (tokens) | Recipe |
+| --- | --- | --- | --- | --- | --- |
+| Qwen3.8-27B | [INT8 PTQR target](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128-PTQR) + [DFlash2 draft](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128-PTQR) | 8 | 13 | ~1.61M | [Qwen setup](docs/recipes/README.md) |
+| NVIDIA Nemotron 3.5 Bolt 74B-A9B-24GB | [Official packed target](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB) + [LiLiCorr draft](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr) | 8 | 7 | ~1.99M | [Bolt setup](docs/recipes/nemotron_bolt.md) |
+| Flint | [INT8 PTQR target](https://huggingface.co/voodooquant/Flint-GPTQ-INT8-PTQR) + [DFlash2 draft](https://huggingface.co/voodooquant/Flint-DFlash2-GPTQ-INT8-PTQR) | 12 | 7 | ~4.4M | [Flint setup](docs/recipes/flint.md) |
 
 Qwen uses INT8 weights retrained against a BF16 reference. Bolt loads the
 official packed checkpoints, converts dense weights to INT8 and caches INT8
