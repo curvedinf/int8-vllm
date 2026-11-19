@@ -171,7 +171,7 @@ VLLM_DISABLED_KERNELS=TritonW8A16LinearKernel \
   --kv-cache-dtype int8_block_g128 \
   --mamba-ssm-cache-dtype float32 \
   --compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","pass_config":{"fuse_allreduce_rms":false}}' \
-  --speculative-config '{"method":"dflash","model":"'"$DRAFT_MODEL"'","num_speculative_tokens":6,"kv_cache_dtype":"int8_block_g128"}'
+  --speculative-config '{"method":"dflash","model":"'"$DRAFT_MODEL"'","num_speculative_tokens":7,"kv_cache_dtype":"int8_block_g128"}'
 ```
 
 The top-level KV flag configures the target. The `kv_cache_dtype` inside the
@@ -202,7 +202,7 @@ These are sampled aggregate workload results, not per-user rates or a 3x gain.
 | Act quantizer | round-to-nearest (`VLLM_GFX908_ACT_QUANT=round`, fused Triton kernel) | halved the dominant 10-15% act-quant error leg; fixed 10x first-token-stop inflation (empty responses); also faster than the 4-pass eager aiter chain |
 | Sampling default | `repetition_penalty=1.0` in the override-generation-config | The 1.05 loop-suppression trial varied across legs and was not a reliable quality fix; per-request override remains available. |
 | Embedding lookup | int8 gather | half embedding bandwidth; it is not a GEMM exception |
-| Speculative decoding | **DFlash2, NS=6, int8 drafter, int8 draft KV — ON** | PTQR-era NS sweep and long-context gates favor NS=6 for this model pair; the older NS=13 sweep used a different checkpoint pair. |
+| Speculative decoding | **DFlash2, NS=7, int8 drafter, int8 draft KV — ON** | All MI100 Qwen launchers default to seven draft tokens. Set `NS` to override. |
 | TP speculative sample sync | `VLLM_TP_SAMPLE_SYNC=1` | Broadcast draft proposals and committed token IDs/counts from TP0. Without this, workers accepted different numbers of tokens in the same round and their recurrent states drifted; the 2026-09-24 mixed API-stream gate is recorded in the ledger. |
 | Attention backend | **AITER unified attention** | target and draft both use the recipe KV dtype (int8_block_g128 since 2026-09-06) |
 | G128 target decode core | Gluon grouped-int8 3D attention (`VLLM_G128_GLUON=1`, 64 query rows) | The AITER backend routes grouped target KV to the gfx908 vector-load/MFMA specialization. At TP4/C6 with six concurrent 32k API streams, two 800-output runs measured 258.92 and 256.00 aggregate decode-overlap tok/s versus 252.59 and 232.98 for the earlier 32-row core, and 147.62 and 179.06 for the matched original-core control. A mixed 3-decode/3-prefill gate scored 0/6144 exact output tokens outside target top 20. The >300 tok/s goal remains open. |
@@ -284,7 +284,7 @@ the long-context garble class stay closed under the unified-kernel levers.
    published model pair and require AITER W8A8, AITER unified attention,
    vLLM CUSTOM all-reduce (CAR=0), fused epilogue OFF, both KV caches at
    the recipe dtype (int8_block_g128 since 2026-09-06), float32 Mamba state,
-   TP4, C8, and DFlash2 NS=13 to remain enabled.
+   TP4, C8, and DFlash2 NS=7 to remain enabled.
 
 ## int8_block_g{G} KV cache dtypes (2026-09-03)
 
@@ -469,7 +469,7 @@ interleaved multi-rep protocol (>=3 reps/NS on a quiet node) confirms it.
 Robust findings: NS=15 is consistently worst on both metrics (both
 sessions); NS=5 leads wall-clock and is coherence-verified (30/30).
 
-## NS sweep — 2026-09-15, PTQR numerics-closure stack (current recipe)
+## NS sweep — 2026-09-15, PTQR numerics-closure stack
 
 Fresh boot per NS, real 20k shared-prefix prompts, C6 steady
 (`scripts/c6_steady.py`), 2 runs each + a 1024-token quality screen; the
@@ -490,9 +490,9 @@ models — PTQR pair vs one-shot GS128 — and different draft).
 
 Shape: floor at 1–2, rise to 3, dip at 4, **plateau at 6–7**
 (statistically indistinguishable; NS=7 median ~98.7 across four runs,
-NS=6 median 102.6 accumulated), cliff at 8. **NS=6 stays the default** for
-its accumulated gate depth; NS=7 is the measured-best alternative, gated
-clean. NS=5 is off the menu (garbled 4k leg despite clean screens). Ledger:
+NS=6 median 102.6 accumulated), cliff at 8. The September recipe retained
+NS=6 for its accumulated gate depth. NS=7 also passed the gate. NS=5 garbled
+the 4k leg despite clean screens. Ledger:
 `G5_NS_MATRIX_CURRENT_RECIPE`.
 
 

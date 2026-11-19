@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.config import SpeculativeConfig
 from vllm.model_executor.models.qwen3_dflash2 import (
     _codebook_lookup,
     _grouped_conv,
@@ -14,6 +15,16 @@ from vllm.model_executor.models.qwen3_dflash2 import (
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
+
+
+def test_dflash_draft_length_separates_graph_cache():
+    config = object.__new__(SpeculativeConfig)
+    config.method = "dflash"
+    config.draft_model_config = None
+    config.num_speculative_tokens = 13
+    previous_hash = config.compute_hash()
+    config.num_speculative_tokens = 7
+    assert config.compute_hash() != previous_hash
 
 
 @pytest.mark.parametrize("block_size", [5, 8])

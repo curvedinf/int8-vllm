@@ -46,6 +46,7 @@ _ns_flag="${LOG_DIR}/NS"
 if [[ -f "${_ns_flag}" ]]; then
   NS="$(tr -d '[:space:]' < "${_ns_flag}")"
 fi
+NS="${NS:-7}"
 
 # DTYPE flag file: override the target model dtype (default half). The
 # 1023-lock NaN cascade is driven by fp16 overflow when a repetition
@@ -184,8 +185,6 @@ ARGS=(
   # target and draft. KV_DTYPE remains a diagnostic lever; older per-token-head
   # INT8 and 16-bit KV results are recorded in the recipe ledger.
   --kv-cache-dtype "${KV_DTYPE:-int8_block_g128}" --mamba-ssm-cache-dtype "${MAMBADT:-float32}"
-  # NS=6 is the PTQR target+draft long-context default. Older NS=13/15
-  # measurements used a different checkpoint pair; see the recipe NS sweep.
   # SPECOFF=1 drops the draft entirely (diagnostic target-only legs).
   # The speculative-config is appended conditionally after ARGS below.
   # CPU KV second tier (cross-worker) host DRAM via the native
@@ -264,7 +263,7 @@ else
 fi
 # (NS flag file read near the top of this script, before COMMON_ENV.)
 if [[ "${_spec_value}" != "1" ]]; then
-  ARGS+=(--speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":'"${NS:-6}"',"kv_cache_dtype":"'"${DRAFT_KV_DTYPE:-int8_block_g128}"'"}')
+  ARGS+=(--speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":'"${NS}"',"kv_cache_dtype":"'"${DRAFT_KV_DTYPE:-int8_block_g128}"'"}')
 fi
 # Diagnostic target-only token-trace replay. Requires SPECOFF=1; the flag file
 # keeps normal systemd boots on the production recipe after it is removed.
@@ -842,7 +841,7 @@ start_server() {
   printf 'starting recipe Qwen3.8 server: url=http://%s:%s cpuset=%s log=%s/server.log\n' \
     "${HOST}" "${PORT}" "${CPUSET}" "${LOG_DIR}"
   printf 'Qwen serving geometry TP=%s PP=%s C=%s NS=%s, CPU KV budget %s bytes\n' \
-    "${TPS:-4}" "${MI100_PP_SIZE:-1}" "${C:-6}" "${NS:-6}" "${CPUTIER:-8589934592}"
+    "${TPS:-4}" "${MI100_PP_SIZE:-1}" "${C:-6}" "${NS}" "${CPUTIER:-8589934592}"
 
   launch_server setsid >"${LOG_DIR}/server.log" 2>&1 </dev/null &
 

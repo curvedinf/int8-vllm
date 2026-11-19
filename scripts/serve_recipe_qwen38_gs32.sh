@@ -29,6 +29,7 @@ _ns_flag="${LOG_DIR}/NS"
 if [[ -f "${_ns_flag}" ]]; then
   NS="$(tr -d '[:space:]' < "${_ns_flag}")"
 fi
+NS="${NS:-7}"
 
 # DTYPE flag file: override the target model dtype (default half). The
 # 1023-lock NaN cascade is driven by fp16 overflow when a repetition
@@ -161,11 +162,6 @@ ARGS=(
   # KV_DTYPE env remains the lever (int8_per_token_head = old default,
   # int8_block_g{4..128} = the long-context int8 family; see README table).
   --kv-cache-dtype "${KV_DTYPE:-int8_block_g128}" --mamba-ssm-cache-dtype "${MAMBADT:-float32}"
-  # NS=13 default per the 2026-08-26 tuned-aiter sweep (see docs/recipes
-  # README history): best measured TPOT 12.34 ms / TG 639-equivalent regime.
-  # NS=15 prior default (2026-08-24 sweep) measured 18.89 ms same-session;
-  # NS=17 collapses (29.7% acceptance — under investigation).
-  # Draft KV int8-PTH: full-W8A8 doctrine.
   # SPECOFF=1 drops the draft entirely (diagnostic target-only legs).
   # The speculative-config is appended conditionally after ARGS below.
   # CPU KV second tier: 12 GiB total (cross-worker) host DRAM via the native
@@ -218,7 +214,7 @@ else
 fi
 # (NS flag file read near the top of this script, before COMMON_ENV.)
 if [[ "${_spec_value}" != "1" ]]; then
-  ARGS+=(--speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":'"${NS:-13}"',"kv_cache_dtype":"'"${DRAFT_KV_DTYPE:-int8_block_g128}"'"}')
+  ARGS+=(--speculative-config '{"method":"dflash","model":"'"${DRAFT_MODEL_DIR}"'","num_speculative_tokens":'"${NS}"',"kv_cache_dtype":"'"${DRAFT_KV_DTYPE:-int8_block_g128}"'"}')
 fi
 
 # LOGSTATS=1 enables periodic engine/spec-decode stat logging

@@ -53,7 +53,7 @@ case "$recipe" in
     target_rev=6f1c4a384442bc4e6dc7df0a8a99bd82c3ab775f
     draft_repo=curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128-PTQR
     draft_rev=7db6ca87ff6c68a77fc220f62bb1166666449055
-    export C="${C:-8}" NS="${NS:-13}" DISKTIER="${DISKTIER:-0}"
+    export C="${C:-8}" DISKTIER="${DISKTIER:-0}"
     if [[ "$cards-$link" == 4-off ]]; then
       # Four RCCL ranks need a fixed FP32 summation order across prefill
       # chunk sizes. The XGMI profile provides that order in custom AR.

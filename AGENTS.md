@@ -16,7 +16,7 @@ upstreamed directly.
 3.83/13 at 42k), AITER W8A8 INT8 GEMMs everywhere, int8_block_g128 KV on both
 target and draft (since 2026-09-04 — int8-first directive; halved KV noise vs
 int8_per_token_head, acceptance 4.67/14 at 40k), AITER unified attention, vLLM
-CUSTOM all-reduce, DFlash2 with NS=13, TP4, C8, ACT_QUANT=round, and fp32
+CUSTOM all-reduce, DFlash2 with NS=7, TP4, C8, ACT_QUANT=round, and fp32
 mamba state) is mandatory. The fused AR+RMSNorm+per-group INT8 quant-out
 epilogue is OFF by default (an eager seam exists behind
 `VLLM_GFX908_EAGER_EPILOGUE=1`; experiment E3 verdict was TPOT-neutral).
@@ -158,7 +158,7 @@ VLLM_GFX908_INT8_LM_HEAD=1`, AITER CK W8A8 for every GS128 GEMM,
 --kv-cache-dtype auto --mamba-ssm-cache-dtype float32`,
 `VLLM_GFX908_ACT_QUANT=round` (fused round-to-nearest act quant — quality
 default, see INT8_AUDIT_RESULTS.md), and the speculative config
-`{"method":"dflash","num_speculative_tokens":13,"kv_cache_dtype":"int8_block_g128"}`.
+`{"method":"dflash","num_speculative_tokens":7,"kv_cache_dtype":"int8_block_g128"}`.
 The nested dtype is explicit and applies to the draft; the top-level
 `--kv-cache-dtype int8_block_g128` applies to the target. fp16 draft KV is
 measured broken (mean_k=1.01, all drafts rejected) — do not use it; the `int8_block_g{4..128}` family (KV_DTYPE env) is the

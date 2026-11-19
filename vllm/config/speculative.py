@@ -681,6 +681,10 @@ class SpeculativeConfig:
             "dspark",
         )
         factors.append(uses_aux_hidden_states)
+        if self.method == "dflash":
+            # The compiled DFlash2 candidate selector specializes the step
+            # dimension. Reusing it at a shorter length reads past its inputs.
+            factors.append(("dflash_steps", self.num_speculative_tokens))
         if self.method == "dspark":
             factors.append(self.enable_adaptive_verification)
 
