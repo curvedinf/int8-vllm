@@ -50,8 +50,11 @@ class RegisteredFile:
         except OSError as e:
             # e.g. tmpfs or a fs without O_DIRECT support
             raise FsGpuError(f"open({path!r})", 0, e.errno) from e
-        self.size = os.fstat(self.fd).st_size
         self.fh = self.ais.handle_register(self.fd)
+
+    @property
+    def size(self) -> int:
+        return os.fstat(self.fd).st_size
 
     def close(self) -> None:
         if self.fh is not None:

@@ -12,9 +12,9 @@ RUN curl -fsSLo /tmp/rustup.sh https://sh.rustup.rs && sh /tmp/rustup.sh -y --pr
 RUN python3.12 -m venv .venv
 COPY requirements/ requirements/
 COPY docker/mi100/install-deps.sh docker/mi100/
-RUN --mount=type=cache,target=/root/.cache/pip docker/mi100/install-deps.sh \
+RUN --mount=type=cache,target=/root/.cache/pip docker/mi100/install-deps.sh --rocm10.2 \
     && .venv/bin/python -c 'import ctypes, torch; ctypes.CDLL("libhipfile.so.0")'
-ARG AITER_REV=4bd8f95f3a5cd3016592fd34ed5fb2cefc9670f0
+ARG AITER_REV=021b72889eb8c531a06a604978b52b92c6ef8a4a
 RUN git init /opt/int8-aiter && cd /opt/int8-aiter && git remote add origin https://github.com/curvedinf/int8-aiter.git \
     && git fetch --depth=1 origin "$AITER_REV" && git checkout --detach FETCH_HEAD \
     && git submodule update --init --recursive --depth=1
@@ -37,6 +37,9 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     && scripts/build_residual_g128.sh && .venv/bin/python -c 'import vllm._rocm_C'
 COPY python_startup/ python_startup/
 COPY scripts/ scripts/
-ENV PYTHONPATH=/opt/int8-vllm/python_startup:/opt/int8-vllm:/opt/int8-aiter \
-    AITER_JIT_DIR=/cache/aiter/${AITER_REV}-gfx908-rocm10.2.0
+# Use the toolkit compiler for AITER JIT. The wheel also installs a hipcc
+# shim, but its runtime-only SDK omits the device bitcode.
+ENV PATH=/opt/rocm/bin:/opt/int8-vllm/.venv/bin:/root/.cargo/bin:$PATH \
+    PYTHONPATH=/opt/int8-vllm/python_startup:/opt/int8-vllm:/opt/int8-aiter \
+    AITER_JIT_DIR=/cache/aiter/${AITER_REV}-gfx908-rocm10.2.0-torch2.15
 ENTRYPOINT ["scripts/mi100-serve.sh"]

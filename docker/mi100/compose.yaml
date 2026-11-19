@@ -31,8 +31,8 @@ services:
       XDG_CACHE_HOME: /cache
       HF_HOME: /cache/huggingface
       VLLM_CACHE_ROOT: /cache/vllm
-      TORCHINDUCTOR_CACHE_DIR: /cache/torchinductor/rocm10.2.0
-      TRITON_CACHE_DIR: /cache/triton/rocm10.2.0
+      TORCHINDUCTOR_CACHE_DIR: /cache/torchinductor/rocm10.2.0-torch2.15
+      TRITON_CACHE_DIR: /cache/triton/rocm10.2.0-torch2.15
     volumes:
       - ${MODELS_DIR:-${HOME:-}/models}:/models:ro
       - cache:/cache

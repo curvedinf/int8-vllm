@@ -11,6 +11,7 @@ future KV pages, whose layout we control).
 
 from __future__ import annotations
 
+import errno
 from concurrent.futures import ThreadPoolExecutor
 
 import torch
@@ -45,6 +46,9 @@ def read_into_tensor(
         raise FsGpuError("read_into_tensor: non-contiguous destination", 5000 + 22)
     dst = _byte_view(tensor)
     total = dst.numel()
+    file_size = f.size
+    if file_offset < 0 or file_offset + total > file_size:
+        raise FsGpuError("read_into_tensor: range outside file", 0, errno.EINVAL)
     done = 0
     while done < total:
         payload = min(total - done, chunk_hint, pool.capacity - ALIGN)
@@ -53,9 +57,7 @@ def read_into_tensor(
         start = file_offset + done
         head = start & (ALIGN - 1)
         extent = _align_up(head + payload)
-        avail = f.size - (start - head)
-        if extent > avail:
-            extent = max(int(avail), 1)
+        extent = min(extent, file_size - (start - head))
         f.ais.read(f.fh, pool.base, extent, start - head, 0)
         dst[done : done + payload].copy_(pool.view(head, payload))
         done += payload

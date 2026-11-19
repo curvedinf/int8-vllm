@@ -69,6 +69,11 @@ case "$recipe" in
     if [[ "$cards" == 4 ]]; then
       export VLLM_GDN_PREFILL_EXACT="${VLLM_GDN_PREFILL_EXACT:-1}"
     fi
+    if [[ "$cards-$link" == 2-off ]]; then
+      # RCCL 2.32 can leave 29.40 GiB free per 31.98 GiB card after TP2
+      # initialization, just below the 29.43 GiB requested at 92%.
+      export GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.90}"
+    fi
     export KVMEM="${KVMEM:-auto}"
     if [[ "$cards" != 4 ]]; then export MAXLEN="${MAXLEN:-auto}"; fi ;;
   flint)

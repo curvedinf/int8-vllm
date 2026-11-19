@@ -4,19 +4,43 @@ set -euo pipefail
 py=.venv/bin/python
 work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
-index=https://download.pytorch.org/whl
-cat > "$work/constraints.txt" <<'PINS'
+case "${1:-}" in
+  --rocm10.2)
+    index=https://stable.repo.amd.com/rocm/whl-next/
+    cat > "$work/constraints.txt" <<'PINS'
+torch==2.15.0+rocm10.2.0
+torchvision==0.29.2+rocm10.2.0
+torchaudio==2.11.1+rocm10.2.0
+triton==3.9.0+git0a6e13e6.rocm10.2.0
+PINS
+    ;;
+  "")
+    index=https://download.pytorch.org/whl
+    cat > "$work/constraints.txt" <<'PINS'
 torch==2.11.0+rocm7.1
 torchvision==0.26.0+rocm7.1
 torchaudio==2.11.0+rocm7.1
 triton-rocm==3.6.0
 PINS
+    ;;
+  *) echo "Usage: $0 [--rocm10.2]" >&2; exit 2 ;;
+esac
 install() {
   "$py" -m pip install --dry-run "$@" && "$py" -m pip install "$@"
 }
-install -c "$work/constraints.txt" --extra-index-url "$index/rocm7.1" torch torchvision torchaudio
+if [[ "${1:-}" == --rocm10.2 ]]; then
+  install -c "$work/constraints.txt" --index-url "$index" --extra-index-url https://pypi.org/simple \
+    'torch[device-gfx908]' 'torchvision[device-gfx908]' torchaudio triton
+else
+  install -c "$work/constraints.txt" --extra-index-url "$index/rocm7.1" torch torchvision torchaudio
+fi
 install -c "$work/constraints.txt" -r requirements/rocm.txt 'cmake>=3.26,<4' ninja pybind11 einops wheel
 smi_dir="${ROCM_PATH:-/opt/rocm}/share/amd_smi"
+if [[ "${1:-}" == --rocm10.2 ]]; then
+  # Torch loads the SDK wheel's libamd_smi. A second copy from the system
+  # bindings can report zero processors even when HIP sees both MI100s.
+  smi_dir=$("$py" -c 'from pathlib import Path; import _rocm_sdk_core; print(Path(next(iter(_rocm_sdk_core.__path__))) / "share/amd_smi")')
+fi
 if [[ -f "$smi_dir/pyproject.toml" || -f "$smi_dir/setup.py" ]]; then
   install -c "$work/constraints.txt" "$smi_dir"
 else
@@ -26,6 +50,10 @@ else
   printf '%s\n' "$smi_dir" > "$site_dir/amd_smi.pth"
 fi
 "$py" -c 'import amdsmi'
+if [[ "${1:-}" == --rocm10.2 ]]; then
+  "$py" -c 'import torch, torchvision, torchaudio, triton; assert torch.__version__ == "2.15.0+rocm10.2.0"'
+  exit 0
+fi
 # Some optional packages depend on the PyPI triton distribution. Both
 # distributions install the same import tree; restore the ROCm owner last.
 if "$py" -m pip show triton >/dev/null 2>&1; then

@@ -14,19 +14,24 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _inputs(lengths, prefixes, *, block_size=4256):
+def _inputs(lengths, prefixes, *, block_size=4256, head_size=128):
     torch.manual_seed(702)
     lens = [a + b for a, b in zip(lengths, prefixes)]
     width = (max(lens) + block_size - 1) // block_size + 1
     blocks = len(lengths) * width
     table = torch.randperm(blocks, device="cuda").to(torch.int32)
     table = table.reshape(len(lengths), width)
-    q = torch.randn((sum(lengths), 12, 128), device="cuda", dtype=torch.bfloat16)[:, :8]
+    q = torch.randn((sum(lengths), 12, head_size), device="cuda", dtype=torch.bfloat16)[
+        :, :8
+    ]
     k = torch.randint(
-        -128, 128, (blocks, block_size, 1, 128), device="cuda", dtype=torch.int8
+        -128, 128, (blocks, block_size, 1, head_size), device="cuda", dtype=torch.int8
     )
     v = torch.randint(-128, 128, k.shape, device="cuda", dtype=torch.int8)
-    sk = (torch.rand((blocks, block_size, 1, 1), device="cuda") * 0.02 + 0.001).half()
+    sk = (
+        torch.rand((blocks, block_size, 1, head_size // 128), device="cuda") * 0.02
+        + 0.001
+    ).half()
     sv = (torch.rand_like(sk) * 0.02 + 0.001).half()
     starts = torch.tensor([0] + lengths, device="cuda", dtype=torch.int32)
     starts = starts.cumsum(0).to(torch.int32)
@@ -38,7 +43,7 @@ def _inputs(lengths, prefixes, *, block_size=4256):
         max_seqlen_q=max(lengths),
         seqused_k=torch.tensor(lens, device="cuda", dtype=torch.int32),
         max_seqlen_k=max(lens),
-        softmax_scale=128**-0.5,
+        softmax_scale=head_size**-0.5,
         causal=True,
         window_size=(-1, -1),
         block_table=table,
@@ -50,6 +55,32 @@ def _inputs(lengths, prefixes, *, block_size=4256):
         g8_k_scale=sk,
         g8_v_scale=sv,
     )
+
+
+@pytest.mark.parametrize("block_size", [64, 48])
+def test_two_group_prefill_matches_dequantized_reference(monkeypatch, block_size):
+    monkeypatch.setenv("VLLM_UA_PREFILL_TILE", "32")
+    monkeypatch.setenv("VLLM_G128_PREFILL_GLUON", "0")
+    prefix, queries = 71, 19
+    length = prefix + queries
+    data = _inputs([queries], [prefix], block_size=block_size, head_size=256)
+    out = torch.empty_like(data["q"])
+    ua.unified_attention(out=out, **data)
+
+    pages = data["block_table"][0].long()
+
+    def dequantized(name):
+        codes = data[name][pages].reshape(-1, 256)[:length].float()
+        scales = data[f"g8_{name}_scale"][pages].reshape(-1, 2)[:length].float()
+        return codes * scales.repeat_interleave(128, dim=-1)
+
+    logits = (data["q"].float() @ dequantized("k").T) * data["softmax_scale"]
+    positions = torch.arange(length, device="cuda")
+    causal = positions <= positions[prefix:, None]
+    reference = logits.masked_fill(~causal[:, None], -torch.inf).softmax(
+        -1
+    ) @ dequantized("v")
+    assert (out.float() - reference).abs().mean() < reference.abs().mean() * 0.02
 
 
 def test_causal_int8_pv_ignores_masked_future_scale(monkeypatch):

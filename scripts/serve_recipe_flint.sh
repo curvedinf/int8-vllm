@@ -58,7 +58,7 @@ serve() {
     VLLM_API_KEY="$(tr -d '\r\n' < "$key_file")"
   fi
   [[ -n "${VLLM_API_KEY}" ]] || { echo 'API key is empty' >&2; return 1; }
-  export PATH="${ROOT_DIR}/.venv/bin:/opt/rocm/bin:${PATH}"
+  export PATH="/opt/rocm/bin:${ROOT_DIR}/.venv/bin:${PATH}"
   export PYTHONPATH="${ROOT_DIR}/python_startup:${ROOT_DIR}:${ROOT_DIR}/../int8-aiter:${PYTHONPATH:-}"
   export ROCM_PATH=/opt/rocm HIP_PATH=/opt/rocm LD_LIBRARY_PATH="/opt/rocm/lib:${LD_LIBRARY_PATH:-}"
   export GPU_ARCHS=gfx908 PYTORCH_ROCM_ARCH=gfx908 VLLM_TARGET_DEVICE=rocm

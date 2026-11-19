@@ -60,7 +60,7 @@ if [[ -f "${_ua_flag}" ]]; then
 fi
 
 COMMON_ENV=(
-  PATH="${VENV}/bin:${PATH:-}"
+  PATH="/opt/rocm/bin:${VENV}/bin:${PATH:-}"
   ROCM_PATH="/opt/rocm"
   HIP_PATH="/opt/rocm"
   GPU_ARCHS="gfx908"
@@ -122,7 +122,7 @@ COMMON_ENV=(
   VLLM_DISABLED_KERNELS="${VLLM_DISABLED_KERNELS:-TritonW8A16LinearKernel}"
   NCCL_ALGO="Ring"
   NCCL_PROTO="Simple"
-  NCCL_P2P_DISABLE="0"
+  NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-0}"
   NCCL_DMABUF_ENABLE="0"
   NCCL_DEBUG="INFO"
   RCCL_LOG_LEVEL="INFO"
