@@ -9,7 +9,7 @@ Install the host AMD GPU driver, Git, Docker Engine and Compose v2.24 or later. 
 ```bash
 git clone --branch main https://github.com/curvedinf/int8-vllm.git
 cd int8-vllm
-MI100_CARDS=2 MI100_XGMI=off MI100_RECIPE=qwen38 \
+MI100_CARDS=4 MI100_XGMI=on MI100_RECIPE=qwen38 \
   docker compose -f docker/mi100/compose.yaml up --build -d
 docker compose -f docker/mi100/compose.yaml logs -f serve
 ```
@@ -74,7 +74,7 @@ export MAX_JOBS=4 CARGO_BUILD_JOBS=4
 scripts/build_residual_g128.sh
 .venv/bin/python scripts/test_int8_kv_micro.py
 HIP_VISIBLE_DEVICES=0 .venv/bin/python scripts/battery_gfx908.py
-MI100_CARDS=2 MI100_XGMI=off MI100_RECIPE=qwen38 scripts/mi100-serve.sh
+MI100_CARDS=4 MI100_XGMI=on MI100_RECIPE=qwen38 scripts/mi100-serve.sh
 ```
 
 Run the build steps in a fresh venv. On a ROCm 10.2 development host, use `docker/mi100/install-deps.sh --rocm10.2` to select the same PyTorch packages as Compose. The native command shown above retains the original stack. In that mode the installer constrains the three PyTorch packages to ROCm builds, installs the fork's ROCm requirements, restores the ROCm Triton package if another dependency installed upstream Triton, then patches torch's bundled runtime. The native and Docker launchers use the same recipe scripts. Set runtime overrides directly in the native launch environment. The existing `scripts/serve_recipe_qwen38_tp2.sh` service commands use the same two-card PCIe profile and retain port 8021.
