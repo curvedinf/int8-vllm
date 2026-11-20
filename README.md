@@ -20,7 +20,7 @@ The recipes below are heavily optimized for four 32 GB MI100 GPUs connected
 over XGMI, combining INT8 matrix kernels, INT8 KV caching and speculative
 decoding to reduce memory traffic and accelerate serving.
 
-## Supported models and optimized recipes
+## Optimized model recipes
 
 This fork is compatible with all stock vLLM-supported models, but the following recipes
 have been heavily optimized and tested.
