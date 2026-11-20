@@ -117,8 +117,11 @@ serve() {
   export VLLM_GFX908_O_PROJ_I8="${VLLM_GFX908_O_PROJ_I8:-1}"
   if [[ "$VLLM_GFX908_O_PROJ_I8" == 1 ]]; then
     export VLLM_GFX908_RESIDUAL_INT8="${VLLM_GFX908_RESIDUAL_INT8:-1}"
-    export VLLM_RESIDUAL_G128_LIBRARY="${VLLM_RESIDUAL_G128_LIBRARY:-${ROOT_DIR}/vllm/_residual_g128.so}"
-    if [[ ! -f "$VLLM_RESIDUAL_G128_LIBRARY" ]]; then
+    local bundled_g128="${ROOT_DIR}/vllm/_residual_g128.so"
+    export VLLM_RESIDUAL_G128_LIBRARY="${VLLM_RESIDUAL_G128_LIBRARY:-$bundled_g128}"
+    if [[ ! -f "$VLLM_RESIDUAL_G128_LIBRARY" ||
+          ( "$VLLM_RESIDUAL_G128_LIBRARY" == "$bundled_g128" &&
+            "${ROOT_DIR}/csrc/custom_all_reduce_g128.hip" -nt "$bundled_g128" ) ]]; then
       bash "${ROOT_DIR}/scripts/build_residual_g128.sh" "$VLLM_RESIDUAL_G128_LIBRARY" || {
         echo 'Flint requires the GS128 projection. Check hipcc and run scripts/build_residual_g128.sh.' >&2
         return 1

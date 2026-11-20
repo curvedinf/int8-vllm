@@ -75,11 +75,12 @@ do not derive an alternate production configuration from archival material.
 
 ## Environment (do not deviate)
 
-- All Python via `.venv/bin/python` in the repo root. Never system python, never
-  bare pip against this venv without a `--dry-run` first — it pins
-  torch 2.11.0+rocm7.1 + triton 3.6.0 and PyPI resolution would replace them
-  with CUDA builds.
-- The venv's ROCm *runtime* is deliberately patched ahead of its wheel:
+- Use `.venv/bin/python` in the repo root. Run pip with `--dry-run` first
+  and pin the ROCm wheels. The original serving stack uses
+  torch 2.11.0+rocm7.1 and Triton 3.6.0. The native Flint comparison also
+  ran torch 2.13.0+rocm7.14.0 with Triton 3.8.0 and rebuilt vLLM and
+  AITER native extensions. See [the two-stack measurements](docs/recipes/flint.md#mixed-prefill-and-decode-on-four-mi100s).
+- The original torch 2.11 venv's ROCm *runtime* is patched ahead of its wheel:
   `torch/lib/libamdhip64.so` and `libhsa-runtime64.so` are the 7.2.53211
   builds (from the quant venv's torch 2.13 wheel; wheel originals kept as
   `*.wheel-rocm7.1`). The bundled 7.1 runtime leaks ~80 KiB of host AQL

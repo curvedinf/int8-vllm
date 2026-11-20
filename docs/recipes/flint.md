@@ -19,6 +19,40 @@ is no 16-bit fallback in this recipe.
   (see [service installation and selection](services.md))
 - Ledger / experiment record: `agents/scratch/flint-int8-recipe.md`
 
+## Mixed prefill and decode on four MI100s
+
+Set `VLLM_GFX908_G128_REDUCE_SCATTER=1` to assign each group of 128
+residual values to one GPU. That GPU sums the four contributions in rank
+order and sends the quantized codes and scale to all ranks over XGMI.
+The launcher rebuilds the bundled library when its source changes.
+
+The native test started six streams with warm 2,048-token prompts and
+injected six cold 2,048-token prompts two seconds later. Each requested
+256 output tokens at temperature 1, top-p 0.95 and top-k 20. The recipe
+used seven drafts and a 2,048-token scheduling budget. At 290 W per card,
+the previous collective delivered 5,023 input and 65.8 decode tokens/s
+during cold prefill. The owner-based implementation delivered 10,786
+and 162.7 respectively. Both figures are three-run medians. Decode counts
+actual output IDs over the same interval as prefill and excludes the
+first token of each newly admitted request.
+
+At 105 W per card, the same owner-based kernel was used to compare
+native PyTorch stacks. Each column is the median of five runs, with an
+additional warm-up excluded from each batch.
+
+| Aggregate tokens/s | Torch 2.11, patched HIP 7.2 | Torch 2.13, ROCm 7.14 | Torch 2.13 repeat |
+|---|---:|---:|---:|
+| Cold prefill during mixed load | 7,122 | 7,359 | 3,996 |
+| Decode during cold prefill | 105.2 | 82.5 | 68.9 |
+| Decode with all 12 streams active after prefill | 489.6 | 494.0 | 490.2 |
+
+The upgraded stack showed intermittent prefill stalls in both batches.
+All three serial, greedy diagnostic prompts changed their 64-token output
+relative to the previous stack. The [experiment ledger](surface_experiments_ledger.jsonl)
+contains the individual rates, cache hits and draft acceptance. The
+[four-rank regression](../../scripts/test_g128_exchange.py) checks the
+collective against an FP32 reference in eager execution and graph replay.
+
 ## Model shape
 
 49 layers (dense MLP layers 0-1, 47 MoE layers), 256 experts top-6,
