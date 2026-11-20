@@ -869,14 +869,16 @@ class DelegatingParser(Parser):
         if not state.prompt_reasoning_checked and prompt_token_ids is not None:
             state.prompt_reasoning_checked = True
             self.set_prompt_token_ids(prompt_token_ids)
-            if self._reasoning_parser is None or self.is_reasoning_end(
-                prompt_token_ids
+            if self._reasoning_parser is None or (
+                not getattr(
+                    self._reasoning_parser, "may_open_reasoning_in_output", False
+                )
+                and self.is_reasoning_end(prompt_token_ids)
             ):
                 state.reasoning_ended = True
             else:
-                # Reasoning is still open at the end of the prompt; let the
-                # reasoning parser adjust its initial parsing state so the
-                # first generated tokens are classified correctly.
+                # The prompt may already contain an open block, or generation
+                # may begin with a model-selected reasoning marker.
                 self._reasoning_parser.adjust_initial_state_from_prompt(
                     prompt_token_ids
                 )

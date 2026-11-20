@@ -203,16 +203,49 @@ The MoE block, dense/shared MLP and draft MLP are end-to-end int8:
   recipe default. Ledger: FLINT_R1S40_512K_RETRAIN_20261109,
   FLINT_NS_SWEEP_C12_20261109.
 
+## Live quality checks
+
+With `VLLM_API_KEY` set for the running server, run the short chat corpus
+and the eight long-document tasks from the repository root.
+
+```bash
+.venv/bin/python scripts/probe_bolt_quality.py --model flint \
+  --max-tokens 4096 --thinking-token-budget 384 \
+  --output logs/flint-chat-quality.json
+KLD_KEY="$VLLM_API_KEY" .venv/bin/python scripts/qat_battery.py \
+  --model flint --tag flint --thinking-token-budget 1024
+```
+
+The long gate decodes the fixed validation documents with their original Qwen
+tokenizer and submits the resulting text to Flint. It saves each final answer
+and its reasoning separately. Read the final answers against the source windows.
+Flint counts every output-limit stop as a failure, even with a nonempty answer.
+Use `--require-complete` to apply the same rule to another model.
+For a longer follow-up, set `--max-tokens` and use another tag to preserve the
+original result. Both probes use the running server.
+
+On the 105 W, TP4/C12 Flint instance, four of the eight long tasks spent
+their entire 4,096-token allowance on reasoning. With 1,024 reasoning
+tokens, six tasks reached a natural stop. Some answers repeated planning
+text after the forced reasoning close. The bugs-and-risks task finished
+with a 16,384-token total limit and unrestricted reasoning. The exhaustive
+API inventory still hit that limit with or without a reasoning cap.
+For an exact inventory, extract smaller source sections and check the
+combined names against the source declarations.
+
 ## Known deltas
 
 - Tool calling: the template's XML `<tool_call>{name}<arg_key>k</arg_key>
   <arg_value>v</arg_value></tool_call>` format is GLM-4.7's, so the recipe
-  boots `--enable-auto-tool-choice --tool-call-parser glm47`
+  boots `--enable-auto-tool-choice --tool-call-parser flint`
   (`TOOLPARSER=""` disables it). Verified end-to-end: an `auto` tool call
   parses to JSON arguments, and a streamed `<|observation|>` tool-result
   turn answers correctly.
-- Reasoning: the template emits `<think>` blocks; the recipe uses
-  `--reasoning-parser qwen3`.
+- The native recipe uses `--reasoning-parser flint`. Flint may answer directly
+  or open a `<think>` block. The parser puts explicit blocks in `reasoning`
+  and the answer in `content`. Flint's template has no `enable_thinking`
+  switch. Use the request's `thinking_token_budget` to limit reasoning.
+  A long task can exhaust `max_tokens` before producing a final answer.
 - The draft export keeps the trained bf16-grid surfaces; re-quantizing
   them would need a new scaled kernel (same exception as Qwen).
 

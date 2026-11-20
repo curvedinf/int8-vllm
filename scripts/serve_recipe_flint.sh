@@ -168,8 +168,7 @@ serve() {
     # the rollback lever (per-token-head scale, group = head_dim).
     --kv-cache-dtype "${KV_DTYPE:-int8_block_g128}"
     # Flint's own reasoning parser: the template's <think>…</think> blocks
-    # and the structured-output reasoning gate that holds the tool grammar
-    # until reasoning ends.
+    # are optional. Plain answers and direct calls start in content.
     --reasoning-parser "${REASONING_PARSER:-flint}"
     --override-generation-config '{"temperature":1.0,"top_p":0.95,"top_k":20}'
   )
