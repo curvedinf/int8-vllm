@@ -14,7 +14,7 @@ COPY requirements/ requirements/
 COPY docker/mi100/install-deps.sh docker/mi100/
 RUN --mount=type=cache,target=/root/.cache/pip docker/mi100/install-deps.sh --rocm10.2 \
     && .venv/bin/python -c 'import ctypes, torch; ctypes.CDLL("libhipfile.so.0")'
-ARG AITER_REV=32725373d0e50725630f277c558f5b3e3a9ff07c
+ARG AITER_REV=588b19605025430afbc948cd247941093b2e9c97
 RUN git init /opt/int8-aiter && cd /opt/int8-aiter && git remote add origin https://github.com/curvedinf/int8-aiter.git \
     && git fetch --depth=1 origin "$AITER_REV" && git checkout --detach FETCH_HEAD \
     && git submodule update --init --recursive --depth=1

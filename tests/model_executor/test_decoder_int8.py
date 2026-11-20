@@ -189,3 +189,37 @@ def test_fused_silu_projection(gated, m, k, n):
     expected = (expected + bias.float()).bfloat16().float()
     expected = F.silu(expected[:, :n]) * expected[:, n:] if gated else F.silu(expected)
     _check(actual, expected.bfloat16().float(), tolerance=0.008)
+
+
+def test_mixed_prefill_reuses_compiled_kernels(monkeypatch):
+    """Varying prefill rows within one tile class should reuse compiled kernels."""
+    from triton.runtime.jit import JITFunction
+
+    tracked = {"_quant", "_gemm", "_gemm_a8w8_blockscale_kernel", "_materialize"}
+    launched = {}
+    run = JITFunction.run
+
+    def record(kernel, *args, **kwargs):
+        compiled = run(kernel, *args, **kwargs)
+        name = kernel.fn.__name__
+        if name in tracked:
+            launched[name] = compiled.hash
+        return compiled
+
+    monkeypatch.setattr(JITFunction, "run", record)
+    layer = SimpleNamespace(
+        weight=torch.randint(-127, 128, (256, 256), device="cuda", dtype=torch.int8),
+        weight_gs128=torch.full((1, 256, 2), 0.001, device="cuda"),
+        tp_size=1,
+    )
+    expected = None
+    for rows in (517, 551, 597):
+        launched.clear()
+        x = _pack(torch.randn(rows, 256, device="cuda", dtype=torch.bfloat16))
+        hidden = projection(layer, x, activation="silu")
+        materialize(projection(layer, hidden))
+        assert launched.keys() == tracked
+        if expected is None:
+            expected = launched.copy()
+        else:
+            assert launched == expected

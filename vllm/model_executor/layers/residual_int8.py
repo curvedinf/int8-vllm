@@ -180,8 +180,8 @@ def _add_norm(
             tl.store(SPT + row, ts)
 
 
-@triton.jit
-def _materialize(Q, S, Y, N: tl.constexpr, K: tl.constexpr, BLOCK: tl.constexpr):
+@triton.jit(do_not_specialize=["N"])
+def _materialize(Q, S, Y, N, K: tl.constexpr, BLOCK: tl.constexpr):
     offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     q = tl.load(Q + offsets, offsets < N, 0).to(tl.float32)
     groups = (offsets // K) * tl.cdiv(K, 128) + (offsets % K) // 128
