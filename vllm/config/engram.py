@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Literal, Self
 
 from pydantic import model_validator
 
@@ -13,8 +13,15 @@ if TYPE_CHECKING:
 
 # Architecture -> the hf_text_config field naming its n-gram layers. A model is
 # only configurable here if it actually has such layers to store.
+_FLASH_ENGRAM_ARCHITECTURES = {
+    "HYV4FlashForCausalLM",
+    "HYV4FlashVLForConditionalGeneration",
+}
+
 _NGRAM_LAYER_FIELDS = {
     "DeepseekV41ForCausalLM": "engram_layer_ids",
+    "HYV4FlashForCausalLM": "engram_layer_ids",
+    "HYV4FlashVLForConditionalGeneration": "engram_layer_ids",
     "Qwen4ExpForCausalLM": "ple_layer_ids",
     "Qwen4ExpForConditionalGeneration": "ple_layer_ids",
 }
@@ -37,6 +44,16 @@ class EngramConfig:
     cpu_offload: bool = True
     """Store embedding weights in pinned CPU memory for UVA lookup."""
 
+    packed_table: Literal["direct", "bcache", "ram"] | None = None
+    """HY4 Q4_0 table placement. Direct uses strict hipFile IO, bcache reads
+    requested pages through the filesystem, and ram pins each rank's head shard."""
+
+    table_directory: str | None = None
+    """Directory containing engram-<layer>.q4_0. Defaults to the checkpoint."""
+
+    page_cache_mib: int = 8
+    """GPU page cache size per packed Engram layer and rank in disk modes."""
+
     embedding_across_dp: bool = False
     """Shard embeddings across TP and all DP ranks when enabled.
     Otherwise, each DP rank has a separate TP-sharded embedding replica."""
@@ -57,6 +74,10 @@ class EngramConfig:
 
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
+        if self.packed_table and (self.dp_shared_memory or self.embedding_across_dp):
+            raise ValueError("Packed Engram tables require TP-local head ranges")
+        if self.packed_table and self.page_cache_mib <= 0:
+            raise ValueError("page_cache_mib must be positive")
         if self.dp_shared_memory and not self.cpu_offload:
             raise ValueError("dp_shared_memory requires cpu_offload=True")
         if self.use_thp and (not self.cpu_offload or self.dp_shared_memory):
@@ -67,6 +88,11 @@ class EngramConfig:
 
     def verify_model_config(self, model_config: "ModelConfig | None") -> None:
         """Reject Engram configuration for models without n-gram embeddings."""
+        if self.packed_table and (
+            model_config is None
+            or model_config.architecture not in _FLASH_ENGRAM_ARCHITECTURES
+        ):
+            raise ValueError("Packed Engram tables require an HY4 Flash checkpoint")
         field = (
             _NGRAM_LAYER_FIELDS.get(model_config.architecture)
             if model_config is not None
@@ -82,14 +108,22 @@ class EngramConfig:
                 "embeddings and non-empty n-gram layer ids."
             )
 
-    def resolve_dp_shared_memory(self, parallel_config: "ParallelConfig") -> None:
-        """Share host tables by default wherever the configuration permits."""
+    def resolve_dp_shared_memory(
+        self,
+        parallel_config: "ParallelConfig",
+        model_config: "ModelConfig | None" = None,
+    ) -> None:
+        """Share host tables by default wherever the model supports them."""
         if self.dp_shared_memory is None:
             self.dp_shared_memory = (
                 self.cpu_offload
                 and not self.use_thp
                 and parallel_config.data_parallel_size > 1
                 and not parallel_config.enable_elastic_ep
+                and (
+                    model_config is None
+                    or model_config.architecture not in _FLASH_ENGRAM_ARCHITECTURES
+                )
             )
 
     def verify_parallel_config(self, parallel_config: "ParallelConfig") -> None:

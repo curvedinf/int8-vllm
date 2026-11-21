@@ -69,8 +69,11 @@ def test_expert_name_index_preserves_replicas():
         (8, 240, 16),
         (64, 240, 16),
         (65, 240, 16),
-        (1706, 240, 16),
-        (1707, 240, 64),
+        # Nine routes per token cross the deployed 8- and 24-row thresholds.
+        (213, 240, 16),
+        (214, 240, 32),
+        (639, 240, 32),
+        (640, 240, 64),
         (4096, 496, 64),
     ],
 )
@@ -112,6 +115,7 @@ def test_expert_projections_share_route_plan_and_tile(
         value = torch.zeros((tokens * 9, 4))
         return value if kwargs.get("down") else (value.to(torch.int8), value)
 
+    monkeypatch.delenv("VLLM_GFX908_EXPERT_BLOCK_SIZE", raising=False)
     monkeypatch.setattr(alignment, "moe_align_block_size", align)
     monkeypatch.setattr(packed_expert_cache, "get_cache", lambda *a: None)
     monkeypatch.setattr(packed.ops, "quantize", lambda x: (x.to(torch.int8), x))

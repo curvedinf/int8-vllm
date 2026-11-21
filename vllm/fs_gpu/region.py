@@ -41,6 +41,7 @@ class RegisteredFile:
 
     def __init__(self, path: str, write: bool = False, direct: bool = False):
         self.path = path
+        self.direct = direct
         self.ais = get_ais()
         flags = (os.O_DIRECT if direct else 0) | (
             os.O_RDWR if write else os.O_RDONLY
@@ -50,7 +51,11 @@ class RegisteredFile:
         except OSError as e:
             # e.g. tmpfs or a fs without O_DIRECT support
             raise FsGpuError(f"open({path!r})", 0, e.errno) from e
-        self.fh = self.ais.handle_register(self.fd)
+        try:
+            self.fh = self.ais.handle_register(self.fd)
+        except BaseException:
+            os.close(self.fd)
+            raise
 
     @property
     def size(self) -> int:
@@ -85,7 +90,7 @@ class GpuStagingPool:
         self.tensor = torch.empty(want, dtype=torch.uint8, device=self.device)
         raw = self.tensor.data_ptr()
         self.base = _align_up(raw)
-        self.capacity = want - (self.base - raw) - ALIGN
+        self.capacity = _align_up(max(min_bytes, ALIGN))
         self.ais = get_ais()
         self.ais.buf_register(self.base, self.capacity)
 
@@ -98,7 +103,7 @@ class GpuStagingPool:
         self.tensor = torch.empty(want, dtype=torch.uint8, device=self.device)
         raw = self.tensor.data_ptr()
         self.base = _align_up(raw)
-        self.capacity = want - (self.base - raw) - ALIGN
+        self.capacity = _align_up(min_bytes)
         self.ais.buf_register(self.base, self.capacity)
 
     def close(self) -> None:

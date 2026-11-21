@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Packed-byte and publication contract for the optional CPU cache writer."""
 
+import json
 import os
+import struct
 from pathlib import Path
 
+import pytest
 import torch
 
 from vllm.fs_gpu.repack import RepackCache
@@ -47,3 +50,30 @@ def test_cpu_repack_short_writes_and_alignment(tmp_path, monkeypatch):
     assert cache.tensors[1].block_off == 8
     source.write_bytes(b"changed source")
     assert not cache.validate([str(source)])
+
+
+@pytest.mark.parametrize(
+    "contents", [b"\x01", struct.pack("<Q", 1 << 63), struct.pack("<Q", 8) + b"{}"]
+)
+def test_incomplete_rank_cache_header_reports_invalid_file(tmp_path, contents):
+    from vllm.fs_gpu.safetensors import SafetensorFile
+
+    path = tmp_path / "rank.safetensors"
+    path.write_bytes(contents)
+    with pytest.raises(ValueError, match="header"):
+        SafetensorFile(str(path))
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        {"__metadata__": []},
+        {"w": {"dtype": "U8", "shape": [1], "data_offsets": [0]}},
+        {"w": {"dtype": "U8", "shape": [1], "data_offsets": [0, 2]}},
+    ],
+)
+def test_invalid_rank_cache_tensor_directory(header):
+    from vllm.fs_gpu.safetensors import SafetensorFile
+
+    with pytest.raises(ValueError):
+        SafetensorFile("rank.safetensors", json.dumps(header).encode())

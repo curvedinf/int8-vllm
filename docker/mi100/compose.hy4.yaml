@@ -1,0 +1,9 @@
+services:
+  serve:
+    extends:
+      file: compose.yaml
+      service: serve
+    environment:
+      MI100_RECIPE: hy4
+volumes:
+  cache:

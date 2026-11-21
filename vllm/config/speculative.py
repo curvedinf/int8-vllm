@@ -74,6 +74,7 @@ EagleModelTypes = Literal[
 SpeculativeMethod = Literal[
     "ngram",
     "draft_model",
+    "dfly",
     "suffix",
     "custom_class",
     "ksdraft",
@@ -1084,7 +1085,7 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["HYV3MTPModel"]}
             )
 
-        if hf_config.model_type == "hy_v4":
+        if hf_config.model_type in ("hy_v4", "hy_v4_vl"):
             hf_config.model_type = "hy_v4_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
@@ -1249,6 +1250,23 @@ class SpeculativeConfig:
                 self.method = "ngram"
             else:
                 self.method = "draft_model"
+
+        dfly_policy = None
+        if self.method == "dfly":
+            if self.target_model_config is None:
+                raise ValueError("DFly requires target_model_config")
+            if self.target_model_config.hf_text_config.model_type == "hy_v4_flash":
+                from vllm.models.hy_v4_flash.dfly_config import (
+                    HYV4FlashDFlySpeculatorConfig as dfly_policy,
+                )
+            else:
+                from vllm.models.hy_v4.dfly_config import (
+                    HYV4DFlySpeculatorConfig as dfly_policy,
+                )
+            self.model = self.model or dfly_policy.default_model(self)
+            dfly_policy.resolve_num_speculative_tokens(self)
+            dfly_policy.apply_options(self)
+            self.parallel_drafting = True
 
         if self.method in get_args(MTPModelTypes) and self.method != "mtp":
             logger.warning(
@@ -1420,6 +1438,8 @@ class SpeculativeConfig:
                 draft_hf_overrides = SpeculativeConfig.compose_draft_hf_overrides(
                     self.target_model_config.hf_overrides, transformers_mtp_overrides
                 )
+                if dfly_policy is not None:
+                    draft_hf_overrides = dfly_policy.draft_hf_overrides(self)
                 self.draft_model_config = ModelConfig(
                     model=self.model,
                     runner="draft",
@@ -1460,9 +1480,12 @@ class SpeculativeConfig:
                 )
 
                 # Automatically detect the method
+                if dfly_policy is not None:
+                    dfly_policy.adapt_draft_model_config(self)
                 if self.method in (
                     "eagle",
                     "eagle3",
+                    "dfly",
                     "dflash",
                     "dspark",
                 ):
@@ -1638,7 +1661,7 @@ class SpeculativeConfig:
                         if block_size is None:
                             block_size = getattr(hf_config, "dspark_block_size", None)
                         self.num_speculative_tokens = block_size
-                elif n_predict is not None:
+                elif n_predict is not None and self.method != "dfly":
                     if self.num_speculative_tokens is None:
                         # Default to max value defined in draft model config.
                         self.num_speculative_tokens = n_predict

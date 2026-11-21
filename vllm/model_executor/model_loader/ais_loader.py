@@ -371,6 +371,8 @@ def ais_safetensors_weights_iterator(
             ok = writer.commit()
             logger.info("fs_gpu repack cache %s", "written" if ok else "FAILED")
     finally:
+        if writer is not None:
+            writer.abort()
         if executor is not None:
             executor.shutdown(wait=True)
         if pool is not None:
@@ -394,16 +396,12 @@ def _append_to_writer(
     # Double-buffered gather pools: hipFileWrite's DMA can outlive its
     # return (probed: 6/2405 blocks corrupted sharing one pool), so a
     # lingering write must never share a buffer with the next gather.
-    pools = getattr(writer, "_gather_pools", None)
-    if pools is None:
-        pools = [
+    while len(writer.gather_pools) < 2:
+        writer.gather_pools.append(
             GpuStagingPool(max(VLLM_AIS_STAGING_MB << 20, total), device=device)
-            for _ in range(2)
-        ]
-        writer._gather_pools = pools  # type: ignore[attr-defined]
-        writer._gather_idx = 0  # type: ignore[attr-defined]
-    pool = pools[writer._gather_idx]  # type: ignore[attr-defined]
-    writer._gather_idx = 1 - writer._gather_idx  # type: ignore[attr-defined]
+        )
+    pool = writer.gather_pools[writer.gather_index]
+    writer.gather_index = 1 - writer.gather_index
     if total > pool.capacity:
         pool.grow(total)
     _gather_into_compact(tensor, pool.view(0, total), runs)
@@ -419,6 +417,7 @@ class AisModelLoader(DefaultModelLoader):
 
     def __init__(self, load_config):
         super().__init__(load_config)
+        self._hy4_windowed = False
         self._read_plan: ReadPlan | None = None
         self._repack_hit: RepackCache | None = None
         self._repack_write: bool = False
@@ -510,6 +509,20 @@ class AisModelLoader(DefaultModelLoader):
         return plan
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
+        self._hy4_windowed = model_config.quantization == "hy4_neuqi"
+        if self._hy4_windowed:
+            from vllm.model_executor.model_loader.hy4_rank_cache import HY4RankCache
+
+            cache = HY4RankCache.for_model(model, model_config)
+            if cache is not None and cache.restore():
+                return
+            logger.info(
+                "Loading HY4 with contiguous GPU windows and GPU-local TP sharding"
+            )
+            super().load_weights(model, model_config)
+            if cache is not None:
+                cache.save()
+            return
         self._read_plan = None
         self._fused_experts = None
         try:
@@ -543,6 +556,23 @@ class AisModelLoader(DefaultModelLoader):
     def _get_weights_iterator(
         self, source: DefaultModelLoader.Source
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
+        if self._hy4_windowed:
+            from vllm.model_executor.model_loader.hy4_direct import hy4_windowed_weights
+
+            _, files, safetensors, _ = self._prepare_weights(
+                source.model_or_path,
+                source.subfolder,
+                source.revision,
+                source.fall_back_to_pt,
+                source.allow_patterns_overrides,
+            )
+            if not safetensors:
+                raise ValueError("The packed HY4 checkpoint requires safetensors")
+            if self.counter_before_loading_weights == 0:
+                self.counter_before_loading_weights = time.perf_counter()
+            return hy4_windowed_weights(
+                source, _sorted_files(files), require_fastpath=False
+            )
         weights_iterator = None
         try:
             if (

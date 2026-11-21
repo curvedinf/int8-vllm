@@ -201,8 +201,16 @@ class HYV4DecoderLayer(nn.Module):
             positions=positions,
             hidden_states=hidden_states,
         )
+        pre = self.hc_mlp_layer.hc_pre
+        rows = attention_output.shape[0]
+        # With MFMA gate dots, a separate residual update is less expensive
+        # at these sizes than recomputing its vector products inside each tile.
+        separate_overlap = pre.overlap_weight is not None and (
+            64 <= rows <= 96 or rows >= 320
+        )
         can_fuse_ihc_post_pre_rms_norm = (
-            triton_ihc_supported(attention_output)
+            not separate_overlap
+            and triton_ihc_supported(attention_output)
             and self.hc_attn_layer.hc_post.hpc_op is None
             and self.hc_mlp_layer.hc_pre.hpc_op is None
         )
@@ -218,6 +226,7 @@ class HYV4DecoderLayer(nn.Module):
                 self.hc_mlp_layer.hc_pre.magnitude,
                 self.hc_mlp_layer.hc_pre.hc_eps,
                 self.hc_mlp_layer.hc_pre.layernorm_epsilon,
+                self.hc_mlp_layer.hc_pre.overlap_weight,
             )
         else:
             hidden_states = self.hc_attn_layer.post(

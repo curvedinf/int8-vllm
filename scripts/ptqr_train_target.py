@@ -71,13 +71,28 @@ def _dither(shape, device, dtype, tau: float, gen: torch.Generator | None):
     return (u - 0.5) * tau
 
 
-def act_quant_fake(x: torch.Tensor, tau: float = 0.0,
-                   gen: torch.Generator | None = None) -> torch.Tensor:
-    """Per-token dynamic symmetric int8, round-half-up (act_quant_rn.py).
+def act_quant_fake(
+    x: torch.Tensor,
+    tau: float = 0.0,
+    gen: torch.Generator | None = None,
+    *,
+    group_size: int = 0,
+) -> torch.Tensor:
+    """Fake-quantize activations on the deployed INT8 grid with an STE.
 
-    x: [M, K] fp16/bf16/fp32 -> dequantized fake-quant with STE gradient.
-    Scale is fp32 max|x|/127 per row (1.0 when the row is all-zero).
+    The per-token recipe uses FP32 row scales and round-half-up. A positive
+    group_size selects independent last-axis groups, round-to-nearest-even,
+    and a minimum scale of 1e-30, matching the HY4 G128 kernels.
     """
+    if group_size:
+        grouped = x.float().unflatten(-1, (-1, group_size))
+        scale = (grouped.abs().amax(-1, keepdim=True) / 127).clamp_min(1e-30)
+        codes = torch.round(grouped / scale)
+        dither = _dither(codes.shape, x.device, torch.float32, tau, gen)
+        if dither is not None:
+            codes = torch.round(codes + dither)
+        quantized = (codes.clamp(-127, 127) * scale).reshape_as(x).to(x.dtype)
+        return x + (quantized - x).detach()
     orig_dtype = x.dtype
     xf = x.float()
     s = xf.abs().amax(dim=-1, keepdim=True) / _ACT_MAX
@@ -139,14 +154,24 @@ class _PTQRLinFn(torch.autograd.Function):
     _dbg_done = False
 
     @staticmethod
-    def forward(ctx, x, w, scale, group: int, tau: float, scale_fp16: bool = True):
+    def forward(
+        ctx,
+        x,
+        w,
+        scale,
+        group: int,
+        tau: float,
+        scale_fp16: bool = True,
+        act_group: int = 0,
+    ):
         ctx.save_for_backward(x, w, scale)
         ctx.group = group
         ctx.tau = tau
         ctx.scale_fp16 = scale_fp16
+        ctx.act_group = act_group
         with torch.no_grad():
             wq = _weight_quant_compute(w, scale, group, tau, scale_fp16=scale_fp16)
-            xq = act_quant_fake(x, tau)
+            xq = act_quant_fake(x, tau, group_size=act_group)
             return F.linear(xq, wq)
 
     @staticmethod
@@ -157,7 +182,7 @@ class _PTQRLinFn(torch.autograd.Function):
         dbg = os.environ.get("PTQR_MEM_DEBUG") and not _PTQRLinFn._dbg_done
         with torch.no_grad():
             wq = _weight_quant_compute(w, scale, group, tau, scale_fp16=s_fp16)
-            xq = act_quant_fake(x, tau)
+            xq = act_quant_fake(x, tau, group_size=ctx.act_group)
             if dbg:
                 _PTQRLinFn._dbg_done = True
                 for nm, t in (("dy", dy), ("wq", wq), ("xq", xq),
@@ -191,7 +216,7 @@ class _PTQRLinFn(torch.autograd.Function):
                         q = (torch.sign(z) * torch.floor(z.abs() + 0.5)
                              .clamp(0.0, _QUANT_MAX_W)).reshape(r1 - r0, in_f)
                         gs[r0:r1] = (gw_r.reshape(r1 - r0, in_f // group, group) * q.reshape(r1 - r0, in_f // group, group)).sum(dim=-1)
-        return grad_x, gw, gs, None, None, None
+        return (grad_x, gw, gs, None, None, None, None)[:len(ctx.needs_input_grad)]
 
 
 def _weight_integer(w: torch.Tensor, scale: torch.Tensor, group: int) -> torch.Tensor:
@@ -259,7 +284,7 @@ class PTQRLinear(nn.Module):
     """
 
     def __init__(self, weight: torch.Tensor, group: int = 128,
-                 scale_fp16: bool = True):
+                 scale_fp16: bool = True, act_group: int = 0):
         super().__init__()
         out_f, in_f = weight.shape
         assert in_f % group == 0, f"in_features {in_f} not divisible by {group}"
@@ -273,6 +298,7 @@ class PTQRLinear(nn.Module):
         # untied LM head uses the CK per-channel contract (fp32 row scales,
         # see _quantize_lm_head_w8a8_ in vocab_parallel_embedding.py).
         self.scale_fp16 = scale_fp16
+        self.act_group = act_group
         self.tau = 0.0
         self.quant_input = True
         self.row_reduce_group = None   # set for row-parallel use (MLP down_proj)
@@ -303,7 +329,7 @@ class PTQRLinear(nn.Module):
             out = torch.nn.functional.linear(x, self.weight)
         else:
             out = _PTQRLinFn.apply(x, self.weight, self.scale, self.group,
-                                   self.tau, self.scale_fp16)
+                                   self.tau, self.scale_fp16, self.act_group)
         if self.row_reduce_group is not None:
             # Row-parallel partial (own column slice of the input): sum the
             # partials across ranks, autograd-exact (_RowParallelSum).

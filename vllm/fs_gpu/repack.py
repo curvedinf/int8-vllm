@@ -217,6 +217,8 @@ class RepackWriter:
         os.makedirs(cache.root, exist_ok=True)
         self.cache = cache
         self.tmp_bin = f"{cache.bin_path}.tmp-{os.getpid()}"
+        self.gather_pools: list[GpuStagingPool] = []
+        self.gather_index = 0
         self.entries: list[dict[str, Any]] = []
         self._runs_flat: list[int] = []
         self.off = 0
@@ -271,11 +273,9 @@ class RepackWriter:
 
     def commit(self) -> bool:
         try:
-            if self.ais is not None:
-                self.ais.handle_deregister(self.fh)
-            else:
+            if self.ais is None:
                 os.fsync(self.fd)
-            os.close(self.fd)
+            self._close_file()
             meta = {
                 "version": REPACK_VERSION,
                 "tp_size": self.cache.tp_size,
@@ -303,7 +303,18 @@ class RepackWriter:
     def abort(self) -> None:
         self._cleanup()
 
+    def _close_file(self) -> None:
+        if self.ais is not None and self.fh is not None:
+            self.ais.handle_deregister(self.fh)
+            self.fh = None
+        if self.fd >= 0:
+            os.close(self.fd)
+            self.fd = -1
+
     def _cleanup(self) -> None:
+        self._close_file()
+        while self.gather_pools:
+            self.gather_pools.pop().close()
         for p in (self.tmp_bin, f"{self.cache.meta_path}.tmp-{os.getpid()}"):
             try:
                 os.unlink(p)

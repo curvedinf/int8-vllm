@@ -136,6 +136,10 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     k3_dspark="K3DSparkConfig",
     funaudiochat="FunAudioChatConfig",
     hy_v4="HYV4Config",
+    hy_v4_dfly="HYV4DFlyConfig",
+    hy_v4_vl="HYV4VLConfig",
+    hy_v4_flash="HYV4FlashConfig",
+    hy_v4_flash_vl="HYV4FlashVLConfig",
     hyperclovax="HyperCLOVAXConfig",  # Upstream class, hub remote code is broken
     isaac="IsaacConfig",
     kimi_k2="DeepseekV3Config",  # Kimi K2 uses same architecture as DeepSeek V3
@@ -226,7 +230,13 @@ def is_rope_parameters_nested(rope_parameters: dict[str, Any]) -> bool:
         return False
     # DeepSeek-V4 nests by rope type ("main", "compress") instead
     return set(rope_parameters.keys()).issubset(
-        {*ALLOWED_LAYER_TYPES, "main", "compress"}
+        {
+            *ALLOWED_LAYER_TYPES,
+            "main",
+            "compress",
+            "indexed_attention",
+            "deepseek_sparse_attention",
+        }
     )
 
 

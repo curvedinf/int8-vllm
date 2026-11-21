@@ -185,7 +185,7 @@ class DefaultModelLoader(BaseModelLoader):
         if load_format == "hf":
             allow_patterns = ["*.safetensors", "*.bin"]
         elif (
-            load_format == "safetensors"
+            load_format in ("safetensors", "ais")
             or load_format == "fastsafetensors"
             or load_format == "instanttensor"
         ):

@@ -534,6 +534,11 @@ def get_and_maybe_dequant_weights(
     ):
         return weight.to(out_dtype)
 
+    from vllm.model_executor.layers.quantization.hy4_neuqi import HY4Linear
+
+    if isinstance(layer.quant_method, HY4Linear):
+        return layer.quant_method.dequantize_weight(layer, dtype=out_dtype)
+
     # Simple Fp8 case: rescale with tensor or block weight scales
     if (
         isinstance(

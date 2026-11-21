@@ -9,7 +9,7 @@ Install the host AMD GPU driver, Git, Docker Engine and Compose v2.24 or later. 
 ```bash
 git clone --branch main https://github.com/curvedinf/int8-vllm.git
 cd int8-vllm
-MI100_CARDS=2 MI100_XGMI=off MI100_RECIPE=qwen38 \
+MI100_CARDS=4 MI100_XGMI=on MI100_RECIPE=qwen38 \
   docker compose -f docker/mi100/compose.yaml up --build -d
 docker compose -f docker/mi100/compose.yaml logs -f serve
 ```
@@ -18,13 +18,15 @@ Compose fetches the fork's pinned AITER source. The existing `docker/Dockerfile.
 
 | Setting | Values | Default |
 | --- | --- | --- |
-| `MI100_CARDS` | `2` and `4` use tensor parallelism. `3` uses three pipeline stages with the complete DFlash2 draft on the final stage. Its 32 query heads cannot be divided evenly across three tensor ranks. | `4` |
+| `MI100_CARDS` | `2` and `4` use tensor parallelism. With three cards, Qwen, Flint and Bolt use three pipeline stages because their DFlash2 draft has 32 query heads. HY4-Flash is supported at TP4. | `4` |
 | `MI100_XGMI` | `on` for a full XGMI mesh. `off` selects RCCL and enables fine-grained PCIe peer memory. The kernel driver and hardware determine the physical path. | `on` |
-| `MI100_RECIPE` | `qwen38`, `flint`, `bolt` | `qwen38` |
+| `MI100_RECIPE` | `qwen38`, `flint`, `bolt`, `hy4` | `qwen38` |
 
 Compose uses AMD’s ROCm 10.2.0 user space and gfx908 wheels for PyTorch 2.15.0, torchvision 0.29.2 and torchaudio 2.11.1. It includes the matching AMD Triton 3.9.0 and hipFile 0.6.0, and builds the vLLM extensions. AITER kernels compile on first use. The host supplies the AMD kernel driver and the device nodes. The first start downloads the matching checkpoints into a named volume, or uses existing checkpoints under `$HOME/models`. Set `MODELS_DIR` on the host to mount a different directory. Downloads, AITER JIT modules, Triton binaries and compiler caches persist across container recreation. After changing AITER or its build ABI use a fresh AITER cache directory. With the earlier ROCm 7.2.1 image, the first two-card Qwen container reached health in 123 minutes with four compiler jobs and checkpoints already downloaded. The worker attributed 104 minutes to post-load processing, which included compiling CK A8W8. Recreating the container with the same volume took 5 minutes 59 seconds to health, including 69 seconds for target weights and 1.3 seconds for target post-load processing. These times exclude building the image and downloading the checkpoints.
 
-Allow approximately 32 GiB for the Qwen checkpoint pair, 39 GiB for Flint or 24 GiB for Bolt, plus separate space for the image (about 57 GB unpacked on the validation host), build cache and any AIS repacks. Two-card and four-card repacks contain different tensor shards.
+Allow approximately 32 GiB for the Qwen checkpoint pair, 39 GiB for Flint, 24 GiB for Bolt or 113 GiB for HY4-Flash including its Q4 Engram tables, plus separate space for the image (about 57 GB unpacked on the validation host), build cache and any AIS repacks. Two-card and four-card repacks contain different tensor shards.
+
+HY4-Flash uses four MI100s, PTQR INT8 vision and DFly2, and an SSD-backed Engram table. Its dedicated Compose file defaults to TP4 on XGMI. Set `MI100_XGMI=off` for a four-card PCIe system. [HY4-Flash setup](hy4-flash.md#docker-compose)
 
 The API listens on `127.0.0.1:8020` on the host. A successful `curl -f http://127.0.0.1:8020/health` means the engine is ready. The launcher generates a private API key on first use. Retrieve it locally with `docker compose -f docker/mi100/compose.yaml exec serve cat /cache/mi100/api.key`, or supply your own through a private environment file. Stop with `docker compose -f docker/mi100/compose.yaml down`. Keep the named volume to reuse the downloads.
 
@@ -39,8 +41,9 @@ Set `MI100_ENV_FILE` to the absolute path of a private env file to pass settings
 | `MODEL_DIR`, `DRAFT_MODEL_DIR` | All | Explicit local checkpoint paths (use container paths under `/models` in Docker). A missing explicit path stops the launch. |
 | `MODEL_REVISION`, `DRAFT_MODEL_REVISION` | Hub downloads | Override the pinned target or draft revision. |
 | `VLLM_API_KEY`, `API_KEY_FILE` | All | Existing API credential or mounted key file. |
-| `C`, `NS` | All | Concurrent sequences and speculative tokens. The portable Qwen launcher uses C8/NS7, Flint C12/NS7 and Bolt C8/NS7. |
-| `MAXLEN`, `MNBT` | Qwen, Flint | Maximum context length and batched tokens. |
+| `C`, `NS` | All | Concurrent sequences and speculative tokens. The portable launcher uses C8/NS7 for Qwen and Bolt, C12/NS7 for Flint and C8/NS7 for HY4-Flash. |
+| `MAXLEN`, `MNBT` | Qwen, Flint, HY4-Flash | Maximum context length and batched tokens. HY4 defaults to `262144` and `2048`. |
+| `HY4_HOST_RAM_RESERVE_GIB` | HY4-Flash | Available host RAM to preserve, 8 GiB by default. The launcher checks Linux `MemAvailable` and any tighter cgroup v2 limit before committing RAM to Engram. |
 | `MAX_MODEL_LEN`, `MAX_BATCHED_TOKENS` | Bolt | Maximum context length and batched tokens. |
 | `GPU_MEMORY_UTILIZATION` | All | Fraction available when vLLM sizes the KV pool automatically. A fixed KV arena takes precedence. |
 | `KVMEM` | Qwen, Bolt | Per-GPU KV bytes. Qwen accepts `auto` for memory profiling. |
@@ -50,8 +53,10 @@ Set `MI100_ENV_FILE` to the absolute path of a private env file to pass settings
 | `GPU_MEMORY_UTILIZATION` | Qwen | The two-card PCIe launcher defaults to `0.90` to leave room for RCCL allocations before KV profiling. |
 | `NCCL_P2P_DISABLE` | Qwen | Defaults to `0`. Set `1` to compare RCCL shared memory with PCIe peer transfers on the same two cards. Confirm the transport in RCCL’s channel logs. |
 | `OFFLOAD`, `PREFIXCACHE` | Qwen | Both default to `1`. For diagnosis, `OFFLOAD=0` disables the CPU connector and `PREFIXCACHE=0` disables prefix reuse. Change one setting per run. |
-| `VLLM_AIS_REPACK_CPU_WRITE` | Portable launcher | Defaults to `1`. New rank caches use buffered host writes and a final sync. Cache hits use the normal AIS read path. |
-| `VLLM_FS_GPU` | All | The default `auto` uses AMD Infinity Storage when available. `0` uses the ordinary weight loader. |
+| `ENGRAM_MODE`, `ENGRAM_DIR` | HY4-Flash | Storage mode and directory for the four packed n-gram tables. The default is `bcache` under the target checkpoint. [Storage modes](hy4-flash.md#n-gram-storage) |
+| `VLLM_AIS_REPACK_WINDOW_MB` | HY4-Flash, Bolt | Read size in MiB when restoring a rank-local cache. HY4 coalesces small tensors into 16 MiB GPU windows and can transfer each window in smaller reads. |
+| `VLLM_AIS_REPACK_CPU_WRITE` | Qwen, Flint, Bolt | Defaults to `1`. New rank caches use buffered host writes and a final sync. Cache hits use the normal AIS read path. |
+| `VLLM_FS_GPU` | Automatic loader selection | The default `auto` uses AMD Infinity Storage when available. `0` uses the ordinary weight loader. HY4-Flash explicitly selects `LOAD_FORMAT=ais` and creates its TP-local weight cache through hipFile. |
 
 ## Native
 
@@ -59,7 +64,7 @@ Use Python 3.12 with development headers, the ROCm development toolkit, a C/C++ 
 
 ```bash
 git clone --recurse-submodules https://github.com/curvedinf/int8-aiter.git ../int8-aiter
-git -C ../int8-aiter checkout 588b19605025430afbc948cd247941093b2e9c97
+git -C ../int8-aiter checkout e2de917dc4fd5933aa7b198bffdbb856a95635c4
 git -C ../int8-aiter submodule update --init --recursive
 python3.12 -m venv .venv
 export ROCM_PATH=/opt/rocm HIP_PATH=/opt/rocm
@@ -74,14 +79,14 @@ export MAX_JOBS=4 CARGO_BUILD_JOBS=4
 scripts/build_residual_g128.sh
 .venv/bin/python scripts/test_int8_kv_micro.py
 HIP_VISIBLE_DEVICES=0 .venv/bin/python scripts/battery_gfx908.py
-MI100_CARDS=2 MI100_XGMI=off MI100_RECIPE=qwen38 scripts/mi100-serve.sh
+MI100_CARDS=4 MI100_XGMI=on MI100_RECIPE=qwen38 scripts/mi100-serve.sh
 ```
 
 Run the build steps in a fresh venv. On a ROCm 10.2 development host, use `docker/mi100/install-deps.sh --rocm10.2` to select the same PyTorch packages as Compose. The native command shown above retains the original stack. In that mode the installer constrains the three PyTorch packages to ROCm builds, installs the fork's ROCm requirements, restores the ROCm Triton package if another dependency installed upstream Triton, then patches torch's bundled runtime. The native and Docker launchers use the same recipe scripts. Set runtime overrides directly in the native launch environment. The existing `scripts/serve_recipe_qwen38_tp2.sh` service commands use the same two-card PCIe profile and retain port 8021.
 
 ## Check a running recipe
 
-The model IDs exposed by the API are `qwen3.8-27b-gptq8`, `flint` and `nemotron-bolt`. To exercise a prefix that spans multiple cache pages, run this probe from the native checkout or inside the serving container. Use the target checkpoint's tokenizer. The probe sends the same chat request twice, checks that both answers contain a verification phrase from the middle of the input and compares their final text.
+The model IDs exposed by the API are `qwen3.8-27b-gptq8`, `flint`, `nemotron-bolt` and `hy4-flash`. To exercise a prefix that spans multiple cache pages, run this probe from the native checkout or inside the serving container. Use the target checkpoint's tokenizer. The probe sends the same chat request twice, checks that both answers contain a verification phrase from the middle of the input and compares their final text.
 
 ```bash
 .venv/bin/python scripts/probe_bolt_prefix.py \
@@ -109,6 +114,10 @@ Each of the 24 servers generated a correct short answer, returned the embedded v
 For the two-card Qwen slowdown in issue #1, a separate single-stream W5 diagnostic used a 3,219-token chat and 256 generated tokens per request. Across three prefix-warm repeats, median decode was **70.4 tokens/s native** (68.9–70.7) and **48.3 tokens/s in Compose** (45.1–50.1). Median warm time to first token was 0.115 s and 0.119 s respectively. The 2,405 target tensors and 186 draft tensors used by the two installations had identical contents. Both used torch 2.11.0+rocm7.1 and Triton 3.6.0. The native environment had Transformers 5.9.0 and the image had 5.20.2. Speculative acceptance differed between runs. Compare runs with the same prompt, concurrency, cache state and sampling settings. The ledger entry `MI100_ISSUE1_QWEN_TP2_PCIE_W5` includes each run and its accepted-token counts.
 
 The normal Qwen budget is seven draft tokens. On four native XGMI cards, the earlier AITER build selected a 256-row INT8 GEMM tile for the eight rows in an NS7 single-stream verification step. Correcting tile selection raised median warm decode from **23.2 to 83.8 tokens/s** on the same W5 chat at temperature 1.0. Median step time fell from **140.1 to 39.5 ms**. The original NS13 control measured 74.3 tokens/s and 52.9 ms per step. With 12 concurrent warmed chat requests and eight active sequences, NS7 median request time fell from 24.1 to 17.7 seconds. See the [experiment ledger](surface_experiments_ledger.jsonl), entry `QWEN38_MI100_NS7_CK_TILE_DISPATCH`.
+
+### HY4-Flash on four MI100s
+
+The native launcher and ROCm 10.2 Compose image support TP4 with XGMI on or off. The XGMI profile uses vLLM custom all-reduce. The PCIe profile uses RCCL. The recipe page gives the measured rates, collective transport, memory and long-context checks for each deployment. [HY4-Flash results](hy4-flash.md#serving-performance)
 
 ### ROCm 10.2 on two PCIe MI100s
 

@@ -108,6 +108,10 @@ class GateLinear(ReplicatedLinear):
         )
         self.out_dtype = out_dtype
         self._i8: tuple | None = None  # (int8 weight, GS128 scales)
+        self.order_four_splits = False
+        self.overlap_router_splits = {}
+        self.register_buffer("_overlap_codes", None, persistent=False)
+        self.register_buffer("_overlap_scales", None, persistent=False)
         self.is_gfx950 = is_gfx950
 
         # A quantized gate exposes no plain ``weight``, so every specialized
@@ -281,6 +285,20 @@ class GateLinear(ReplicatedLinear):
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         return output if not self.return_bias else (output, None)
 
+    def prepare_gfx908_overlap(self, splits: dict[int, int]) -> None:
+        """Pack this replicated INT8 router once, preserving its FP32 GS128 scales."""
+        from aiter.ops.flydsl.kernels import gfx908_g128  # noqa: F401
+        from aiter.ops.gemm_packed_native import pack_affine_weights
+
+        from vllm.model_executor.layers.quantization.utils.packed_g128_int8 import (
+            quantize,
+        )
+
+        self._i8 = quantize(self.weight.detach().float().contiguous())
+        weight, scales, _ = pack_affine_weights(*self._i8, overlap=True)
+        self._overlap_codes, self._overlap_scales = weight, scales
+        self.overlap_router_splits = splits
+
     def _int8_forward(self, x: torch.Tensor) -> torch.Tensor:
         """INT8 GS128 router GEMM (Bolt GATE_I8 parity).
 
@@ -328,6 +346,12 @@ class GateLinear(ReplicatedLinear):
                     f"K={x2.shape[1]}", flush=True)
         else:
             xq, xs = quantize(x2)
+        split = self.overlap_router_splits.get(xq.shape[0])
+        if split is not None:
+            out = torch.ops.aiter.gfx908_g128_overlap(
+                xq, xs, None, self._overlap_codes, self._overlap_scales, None, split
+            )
+            return out.reshape(*x.shape[:-1], -1)
         # gfx908: the aiter heuristic picks a 6-CTA grid for the decode gate
         # shape (M=96 N=256 K=2048) and measures 70.5 us; the fork's tuned
         # selector (bm=16/bn=128/ksplit=4, 48 CTAs) measures 20.4 us at the
@@ -341,8 +365,10 @@ class GateLinear(ReplicatedLinear):
             cfg = _get_aiter_w8a8_config(
                 xq.shape[0], wq.shape[0], xq.shape[1], 128
             )
-        out = gemm_a8w8_blockscale(xq, wq, xs, ws, dtype=torch.float32,
-                                   config=cfg)
+        options = {"order_four_splits": True} if self.order_four_splits else {}
+        out = gemm_a8w8_blockscale(
+            xq, wq, xs, ws, dtype=torch.float32, config=cfg, **options
+        )
         return out.reshape(*x.shape[:-1], -1)
 
     def forward(

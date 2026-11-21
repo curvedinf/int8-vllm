@@ -133,7 +133,11 @@ class AisLib:
 
     def __init__(self, path: str | None = None):
         self.path = path or os.getenv("VLLM_AIS_LIB", "libhipfile.so.0")
-        self.lib = ctypes.CDLL(self.path, mode=ctypes.RTLD_LOCAL)
+        self.fastpath_only = (
+            os.environ.get("HIPFILE_ALLOW_COMPAT_MODE", "").lower() == "false"
+            and os.environ.get("HIPFILE_FORCE_COMPAT_MODE", "").lower() == "false"
+        )
+        self.lib = ctypes.CDLL(self.path, mode=ctypes.RTLD_LOCAL, use_errno=True)
         self._bind()
         self._driver_refs = 0
         self.version = self.get_version()
@@ -244,21 +248,24 @@ class AisLib:
 
     # -- synchronous IO ----------------------------------------------------
 
+    def read_once(
+        self, fh: int, buf_base: int, size: int, file_offset: int, buf_offset: int = 0
+    ) -> int:
+        """Issue one read. An aligned request crossing EOF may return short."""
+        got = self.lib.hipFileRead(fh, buf_base, size, file_offset, buf_offset)
+        if got == -1:
+            raise FsGpuError("hipFileRead", 0, ctypes.get_errno())
+        if got < 0:
+            raise FsGpuError("hipFileRead", -got)
+        return got
+
     def read(self, fh: int, buf_base: int, size: int, file_offset: int, buf_offset: int = 0) -> int:
         """hipFileRead; returns bytes read (retries short reads)."""
         done = 0
         while done < size:
-            got = self.lib.hipFileRead(
-                ctypes.c_void_p(fh),
-                ctypes.c_void_p(buf_base),
-                ctypes.c_size_t(size - done),
-                ctypes.c_int64(file_offset + done),
-                ctypes.c_int64(buf_offset + done),
+            got = self.read_once(
+                fh, buf_base, size - done, file_offset + done, buf_offset + done
             )
-            if got == -1:
-                raise FsGpuError("hipFileRead", 0, ctypes.get_errno())
-            if got < 0:
-                raise FsGpuError("hipFileRead", -got)
             if got == 0:
                 raise FsGpuError("hipFileRead", 0, 0)  # unexpected EOF
             done += got

@@ -1,5 +1,7 @@
 # Scratch index
 
+- [HY4 Flash](hy4-flash.md) records the port, checkpoint and direct-storage state.
+
 - [Bolt INT8 residuals](bolt-residual-int8.md): requested text-path conversion and live gates.
 
 - [Shared timers](timers.json): periodic maintenance state.

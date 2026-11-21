@@ -17,6 +17,8 @@
 !scripts/serve_recipe_qwen38.sh
 !scripts/serve_recipe_flint.sh
 !scripts/serve_recipe_bolt.sh
+!scripts/serve_recipe_hy4.sh
+!scripts/warm_hy4_engram.py
 !scripts/build_residual_g128.sh
 !scripts/fs_gpu_probe.py
 !scripts/prefetch_bolt_cache.py

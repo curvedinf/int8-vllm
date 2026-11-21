@@ -729,6 +729,7 @@ class RocmPlatform(Platform):
         "awq_marlin",  # will be overwritten with awq
         "gptq",
         "auto_gptq",
+        "hy4_neuqi",
         "fp8",
         "deepseek_v4_fp8",
         "compressed-tensors",

@@ -189,6 +189,7 @@ def triton_ihc_pre(
     magnitude: float,
     hc_eps: float,
     norm_eps: float,
+    packed_weight: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert x.dim() == 3 and x.is_cuda
     assert x.dtype in (torch.float16, torch.bfloat16)
@@ -215,26 +216,33 @@ def triton_ihc_pre(
         )
     output = torch.empty((num_tokens, hidden_size), dtype=x.dtype, device=x.device)
     post = torch.empty((num_tokens, hc_mult), dtype=torch.float32, device=x.device)
-    num_splits = triton.cdiv(k_total, _BLOCK_K)
+    overlap = (
+        packed_weight is not None and x.dtype == torch.float16 and num_tokens >= 64
+    )
+    block_k = (512 if num_tokens < 768 else 1024) if overlap else _BLOCK_K
+    num_splits = triton.cdiv(k_total, block_k)
     partial_stride = 1 + 2 * hc_pow2
     partial = torch.empty(
         (num_tokens, num_splits, partial_stride),
         dtype=torch.float32,
         device=x.device,
     )
-    _ihc_pre_stage1[(num_tokens, num_splits)](
-        x,
-        weight,
-        partial,
-        K_TOTAL=k_total,
-        HC_MULT=hc_mult,
-        HC_POW2=hc_pow2,
-        NUM_SPLITS=num_splits,
-        BLOCK_K=_BLOCK_K,
-        PARTIAL_STRIDE=partial_stride,
-        num_warps=_PRE_STAGE1_WARPS,
-        enable_fp_fusion=False,
-    )
+    if overlap:
+        torch.ops.aiter.gfx908_ihc_partial(x, packed_weight, block_k, partial)
+    else:
+        _ihc_pre_stage1[(num_tokens, num_splits)](
+            x,
+            weight,
+            partial,
+            K_TOTAL=k_total,
+            HC_MULT=hc_mult,
+            HC_POW2=hc_pow2,
+            NUM_SPLITS=num_splits,
+            BLOCK_K=_BLOCK_K,
+            PARTIAL_STRIDE=partial_stride,
+            num_warps=_PRE_STAGE1_WARPS,
+            enable_fp_fusion=False,
+        )
     _ihc_pre_stage2[(num_tokens, triton.cdiv(hidden_size, _BLOCK_D))](
         x,
         partial,
@@ -423,6 +431,7 @@ def triton_ihc_post_pre_rms_norm(
     magnitude: float,
     hc_eps: float,
     norm_eps: float,
+    packed_weight: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert x.dim() == 2 and residual.dim() == 3 and attn_post.dim() == 2
     assert x.is_cuda and residual.is_cuda and attn_post.is_cuda
@@ -468,7 +477,11 @@ def triton_ihc_post_pre_rms_norm(
     post = torch.empty((num_tokens, hc_mult), dtype=torch.float32, device=x.device)
     y = torch.empty_like(residual)
     hc_pow2 = triton.next_power_of_2(hc_mult)
-    num_splits = triton.cdiv(k_total, _BLOCK_K)
+    overlap = (
+        packed_weight is not None and x.dtype == torch.float16 and num_tokens >= 128
+    )
+    block_k = (256 if num_tokens < 768 else 512) if overlap else _BLOCK_K
+    num_splits = triton.cdiv(k_total, block_k)
     num_hidden_blocks = triton.cdiv(hidden_size, _BLOCK_D)
     partial_stride = 1 + 2 * hc_pow2
     partial = torch.empty(
@@ -476,23 +489,28 @@ def triton_ihc_post_pre_rms_norm(
         dtype=torch.float32,
         device=x.device,
     )
-    _ihc_post_pre_rms_norm_stage1[(num_tokens, num_splits)](
-        x,
-        residual,
-        attn_post,
-        weight,
-        partial,
-        y,
-        K_TOTAL=k_total,
-        HIDDEN_SIZE=hidden_size,
-        HC_MULT=hc_mult,
-        HC_POW2=hc_pow2,
-        NUM_SPLITS=num_splits,
-        BLOCK_K=_BLOCK_K,
-        PARTIAL_STRIDE=partial_stride,
-        num_warps=_PRE_STAGE1_WARPS,
-        enable_fp_fusion=False,
-    )
+    if overlap:
+        torch.ops.aiter.gfx908_ihc_partial(
+            residual, packed_weight, block_k, partial, x, attn_post, y
+        )
+    else:
+        _ihc_post_pre_rms_norm_stage1[(num_tokens, num_splits)](
+            x,
+            residual,
+            attn_post,
+            weight,
+            partial,
+            y,
+            K_TOTAL=k_total,
+            HIDDEN_SIZE=hidden_size,
+            HC_MULT=hc_mult,
+            HC_POW2=hc_pow2,
+            NUM_SPLITS=num_splits,
+            BLOCK_K=_BLOCK_K,
+            PARTIAL_STRIDE=partial_stride,
+            num_warps=_PRE_STAGE1_WARPS,
+            enable_fp_fusion=False,
+        )
     _ihc_post_pre_rms_norm_stage2[(num_tokens,)](
         y,
         partial,

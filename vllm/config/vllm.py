@@ -91,6 +91,7 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "GlmMoeDsaForCausalLM",
         "HYV4ForCausalLM",
         "HYV4MTPModel",
+        "HYV4DFlyModel",
         "InklingForCausalLM",
         "InklingForConditionalGeneration",
         "KimiK3ForConditionalGeneration",
@@ -120,12 +121,17 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
         # opt those in by default. Users can still force them with
         # VLLM_USE_BREAKABLE_CUDAGRAPH=1.
         #
-        # DeepseekV41ForCausalLM cannot torch.compile, and the ROCm sparse
-        # SWA backend only reports AttentionCGSupport.UNIFORM_BATCH. Default
-        # FULL_AND_PIECEWISE then dies at capture unless breakable CUDA
-        # graphs are on. Enable this architecture so the published AMD
-        # recipe can start.
-        return frozenset({"DeepseekV41ForCausalLM"})
+        # DeepSeek V4.1 and HY4 sparse attention need breakable graphs for
+        # mixed prefill and decode. Their ROCm backends can capture only
+        # uniform decode batches with the ordinary graph wrapper.
+        return frozenset(
+            {
+                "DeepseekV41ForCausalLM",
+                "HYV4FlashForCausalLM",
+                "HYV4FlashVLForConditionalGeneration",
+                "HYV4DFlyModel",
+            }
+        )
     return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES
 
 
@@ -1488,7 +1494,7 @@ class VllmConfig:
                 return
             self.engram_config = EngramConfig()
         self.engram_config.verify_model_config(model_config)
-        self.engram_config.resolve_dp_shared_memory(self.parallel_config)
+        self.engram_config.resolve_dp_shared_memory(self.parallel_config, model_config)
         self.engram_config.verify_parallel_config(self.parallel_config)
         logger.info_once("Resolved Engram configuration: %s", str(self.engram_config))
 
@@ -3085,7 +3091,7 @@ class VllmConfig:
             # own speculators.
             if (
                 speculative_config.parallel_drafting
-                and speculative_config.method not in ("dflash", "dspark")
+                and speculative_config.method not in ("dflash", "dfly", "dspark")
             ):
                 unsupported.append("parallel drafting for EAGLE speculative decoding")
 

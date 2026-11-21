@@ -67,6 +67,7 @@ class HYV4HCPreLayer(nn.Module):
             bias=False,
             prefix=f"{prefix}.hc_fn",
         )
+        self.register_buffer("overlap_weight", None, persistent=False)
         self.hc_scale = nn.Parameter(torch.empty(2, dtype=torch.float32))
         self.hc_base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
 
@@ -120,6 +121,7 @@ class HYV4HCPreLayer(nn.Module):
                 self.magnitude,
                 self.hc_eps,
                 self.layernorm_epsilon,
+                self.overlap_weight,
             )
 
         shape = x.size()  # [num_tokens, hc, d]

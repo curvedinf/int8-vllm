@@ -169,16 +169,16 @@ def reshape_and_cache_kernel_flash(
 # ---------------------------------------------------------------------------
 
 @triton.jit
-def _hadamard_stage(x, H: tl.constexpr, N: tl.constexpr):
+def _hadamard_stage(x, H: tl.constexpr, N: tl.constexpr, BLOCK: tl.constexpr = 64):
     """One butterfly stage: pair indices differing in bit log2(H)."""
-    lead: tl.constexpr = N // 64
-    g: tl.constexpr = 64 // (2 * H)
+    lead: tl.constexpr = N // BLOCK
+    g: tl.constexpr = BLOCK // (2 * H)
     x = tl.reshape(x, (lead, g, 2, H))
     x = tl.permute(x, (0, 1, 3, 2))
     a, b = tl.split(x)
     x = tl.join(a + b, a - b)
     x = tl.permute(x, (0, 1, 3, 2))
-    return tl.reshape(x, (lead, 64))
+    return tl.reshape(x, (lead, BLOCK))
 
 
 @triton.jit

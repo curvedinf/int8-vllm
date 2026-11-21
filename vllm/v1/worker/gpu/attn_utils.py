@@ -156,11 +156,13 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
 
 
 def get_shared_kv_cache_layers(vllm_config: VllmConfig):
-    attn_layers = get_layers_from_vllm_config(vllm_config, Attention)
+    attn_layers = get_layers_from_vllm_config(
+        vllm_config, cast(type[Any], AttentionLayerBase)
+    )
     return {
         layer_name: kv_tgt_layer
         for layer_name, attn_module in attn_layers.items()
-        if (kv_tgt_layer := attn_module.kv_sharing_target_layer_name)
+        if (kv_tgt_layer := getattr(attn_module, "kv_sharing_target_layer_name", None))
     }
 
 
@@ -206,9 +208,8 @@ def init_attn_backend(
 
     # Add KV-sharing layers to their target's kv cache group so they are
     # discovered alongside the target layer in Phase 1 below.
-    add_kv_sharing_layers_to_kv_cache_groups(
-        get_shared_kv_cache_layers(vllm_config), kv_cache_config.kv_cache_groups
-    )
+    shared = get_shared_kv_cache_layers(vllm_config)
+    add_kv_sharing_layers_to_kv_cache_groups(shared, kv_cache_config.kv_cache_groups)
     fast_prefill_eligible_layers = get_kv_sharing_fast_prefill_eligible_layers(
         vllm_config, draft_layer_names
     )
@@ -247,7 +248,9 @@ def init_attn_backend(
 
             layer_kv_cache_spec: KVCacheSpec = kv_cache_group_spec.kv_cache_spec
             if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
-                layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+                layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[
+                    shared.get(layer_name, layer_name)
+                ]
 
             # Split on per-rank num_heads_q so layers with different Q-head
             # counts (e.g. a spec-decode draft head and its target) get separate

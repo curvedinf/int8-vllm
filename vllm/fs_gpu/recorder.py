@@ -232,6 +232,14 @@ class _NullEntry:
 _NULL_ENTRY = _NullEntry()
 
 
+def record_full_read(tensor: torch.Tensor) -> bool:
+    """Mark a data-dependent consumer during the shape-only AIS planning pass."""
+    if isinstance(tensor, _RecorderTensor) and _ACTIVE_PLAN[0] is not None:
+        _entry_for(_ACTIVE_PLAN[0], tensor).mark_unsupported()
+        return True
+    return False
+
+
 def with_active_plan(plan: ReadPlan | None):
     class _Ctx:
         def __enter__(self):

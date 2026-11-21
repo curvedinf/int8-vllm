@@ -14,10 +14,6 @@ COPY requirements/ requirements/
 COPY docker/mi100/install-deps.sh docker/mi100/
 RUN --mount=type=cache,target=/root/.cache/pip docker/mi100/install-deps.sh --rocm10.2 \
     && .venv/bin/python -c 'import ctypes, torch; ctypes.CDLL("libhipfile.so.0")'
-ARG AITER_REV=588b19605025430afbc948cd247941093b2e9c97
-RUN git init /opt/int8-aiter && cd /opt/int8-aiter && git remote add origin https://github.com/curvedinf/int8-aiter.git \
-    && git fetch --depth=1 origin "$AITER_REV" && git checkout --detach FETCH_HEAD \
-    && git submodule update --init --recursive --depth=1
 # Keep runtime launcher changes out of the native extension build cache key.
 COPY CMakeLists.txt LICENSE MANIFEST.in README.md pyproject.toml setup.py ./
 COPY cmake/ cmake/
@@ -35,11 +31,21 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     && .venv/bin/python -m pip install --dry-run --no-build-isolation --no-deps -e . \
     && .venv/bin/python -m pip install --no-build-isolation --no-deps -e . \
     && scripts/build_residual_g128.sh && .venv/bin/python -c 'import vllm._rocm_C'
+# HY4's gfx908 matrix/vector schedules require this FlyDSL compiler ABI.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    .venv/bin/python -m pip install --dry-run 'flydsl==0.5.0' \
+    && .venv/bin/python -m pip install 'flydsl==0.5.0' \
+    && .venv/bin/python -c 'import flydsl.compiler'
+# AITER builds its kernels at runtime from this pinned checkout.
+ARG AITER_REV=bbc57fe793043748ac15ae7309a66b28a425cea4
+RUN git init /opt/int8-aiter && cd /opt/int8-aiter && git remote add origin https://github.com/curvedinf/int8-aiter.git \
+    && git fetch --depth=1 origin "$AITER_REV" && git checkout --detach FETCH_HEAD \
+    && git submodule update --init --recursive --depth=1
 COPY python_startup/ python_startup/
 COPY scripts/ scripts/
 # Use the toolkit compiler for AITER JIT. The wheel also installs a hipcc
 # shim, but its runtime-only SDK omits the device bitcode.
-ENV PATH=/opt/rocm/bin:/opt/int8-vllm/.venv/bin:/root/.cargo/bin:$PATH \
+ENV MI100_CONTAINER=1 PATH=/opt/rocm/bin:/opt/int8-vllm/.venv/bin:/root/.cargo/bin:$PATH \
     PYTHONPATH=/opt/int8-vllm/python_startup:/opt/int8-vllm:/opt/int8-aiter \
     AITER_JIT_DIR=/cache/aiter/${AITER_REV}-gfx908-rocm10.2.0-torch2.15
 ENTRYPOINT ["scripts/mi100-serve.sh"]

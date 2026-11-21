@@ -20,7 +20,7 @@ The recipes below are heavily optimized for four 32 GB MI100 GPUs connected
 over XGMI, combining INT8 matrix kernels, INT8 KV caching and speculative
 decoding to reduce memory traffic and accelerate serving.
 
-## Supported models and optimized recipes
+## Optimized model recipes
 
 This fork is compatible with all stock vLLM-supported models, but the following recipes
 have been heavily optimized and tested.
@@ -30,8 +30,9 @@ have been heavily optimized and tested.
 | Qwen3.8-27B | [INT8 PTQR target](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128-PTQR) + [DFlash2 draft](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128-PTQR) | 8 | 7 | 262,144 | ~1.61M | [Qwen setup](docs/recipes/README.md) |
 | NVIDIA Nemotron 3.5 Bolt 74B-A9B-24GB | [Official packed target](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB) + [LiLiCorr draft](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr) | 8 | 7 | 262,144 | ~1.99M | [Bolt setup](docs/recipes/nemotron_bolt.md) |
 | Flint | [INT8 PTQR target](https://huggingface.co/voodooquant/Flint-GPTQ-INT8-PTQR) + [DFlash2 draft](https://huggingface.co/voodooquant/Flint-DFlash2-GPTQ-INT8-PTQR) | 12 | 7 | 524,288 | ~4.4M | [Flint setup](docs/recipes/flint.md) |
+| Tencent Hy4-flash | [NeUQI INT4 target with PTQR INT8 vision](https://huggingface.co/voodooquant/Hy4-flash-NeUQI-INT4-W4A8-GS128) + [PTQR INT8 DFly2](https://huggingface.co/voodooquant/Hy4-flash-DFly2-PTQR-INT8-W8A8-GS128) | 8 | 7 | 262,144 | 372,870 | [HY4 setup](docs/recipes/hy4-flash.md) |
 
-These recipes are tested on **2 to 4 MI100 (gfx908), with XGMI and without**.
+Qwen, Bolt and Flint were tested on two to four MI100s across PCIe and XGMI. HY4 supports TP4 on four 32 GiB MI100s with either XGMI or PCIe and keeps its packed Engram tables on SSD.
 
 ## Getting started
 
@@ -42,7 +43,7 @@ MI100_CARDS=4 MI100_XGMI=on MI100_RECIPE=qwen38 \
   docker compose -f docker/mi100/compose.yaml up --build -d
 ```
 
-Choose `qwen38`, `flint` or `bolt`. The installer pins the software stack. The launcher selects the target, draft and recipe defaults. See [Docker and native installation](docs/recipes/mi100-install.md) for supported layouts, API access and overrides, or [common issues](docs/recipes/mi100-install.md#common-issues) for slow startup, PCIe peer routing and build failures.
+Choose `qwen38`, `flint`, `bolt` or `hy4`. The installer pins the software stack. The launcher selects the target, draft and recipe defaults. See [Docker and native installation](docs/recipes/mi100-install.md) for supported layouts, API access and overrides, or [common issues](docs/recipes/mi100-install.md#common-issues) for slow startup, PCIe peer routing and build failures.
 
 For a native installation managed by systemd, see [service installation and selection](docs/recipes/services.md).
 
@@ -52,7 +53,10 @@ The optimized recipes are built for fast, dependable inference. **Rigorous
 quality control covers the entire serving path**, from quantized weights and
 GPU kernels to complete responses and sustained concurrent workloads.
 Optimizations are evaluated for model fidelity, response quality and service
-stability alongside their speed and memory benefits.
+stability alongside their speed and memory benefits. HY4-Flash has a dedicated
+release gate covering 64 original-teacher prefixes, 52 chat checks, 114
+multiple-choice questions, image and video inputs, and DFly2 decoding.
+[HY4-Flash quality results](docs/recipes/hy4-flash.md#quality-and-memory)
 
 - **Model fidelity:** compare 52 prompts with BF16 using KLD, output agreement and stop probability to measure quantization drift.
 - **Weight integrity:** byte-check loaded/repacked weights and verify exports against the trained quantization grid to catch loading errors.

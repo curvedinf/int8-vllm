@@ -20,6 +20,7 @@ from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.utils import MROPE_POSITION_DELTA_KEY
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
@@ -517,6 +518,12 @@ class Scheduler(SchedulerInterface):
         # fence_seq.
         self.deferred_loads: dict[str, tuple[int, int, int, int]] = {}
 
+        self.trace_prefill_shapes = bool(
+            vllm_config.additional_config.get("trace_prefill_shapes", False)
+            if isinstance(vllm_config.additional_config, dict)
+            else False
+        )
+        self._last_traced_decode_shape: tuple[int, int] | None = None
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
@@ -2112,6 +2119,30 @@ class Scheduler(SchedulerInterface):
         # 3. If some tokens (e.g. spec tokens) are rejected later, the number of
         #    computed tokens will be adjusted in update_from_output.
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+        if self.trace_prefill_shapes:
+            prompt = tuple(
+                min(
+                    count,
+                    max(
+                        0,
+                        self.requests[rid].num_prompt_tokens
+                        - self.requests[rid].num_computed_tokens,
+                    ),
+                )
+                for rid, count in num_scheduled_tokens.items()
+            )
+            if any(prompt):
+                self._last_traced_decode_shape = None
+                logger.info(
+                    "Prefill iteration total=%d prompt=%s",
+                    scheduler_output.total_num_scheduled_tokens,
+                    ",".join(str(n) for n in prompt if n),
+                )
+            elif num_scheduled_tokens:
+                shape = (scheduler_output.total_num_scheduled_tokens, len(prompt))
+                if shape != self._last_traced_decode_shape:
+                    logger.info("Decode iteration total=%d requests=%d", *shape)
+                    self._last_traced_decode_shape = shape
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             request = self.requests[req_id]
             request.num_computed_tokens += num_scheduled_token
@@ -2584,6 +2615,11 @@ class Scheduler(SchedulerInterface):
                     num_scheduled_tokens,
                 )
             )
+        if kv_connector_output and kv_connector_output.mrope_position_deltas:
+            # Record before the loop below can finish (and free) a request.
+            for req_id, delta in kv_connector_output.mrope_position_deltas.items():
+                if (request := self.requests.get(req_id)) is not None:
+                    request.mrope_position_delta = delta
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.
@@ -3709,6 +3745,11 @@ class Scheduler(SchedulerInterface):
             delay_free, kv_xfer_params = self.connector.request_finished_all_groups(
                 request, block_ids
             )
+        if kv_xfer_params is not None and request.mrope_position_delta is not None:
+            kv_xfer_params = {
+                **kv_xfer_params,
+                MROPE_POSITION_DELTA_KEY: request.mrope_position_delta,
+            }
         return delay_free or partial_tail_delay, kv_xfer_params
 
     def _request_remaining_blocks(self, request: Request) -> int:

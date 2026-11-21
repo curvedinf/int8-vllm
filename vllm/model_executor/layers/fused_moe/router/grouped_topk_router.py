@@ -274,6 +274,7 @@ class GroupedTopKRouter(BaseRouter):
         self.e_score_correction_bias = e_score_correction_bias
         self.num_fused_shared_experts = num_fused_shared_experts
         self.skip_padding = skip_padding
+        self.single_group_sigmoid = False
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
@@ -324,6 +325,24 @@ class GroupedTopKRouter(BaseRouter):
                     indices_type=indices_type,
                 )
             return topk_weights, topk_ids
+
+        if self.single_group_sigmoid:
+            # A single selected group contains all 512 experts. The existing
+            # ROCm sigmoid kernel selects and normalizes the same sixteen scores.
+            shape = (router_logits.shape[0], self.top_k)
+            weights = router_logits.new_empty(shape, dtype=torch.float32)
+            ids = router_logits.new_empty(shape, dtype=torch.int32)
+            token_indices = torch.empty_like(ids)
+            ops.topk_sigmoid(
+                weights,
+                ids,
+                token_indices,
+                router_logits,
+                self.renormalize,
+                self.e_score_correction_bias,
+                self.routed_scaling_factor,
+            )
+            return weights, ids
 
         # Select grouped_topk implementation
         if rocm_aiter_ops.is_fused_moe_enabled():

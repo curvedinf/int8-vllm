@@ -20,6 +20,7 @@ import torch
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config, PreTrainedConfig
 
+import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
@@ -42,6 +43,16 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.model_executor.model_loader.weight_utils import make_attention_sink
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
+from vllm.models.hy_v4.nvidia.indexer_fusion import (
+    fused_indexer_k_norm_rope,
+    fused_indexer_q_rope_quant,
+)
+from vllm.models.hy_v4.nvidia.mrope import (
+    apply_mrope,
+    fused_mrope_norm,
+    rope_into,
+    token_rope,
+)
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.selector import get_attn_backend
@@ -237,14 +248,43 @@ class Indexer(nn.Module):
         k = kw[:, : self.head_dim]
         weights = kw[:, self.head_dim :]
 
+        if (
+            positions.ndim == 2
+            and q.dtype == torch.bfloat16
+            and k.dtype == torch.bfloat16
+            and self.head_dim == 128
+            and self.rope_dim == 64
+            and self.quant_block_size == 128
+            and self.scale_fmt == "ue8m0"
+            and current_platform.is_cuda()
+            and not envs.VLLM_BATCH_INVARIANT
+        ):
+            rope_pos, cache = token_rope(
+                rotary_emb, positions, rotary_emb._match_cos_sin_cache_dtype(q)
+            )
+            k = fused_indexer_k_norm_rope(
+                k, self.k_norm, rope_pos, cache, rotary_emb.is_neox_style
+            )
+            q_fp8, weights = fused_indexer_q_rope_quant(
+                rope_pos,
+                q,
+                cache,
+                weights,
+                self.softmax_scale,
+                self.n_head**-0.5,
+                rotary_emb.is_neox_style,
+            )
+            return hidden_states, q_fp8, k, weights
+
         k = self.k_norm(k)
         k_nope, k_pe = torch.split(
             k, [self.head_dim - self.rope_dim, self.rope_dim], dim=-1
         )
 
-        q_pe, k_pe = rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
-        # RoPE (NeoX) can introduce extra leading dims, so flatten back to the
-        # token-major shapes.
+        if positions.ndim == 2:
+            q_pe, k_pe = apply_mrope(rotary_emb, positions, q_pe, k_pe.unsqueeze(1))
+        else:
+            q_pe, k_pe = rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
         q_pe = q_pe.reshape(-1, self.n_head, self.rope_dim)
         k_pe = k_pe.reshape(-1, 1, self.rope_dim)
 
@@ -326,9 +366,13 @@ class HYV4MLAAttention(nn.Module):
             and self.layer_id < len(layer_types)
             and layer_types[self.layer_id] in _SPARSE_LAYER_TYPES
         )
+        self.external_topk = requested_sparse and getattr(
+            config, "dfly_external_topk", False
+        )
+        self.topk_snapshot: torch.Tensor | None = None
         # Only actual sparse layers may share another layer's top-k indices.
-        self.skip_topk = requested_sparse and self.layer_id in compute_skip_topk_layers(
-            config
+        self.skip_topk = requested_sparse and (
+            self.external_topk or self.layer_id in compute_skip_topk_layers(config)
         )
         # The skip pattern only governs backbone layers. MTP/nextn layers
         # (layer_id >= num_hidden_layers) always build a full indexer: they
@@ -337,13 +381,20 @@ class HYV4MLAAttention(nn.Module):
         is_mtp_layer = (
             num_hidden_layers is not None and self.layer_id >= num_hidden_layers
         )
-        self.create_indexer = requested_sparse and (not self.skip_topk or is_mtp_layer)
+        self.create_indexer = (
+            requested_sparse
+            and not self.external_topk
+            and (not self.skip_topk or is_mtp_layer)
+        )
         self.is_sparse = requested_sparse
 
         # Do not silently degrade sparse layers into dense attention. Probe the
         # sparse MLA backend directly and fail fast with the real error.
         kv_cache_dtype = cache_config.cache_dtype if cache_config else "auto"
-        if self.is_sparse:
+        from vllm.models.hy_v4_flash.rocm_attention import FlashMI100Backend, is_mi100
+
+        mi100_draft = self.external_topk and is_mi100()
+        if self.is_sparse and not mi100_draft:
             try:
                 get_attn_backend(
                     head_size=self.kv_lora_rank + self.qk_rope_head_dim,
@@ -492,7 +543,11 @@ class HYV4MLAAttention(nn.Module):
         sinks = None
         sink_backend: type[AttentionBackend] | None = None
         if self.learnable_sink:
-            sink_backend = self._resolve_sink_backend(kv_cache_dtype)
+            sink_backend = (
+                FlashMI100Backend
+                if mi100_draft
+                else self._resolve_sink_backend(kv_cache_dtype)
+            )
             enable_sink = sink_backend is not None
             # The kernels require fp32 sinks; the disabled path keeps the
             # checkpoint dtype since the value is never consumed.
@@ -522,6 +577,11 @@ class HYV4MLAAttention(nn.Module):
             topk_indices_buffer=topk_indices_buffer,
             attn_backend=sink_backend,
             **extra_impl_args,
+        )
+        self.post_proj_norm = (
+            RMSNorm(hidden_size, config.rms_norm_eps)
+            if getattr(config, "attn_post_proj_norm", False)
+            else None
         )
 
     @property
@@ -670,6 +730,7 @@ class HYV4MLAAttention(nn.Module):
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
         q_c = None
+        fused_rope = None
         if self.q_lora_rank is not None:
             assert self.fused_qkv_a_proj is not None
             assert self.q_a_layernorm is not None
@@ -679,7 +740,26 @@ class HYV4MLAAttention(nn.Module):
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 dim=-1,
             )
-            q_c = self.q_a_layernorm(q_c)
+            if (
+                positions.ndim == 2
+                and current_platform.is_cuda()
+                and q_c.dtype == torch.bfloat16
+                and self.kv_lora_rank == 512
+                and self.qk_rope_head_dim == 64
+                and not self.rotary_emb.is_neox_style
+                and not envs.VLLM_BATCH_INVARIANT
+            ):
+                q_c, kv_c_normed, k_pe, rope_pos, cache = fused_mrope_norm(
+                    self.rotary_emb,
+                    positions,
+                    q_c,
+                    kv_lora,
+                    self.q_a_layernorm,
+                    self.kv_a_layernorm,
+                )
+                fused_rope = (rope_pos, cache)
+            else:
+                q_c = self.q_a_layernorm(q_c)
             q = self.q_b_proj(q_c)[0]
         else:
             assert self.q_proj is not None
@@ -687,15 +767,28 @@ class HYV4MLAAttention(nn.Module):
             q = self.q_proj(hidden_states)[0]
             kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
 
-        kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        kv_c_normed = self.kv_a_layernorm(kv_c)
+        if fused_rope is None:
+            kv_c, k_pe = kv_lora.split(
+                [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+            )
+            kv_c_normed = self.kv_a_layernorm(kv_c)
 
         q = q.view(-1, self.num_local_heads, self.qk_head_dim)
-        # Add a head dim of 1 to k_pe.
-        k_pe = k_pe.unsqueeze(1)
-        q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-            positions, q[..., self.qk_nope_head_dim :], k_pe
-        )
+        if fused_rope is not None:
+            q_pe = q[..., self.qk_nope_head_dim :]
+            rope_into(fused_rope[0], q_pe, fused_rope[1], q_pe)
+        elif positions.ndim == 2:
+            _, k_pe = apply_mrope(
+                self.rotary_emb,
+                positions,
+                q[..., self.qk_nope_head_dim :],
+                k_pe.unsqueeze(1),
+            )
+        else:
+            k_pe = k_pe.unsqueeze(1)
+            q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
+                positions, q[..., self.qk_nope_head_dim :], k_pe
+            )
 
         if llama_4_scaling is not None:
             q *= llama_4_scaling
@@ -739,7 +832,7 @@ class HYV4MLAAttention(nn.Module):
                     attn_out = attn_out * torch.sigmoid(gate_score)
 
         out, _ = self.o_proj(attn_out)
-        return out
+        return self.post_proj_norm(out) if self.post_proj_norm is not None else out
 
     @eager_break_during_capture
     def _indexer_and_attn(
@@ -762,7 +855,14 @@ class HYV4MLAAttention(nn.Module):
         the capture is no longer active inside an eager segment.
         """
         if self.indexer is not None and self.is_sparse and not self.skip_topk:
-            self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
+            if self.topk_snapshot is not None or not getattr(
+                self.indexer, "implicit_window", False
+            ):
+                self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
+            if self.topk_snapshot is not None:
+                assert self.topk_indices_buffer is not None
+                num_rows = hidden_states.shape[0]
+                self.topk_snapshot[:num_rows].copy_(self.topk_indices_buffer[:num_rows])
         if self.is_sparse:
             self.mla_attn.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
         out.copy_(

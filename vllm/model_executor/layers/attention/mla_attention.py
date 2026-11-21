@@ -477,6 +477,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.kv_b_proj = kv_b_proj
         self.dcp_q_replicate = dcp_q_replicate
         self.W_UK_T_dcp_qrep: torch.Tensor | None = None
+        self.register_buffer("W_UK_T_verify", None, persistent=False)
         self.head_size = kv_lora_rank + qk_rope_head_dim
         self.layer_name = prefix
         self.indexer = indexer
@@ -1086,6 +1087,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 # Pads the head_dim if necessary (for the underlying kernel)
                 N, B, P = mqa_q_nope.shape
                 W_UK_T = self.W_UK_T_dcp_qrep if qrep_decode else self.W_UK_T
+                if self.W_UK_T_verify is not None and not qrep_decode and B == 96:
+                    W_UK_T = self.W_UK_T_verify
                 assert W_UK_T is not None
                 _, _, L = W_UK_T.shape
 
@@ -1347,6 +1350,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             replace_parameter(self, "W_UV", W_UV.transpose(0, 1))
             # Convert from (L, N, P) to (N, P, L)
             replace_parameter(self, "W_UK_T", W_UK.permute(1, 2, 0))
+            if getattr(self.impl, "pack_verify_query", False):
+                # The MI100 BLAS solution for M=96, K=192 prefers column-major
+                # weights. Keep the original view for every other shape.
+                self.W_UK_T_verify = (
+                    self.W_UK_T.transpose(1, 2).contiguous().transpose(1, 2)
+                )
             if self.dcp_q_replicate:
                 replace_parameter(
                     self,
@@ -1383,9 +1392,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # ds_mla layouts pack NoPE + RoPE + scales into one opaque per-token
             # blob, so the size is not derivable from head_size.
             # See flashmla_sparse.py.
-            state_content_bytes={"fp8_ds_mla": 656, "nvfp4_ds_mla": 352}.get(
-                self.kv_cache_dtype
-            ),
+            state_content_bytes=getattr(self.impl, "state_content_bytes", None)
+            or {"fp8_ds_mla": 656, "nvfp4_ds_mla": 352}.get(self.kv_cache_dtype),
         )
         if self.sliding_window is not None:
             return SlidingWindowMLASpec(

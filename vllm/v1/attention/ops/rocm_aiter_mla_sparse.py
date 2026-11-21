@@ -540,6 +540,16 @@ def fp8_paged_mqa_logits_torch(
 
 
 @triton.jit
+def _indexpool_rank(score, col):
+    # Map IEEE float32 to monotonically ordered signed integers. Appending the
+    # inverse logical position ranks earlier groups first on exact score ties.
+    score = tl.where(score == 0.0, 0.0, score)
+    bits = score.to(tl.int32, bitcast=True)
+    ordered = bits ^ ((bits >> 31) & 0x7FFFFFFF)
+    return (ordered.to(tl.int64) << 32) | (0xFFFFFFFF - col.to(tl.int64))
+
+
+@triton.jit
 def _fp8_paged_mqa_logits_decode_kernel(
     q_ptr,  # fp8 [B, NEXT_N, H, D]
     kv_val_ptr,  # fp8, block-flat: [num_blocks, block_size*(D+4)]
@@ -566,6 +576,11 @@ def _fp8_paged_mqa_logits_decode_kernel(
     N_SPLITS: tl.constexpr,  # KV-tile parallelism factor (grid dim 1)
     NEXT_N: tl.constexpr,  # query positions per batch (1 = decode; >1 = MTP verify)
     CTX_PER_ROW: tl.constexpr,  # ctx_lens is already per-(b, n)
+    Q_SCALES=None,
+    OWNER=None,
+    INT_GROUP: tl.constexpr = 0,
+    RANK: tl.constexpr = False,
+    KEEP_ALL: tl.constexpr = 0,
 ):
     # scale_region_off = block_size*D//4 needs D % 4 == 0 (D=128).
     tl.static_assert(HEAD_SIZE % 4 == 0)
@@ -580,13 +595,34 @@ def _fp8_paged_mqa_logits_decode_kernel(
         seq_len = tl.load(ctx_lens_ptr + b) - NEXT_N + n + 1
     seq_len = tl.minimum(tl.maximum(seq_len, 0), max_model_len)
 
+    # All historical groups fit. Only the valid page mask is needed.
+    if KEEP_ALL and seq_len <= KEEP_ALL:
+        owner = b if OWNER is None else tl.load(OWNER + row)
+        cols = tl.arange(0, BLOCK_KV)
+        for start in tl.range(split * BLOCK_KV, seq_len, N_SPLITS * BLOCK_KV):
+            logical = start // BLOCK_SIZE
+            page = tl.load(
+                block_tables_ptr + owner.to(tl.int64) * stride_bt_b + logical,
+                logical < max_blocks,
+                -1,
+            )
+            pos = start + cols
+            tl.store(
+                logits_ptr + row.to(tl.int64) * stride_logits_row + pos,
+                tl.where(page >= 0, 0.0, -float("inf")),
+                pos < seq_len,
+            )
+        return
+
     h = tl.arange(0, NUM_HEADS)
     d = tl.arange(0, HEAD_SIZE)
     # keep q/kv fp8 -> fp8 MFMA (f32 accum), not the slow f32 path
-    q = tl.load(
-        q_ptr + b * stride_q_b + n * stride_q_n + h[:, None] * stride_q_h + d[None, :]
-    )
+    q_base = q_ptr + b.to(tl.int64) * stride_q_b + n * stride_q_n
+    if INT_GROUP == 0 or INT_GROUP == HEAD_SIZE:
+        q = tl.load(q_base + h[:, None] * stride_q_h + d[None, :])
     w = tl.load(weights_ptr + row * stride_w_row + h).to(tl.float32)  # [H]
+    if INT_GROUP == HEAD_SIZE:
+        w *= tl.load(Q_SCALES + row.to(tl.int64) * NUM_HEADS + h).to(tl.float32)
 
     kv_col = tl.arange(0, BLOCK_KV)
     for kv_start in tl.range(split * BLOCK_KV, seq_len, N_SPLITS * BLOCK_KV):
@@ -595,30 +631,157 @@ def _fp8_paged_mqa_logits_decode_kernel(
         logical_blk = kv_start // BLOCK_SIZE
         blk_ok = logical_blk < max_blocks  # guard against a wild page -> fault
         mask_pos = (pos < seq_len) & blk_ok
+        owner = b if OWNER is None else tl.load(OWNER + row)
         page = tl.load(
-            block_tables_ptr + b * stride_bt_b + logical_blk, mask=blk_ok, other=0
+            block_tables_ptr + owner.to(tl.int64) * stride_bt_b + logical_blk,
+            mask=blk_ok,
+            other=0,
         ).to(tl.int64)
+        if INT_GROUP:
+            # Padded graph rows may reference an unassigned page.
+            mask_pos &= page >= 0
+            page = tl.maximum(page, 0)
         pos_in_blk = pos - logical_blk * BLOCK_SIZE  # [BLOCK_KV] == pos % BLOCK_SIZE
 
         # block-flat layout: values region, then scales region.
-        val_off = page * stride_kvblk_fp8 + pos_in_blk[:, None] * HEAD_SIZE + d[None, :]
-        kv = tl.load(
-            kv_val_ptr + val_off, mask=mask_pos[:, None], other=0.0
-        )  # [BLOCK_KV, D] fp8
-        sc = tl.load(
-            kv_scale_ptr + page * stride_kvblk_f32 + scale_region_off + pos_in_blk,
-            mask=mask_pos,
-            other=0.0,
-        )  # [BLOCK_KV]
-
-        # fp8 upcasts exactly; bit-identical on gfx942, ~1e-5 rel on gfx950
-        # (accum order), top-k unchanged.
-        s = tl.dot(kv, tl.trans(q))  # [BLOCK_KV, H]
+        val_base = (
+            kv_val_ptr + page * stride_kvblk_fp8 + pos_in_blk[:, None] * HEAD_SIZE
+        )
+        scale_base = kv_scale_ptr + page * stride_kvblk_f32 + scale_region_off
+        if INT_GROUP == 0 or INT_GROUP == HEAD_SIZE:
+            kv = tl.load(val_base + d[None, :], mask=mask_pos[:, None], other=0)
+            sc = tl.load(scale_base + pos_in_blk, mask=mask_pos, other=0.0)
+            if INT_GROUP:
+                s = tl.dot(kv, tl.trans(q), out_dtype=tl.int32).to(tl.float32)
+            else:
+                s = tl.dot(kv, tl.trans(q))
+        else:
+            groups: tl.constexpr = HEAD_SIZE // INT_GROUP
+            inner = tl.arange(0, max(32, INT_GROUP))
+            s = tl.full((BLOCK_KV, NUM_HEADS), 0, tl.float32)
+            for group in tl.static_range(groups):
+                channel = group * INT_GROUP + inner
+                kv = tl.load(
+                    val_base + channel[None, :],
+                    mask_pos[:, None] & (inner[None, :] < INT_GROUP),
+                    0,
+                )
+                qg = tl.load(
+                    q_base + h[:, None] * stride_q_h + channel[None, :],
+                    inner[None, :] < INT_GROUP,
+                    0,
+                )
+                ks = tl.load(scale_base + pos_in_blk * groups + group, mask_pos, 0)
+                qs = tl.load(
+                    Q_SCALES + (row.to(tl.int64) * NUM_HEADS + h) * groups + group
+                )
+                part = tl.dot(kv, tl.trans(qg), out_dtype=tl.int32).to(tl.float32)
+                s += part * ks[:, None] * qs[None, :]
+            sc = 1.0
         s = tl.maximum(s, 0.0)
         s = s * w[None, :]
         s = tl.sum(s, axis=1)  # [BLOCK_KV]
         s = s * sc
-        tl.store(logits_ptr + row * stride_logits_row + pos, s, mask=mask_pos)
+        if RANK:
+            result = tl.where(mask_pos, _indexpool_rank(s, pos), -9223372036854775808)
+        elif INT_GROUP:
+            result = tl.where(mask_pos, s, -float("inf"))
+        else:
+            result = s
+        tl.store(
+            logits_ptr + row.to(tl.int64) * stride_logits_row + pos,
+            result,
+            mask=pos < seq_len if INT_GROUP else mask_pos,
+        )
+
+
+def hy4_int8_paged_mqa_logits(
+    q,
+    qscale,
+    cache,
+    weights,
+    upper,
+    table,
+    owner,
+    width,
+    group,
+    *,
+    tile=64,
+    splits=None,
+    warps=4,
+    out=None,
+    mask_unused=False,
+    rank=False,
+    keep_all_at_most=0,
+):
+    """Score HY4's coarse IndexPool keys with signed INT8 MFMA."""
+    rows, heads, dim = q.shape
+    page_size = cache.shape[1]
+    groups = dim // group
+    if (
+        dim != 128
+        or group not in (4, 8, 16, 32, 64, 128)
+        or heads not in (16, 32, 64)
+        or page_size % tile
+        or keep_all_at_most < 0
+        or (rank and keep_all_at_most)
+        or cache.shape[-1] < dim + 2 * groups
+    ):
+        raise ValueError("Invalid HY4 packed IndexPool dimensions")
+    cache_flat = cache.view(cache.shape[0], -1)
+    tiles = triton.cdiv(width, tile)
+    if splits is None:
+        splits = max(1, min(tiles, triton.cdiv(120 * 2, max(1, rows))))
+    dtype = torch.int64 if rank else torch.float32
+    logits = (
+        out
+        if out is not None
+        else torch.empty((rows, width), device=q.device, dtype=dtype)
+    )
+    if (
+        logits.shape != (rows, width)
+        or logits.device != q.device
+        or logits.dtype != dtype
+        or not logits.is_contiguous()
+    ):
+        raise ValueError("Invalid HY4 IndexPool score buffer")
+    if mask_unused or rank:
+        logits.fill_(torch.iinfo(torch.int64).min if rank else -torch.inf)
+    if rows:
+        _fp8_paged_mqa_logits_decode_kernel[(rows, splits)](
+            q,
+            cache_flat.view(torch.int8),
+            cache_flat.view(torch.float16),
+            weights,
+            upper,
+            table,
+            logits,
+            q.stride(0),
+            0,
+            q.stride(1),
+            weights.stride(0),
+            cache_flat.stride(0),
+            cache_flat.stride(0) // 2,
+            page_size * dim // 2,
+            table.stride(0),
+            width,
+            table.shape[1],
+            width,
+            heads,
+            dim,
+            page_size,
+            tile,
+            splits,
+            1,
+            True,
+            qscale,
+            owner,
+            group,
+            rank,
+            keep_all_at_most,
+            num_warps=warps,
+        )
+    return logits
 
 
 def rocm_fp8_paged_mqa_logits_triton(

@@ -26,6 +26,8 @@ The [Flint + Flint-DFlash2 peer recipe](flint.md) serves a 49-layer,
 grouped expert kernel, `int8_block_g128` KV on target and draft, and an
 int8 PTQR draft (NS=7).
 
+HY4-Flash supports four MI100s with XGMI or PCIe and a training-free NeUQI INT4 language model, PTQR INT8 vision and DFly2, and packed INT4 n-gram tables on SSD. The target, all experts and the drafter stay in VRAM. [HY4-Flash recipe](hy4-flash.md)
+
 Separate Qwen3.8 and Bolt systemd units are available; see
 [service installation and selection](services.md).
 

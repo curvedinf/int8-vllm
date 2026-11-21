@@ -23,6 +23,7 @@ QuantizationMethods = Literal[
     "modelopt_mxfp8",
     "modelopt_mixed",
     "auto_gptq",
+    "hy4_neuqi",
     "gptq",
     "gptq_marlin",
     "awq_marlin",
@@ -112,6 +113,10 @@ def register_quantization_config(quantization: str):
 def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     if quantization not in QUANTIZATION_METHODS:
         raise ValueError(f"Invalid quantization method: {quantization}")
+    if quantization == "hy4_neuqi":
+        from .hy4_neuqi import HY4NeUQIConfig
+
+        return HY4NeUQIConfig
 
     # lazy import to avoid triggering `torch.compile` too early
     from vllm.config.quantization import _ONLINE_SHORTHANDS

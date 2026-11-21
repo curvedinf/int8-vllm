@@ -6,8 +6,9 @@ import torch
 from torch import nn
 from transformers import PreTrainedConfig
 
+from vllm import envs
 from vllm.config import get_current_vllm_config
-from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
@@ -60,8 +61,18 @@ class HYV4FeedForward(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate_up, _ = self.gate_up_proj(x)
-        out = self.act_fn(gate_up)
+        gate = self.gate_up_proj
+        method = gate.quant_method
+        if (
+            getattr(method, "fly_swiglu_rows", ())
+            and x.ndim == 2
+            and x.shape[0] in method.fly_swiglu_rows
+            and not envs.VLLM_DECODE_INT8_INTERMEDIATES
+        ):
+            out = method.apply_swiglu(gate, x)
+        else:
+            gate_up, _ = gate(x)
+            out = self.act_fn(gate_up)
         out, _ = self.down_proj(out)
         return out
 
@@ -91,18 +102,15 @@ class HYV4MoEFused(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
+        reduce_results: bool = True,
+        *,
+        routed_hidden_size: int | None = None,
+        routed_input_transform: nn.Module | None = None,
+        routed_output_transform: nn.Module | None = None,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.ep_group = get_ep_group().device_group
-        self.ep_rank = get_ep_group().rank_in_group
-        self.ep_size = self.ep_group.size()
         self.n_routed_experts = config.num_experts
-        if self.tp_size > config.num_experts:
-            raise ValueError(
-                f"Tensor parallel size {self.tp_size} is greater than "
-                f"the number of experts {config.num_experts}."
-            )
         top_k = config.num_experts_per_tok
         intermediate_size = config.expert_hidden_dim
         router_scaling_factor = getattr(config, "router_scaling_factor", 1.0)
@@ -113,11 +121,6 @@ class HYV4MoEFused(nn.Module):
         self.n_logical_experts = self.n_routed_experts
         self.n_redundant_experts = eplb_config.num_redundant_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
-        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
 
         self.gate = GateLinear(
             config.hidden_size,
@@ -148,12 +151,20 @@ class HYV4MoEFused(nn.Module):
         raw_swiglu_limit = getattr(config, "swiglu_limit", 0)
         use_swiglu_clamp = bool(raw_swiglu_limit) and float(raw_swiglu_limit) > 0
         moe_swiglu_limit = float(raw_swiglu_limit) if use_swiglu_clamp else None
+        if routed_input_transform is not None:
+            self.routed_expert_down_proj = routed_input_transform
+        if routed_output_transform is not None:
+            self.routed_expert_up_proj = routed_output_transform
 
         self.experts = FusedMoEFactory(
             num_experts=self.n_routed_experts,
             top_k=top_k,
-            hidden_size=config.hidden_size,
+            hidden_size=(
+                config.hidden_size if routed_hidden_size is None else routed_hidden_size
+            ),
             intermediate_size=intermediate_size,
+            routed_input_transform=routed_input_transform,
+            routed_output_transform=routed_output_transform,
             renormalize=config.route_norm,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
@@ -168,6 +179,7 @@ class HYV4MoEFused(nn.Module):
             shared_experts=self.shared_experts,
             swiglu_limit=moe_swiglu_limit,
         )
+        self.n_local_physical_experts = self.experts.moe_config.num_local_experts
         self.prefix = prefix
         if use_swiglu_clamp:
             logger.debug_once(

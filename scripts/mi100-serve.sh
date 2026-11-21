@@ -14,7 +14,7 @@ pp=1
 tp=$cards
 case "$cards" in
   2) devices=0,1 ;;
-  3) devices=0,1,2; tp=1; pp=3 ;;
+  3) devices=0,1,2; if [[ "$recipe" != hy4 ]]; then tp=1; pp=3; fi ;;
   4) devices=0,1,2,3 ;;
   *) echo "MI100_CARDS must be 2, 3 or 4." >&2; exit 2 ;;
 esac
@@ -102,7 +102,23 @@ case "$recipe" in
       export VLLM_BOLT_EXPERT_CACHE_GIB="${VLLM_BOLT_EXPERT_CACHE_GIB:-3}" KVMEM="${KVMEM:-4000000000}"
       export MAX_MODEL_LEN="${MAX_MODEL_LEN:-auto}"
     fi ;;
-  *) echo "MI100_RECIPE must be qwen38, flint or bolt." >&2; exit 2 ;;
+  hy4)
+    if [[ "${MI100_CONTAINER:-0}" == 1 ]]; then
+      # Bound RCCL staging so the four ROCm 10.2 workers retain room for KV.
+      export NCCL_BUFFSIZE="${NCCL_BUFFSIZE:-1048576}"
+      export NCCL_MAX_NCHANNELS="${NCCL_MAX_NCHANNELS:-4}"
+    fi
+    target=Hy4-flash-NeUQI-W4A8
+    draft=Hy4-flash-DFly2-PTQR-INT8
+    target_repo=voodooquant/Hy4-flash-NeUQI-INT4-W4A8-GS128
+    target_rev=6bcd3e95f31ff6a23201e99273ddf5ab134faec0
+    draft_repo=voodooquant/Hy4-flash-DFly2-PTQR-INT8-W8A8-GS128
+    draft_rev=026c6c08dc582c7dca03b4db4c14dcf85a9d006a
+    export VLLM_API_KEY="${VLLM_API_KEY:-${LLAMA_API_KEY:-}}"
+    if [[ -z "${API_KEY_FILE:-}" && -r /etc/llama/llama-api.key ]]; then
+      export API_KEY_FILE=/etc/llama/llama-api.key
+    fi ;;
+  *) echo "MI100_RECIPE must be qwen38, flint, bolt or hy4." >&2; exit 2 ;;
 esac
 launcher="$root/scripts/serve_recipe_$recipe.sh"
 if [[ "$action" == status || "$action" == stop ]]; then
@@ -119,7 +135,11 @@ resolve_model() {
     "$root/.venv/bin/python" - "$repo" "$revision" <<'PYTHON'
 import sys
 from huggingface_hub import snapshot_download
-print(snapshot_download(sys.argv[1], revision=sys.argv[2]))
+repo, revision = sys.argv[1:]
+print(f"Resolving {repo} at {revision} in the Hugging Face cache", file=sys.stderr, flush=True)
+path = snapshot_download(repo, revision=revision)
+print(f"Checkpoint ready {repo} at {revision}", file=sys.stderr, flush=True)
+print(path)
 PYTHON
   fi
 }

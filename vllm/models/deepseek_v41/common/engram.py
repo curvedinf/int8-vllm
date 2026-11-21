@@ -284,6 +284,7 @@ def _write_hash_cache_kernel(
         "num_query_rows",
         "num_table_rows",
         "max_blocks",
+        "actual_tokens",
     ]
 )
 def _hash_ids_kernel(
@@ -323,6 +324,11 @@ def _hash_ids_kernel(
     lookback_col_stride,
     lookback_mask_row_stride,
     lookback_mask_col_stride,
+    seq_lens=None,
+    actual_tokens=0,
+    layer_stride=0,
+    VOCAB: tl.constexpr = 0,
+    SUPPRESSED: tl.constexpr = (),
 ):
     token = tl.program_id(0) * BLOCK_T + tl.arange(0, BLOCK_T)
     layer = tl.program_id(1)
@@ -345,8 +351,24 @@ def _hash_ids_kernel(
     req = tl.minimum(lo, num_query_rows - 1).to(tl.int64)
     chunk_idx = tl.load(query_start_loc + req * query_stride)
     chunk_idx = tl.minimum(chunk_idx, num_tokens - 1).to(tl.int64)
-    chunk_start = tl.load(positions + chunk_idx * position_stride)
-    position = tl.load(positions + token * position_stride, valid, other=0).to(tl.int64)
+    if seq_lens is None:
+        chunk_start = tl.load(positions + chunk_idx * position_stride)
+        position = tl.load(positions + token * position_stride, valid, other=0).to(
+            tl.int64
+        )
+    else:
+        chunk_end = tl.load(query_start_loc + (req + 1) * query_stride)
+        chunk_start = tl.load(seq_lens + req) - (chunk_end - chunk_idx)
+        position = chunk_start + token - chunk_idx
+        current = tl.load(input_ids + token * input_stride, valid, other=-1)
+        suppress = (
+            (token >= actual_tokens)
+            | (token >= chunk_end)
+            | (current < 0)
+            | (current >= VOCAB)
+        )
+        for excluded in tl.static_range(len(SUPPRESSED)):
+            suppress |= current == SUPPRESSED[excluded]
     head = tl.arange(0, BLOCK_H)
     blocked = tl.full((BLOCK_T,), False, tl.int1)
     rolling = tl.full((BLOCK_T,), 0, tl.int64)
@@ -357,9 +379,14 @@ def _hash_ids_kernel(
         batch_token = tl.load(
             input_ids + batch_idx * input_stride, valid & in_batch, other=0
         )
-        batch_source = tl.load(token_map + batch_token, valid & in_batch, other=0)
-        batch_dead = tl.load(
-            dead_mask + batch_idx * mask_stride, valid & in_batch, other=False
+        if dead_mask is None:
+            batch_dead = (batch_token < 0) | (batch_token >= VOCAB)
+        else:
+            batch_dead = tl.load(
+                dead_mask + batch_idx * mask_stride, valid & in_batch, other=False
+            )
+        batch_source = tl.load(
+            token_map + batch_token, valid & in_batch & ~batch_dead, other=0
         )
         batch_source = tl.where(batch_dead, dead_id, batch_source)
 
@@ -372,14 +399,17 @@ def _hash_ids_kernel(
             other=-1,
         )
         known = in_window & (window_token >= 0)
-        window_source = tl.load(token_map + window_token, known, other=0)
-        window_dead = tl.load(
-            lookback_dead_mask
-            + req * lookback_mask_row_stride
-            + col * lookback_mask_col_stride,
-            known,
-            other=False,
-        )
+        if lookback_dead_mask is None:
+            window_dead = window_token >= VOCAB
+        else:
+            window_dead = tl.load(
+                lookback_dead_mask
+                + req * lookback_mask_row_stride
+                + col * lookback_mask_col_stride,
+                known,
+                other=False,
+            )
+        window_source = tl.load(token_map + window_token, known & ~window_dead, other=0)
         window_source = tl.where(window_dead, dead_id, window_source)
 
         if cache is not None:
@@ -415,9 +445,21 @@ def _hash_ids_kernel(
             prime = tl.load(primes + param_offset, head < num_heads, other=1)
             offset = tl.load(offsets + param_offset, head < num_heads, other=0)
             hashed = rolling[:, None] % prime[None, :] + offset[None, :]
-            out_offset = (token.to(tl.int64) * num_layers + layer)[:, None] * (
-                (MAX_NGRAM - 1) * num_heads
-            ) + col[None, :]
+            if seq_lens is None:
+                out_offset = (token.to(tl.int64) * num_layers + layer)[:, None] * (
+                    (MAX_NGRAM - 1) * num_heads
+                ) + col[None, :]
+            else:
+                # Flash consumes complete per-table slabs and uses Euclidean modulo.
+                hashed = tl.where(
+                    hashed < offset[None, :], hashed + prime[None, :], hashed
+                )
+                hashed = tl.where(suppress[:, None], -1, hashed)
+                out_offset = (
+                    layer * layer_stride
+                    + token[:, None].to(tl.int64) * ((MAX_NGRAM - 1) * num_heads)
+                    + col[None, :]
+                )
             tl.store(output + out_offset, hashed, valid[:, None] & (head < num_heads))
 
 
