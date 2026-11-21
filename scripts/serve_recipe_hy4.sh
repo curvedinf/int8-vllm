@@ -59,8 +59,20 @@ serve() {
     export HIPFILE_ALLOW_COMPAT_MODE=false HIPFILE_FORCE_COMPAT_MODE=false
   fi
   local table_dir="${ENGRAM_DIR:-$model/engram}"
-  "$python" "$root/scripts/warm_hy4_engram.py" "$table_dir" --check-ram "$mode" \
-    --ram-reserve-gib "${HY4_HOST_RAM_RESERVE_GIB:-8}" >&2
+  # Host memory growth from launch to peak C8 load, rounded up to whole GiB.
+  local runtime_gib host_kv_gib
+  case "${MI100_CONTAINER:-0}-${MI100_XGMI:-on}" in
+    0-on) runtime_gib=14 ;;
+    0-off) runtime_gib=18 ;;
+    1-on) runtime_gib=19 ;;
+    *) runtime_gib=20 ;;
+  esac
+  # The native offload connector raised non-pool host usage by about 2 GiB.
+  # Round its allowance up independently of the base runtime.
+  runtime_gib=$((runtime_gib + 3))
+  host_kv_gib="$("$python" "$root/scripts/warm_hy4_engram.py" "$table_dir" \
+    --check-ram "$mode" --ram-reserve-gib "${HY4_HOST_RAM_RESERVE_GIB:-8}" \
+    --runtime-gib "$runtime_gib" --host-kv-gib "${HY4_HOST_KV_GIB:-auto}")"
   if [[ "$mode" == bcache ]]; then
     local -a prime=()
     case "${ENGRAM_PRIME:-auto}" in
@@ -91,6 +103,9 @@ serve() {
     --tokenizer-mode hy_v4 --reasoning-parser hy_v4 --enable-auto-tool-choice --tool-call-parser hy_v4
     --override-generation-config '{"temperature":1.0,"top_p":0.95,"top_k":20}'
   )
+  if (( host_kv_gib > 0 )); then
+    args+=(--kv-offloading-backend native --kv-offloading-size "$host_kv_gib")
+  fi
   if [[ "${SPEC:-1}" == 1 ]]; then
     if [[ ! -r "$draft/model.safetensors.index.json" ]]; then
       echo "HY4 DFly2 checkpoint missing at $draft" >&2

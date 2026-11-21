@@ -4,10 +4,12 @@
 """Populate bcache's SSD read cache for the packed HY4 Engram tables."""
 
 import argparse
+import math
 import mmap
 import os
 import random
 import statistics
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -105,7 +107,7 @@ def available_ram_bytes(proc=Path("/proc"), root=Path("/sys/fs/cgroup")):
     return available
 
 
-def check_ram(directory, mode, reserve_gib):
+def check_ram(directory, mode, reserve_gib, runtime_gib=0, kv_gib=0):
     available = available_ram_bytes()
     tables = []
     if mode == "ram":
@@ -113,17 +115,23 @@ def check_ram(directory, mode, reserve_gib):
         if not tables:
             raise ValueError(f"No packed Engram tables in {directory}")
     pinned = sum(p.stat().st_size for p in tables)
-    if available - pinned < reserve_gib * 2**30:
+    budget = (available - pinned) / 2**30 - reserve_gib - runtime_gib
+    kv_gib = max(0, math.floor(budget)) if kv_gib == "auto" else int(kv_gib)
+    if kv_gib < 0 or kv_gib > budget:
         raise ValueError(
             f"HY4 has {available / 2**30:.2f} GiB RAM available. "
             f"Engram mode {mode} needs {pinned / 2**30:.2f} GiB of pinned tables "
-            f"and the host reserve is {reserve_gib:g} GiB."
+            f"and the host reserve is {reserve_gib:g} GiB. "
+            f"Runtime allowance is {runtime_gib} GiB and host KV is {kv_gib} GiB."
         )
     print(
         f"HY4 host RAM available {available / 2**30:.2f} GiB, "
-        f"reserve {reserve_gib:g} GiB, pinned Engram {pinned / 2**30:.2f} GiB",
+        f"reserve {reserve_gib:g} GiB, pinned Engram {pinned / 2**30:.2f} GiB, "
+        f"runtime allowance {runtime_gib} GiB, host KV {kv_gib} GiB",
+        file=sys.stderr,
         flush=True,
     )
+    return kv_gib
 
 
 def main():
@@ -144,12 +152,20 @@ def main():
         help="Check host headroom for the selected Engram mode and exit",
     )
     parser.add_argument("--ram-reserve-gib", type=float, default=8)
+    parser.add_argument("--runtime-gib", type=int, default=0)
+    parser.add_argument("--host-kv-gib", default="0")
     args = parser.parse_args()
     if not 0 <= args.ram_reserve_gib < float("inf"):
         parser.error("RAM reserve must be a finite, nonnegative number")
     if args.check_ram:
         try:
-            check_ram(args.directory, args.check_ram, args.ram_reserve_gib)
+            if args.runtime_gib < 0:
+                raise ValueError("Runtime allowance must be nonnegative")
+            size = check_ram(
+                args.directory, args.check_ram, args.ram_reserve_gib,
+                args.runtime_gib, args.host_kv_gib,
+            )
+            print(size)
         except ValueError as exc:
             parser.error(str(exc))
         return

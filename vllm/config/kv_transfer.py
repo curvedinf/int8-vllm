@@ -124,6 +124,10 @@ class KVTransferConfig:
             )
 
     @property
+    def is_local_cpu_offload(self) -> bool:
+        return self.kv_connector == "OffloadingConnector" and self.kv_role == "kv_both"
+
+    @property
     def is_kv_transfer_instance(self) -> bool:
         return self.kv_connector is not None and self.kv_role in get_args(KVRole)
 
