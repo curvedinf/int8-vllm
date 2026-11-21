@@ -28,9 +28,9 @@ have been heavily optimized and tested.
 | Model | Checkpoints | Concurrent sequences | Speculative tokens | Sequence Context Length | Total Context Tokens | Recipe |
 | --- | --- | --- | --- | --- | --- | --- |
 | Qwen3.8-27B | [INT8 PTQR target](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128-PTQR) + [DFlash2 draft](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128-PTQR) | 8 | 7 | 262,144 | ~1.61M | [Qwen setup](docs/recipes/README.md) |
-| NVIDIA Nemotron 3.5 Bolt 74B-A9B-24GB | [Official packed target](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB) + [LiLiCorr draft](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr) | 8 | 7 | 262,144 | ~1.99M | [Bolt setup](docs/recipes/nemotron_bolt.md) |
+| Nemotron 3.5 Bolt 74B-A9B | [Official packed target](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB) + [LiLiCorr draft](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr) | 8 | 7 | 262,144 | ~1.99M | [Bolt setup](docs/recipes/nemotron_bolt.md) |
 | Flint | [INT8 PTQR target](https://huggingface.co/voodooquant/Flint-GPTQ-INT8-PTQR) + [DFlash2 draft](https://huggingface.co/voodooquant/Flint-DFlash2-GPTQ-INT8-PTQR) | 12 | 7 | 524,288 | ~4.4M | [Flint setup](docs/recipes/flint.md) |
-| Tencent Hy4-flash | [NeUQI INT4 target with PTQR INT8 vision](https://huggingface.co/voodooquant/Hy4-flash-NeUQI-INT4-W4A8-GS128) + [PTQR INT8 DFly2](https://huggingface.co/voodooquant/Hy4-flash-DFly2-PTQR-INT8-W8A8-GS128) | 8 | 7 | 262,144 | ~1.34M | [HY4 setup](docs/recipes/hy4-flash.md) |
+| Hy4-flash | [NeUQI INT4 target with PTQR INT8 vision](https://huggingface.co/voodooquant/Hy4-flash-NeUQI-INT4-W4A8-GS128) + [PTQR INT8 DFly2](https://huggingface.co/voodooquant/Hy4-flash-DFly2-PTQR-INT8-W8A8-GS128) | 8 | 7 | 262,144 | ~1.34M | [HY4 setup](docs/recipes/hy4-flash.md) |
 
 Qwen, Bolt and Flint were tested on two to four MI100s across PCIe and XGMI. HY4 supports TP4 on four 32 GiB MI100s with either XGMI or PCIe and keeps its packed Engram tables on SSD.
 
