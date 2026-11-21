@@ -67,9 +67,6 @@ serve() {
     1-on) runtime_gib=19 ;;
     *) runtime_gib=20 ;;
   esac
-  # The native offload connector raised non-pool host usage by about 2 GiB.
-  # Round its allowance up independently of the base runtime.
-  runtime_gib=$((runtime_gib + 3))
   host_kv_gib="$("$python" "$root/scripts/warm_hy4_engram.py" "$table_dir" \
     --check-ram "$mode" --ram-reserve-gib "${HY4_HOST_RAM_RESERVE_GIB:-8}" \
     --runtime-gib "$runtime_gib" --host-kv-gib "${HY4_HOST_KV_GIB:-auto}")"
