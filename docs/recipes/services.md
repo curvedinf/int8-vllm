@@ -1,100 +1,39 @@
-# Installing the recipe services
+# Run a native MI100 recipe with systemd
 
-The three recipes have separate systemd units:
+Use these units to start Qwen, Flint or Bolt at boot on a four-card host. The services use the same GPUs and localhost port `8020`. Select one service for the host.
 
-| Recipe | Unit file | Service name |
-| --- | --- | --- |
-| Qwen3.8 + DFlash2 | [vllm-qwen38.service](../../scripts/vllm-qwen38.service) | `vllm-qwen38.service` |
-| Nemotron Bolt + LiLiCorr | [vllm-bolt.service](../../scripts/vllm-bolt.service) | `vllm-bolt.service` |
-| Flint + Flint-DFlash2 | [vllm-flint.service](../../scripts/vllm-flint.service) | `vllm-flint.service` |
+| Model | Unit template |
+| --- | --- |
+| Qwen3.8-27B | [vllm-qwen38.service](../../scripts/vllm-qwen38.service) |
+| Flint | [vllm-flint.service](../../scripts/vllm-flint.service) |
+| Nemotron Bolt | [vllm-bolt.service](../../scripts/vllm-bolt.service) |
 
-All three services share `127.0.0.1:8020`, the nginx upstream endpoint, so
-switching recipes does not require changing nginx. Only one may run at a time.
+## Install a service
 
-All three services run as `curved`, with primary group `curved`.
-The units expect `/home/curved/int8-vllm`, its `.venv`, the sibling `aiter`
-checkout, model assets, and access to the `video` and `render` groups. Prepare
-the environment and checkpoints using the [Qwen recipe](README.md) or
-[Bolt recipe](nemotron_bolt.md) first. For other checkout locations, adapt the
-unit's working directory and executable paths before installation.
-
-Both units require `/etc/llama/llama-api.env`, provisioned by the administrator
-with the production `VLLM_API_KEY` or `LLAMA_API_KEY`. Keep it root-owned and
-mode `0600`. Recipe environment overrides can also be placed there. Each unit
-runs its recipe's `supervise` command and stops an existing manually launched
-instance of that same recipe before starting.
-
-From the checkout, install both definitions without starting either:
+1. [Build the native environment](mi100-install.md#native) and download the target and draft for your model. The units call the model-specific scripts directly and expect local checkpoints.
+2. Create `/etc/llama/llama-api.env` with mode `0600`, owned by root. Set `VLLM_API_KEY` to your key. If the checkpoints are outside the serving account’s default model directories, set `MODEL_DIR` and `DRAFT_MODEL_DIR` to their absolute paths in the same file.
+3. From the checkout root, install the selected unit. This example selects Flint. Use the filename from the table for another model.
 
 ```bash
-sudo install -m0644 scripts/vllm-qwen38.service scripts/vllm-bolt.service \
-  scripts/vllm-flint.service /etc/systemd/system/
+unit=vllm-flint.service
+sudo install -m 0644 "scripts/$unit" "/etc/systemd/system/$unit"
+sudoedit "/etc/systemd/system/$unit"
+```
+
+In the installed unit, set `User`, `Group`, `WorkingDirectory` and the absolute paths in the `Exec` directives to match your serving account and checkout. The account needs access to the GPUs, venv, sibling AITER checkout and checkpoints. The templates grant the `video` and `render` supplementary groups and set the locked-memory limit for CPU caches.
+
+Set any launcher overrides you need in the service environment file. For example, the portable Qwen launcher sets `C=8`, `KVMEM=auto` and `DISKTIER=0` on four cards. Set those values there to use the same concurrency and cache settings under systemd.
+
+## Start and manage the service
+
+Stop any manually launched recipe using the same cards. To switch from another enabled unit, run `sudo systemctl disable --now` with that unit’s name first. Then enable the unit selected above.
+
+```bash
 sudo systemctl daemon-reload
+sudo systemctl enable --now "$unit"
+systemctl status "$unit"
 ```
 
-When ready to activate, run the following from the serving account, selecting
-one recipe. These commands stop the previous recipe and change boot selection:
+Follow startup with `journalctl -u "$unit" -f`. When `http://127.0.0.1:8020/health` is ready, connect your client with the model ID and key from your service configuration. [API access](mi100-install.md#api-access)
 
-```bash
-# Select Bolt.
-sudo systemctl disable --now vllm.service "vllm-qwen38.service" "vllm-flint.service"
-sudo systemctl enable --now "vllm-bolt.service"
-
-# Alternatively, select Qwen3.8.
-sudo systemctl disable --now vllm.service "vllm-bolt.service" "vllm-flint.service"
-sudo systemctl enable --now "vllm-qwen38.service"
-
-# Alternatively, select Flint.
-sudo systemctl disable --now vllm.service "vllm-qwen38.service" "vllm-bolt.service"
-sudo systemctl enable --now "vllm-flint.service"
-```
-
-If the legacy `vllm.service` was never installed, omit it from these commands.
-The services conflict with each other and with the legacy unit. Use one serving account for this four-GPU host; do not enable
-both recipes at boot. Stop any manually launched *other* recipe before
-activation, since systemd cannot manage a process outside its units.
-
-Check the selected service with `systemctl status` and `journalctl -u`, then
-verify authenticated generation on its configured endpoint. The legacy
-`scripts/vllm.service` remains available for existing installations; new
-installations should use the named units above.
-
-## CPU cache residency and crash recovery
-
-On ROCm, CPU KV pages are explicitly locked with `mlock` before HIP host
-registration. HIP registration alone can leave pages pageable through HMM.
-Each worker locks only its own slots; the 24 GiB Bolt CPU cache remains one
-shared physical allocation. Lock failure aborts startup with a memlock/RAM
-diagnostic instead of silently accepting a pageable cache. The units already
-set `LimitMEMLOCK=infinity`; manual launchers need an adequate memlock limit.
-
-After every worker has registered its KV cache and the scheduler has opened
-any tier mappings, the connector handshake verifies the shared inode and
-unlinks its name. Mappings remain usable until their last holder exits, at
-which point the kernel reclaims the storage, including after SIGKILL.
-The launcher's guarded cleanup remains necessary for failures before that
-handshake. Distributed-host and PCP topologies retain creator cleanup.
-
-Verify a running Bolt instance through `/proc/<worker-pid>/smaps`: its
-`vllm_offload_*.mmap (deleted)` mappings should have `lo` in `VmFlags` for the
-worker's slots, and `VmLck` in `/proc/<worker-pid>/status` should account for
-roughly 6 GiB per rank. There should be no named offload file for that engine.
-
-## Background kernel upgrades
-
-An unattended AMD DKMS rebuild can consume enough RAM to disrupt serving.
-Its configure probes and nested make use `nproc` themselves, bypassing the
-ordinary DKMS parallel-job setting. On this 96-CPU host, constrain the upgrade
-service to eight CPUs and a 4 GiB soft memory limit:
-
-```bash
-sudo install -d /etc/systemd/system/apt-daily-upgrade.service.d
-sudo install -m0644 scripts/apt-daily-upgrade-vllm.conf \
-  /etc/systemd/system/apt-daily-upgrade.service.d/vllm.conf
-sudo systemctl daemon-reload
-```
-
-This applies to future runs, keeps automatic updates enabled, and does not
-change the serving cache budget. `MemoryHigh` throttles/reclaims the build's
-own cgroup rather than imposing a hard OOM cutoff. Adapt the CPU affinity to
-other hosts; verify `nproc` under the same affinity before deploying there.
+Use `sudo systemctl restart "$unit"` after changing the environment file. To stop serving and remove the unit from boot, run `sudo systemctl disable --now "$unit"`.

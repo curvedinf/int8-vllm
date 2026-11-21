@@ -43,7 +43,7 @@ MI100_CARDS=4 MI100_XGMI=on MI100_RECIPE=qwen38 \
   docker compose -f docker/mi100/compose.yaml up --build -d
 ```
 
-Choose `qwen38`, `flint`, `bolt` or `hy4`. The installer pins the software stack. The launcher selects the target, draft and recipe defaults. See [Docker and native installation](docs/recipes/mi100-install.md) for supported layouts, API access and overrides, or [common issues](docs/recipes/mi100-install.md#common-issues) for slow startup, PCIe peer routing and build failures.
+Choose `qwen38`, `flint`, `bolt` or `hy4`. The launcher selects the target, draft and recipe defaults. See [Docker and native installation](docs/recipes/mi100-install.md) for supported layouts, API access and overrides. For GPU visibility, topology or startup errors, see [common issues](docs/recipes/mi100-install.md#common-issues).
 
 For a native installation managed by systemd, see [service installation and selection](docs/recipes/services.md).
 
@@ -56,7 +56,7 @@ Optimizations are evaluated for model fidelity, response quality and service
 stability alongside their speed and memory benefits. HY4-Flash has a dedicated
 release gate covering 64 original-teacher prefixes, 52 chat checks, 114
 multiple-choice questions, image and video inputs, and DFly2 decoding.
-[HY4-Flash quality results](docs/recipes/hy4-flash.md#quality-and-memory)
+[HY4-Flash release results](https://github.com/curvedinf/int8-vllm/blob/2660cf5ec3cfc9ded4b4b26c278bbacfc7c5cf44/docs/recipes/hy4-flash.md#quality-and-memory)
 
 - **Model fidelity:** compare 52 prompts with BF16 using KLD, output agreement and stop probability to measure quantization drift.
 - **Weight integrity:** byte-check loaded/repacked weights and verify exports against the trained quantization grid to catch loading errors.
@@ -76,7 +76,7 @@ multiple-choice questions, image and video inputs, and DFly2 decoding.
 - **Application behavior:** exercise arithmetic, reasoning, tools, image/video input, streaming, authentication and cross-recipe regressions to protect application compatibility.
 - **Serving stability:** stress concurrent requests while checking finite activations, memory growth, allocation failures, startup/shutdown and unexpected restarts.
 
-See the [recipe guides](docs/recipes/README.md) for configuration and validation details.
+The [experiment ledger](docs/recipes/surface_experiments_ledger.jsonl) records individual runs. The [archived MI100 recipe notes](https://github.com/curvedinf/int8-vllm/tree/2660cf5ec3cfc9ded4b4b26c278bbacfc7c5cf44/docs/recipes) preserve the original write-ups.
 
 ## Kernels and features
 

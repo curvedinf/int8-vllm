@@ -108,7 +108,7 @@ time including the staggered finish as requests hit EOS — concurrency
 decays after the first finisher, so it reads ~0.55× steady-state on
 8-equal-length benches by construction. Ledger TPOT deltas are comparable
 across both; tok/s numbers are only comparable within the same definition.
-See docs/recipes/README.md "Current production status".
+The [measurement procedure](docs/recipes/optimization_procedure.md#3-metric-definitions) defines the fork's current reporting metrics.
 
 Net: the audited exceptions ARE the optimum at the current measurement
 floor. The genuinely-open items are structural: Inductor fix (E3 fusion

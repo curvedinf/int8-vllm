@@ -10,7 +10,8 @@ upstreamed directly.
 
 ## THE BASELINE (read first)
 
-`docs/recipes/README.md` is the canonical baseline. Every feature listed there
+The four-card Qwen baseline is configured in `scripts/mi100-serve.sh` and
+`scripts/serve_recipe_qwen38.sh`. Every feature in the following list
 (the PTQR-retrained GS128 target + PTQR-retrained int8 DFlash2 draft (since
 2026-09-06 — ledger PTQR_P2_R1DRAFT_FINAL: quantized fidelity == bf16, acceptance
 3.83/13 at 42k), AITER W8A8 INT8 GEMMs everywhere, int8_block_g128 KV on both
@@ -79,7 +80,7 @@ do not derive an alternate production configuration from archival material.
   and pin the ROCm wheels. The original serving stack uses
   torch 2.11.0+rocm7.1 and Triton 3.6.0. The native Flint comparison also
   ran torch 2.13.0+rocm7.14.0 with Triton 3.8.0 and rebuilt vLLM and
-  AITER native extensions. See [the two-stack measurements](docs/recipes/flint.md#mixed-prefill-and-decode-on-four-mi100s).
+  AITER native extensions. See [the two-stack measurements](https://github.com/curvedinf/int8-vllm/blob/2660cf5ec3cfc9ded4b4b26c278bbacfc7c5cf44/docs/recipes/flint.md#mixed-prefill-and-decode-on-four-mi100s).
 - The original torch 2.11 venv's ROCm *runtime* is patched ahead of its wheel:
   `torch/lib/libamdhip64.so` and `libhsa-runtime64.so` are the 7.2.53211
   builds (from the quant venv's torch 2.13 wheel; wheel originals kept as
@@ -163,7 +164,7 @@ default, see INT8_AUDIT_RESULTS.md), and the speculative config
 The nested dtype is explicit and applies to the draft; the top-level
 `--kv-cache-dtype int8_block_g128` applies to the target. fp16 draft KV is
 measured broken (mean_k=1.01, all drafts rejected) — do not use it; the `int8_block_g{4..128}` family (KV_DTYPE env) is the
-long-context int8 fallback — see the table in docs/recipes/README.md.
+long-context int8 fallback. See the [archived KV format comparison](https://github.com/curvedinf/int8-vllm/blob/2660cf5ec3cfc9ded4b4b26c278bbacfc7c5cf44/docs/recipes/README.md#L291-L339).
 The draft
 MODEL dtype resolves from its checkpoint (bf16) — forcing the target's
 fp16 onto it overflows its residual stream (fixed 2026-08-24; do not
@@ -275,7 +276,7 @@ flow, and the A/B-ledger doctrine stands unchanged.
 
 - **Testing:** `testing-doctrine` governs cadence and coverage; `design-validation` designs the checks; `diagnose-and-repair` investigates a failing behavior.
 - **Improvement:** `run-experiment` answers a bounded comparison; `indefinite-loop` repeats experiment batches only under a continuous request.
-- **Documentation:** `documentation-style` shapes ordinary edits; `polish-docs` redesigns first-use experience.
+- **Documentation:** `documentation-style` guides ordinary edits and `polish-docs` guides first-use redesigns. Keep the MI100 serving recipes focused on installing, starting and using each model. Record validation and performance work in the experiment ledger or a dedicated engineering report.
 - **Delivery:** `git-discipline` governs repository changes; `operate-workflow` handles external operations; `audit-and-resolve` assesses findings; `coordinate-work` manages assignments.
 
 | Request terms | Read |

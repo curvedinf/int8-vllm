@@ -177,7 +177,7 @@ does not establish that Bolt will run several times faster than Qwen.
 ## Reproduction and evidence
 
 Code identity: vLLM `f827e37a50`, AITER `a6aacf7d52`. Recipe: official target and
-LiLiCorr revisions recorded in [the model recipe](nemotron_bolt.md), TP4/C8,
+LiLiCorr revisions recorded in the [checkpoint table for that run](https://github.com/curvedinf/int8-vllm/blob/2660cf5ec3cfc9ded4b4b26c278bbacfc7c5cf44/docs/recipes/nemotron_bolt.md#checkpoints-and-execution), TP4/C8,
 NS7, INT8-G128 KV on both models, FP32 Mamba state, BF16 residuals, custom AR,
 full decode graphs, default mixed-prefill policy, CPU tier only. No numerical
 or performance settings were changed during this investigation.
