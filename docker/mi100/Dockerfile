@@ -41,6 +41,9 @@ ARG AITER_REV=bbc57fe793043748ac15ae7309a66b28a425cea4
 RUN git init /opt/int8-aiter && cd /opt/int8-aiter && git remote add origin https://github.com/curvedinf/int8-aiter.git \
     && git fetch --depth=1 origin "$AITER_REV" && git checkout --detach FETCH_HEAD \
     && git submodule update --init --recursive --depth=1
+# The optional per-worker CPU map uses vLLM's numactl wrapper at runtime.
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends numactl \
+    && rm -rf /var/lib/apt/lists/*
 COPY python_startup/ python_startup/
 COPY scripts/ scripts/
 # Use the toolkit compiler for AITER JIT. The wheel also installs a hipcc

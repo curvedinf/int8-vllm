@@ -152,8 +152,10 @@ serve() {
   if [[ "${FORCE_REJECT:-0}" == "1" ]]; then
     spec="$("${ROOT_DIR}/.venv/bin/python" -c 'import json,sys; d=json.loads(sys.argv[1]); d["rejection_sample_method"]="synthetic"; d["synthetic_acceptance_rates"]=[0.0]*int(d["num_speculative_tokens"]); print(json.dumps(d))' "$spec")"
   fi
+  source "$ROOT_DIR/scripts/mi100-cpu-map.sh"
   local args=(
     -m vllm.entrypoints.openai.api_server
+    "${cpu_bind_args[@]}"
     --model "$MODEL_DIR" --served-model-name flint
     --host "$HOST" --port "$PORT"
     --pipeline-parallel-size "${MI100_PP_SIZE:-1}" --tensor-parallel-size "${TPS:-4}"

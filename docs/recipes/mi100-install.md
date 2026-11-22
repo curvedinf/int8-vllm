@@ -42,10 +42,25 @@ Set Compose variables in your shell before running `up`. Use a container env fil
 | Host shell | `MAX_JOBS`, `MI100_SHM_SIZE` | Set build parallelism (default `4`) and container shared memory (default `32gb`). |
 | Container env file | `MODEL_DIR`, `DRAFT_MODEL_DIR` | Use existing target and draft directories. Supply full paths as seen **inside** the container, such as `/models/my-target` and `/models/my-draft`. |
 | Container env file | `MI100_DEVICES` | Select the ordered HIP device IDs, for example `1,3` with `MI100_CARDS=2`. |
+| Container env file or native shell | `MI100_CPU_MAP` | Optional. Set one space-separated CPU list per GPU, in `MI100_DEVICES` order. |
 | Container env file | `VLLM_API_KEY` | Use your own API key. Keep the env file private. |
 | Container env file | `C`, `MAXLEN` (Qwen, Flint, HY4), `MAX_MODEL_LEN` (Bolt) | Set concurrency and the per-request context limit. |
 
 With automatic downloads the checkpoints live in the cache volume. Mounting `MODELS_DIR` supplies an alternative source for existing files. For HY4, put the actual n-gram files on SSD. [HY4 storage options](hy4-flash.md#n-gram-storage)
+
+### Pin workers to CPU cores
+
+For example, with four GPUs and CPUs 0–15 available, set
+`MI100_CPU_MAP="0-3 4-7 8-11 12-15"`. Use commas to include SMT siblings in
+the same group, such as `0-3,48-51`. Each group must belong to one NUMA
+node. To keep a worker within one L3 cache, choose cores that share the
+same L3 on your host. The native launcher requires `numactl` when a map is set.
+
+Run `scripts/mi100-serve.sh check` with your recipe settings to see the GPU,
+CPU list, NUMA node and shared L3 CPU lists for each rank. For Docker use
+`docker compose -f docker/mi100/compose.yaml run --rm serve check` with the
+same Compose file and environment as your server. Omit `MI100_CPU_MAP` to
+use the recipe's normal CPU scheduling.
 
 ## Native
 

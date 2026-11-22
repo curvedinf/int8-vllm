@@ -89,8 +89,10 @@ serve() {
   local engram spec mm_default='{"image":1,"video":1}'
   local mm_processing='{"images_kwargs":{"max_pixels":1048576},"videos_kwargs":{"max_pixels":4194304,"max_frames":32}}'
   engram="$("$python" -c 'import json,sys; print(json.dumps(dict(packed_table=sys.argv[1], table_directory=sys.argv[2], page_cache_mib=int(sys.argv[3]), cpu_offload=False)))' "$mode" "$table_dir" "${ENGRAM_CACHE_MIB:-32}")"
+  source "$root/scripts/mi100-cpu-map.sh"
   local -a args=(
     -m vllm.entrypoints.openai.api_server --model "$model" --served-model-name hy4-flash
+    "${cpu_bind_args[@]}"
     --host "${HOST:-127.0.0.1}" --port "${PORT:-8020}" --tensor-parallel-size "$tp"
     --dtype float16 --load-format "$load" --kv-cache-dtype "$kv" --engram-config "$engram"
     --max-model-len "${MAXLEN:-262144}" --max-num-seqs "${C:-8}"

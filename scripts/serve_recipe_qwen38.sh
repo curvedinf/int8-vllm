@@ -27,6 +27,9 @@ STOP_TIMEOUT=20
 # Preserve the deployed cap on larger hosts and respect smaller cpusets.
 cpu_threads=$(nproc)
 if ((cpu_threads > 48)); then cpu_threads=48; fi
+if [[ -n "${MI100_CPU_MAP:-}" && -z "${CPUSET:-}" ]]; then
+  CPUSET=$(awk '/^Cpus_allowed_list:/ {print $2}' /proc/self/status)
+fi
 if [[ -z "${CPUSET:-}" ]]; then
   CPUSET=$("${VENV}/bin/python" -c \
     'import os; print(",".join(map(str, sorted(os.sched_getaffinity(0))[:48])))')
@@ -710,6 +713,8 @@ launch_server() {
   # Bolt-only scheduler levers: pin off for the Qwen recipe (same phantom-
   # env containment as the residual seam).
   export VLLM_BOLT_SHORT_PREFILL_COHORT="${VLLM_BOLT_SHORT_PREFILL_COHORT:-0}"
+  source "$ROOT_DIR/scripts/mi100-cpu-map.sh"
+  ARGS+=("${cpu_bind_args[@]}")
   exec "$@" taskset -c "${CPUSET}" env -u HSA_OVERRIDE_GFX_VERSION \
     VLLM_API_KEY="${api_key}" \
   VLLM_GFX908_RESIDUAL_INT8="${VLLM_GFX908_RESIDUAL_INT8}" \

@@ -133,8 +133,10 @@ serve() {
   export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
   local spec
   spec="$("${ROOT_DIR}/.venv/bin/python" -c 'import json,sys; print(json.dumps(dict(method="dflash",model=sys.argv[1],num_speculative_tokens=int(sys.argv[2]),kv_cache_dtype="int8_block_g128")))' "$DRAFT_MODEL_DIR" "${NS:-7}")"
+  source "$ROOT_DIR/scripts/mi100-cpu-map.sh"
   local args=(
     -m vllm.entrypoints.openai.api_server
+    "${cpu_bind_args[@]}"
     --model "$MODEL_DIR" --served-model-name nemotron-bolt
     --enable-prompt-tokens-details
     --override-generation-config '{"temperature":1.0,"top_p":0.95,"max_new_tokens":32768}'

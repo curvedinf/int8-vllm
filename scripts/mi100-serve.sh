@@ -153,6 +153,11 @@ devices=$(IFS=,; echo "${gpu_ids[*]:0:cards}")
 export MI100_DEVICES="$devices" HIP_VISIBLE_DEVICES="$devices" CUDA_VISIBLE_DEVICES="$devices"
 printf 'MI100 recipe=%s HIP devices=%s XGMI=%s TP=%s PP=%s\n' \
   "$recipe" "$devices" "$link" "$tp" "$pp" >&2
+unset _MI100_CPU_BIND_FLAGS
+if [[ -n "${MI100_CPU_MAP:-}" ]]; then
+  source "$root/scripts/mi100-cpu-map.sh"
+  export _MI100_CPU_BIND_FLAGS
+fi
 # Fail before a large checkpoint download on a misconfigured host.
 # Return the shared CU count separately from library diagnostics.
 reported_cus=$("$root/.venv/bin/python" - "$cards" "$link" "$action" 3>&1 1>&2 <<'PYTHON'
