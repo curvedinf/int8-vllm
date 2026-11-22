@@ -121,6 +121,8 @@ class InklingSconvBackend(AttentionBackend):
 class InklingConvState(nn.Module, AttentionLayerBase):
     """Per-decoder-layer owner emitting one sliding-window conv-state spec."""
 
+    supported_cache_dtypes = (torch.bfloat16,)
+
     def __init__(
         self,
         *,
@@ -167,8 +169,8 @@ class InklingConvState(nn.Module, AttentionLayerBase):
         )
         vllm_config = get_current_vllm_config()
         self._dtype = vllm_config.model_config.dtype
-        assert self._dtype == torch.bfloat16, (
-            f"sconv SWA cache supports bfloat16 only, got {self._dtype}"
+        assert self._dtype in self.supported_cache_dtypes, (
+            f"Unsupported sconv SWA cache dtype {self._dtype}"
         )
         # Register in the forward context so the runner enumerates this owner as
         # an attention-like layer (get_kv_cache_spec / get_attn_backend).

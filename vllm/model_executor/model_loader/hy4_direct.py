@@ -30,9 +30,16 @@ def hy4_windowed_weights(source, files, *, require_fastpath, allowed=None):
     device = torch.device("cuda", torch.cuda.current_device())
     config = get_current_vllm_config_or_none()
     group = None
+    inkling = (
+        getattr(getattr(config, "model_config", None), "quantization", None)
+        == "inkling2_ptqr"
+    )
     if (
         config is not None
-        and config.additional_config.get("hy4_share_weight_reads", False)
+        and config.additional_config.get(
+            "inkling2_share_weight_reads" if inkling else "hy4_share_weight_reads",
+            inkling,
+        )
         and config.parallel_config.tensor_parallel_size > 1
     ):
         group = get_tp_group()
@@ -93,7 +100,9 @@ def hy4_windowed_weights(source, files, *, require_fastpath, allowed=None):
                         ):
                             continue
                         if spec.nbytes != math.prod(spec.shape) * spec.dtype.itemsize:
-                            raise ValueError(f"HY4 tensor extent mismatch: {spec.name}")
+                            raise ValueError(
+                                f"Packed tensor extent mismatch: {spec.name}"
+                            )
                         raw = data[spec.start - first : spec.end - first]
                         if raw.storage_offset() % spec.dtype.itemsize:
                             raw = raw.clone()
@@ -103,7 +112,7 @@ def hy4_windowed_weights(source, files, *, require_fastpath, allowed=None):
                         )
                     i = j
     logger.info(
-        "HY4 rank read %.2f GiB in %.2f seconds (shared reads: %s)",
+        "Packed checkpoint rank read %.2f GiB in %.2f seconds (shared reads: %s)",
         read_bytes / (1 << 30),
         time.monotonic() - started,
         group is not None,

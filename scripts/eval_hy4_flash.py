@@ -45,7 +45,13 @@ def request(args, endpoint, body):
     return response(args, endpoint, body)["choices"][0]
 
 
-def chat(args, messages, **kwargs):
+def minimum_reasoning(args):
+    if args.inkling:
+        return {"reasoning_effort": "none"}
+    return {"chat_template_kwargs": {"reasoning_effort": "no_think"}}
+
+
+def chat(args, messages, *, use_minimum=True, **kwargs):
     return request(
         args,
         "/v1/chat/completions",
@@ -54,7 +60,7 @@ def chat(args, messages, **kwargs):
             "temperature": 0,
             "seed": SEED,
             "max_tokens": 128,
-            "chat_template_kwargs": {"reasoning_effort": "no_think"},
+            **(minimum_reasoning(args) if use_minimum else {}),
             **kwargs,
         },
     )
@@ -117,9 +123,9 @@ def corpus(args, entry):
         issue = None if strict else "requested output format or answer did not match"
     elif i == 19 and reply.strip() == "11":
         issue = None
-    if result["message"].get("reasoning") or re.search(
-        r"<(?:think|｜reasoning_mode)", reply
-    ):
+    if re.search(r"<(?:think|｜reasoning_mode)|<\|content_thinking\|>", reply):
+        issue = "reasoning marker leaked into answer"
+    elif not args.inkling and result["message"].get("reasoning"):
         issue = "reasoning appeared in a no_think answer"
     ids = result.get("token_ids") or []
     return {
@@ -144,7 +150,11 @@ def multiple_choice(args, entry):
         for letter, option in zip(letters, row["choices"], strict=True)
     )
     prompt = f"{row['question']}\n\n{options}\n\nAnswer with just the letter."
-    result = chat(args, [{"role": "user", "content": prompt}], max_tokens=8)
+    result = chat(
+        args,
+        [{"role": "user", "content": prompt}],
+        max_tokens=2048 if args.inkling else 8,
+    )
     content = (result["message"].get("content") or "").strip()
     match = re.fullmatch(r"([A-D])[.)]?", content, flags=re.IGNORECASE)
     answer = match.group(1).upper() if match else None
@@ -154,6 +164,7 @@ def multiple_choice(args, entry):
         "expected": row["answer"],
         "answer": answer,
         "content": content,
+        "finish": result["finish_reason"],
         "correct": answer == row["answer"],
     }
 
@@ -220,7 +231,12 @@ def modalities(args):
             "image/png",
             "What is the color filling this image? Answer with one color word.",
         )
-        text = chat(args, msgs, max_tokens=32)["message"].get("content") or ""
+        text = (
+            chat(args, msgs, max_tokens=256 if args.inkling else 32)["message"].get(
+                "content"
+            )
+            or ""
+        )
         cases.append(
             {
                 "case": color,
@@ -234,7 +250,12 @@ def modalities(args):
             "image/jpeg",
             "What animals can you see on the furniture?",
         )
-        text = chat(args, msgs, max_tokens=64)["message"].get("content") or ""
+        text = (
+            chat(args, msgs, max_tokens=256 if args.inkling else 64)["message"].get(
+                "content"
+            )
+            or ""
+        )
         cases.append(
             {
                 "case": "COCO val2017 image 39769",
@@ -292,11 +313,11 @@ def reasoning_modes(args):
         {"role": "user", "content": "What is seven plus five? Answer in digits."}
     ]
     cases = {}
-    for name, options in (
-        ("default", {}),
-        ("no_think", {"reasoning_effort": "no_think"}),
+    for name, use_minimum in (
+        ("default", False),
+        ("minimum" if args.inkling else "no_think", True),
     ):
-        choice = chat(args, question, chat_template_kwargs=options, max_tokens=512)
+        choice = chat(args, question, use_minimum=use_minimum, max_tokens=512)
         message = choice["message"]
         answer = (message.get("content") or "").strip()
         thinking = bool((message.get("reasoning") or "").strip())
@@ -305,7 +326,7 @@ def reasoning_modes(args):
                 bool(re.search(r"\b12\b", answer))
                 and "<think" not in answer
                 and "</think" not in answer
-                and thinking == (name == "default")
+                and (thinking == (name == "default") or name == "minimum")
                 and choice["finish_reason"] == "stop"
             ),
             "content": answer,
@@ -320,28 +341,31 @@ def exact_context_prompt(args, passage, length, variant=0):
     slot = "HY4ARCHIVEFILL49517"
     tag = hashlib.sha256(f"{SEED}:{length}:{variant}".encode()).hexdigest()[:7].upper()
     answer = f"CEDAR-{tag}"
-    template = response(
-        args,
-        "/tokenize",
-        {
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        f"Review these source excerpts.\n\n{slot}\n\n"
-                        f"For this review, the release codename is {answer}.\n\n"
-                        f"{slot}\n\nEnd of the source excerpts."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": "What release codename was assigned to this review? "
-                    "Copy it exactly. Reply with the codename only.",
-                },
-            ],
-            "chat_template_kwargs": {"reasoning_effort": "no_think"},
+    body = {
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    f"Review these source excerpts.\n\n{slot}\n\n"
+                    f"For this review, the release codename is {answer}.\n\n"
+                    f"{slot}\n\nEnd of the source excerpts."
+                ),
+            },
+            {
+                "role": "user",
+                "content": "What release codename was assigned to this review? "
+                "Copy it exactly. Reply with the codename only.",
+            },
+        ],
+        "chat_template_kwargs": {
+            "reasoning_effort": "none" if args.inkling else "no_think",
         },
-    )
+    }
+    if args.inkling:
+        # Open a visible answer block for the raw-completion recall check.
+        body["messages"].append({"role": "assistant", "content": ""})
+        body.update(continue_final_message=True, add_generation_prompt=False)
+    template = response(args, "/tokenize", body)
     ids = template["tokens"]
 
     def raw(text):
@@ -538,10 +562,10 @@ def context_recall(args):
             ],
             "temperature": 0,
             "seed": SEED,
-            "max_tokens": 32,
+            "max_tokens": 256 if args.inkling else 32,
             "cache_salt": uuid.uuid4().hex,
             "return_token_ids": True,
-            "chat_template_kwargs": {"reasoning_effort": "no_think"},
+            **minimum_reasoning(args),
         }
         pair = []
         for _ in range(2):
@@ -574,6 +598,11 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--url", default="http://127.0.0.1:8020")
     p.add_argument("--model", default="hy4-flash")
+    p.add_argument(
+        "--inkling",
+        action="store_true",
+        help="Use Inkling's minimum reasoning effort and allow a reasoning block",
+    )
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--reference", type=Path)
     p.add_argument(

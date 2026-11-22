@@ -417,7 +417,7 @@ class AisModelLoader(DefaultModelLoader):
 
     def __init__(self, load_config):
         super().__init__(load_config)
-        self._hy4_windowed = False
+        self._packed_windowed = False
         self._read_plan: ReadPlan | None = None
         self._repack_hit: RepackCache | None = None
         self._repack_write: bool = False
@@ -509,15 +509,16 @@ class AisModelLoader(DefaultModelLoader):
         return plan
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
-        self._hy4_windowed = model_config.quantization == "hy4_neuqi"
-        if self._hy4_windowed:
+        self._packed_windowed = model_config.quantization in ("hy4_neuqi", "inkling2_ptqr")
+        if self._packed_windowed:
             from vllm.model_executor.model_loader.hy4_rank_cache import HY4RankCache
 
             cache = HY4RankCache.for_model(model, model_config)
             if cache is not None and cache.restore():
                 return
             logger.info(
-                "Loading HY4 with contiguous GPU windows and GPU-local TP sharding"
+                "Loading %s with contiguous GPU windows and GPU-local TP sharding",
+                model_config.quantization,
             )
             super().load_weights(model, model_config)
             if cache is not None:
@@ -556,7 +557,7 @@ class AisModelLoader(DefaultModelLoader):
     def _get_weights_iterator(
         self, source: DefaultModelLoader.Source
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
-        if self._hy4_windowed:
+        if self._packed_windowed:
             from vllm.model_executor.model_loader.hy4_direct import hy4_windowed_weights
 
             _, files, safetensors, _ = self._prepare_weights(
@@ -567,7 +568,7 @@ class AisModelLoader(DefaultModelLoader):
                 source.allow_patterns_overrides,
             )
             if not safetensors:
-                raise ValueError("The packed HY4 checkpoint requires safetensors")
+                raise ValueError("Packed windowed loading requires safetensors")
             if self.counter_before_loading_weights == 0:
                 self.counter_before_loading_weights = time.perf_counter()
             return hy4_windowed_weights(

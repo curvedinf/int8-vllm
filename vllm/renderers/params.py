@@ -114,6 +114,9 @@ class ChatParams:
     response_format: Any | None = None
     """Request-level response format for renderers that need API metadata."""
 
+    parallel_tool_calls: bool = True
+    """Whether the renderer may instruct the model to call several tools."""
+
     def with_defaults(
         self,
         default_chat_template_kwargs: dict[str, Any] | None = None,
@@ -144,6 +147,7 @@ class ChatParams:
             ),
             tool_choice=self.tool_choice,
             response_format=self.response_format,
+            parallel_tool_calls=self.parallel_tool_calls,
         )
 
     def get_apply_chat_template_kwargs(self) -> dict[str, Any]:

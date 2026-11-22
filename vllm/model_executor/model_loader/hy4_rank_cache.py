@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Cache validated TP-local HY4 parameters before kernel-specific GPU packing."""
+"""Cache TP-local packed-model parameters before kernel-specific GPU packing."""
 
 import hashlib
 import json
@@ -24,10 +24,12 @@ _TOKEN_MAP = "__hy4_token_map__"
 
 
 class HY4RankCache:
-    def __init__(self, model, directory):
+    def __init__(self, model, directory, recipe="hy4"):
         self.group = get_tp_group()
         self.params = dict(model.named_parameters())
-        self.hash_state = model.language_model.model.engram_hash
+        self.hash_state = (
+            model.language_model.model.engram_hash if recipe == "hy4" else None
+        )
         self.device = next(iter(self.params.values())).device
         index = directory / "model.safetensors.index.json"
         names = set(json.loads(index.read_text())["weight_map"].values())
@@ -48,18 +50,33 @@ class HY4RankCache:
             json.dumps(signature, sort_keys=True).encode()
         ).hexdigest()
         root = Path(default_repack_root(str(directory)))
-        name = f"hy4-tp{self.group.world_size}-rank{self.group.rank_in_group}"
+        name = f"{recipe}-tp{self.group.world_size}-rank{self.group.rank_in_group}"
+        if recipe == "inkling2":
+            # Joint Q/gate projections and text-only serving have distinct
+            # parameter layouts even when they read the same checkpoint.
+            layout = [(key, list(p.shape), str(p.dtype)) for key, p in self.params.items()]
+            name += "-" + hashlib.sha256(json.dumps(layout).encode()).hexdigest()[:12]
         self.path = root / (name + ".safetensors")
 
     @classmethod
     def for_model(cls, model, model_config):
         config = get_current_vllm_config_or_none()
-        if config is None or not config.additional_config.get("hy4_rank_cache", False):
+        recipes = {
+            "HYV4FlashVLForConditionalGeneration": "hy4",
+            "Inkling2LoopForConditionalGeneration": "inkling2",
+        }
+        recipe = recipes.get(type(model).__name__)
+        if (
+            config is None
+            or recipe is None
+            or not config.additional_config.get(
+                f"{recipe}_rank_cache", recipe == "inkling2"
+            )
+        ):
             return None
         parallel = config.parallel_config
         if (
-            type(model).__name__ != "HYV4FlashVLForConditionalGeneration"
-            or parallel.tensor_parallel_size <= 1
+            parallel.tensor_parallel_size <= 1
             or parallel.pipeline_parallel_size != 1
             or parallel.data_parallel_size != 1
             or parallel.enable_expert_parallel
@@ -69,7 +86,7 @@ class HY4RankCache:
         directory = Path(model_config.model_weights or model_config.model)
         if not directory.is_dir():
             return None
-        return cls(model, directory)
+        return cls(model, directory, recipe)
 
     def _all(self, ready):
         flag = torch.tensor(int(ready), dtype=torch.int32, device="cpu")
@@ -84,7 +101,10 @@ class HY4RankCache:
         header = SafetensorFile(str(self.path))
         if header.metadata.get("source") != self.digest:
             return None
-        if set(header.tensors) != set(self.params) | {_TOKEN_MAP}:
+        expected = set(self.params)
+        if self.hash_state is not None:
+            expected.add(_TOKEN_MAP)
+        if set(header.tensors) != expected:
             return None
         end = 0
         for spec in sorted(header, key=lambda item: item.start):
@@ -115,7 +135,9 @@ class HY4RankCache:
         try:
             header = self._validate()
         except (OSError, KeyError, TypeError, ValueError) as exc:
-            logger.warning("Ignoring unreadable HY4 rank cache %s: %s", self.path, exc)
+            logger.warning(
+                "Ignoring unreadable TP-local weight cache %s: %s", self.path, exc
+            )
             header = None
         # The original loader uses TP collectives. All ranks must make the
         # same decision when a cache file is absent, stale or unreadable.
@@ -174,13 +196,16 @@ class HY4RankCache:
                         dest.copy_(target)
             read = True
         except (OSError, RuntimeError, ValueError) as exc:
-            logger.warning("Could not restore HY4 rank cache %s: %s", self.path, exc)
+            logger.warning(
+                "Could not restore TP-local weight cache %s: %s", self.path, exc
+            )
             read = False
         if not self._all(read):
             return False
-        self.hash_state.load_lookup(lookup)
+        if self.hash_state is not None:
+            self.hash_state.load_lookup(lookup)
         logger.info(
-            "HY4 TP-local cache restored %d parameters in %.2f seconds "
+            "TP-local weight cache restored %d parameters in %.2f seconds "
             "from %s (%d MiB per read)",
             len(self.params),
             time.monotonic() - started,
@@ -191,8 +216,9 @@ class HY4RankCache:
 
     def save(self):
         tensors = {name: value.detach() for name, value in self.params.items()}
-        count = len(self.hash_state.layout.lookup_table)
-        tensors[_TOKEN_MAP] = self.hash_state.token_map[:count]
+        if self.hash_state is not None:
+            count = len(self.hash_state.layout.lookup_table)
+            tensors[_TOKEN_MAP] = self.hash_state.token_map[:count]
         declaration = {name: (tuple(t.shape), t.dtype) for name, t in tensors.items()}
         started = time.monotonic()
         try:
@@ -210,11 +236,11 @@ class HY4RankCache:
                 for name, value in tensors.items():
                     writer.append(name, value.contiguous())
             logger.info(
-                "Wrote HY4 TP-local cache in %.2f seconds to %s",
+                "Wrote TP-local weight cache in %.2f seconds to %s",
                 time.monotonic() - started,
                 self.path,
             )
         except (OSError, RuntimeError, ValueError) as exc:
             logger.warning(
-                "Could not save optional HY4 rank cache %s: %s", self.path, exc
+                "Could not save optional TP-local weight cache %s: %s", self.path, exc
             )

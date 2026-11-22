@@ -140,8 +140,17 @@ def kv_block_quant_fake(t: torch.Tensor, group: int, tau: float = 0.0,
     return t + (out.to(orig_dtype) - t).detach()  # STE
 
 
+def _weight_codes(grouped_weight, scale, bounds, tau=0.0, gen=None):
+    z = grouped_weight / scale.unsqueeze(-1)
+    magnitude = torch.floor(z.abs() + 0.5)
+    dither = _dither(magnitude.shape, z.device, torch.float32, tau, gen)
+    if dither is not None:
+        magnitude = torch.floor(magnitude + dither + 0.5).clamp_min_(0)
+    return (torch.sign(z) * magnitude).clamp_(*bounds)
+
+
 class _PTQRLinFn(torch.autograd.Function):
-    """Memory-safe W8A8 fake-quant linear.
+    """Memory-safe W8A8 or W4A8 fake-quant linear.
 
     F.linear's autograd node SAVES its weight operand, so a graph-built
     quantized weight retains a full weight-sized tensor per linear for the
@@ -163,14 +172,17 @@ class _PTQRLinFn(torch.autograd.Function):
         tau: float,
         scale_fp16: bool = True,
         act_group: int = 0,
+        weight_bounds: tuple[int, int] = (-127, 127),
     ):
         ctx.save_for_backward(x, w, scale)
         ctx.group = group
         ctx.tau = tau
         ctx.scale_fp16 = scale_fp16
+        ctx.weight_bounds = weight_bounds
         ctx.act_group = act_group
         with torch.no_grad():
-            wq = _weight_quant_compute(w, scale, group, tau, scale_fp16=scale_fp16)
+            wq = _weight_quant_compute(w, scale, group, tau, scale_fp16=scale_fp16,
+                                       bounds=weight_bounds)
             xq = act_quant_fake(x, tau, group_size=act_group)
             return F.linear(xq, wq)
 
@@ -181,7 +193,8 @@ class _PTQRLinFn(torch.autograd.Function):
         s_fp16 = ctx.scale_fp16
         dbg = os.environ.get("PTQR_MEM_DEBUG") and not _PTQRLinFn._dbg_done
         with torch.no_grad():
-            wq = _weight_quant_compute(w, scale, group, tau, scale_fp16=s_fp16)
+            wq = _weight_quant_compute(w, scale, group, tau, scale_fp16=s_fp16,
+                                       bounds=ctx.weight_bounds)
             xq = act_quant_fake(x, tau, group_size=ctx.act_group)
             if dbg:
                 _PTQRLinFn._dbg_done = True
@@ -212,14 +225,13 @@ class _PTQRLinFn(torch.autograd.Function):
                         wc = w[r0:r1].float().reshape(r1 - r0, in_f // group, group)
                         s_e = scale[r0:r1].to(torch.float16).float() if s_fp16 \
                             else scale[r0:r1].float()
-                        z = wc / s_e.unsqueeze(-1)
-                        q = (torch.sign(z) * torch.floor(z.abs() + 0.5)
-                             .clamp(0.0, _QUANT_MAX_W)).reshape(r1 - r0, in_f)
+                        q = _weight_codes(wc, s_e, ctx.weight_bounds)
                         gs[r0:r1] = (gw_r.reshape(r1 - r0, in_f // group, group) * q.reshape(r1 - r0, in_f // group, group)).sum(dim=-1)
-        return (grad_x, gw, gs, None, None, None, None)[:len(ctx.needs_input_grad)]
+        return (grad_x, gw, gs, None, None, None, None, None)[:len(ctx.needs_input_grad)]
 
 
-def _weight_integer(w: torch.Tensor, scale: torch.Tensor, group: int) -> torch.Tensor:
+def _weight_integer(w: torch.Tensor, scale: torch.Tensor, group: int,
+                    bounds: tuple[int, int] = (-127, 127)) -> torch.Tensor:
     """Integer payload q (pre fp16-scale multiply), row-chunked, no grad."""
     out_f, in_f = w.shape
     q = torch.empty(w.shape, dtype=torch.float32, device=w.device)
@@ -228,21 +240,19 @@ def _weight_integer(w: torch.Tensor, scale: torch.Tensor, group: int) -> torch.T
         r1 = min(r0 + R, out_f)
         wc = w[r0:r1].float().reshape(r1 - r0, in_f // group, group)
         s16 = scale[r0:r1].to(torch.float16).float()
-        z = wc / s16.unsqueeze(-1)
-        sign = torch.sign(z)
-        az = torch.floor(z.abs() + 0.5).clamp(0.0, _QUANT_MAX_W)
-        q[r0:r1] = (sign * az).reshape(r1 - r0, in_f)
+        q[r0:r1] = _weight_codes(wc, s16, bounds).reshape(r1 - r0, in_f)
     return q
 
 
 def _weight_quant_compute(w: torch.Tensor, scale: torch.Tensor, group: int,
                           tau: float = 0.0,
                           gen: torch.Generator | None = None,
-                          scale_fp16: bool = True) -> torch.Tensor:
-    """G128 int8 weight fake-quant with learned per-group scales (no grad).
+                          scale_fp16: bool = True,
+                          bounds: tuple[int, int] = (-127, 127)) -> torch.Tensor:
+    """G128 weight fake-quant with learned per-group scales (no grad).
 
     w: [out, in] master (bf16); scale: [out, in//group] fp32 parameter.
-    Deployed grid: q in [-127, 127]; fp16 group scales for the W8A8 GEMM
+    W8 uses [-127, 127] and W4 uses [-8, 7]. FP16 group scales serve the GEMM
     (gptq GS128 contract), fp32 row scales for the per-channel LM head
     (_quantize_lm_head_w8a8_ contract).
 
@@ -257,14 +267,7 @@ def _weight_quant_compute(w: torch.Tensor, scale: torch.Tensor, group: int,
         wc = w[r0:r1].float().reshape(r1 - r0, in_f // group, group)
         s_e = scale[r0:r1].to(torch.float16).float() if scale_fp16 \
             else scale[r0:r1].float()
-        z = wc / s_e.unsqueeze(-1)
-        sign = torch.sign(z)
-        az = torch.floor(z.abs() + 0.5)
-        d = _dither(az.shape, w.device, torch.float32, tau, gen)
-        if d is not None:
-            az = torch.floor(az + d + 0.5)
-        z = sign * az.clamp(0.0, _QUANT_MAX_W)
-        z = z.clamp(-_QUANT_MAX_W, _QUANT_MAX_W)
+        z = _weight_codes(wc, s_e, bounds, tau, gen)
         out[r0:r1] = (z * s_e.unsqueeze(-1)).reshape(r1 - r0, in_f).to(orig_dtype)
     return out
 
@@ -274,7 +277,7 @@ def _weight_quant_compute(w: torch.Tensor, scale: torch.Tensor, group: int,
 # ---------------------------------------------------------------------------
 
 class PTQRLinear(nn.Module):
-    """Linear whose forward is the deployed W8A8 INT8 GEMM (fake-quant).
+    """Linear with the selected weight grid and deployed INT8 activation grid.
 
     Holds the bf16 master weight and a trainable fp32 per-G128-group scale.
     Both the input activations and the weight pass through their deployed
@@ -284,15 +287,25 @@ class PTQRLinear(nn.Module):
     """
 
     def __init__(self, weight: torch.Tensor, group: int = 128,
-                 scale_fp16: bool = True, act_group: int = 0):
+                 scale_fp16: bool = True, act_group: int = 0,
+                 weight_bits: int = 8):
         super().__init__()
         out_f, in_f = weight.shape
         assert in_f % group == 0, f"in_features {in_f} not divisible by {group}"
+        if weight_bits not in (4, 8):
+            raise ValueError("PTQR weight_bits must be 4 or 8")
+        self.weight_bounds = (-8, 7) if weight_bits == 4 else (-127, 127)
         self.weight = nn.Parameter(weight.detach().clone())
         with torch.no_grad():
             wf = weight.detach().float().reshape(out_f, in_f // group, group)
-            amax = wf.abs().amax(dim=-1)
-            self.scale = nn.Parameter((amax / _QUANT_MAX_W).clamp_min(1e-8))
+            if weight_bits == 4:
+                # The packed W4A8 kernel stores 16 codes and a zero point of 8.
+                lo, hi = self.weight_bounds
+                step = torch.maximum(wf.amin(-1) / lo, wf.amax(-1) / hi)
+                step = step.clamp_min(2**-24)  # smallest nonzero FP16 scale
+            else:
+                step = (wf.abs().amax(-1) / _QUANT_MAX_W).clamp_min(1e-8)
+            self.scale = nn.Parameter(step)
         self.group = group
         # W8A8 GEMM weights use fp16 group scales (gptq GS128 contract); the
         # untied LM head uses the CK per-channel contract (fp32 row scales,
@@ -329,7 +342,8 @@ class PTQRLinear(nn.Module):
             out = torch.nn.functional.linear(x, self.weight)
         else:
             out = _PTQRLinFn.apply(x, self.weight, self.scale, self.group,
-                                   self.tau, self.scale_fp16, self.act_group)
+                                   self.tau, self.scale_fp16, self.act_group,
+                                   self.weight_bounds)
         if self.row_reduce_group is not None:
             # Row-parallel partial (own column slice of the input): sum the
             # partials across ranks, autograd-exact (_RowParallelSum).

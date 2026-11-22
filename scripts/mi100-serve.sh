@@ -14,7 +14,7 @@ pp=1
 tp=$cards
 case "$cards" in
   2) devices=0,1 ;;
-  3) devices=0,1,2; if [[ "$recipe" != hy4 ]]; then tp=1; pp=3; fi ;;
+  3) devices=0,1,2; if [[ "$recipe" != hy4 && "$recipe" != inkling2 ]]; then tp=1; pp=3; fi ;;
   4) devices=0,1,2,3 ;;
   *) echo "MI100_CARDS must be 2, 3 or 4." >&2; exit 2 ;;
 esac
@@ -114,12 +114,20 @@ case "$recipe" in
     target_rev=6bcd3e95f31ff6a23201e99273ddf5ab134faec0
     draft_repo=voodooquant/Hy4-flash-DFly2-PTQR-INT8-W8A8-GS128
     draft_rev=026c6c08dc582c7dca03b4db4c14dcf85a9d006a
-    export VLLM_API_KEY="${VLLM_API_KEY:-${LLAMA_API_KEY:-}}"
-    if [[ -z "${API_KEY_FILE:-}" && -r /etc/llama/llama-api.key ]]; then
-      export API_KEY_FILE=/etc/llama/llama-api.key
-    fi ;;
-  *) echo "MI100_RECIPE must be qwen38, flint, bolt or hy4." >&2; exit 2 ;;
+    ;;
+  inkling2)
+    target=Inkling-2-Mini-PTQR-W4A8-G128
+    target_repo=voodooquant/Inkling-2-Mini-PTQR-W4A8-G128
+    target_rev=main
+    draft="" ;;
+  *) echo "MI100_RECIPE must be qwen38, flint, bolt, hy4 or inkling2." >&2; exit 2 ;;
 esac
+if [[ "$recipe" == hy4 || "$recipe" == inkling2 ]]; then
+  export VLLM_API_KEY="${VLLM_API_KEY:-${LLAMA_API_KEY:-}}"
+  if [[ -z "${API_KEY_FILE:-}" && -r /etc/llama/llama-api.key ]]; then
+    export API_KEY_FILE=/etc/llama/llama-api.key
+  fi
+fi
 launcher="$root/scripts/serve_recipe_$recipe.sh"
 if [[ "$action" == status || "$action" == stop ]]; then
   exec "$launcher" "$action"
@@ -224,8 +232,11 @@ if [[ "$action" == check ]]; then exit 0; fi
 if [[ -n "$reported_cus" ]]; then export CU_NUM="${CU_NUM:-$reported_cus}"; fi
 models=${MODELS_DIR:-$HOME/models}
 MODEL_DIR=$(resolve_model "${MODEL_DIR:-$models/$target}" "$target_repo" "${MODEL_DIR:-}" "${MODEL_REVISION:-$target_rev}")
-DRAFT_MODEL_DIR=$(resolve_model "${DRAFT_MODEL_DIR:-$models/$draft}" "$draft_repo" "${DRAFT_MODEL_DIR:-}" "${DRAFT_MODEL_REVISION:-$draft_rev}")
-export MODEL_DIR DRAFT_MODEL_DIR
+export MODEL_DIR
+if [[ -n "$draft" ]]; then
+  DRAFT_MODEL_DIR=$(resolve_model "${DRAFT_MODEL_DIR:-$models/$draft}" "$draft_repo" "${DRAFT_MODEL_DIR:-}" "${DRAFT_MODEL_REVISION:-$draft_rev}")
+  export DRAFT_MODEL_DIR
+fi
 if [[ -z "${VLLM_API_KEY:-}${LLAMA_API_KEY:-}" && ! -r "${API_KEY_FILE:-/etc/llama/llama-api.key}" ]]; then
   key_dir="${XDG_CACHE_HOME:-$HOME/.cache}/mi100"
   mkdir -p "$key_dir"

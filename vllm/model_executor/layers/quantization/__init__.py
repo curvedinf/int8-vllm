@@ -24,6 +24,7 @@ QuantizationMethods = Literal[
     "modelopt_mixed",
     "auto_gptq",
     "hy4_neuqi",
+    "inkling2_ptqr",
     "gptq",
     "gptq_marlin",
     "awq_marlin",
@@ -113,6 +114,10 @@ def register_quantization_config(quantization: str):
 def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     if quantization not in QUANTIZATION_METHODS:
         raise ValueError(f"Invalid quantization method: {quantization}")
+    if quantization == "inkling2_ptqr":
+        from vllm.models.inkling2.quantization import Inkling2PTQRConfig
+
+        return Inkling2PTQRConfig
     if quantization == "hy4_neuqi":
         from .hy4_neuqi import HY4NeUQIConfig
 

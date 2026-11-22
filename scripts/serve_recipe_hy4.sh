@@ -9,19 +9,9 @@ draft="${DRAFT_MODEL_DIR:-$HOME/models/Hy4-flash-DFly2-PTQR-INT8}"
 logs="${LOG_DIR:-$root/logs/serve_recipe_hy4}"
 pid_file="$logs/server.pid"
 
-is_running() {
-  [[ -r "$pid_file" ]] || return 1
-  local pid arg previous='' api=0
-  read -r pid <"$pid_file"
-  [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" ]] || return 1
-  while IFS= read -r -d '' arg; do
-    if [[ "$previous" == "$root/scripts/serve_recipe_hy4.sh" && "$arg" == serve ]]; then return 0; fi
-    if [[ "$arg" == vllm.entrypoints.openai.api_server ]]; then api=1; fi
-    if [[ "$previous" == --served-model-name && "$arg" == hy4-flash && "$api" == 1 ]]; then return 0; fi
-    previous="$arg"
-  done <"/proc/$pid/cmdline"
-  return 1
-}
+launcher="$root/scripts/serve_recipe_hy4.sh"
+served_name=hy4-flash
+recipe_label=HY4
 
 serve() {
   local tp="${TPS:-4}" kv="${KV_DTYPE:-int8_block_g128}"
@@ -169,42 +159,4 @@ PY
   exec "$python" "${args[@]}" "$@"
 }
 
-case "${1:-serve}" in
-  serve|supervise) [[ $# -eq 0 ]] || shift; serve "$@" ;;
-  start)
-    mkdir -p -- "$logs"
-    exec 9>"$logs/recipe.lock"
-    flock 9
-    if is_running; then echo "HY4 is already running"; exit 0; fi
-    shift
-    setsid "$root/scripts/serve_recipe_hy4.sh" serve "$@" </dev/null >>"$logs/server.log" 2>&1 9>&- &
-    pid=$!
-    printf '%s\n' "$pid" >"$pid_file"
-    # Keep the start lock through the short fork/exec interval. Other callers
-    # can identify the process once it enters the launcher or API server.
-    for ((attempt=0; attempt<200; attempt++)); do
-      is_running && break
-      kill -0 "$pid" 2>/dev/null || { rm -f -- "$pid_file"; wait "$pid"; exit 1; }
-      sleep 0.01
-    done
-    if ! is_running; then echo "HY4 launch could not be verified. See $logs/server.log" >&2; exit 1; fi
-    echo "HY4 starting, log at $logs/server.log"
-    ;;
-  stop)
-    [[ -d "$logs" ]] || exit 0
-    exec 9>"$logs/recipe.lock"
-    flock 9
-    if is_running; then
-      read -r pid <"$pid_file"
-      kill -TERM "$pid" 2>/dev/null || true
-      while is_running; do sleep 1; done
-      # An API process can exit while its workers are still releasing VRAM.
-      # The launcher creates a dedicated session for this recipe.
-      while ps -s "$pid" -o stat= | grep -Eq '^[[:blank:]]*[^Z[:space:]]'; do sleep 1; done
-    fi
-    rm -f -- "$pid_file"
-    ;;
-  restart) shift; "$root/scripts/serve_recipe_hy4.sh" stop; exec "$root/scripts/serve_recipe_hy4.sh" start "$@" ;;
-  status) if is_running; then echo "HY4 is running"; else echo "HY4 is stopped"; exit 1; fi ;;
-  *) echo "Usage: $0 {serve|start|stop|restart|status} [vLLM options]" >&2; exit 2 ;;
-esac
+source "$root/scripts/mi100-recipe-lifecycle.sh"

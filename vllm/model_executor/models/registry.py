@@ -171,6 +171,9 @@ _TEXT_GENERATION_MODELS = {
         "vllm.models.minimax_m3",
         "MiniMaxM3SparseForCausalLM",
     ),
+    "Inkling2LoopForConditionalGeneration": (
+        "vllm.models.inkling2.amd.model", "Inkling2LoopForConditionalGeneration",
+    ),
     "InklingForCausalLM": ("vllm.models.inkling", "InklingForCausalLM"),
     "InklingForConditionalGeneration": (
         "vllm.models.inkling",

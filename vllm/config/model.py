@@ -766,7 +766,11 @@ class ModelConfig:
                 self.tokenizer_mode = "deepseek_v4"
             elif arch == "DeepseekV41ForCausalLM":
                 self.tokenizer_mode = "deepseek_v41"
-            elif arch in ("InklingForCausalLM", "InklingForConditionalGeneration"):
+            elif arch in (
+                "InklingForCausalLM",
+                "InklingForConditionalGeneration",
+                "Inkling2LoopForConditionalGeneration",
+            ):
                 self.tokenizer_mode = "inkling"
 
             if self.tokenizer_mode != "auto":

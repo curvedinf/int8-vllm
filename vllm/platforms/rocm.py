@@ -730,6 +730,7 @@ class RocmPlatform(Platform):
         "gptq",
         "auto_gptq",
         "hy4_neuqi",
+        "inkling2_ptqr",
         "fp8",
         "deepseek_v4_fp8",
         "compressed-tensors",
