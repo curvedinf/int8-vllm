@@ -52,6 +52,7 @@ def adaptive_draft_len(conf: "torch.Tensor", max_n: int, tau: float = 0.3,
 
 
 class KSDraftProposer:
+    @torch.inference_mode(False)
     def __init__(self, export_dir: str | Path, device: str | torch.device = "cuda",
                  int8: bool = True, window: int | None = None,
                  embedding: "torch.Tensor | None" = None,
@@ -146,11 +147,11 @@ class KSDraftProposer:
 
     @torch.no_grad()
     def propose_block_with_kv(self, tokens: torch.Tensor,
-                              kv_streams: tuple[torch.Tensor, torch.Tensor],
-                              n: int) -> torch.Tensor:
+                              kv_streams: tuple[torch.Tensor, ...],
+                              n: int, *, first_token: torch.Tensor | None = None) -> torch.Tensor:
         """KV-reuse path: streams (B, L_taps, S, kv_dim) whose last ``window``
         positions are the draft tokens' context (see model/reuse.py)."""
         ctx = tokens[:, -self.window:].to(self.device).long()
         return self.model.propose_block_tokens(
             ctx, int(n), refine_iters=self.refine_iters,
-            target_kv=kv_streams)
+            target_kv=kv_streams, first_token=first_token)

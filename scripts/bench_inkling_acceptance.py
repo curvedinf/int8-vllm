@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # SPDX-License-Identifier: Apache-2.0
-"""Greedy acceptance/throughput witness for the Inkling-2-Mini recipe.
+"""Sampled acceptance/throughput witness for the Inkling-2-Mini recipe.
 
 Same counter method as bench_flint_acceptance.py: read vLLM's spec-decode
 counters before/after, report acceptance length = 1 + accepted/drafts.
@@ -37,6 +37,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--base-url", default="http://127.0.0.1:8020")
 ap.add_argument("--api-key", default=os.environ.get("VLLM_API_KEY", ""))
 ap.add_argument("--model", default="inkling-2-mini")
+ap.add_argument("--temperature", type=float, default=1.0)
 ap.add_argument("--max-tokens", type=int, default=256)
 ap.add_argument("--concurrency", type=int, default=8)
 ap.add_argument("--output", type=Path, required=True)
@@ -64,7 +65,7 @@ def run(item):
         headers=hdr,
         json={"model": args.model,
               "messages": [{"role": "user", "content": prompt}],
-              "temperature": 0, "max_tokens": args.max_tokens},
+              "temperature": args.temperature, "max_tokens": args.max_tokens},
         timeout=1200,
     )
     r.raise_for_status()
@@ -96,6 +97,7 @@ endc = counters()
 delta = {n: endc[n] - startc[n] for n in endc}
 tokens = sum(r["completion_tokens"] for r in results)
 report = {
+    "temperature": args.temperature,
     "max_tokens": args.max_tokens,
     "concurrency": args.concurrency,
     "wall_s": round(wall, 2),
