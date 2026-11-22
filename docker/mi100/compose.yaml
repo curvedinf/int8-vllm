@@ -24,6 +24,8 @@ services:
       MI100_RECIPE: ${MI100_RECIPE:-qwen38}
       MI100_CARDS: ${MI100_CARDS:-4}
       MI100_XGMI: ${MI100_XGMI:-on}
+      # Keep the recipe.env map when the calling shell supplies no override.
+      MI100_COMPOSE_CPU_MAP: ${MI100_CPU_MAP:-}
       HOST: 0.0.0.0
       PORT: 8020
       MAX_JOBS: ${MAX_JOBS:-4}

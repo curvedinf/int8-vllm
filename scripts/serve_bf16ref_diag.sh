@@ -3,12 +3,19 @@
 # reference checkpoint with the LAYERPROBE env passed the same way the recipe
 # script passes env to workers (env-block on the launch line).
 set -euo pipefail
-LOG_DIR="${HOME}/vllm-gfx908/logs/serve_recipe_qwen38"
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+LOG_DIR="${root}/logs/serve_recipe_qwen38"
 PROBE_DIR="$(cat "${LOG_DIR}/LAYERPROBE" 2>/dev/null | tr -d '[:space:]')"
+if [[ -n "${MI100_DEVICES:-}" ]]; then
+  export HIP_VISIBLE_DEVICES="$MI100_DEVICES" CUDA_VISIBLE_DEVICES="$MI100_DEVICES"
+fi
+TPS=4 MI100_PP_SIZE=1 MI100_DEVICES="${HIP_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-0,1,2,3}}" \
+  source "$root/scripts/mi100-cpu-map.sh"
 NCCL_ALGO=Ring NCCL_PROTO=Simple \
 VLLM_LAYERPROBE="${PROBE_DIR}" \
-"${HOME}/vllm-gfx908/.venv/bin/vllm" serve \
+"${root}/.venv/bin/vllm" serve \
   "${HOME}/models/Qwen3.8-27B-bf16-ref" \
+  "${cpu_bind_args[@]}" \
   --served-model-name qwen3.8-27b-bf16ref \
   --host 127.0.0.1 --port 8021 --tensor-parallel-size 4 \
   --dtype bfloat16 --max-model-len 262144 --max-num-seqs 6 \

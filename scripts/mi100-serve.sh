@@ -153,6 +153,9 @@ devices=$(IFS=,; echo "${gpu_ids[*]:0:cards}")
 export MI100_DEVICES="$devices" HIP_VISIBLE_DEVICES="$devices" CUDA_VISIBLE_DEVICES="$devices"
 printf 'MI100 recipe=%s HIP devices=%s XGMI=%s TP=%s PP=%s\n' \
   "$recipe" "$devices" "$link" "$tp" "$pp" >&2
+if [[ -n "${MI100_COMPOSE_CPU_MAP:-}" ]]; then
+  export MI100_CPU_MAP="$MI100_COMPOSE_CPU_MAP"
+fi
 unset _MI100_CPU_BIND_FLAGS
 if [[ -n "${MI100_CPU_MAP:-}" ]]; then
   source "$root/scripts/mi100-cpu-map.sh"

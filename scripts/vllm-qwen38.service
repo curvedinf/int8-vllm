@@ -12,6 +12,8 @@ Group=curved
 SupplementaryGroups=video render
 WorkingDirectory=/home/curved/int8-vllm
 Environment=PYTHONUNBUFFERED=1
+# One CPU list per GPU. Adjust these four L3 domains for the serving host.
+Environment="MI100_CPU_MAP=4-7,52-55 8-11,56-59 12-15,60-63 16-19,64-67"
 EnvironmentFile=/etc/llama/llama-api.env
 ExecStartPre=/home/curved/int8-vllm/scripts/serve_recipe_qwen38.sh stop
 ExecStart=/home/curved/int8-vllm/scripts/serve_recipe_qwen38.sh supervise

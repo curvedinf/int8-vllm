@@ -22,6 +22,8 @@ sudoedit "/etc/systemd/system/$unit"
 
 In the installed unit, set `User`, `Group`, `WorkingDirectory` and the absolute paths in the `Exec` directives to match your serving account and checkout. The account needs access to the GPUs, venv, sibling AITER checkout and checkpoints. The templates grant the `video` and `render` supplementary groups and set the locked-memory limit for CPU caches.
 
+Each template sets `MI100_CPU_MAP` for the reference host’s four L3 domains. Edit that line to match the CPU lists on your host, in GPU order. Remove it to use normal CPU scheduling. The recipe script applies the map when it starts each worker. [Choosing CPU lists](mi100-install.md#pin-workers-to-cpu-cores)
+
 Set any launcher overrides you need in the service environment file. For example, the portable Qwen launcher sets `C=8`, `KVMEM=auto` and `DISKTIER=0` on four cards. Set those values there to use the same concurrency and cache settings under systemd.
 
 ## Start and manage the service
