@@ -75,8 +75,7 @@ def join_pack(pack_dir: Path, out_root: Path, rows: int, world: int,
     def openw(name):
         return open(out_root / name, "wb")
 
-    f_kc, f_ks = openw("k_codes.bin"), openw("k_scales.bin")
-    f_vc, f_vs = openw("v_codes.bin"), openw("v_scales.bin")
+    kc_all, ks_all, vc_all, vs_all = [], [], [], []
     for tap in TAPS:
         # rank files: tap{li}_{pi}_rank{r}_{kc,ks,vc,vs}.bin
         shard = {}
@@ -103,12 +102,19 @@ def join_pack(pack_dir: Path, out_root: Path, rows: int, world: int,
         vs = np.concatenate(
             [shard[r]["vs"].reshape(n, heads) for r in range(world)],
             axis=1)
-        f_kc.write(kc.tobytes())
-        f_vc.write(vc.tobytes())
-        f_ks.write(ks.astype(np.float16).tobytes())
-        f_vs.write(vs.astype(np.float16).tobytes())
-    for f in (f_kc, f_ks, f_vc, f_vs):
-        f.close()
+        kc_all.append(kc)
+        vc_all.append(vc)
+        ks_all.append(ks.astype(np.float16))
+        vs_all.append(vs.astype(np.float16))
+    # store v2 is row-major: (rows, taps, dim) with all taps per row
+    kc = np.stack(kc_all, axis=1).reshape(rows, len(TAPS), 1024)
+    vc = np.stack(vc_all, axis=1).reshape(rows, len(TAPS), 1024)
+    ks = np.stack(ks_all, axis=1).reshape(rows, len(TAPS), 8)
+    vs = np.stack(vs_all, axis=1).reshape(rows, len(TAPS), 8)
+    for name, arr in (("k_codes.bin", kc), ("k_scales.bin", ks),
+                      ("v_codes.bin", vc), ("v_scales.bin", vs)):
+        with open(out_root / name, "wb") as f:
+            f.write(arr.tobytes())
 
     # ---- global top-32: merge per-rank candidates, exact probs via LSE sum
     ids_r, val_r, lse = [], [], None

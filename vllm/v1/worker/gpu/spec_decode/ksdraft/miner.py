@@ -57,12 +57,24 @@ class KSDraftMinerMixin:
 
             attn._attention = wrap
 
-        def head_hook(_module, _inputs, output):
-            tensor = output[0] if isinstance(output, (tuple, list)) else output
+        # The logits processor calls lm_head.quant_method.apply directly (it
+        # does not go through the module __call__), so wrap the quant method:
+        # it returns this rank's raw vocab-shard logits.
+        import types
+
+        head = model.lm_head
+        qm = head.quant_method
+        orig_apply = qm.apply
+
+        def apply_wrap(_mod, *a, **kw):
+            out = orig_apply(_mod, *a, **kw)
+            tensor = out[0] if isinstance(out, (tuple, list)) else out
             if torch.is_tensor(tensor):
                 self._kdm_capture_logits(tensor)
+            return out
 
-        model.lm_head.register_forward_hook(head_hook)
+        qm.apply = types.MethodType(lambda _self, mod, *a, **kw:
+                                    apply_wrap(mod, *a, **kw), qm)
         return {"rank": self._kdm["rank"], "world": self._kdm["world"],
                 "taps": self._kdm["taps"]}
 
