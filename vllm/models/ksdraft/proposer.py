@@ -53,10 +53,15 @@ def adaptive_draft_len(conf: "torch.Tensor", max_n: int, tau: float = 0.3,
 
 class KSDraftProposer:
     def __init__(self, export_dir: str | Path, device: str | torch.device = "cuda",
-                 int8: bool = True, window: int | None = None):
+                 int8: bool = True, window: int | None = None,
+                 embedding: "torch.Tensor | None" = None,
+                 head: "torch.Tensor | None" = None):
         from ksdraft.export import load_export
 
-        self.model = load_export(str(export_dir), device=device)
+        # A shared-table export ships only the trunk; the target's own
+        # embedding/lm_head ride in as external tables (DFly2 pattern).
+        self.model = load_export(str(export_dir), device=device,
+                                 embedding=embedding, head=head)
         # An int8 export loads already converted; converting twice would
         # wrap the surfaces again.
         if int8 and getattr(self.model, "_int8_tier", None) is None:
@@ -72,6 +77,12 @@ class KSDraftProposer:
         # JetSpec++ intra-block self refinement (fixed-point walk passes).
         self.refine_iters = int(os.environ.get("KSDRAFT_REFINE_ITERS", "0"))
 
+    def _require_kv(self) -> None:
+        if int(getattr(self.model.config, "kv_dim", 0) or 0):
+            raise ValueError(
+                "ksdraft reuse model (kv_dim > 0) needs the target's KV "
+                "streams at every forward; use propose_block_with_kv")
+
     @torch.no_grad()
     def propose(self, tokens: torch.Tensor, n: int,
                 temperature: torch.Tensor | None = None) -> torch.Tensor:
@@ -81,6 +92,7 @@ class KSDraftProposer:
         zero means greedy (the engine's rejection sampler still handles the
         target-side acceptance).
         """
+        self._require_kv()
         if tokens.ndim != 2 or tokens.shape[1] == 0:
             raise ValueError("tokens must be [B, L] with L >= 1")
         B = tokens.shape[0]
@@ -104,6 +116,7 @@ class KSDraftProposer:
     def propose_block_with_conf(self, tokens: torch.Tensor, n: int
                                 ) -> tuple[torch.Tensor, torch.Tensor]:
         """Greedy block walk plus the selected candidate's probability."""
+        self._require_kv()
         ctx = tokens[:, -self.window:].to(self.device).long()
         return self.model.propose_block_tokens(
             ctx, int(n), return_conf=True, refine_iters=self.refine_iters)
@@ -118,6 +131,7 @@ class KSDraftProposer:
         """
         if tokens.ndim != 2 or tokens.shape[1] == 0:
             raise ValueError("tokens must be [B, L] with L >= 1")
+        self._require_kv()
         ctx = tokens[:, -self.window:].to(self.device).long()
         if temperature is None or bool((temperature <= 0).all()):
             # DFlash2 pairwise selector walk (greedy path over the unary top-K)
@@ -129,3 +143,14 @@ class KSDraftProposer:
         b, nn, _ = probs.shape
         return torch.multinomial(
             probs.reshape(b * nn, -1), 1).reshape(b, nn)
+
+    @torch.no_grad()
+    def propose_block_with_kv(self, tokens: torch.Tensor,
+                              kv_streams: tuple[torch.Tensor, torch.Tensor],
+                              n: int) -> torch.Tensor:
+        """KV-reuse path: streams (B, L_taps, S, kv_dim) whose last ``window``
+        positions are the draft tokens' context (see model/reuse.py)."""
+        ctx = tokens[:, -self.window:].to(self.device).long()
+        return self.model.propose_block_tokens(
+            ctx, int(n), refine_iters=self.refine_iters,
+            target_kv=kv_streams)

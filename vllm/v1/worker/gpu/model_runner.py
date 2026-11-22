@@ -271,6 +271,9 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     get_max_chunk_logits,
 )
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.gpu.spec_decode.ksdraft.speculator import (
+    KSDraftSpeculator,
+)
 from vllm.v1.worker.gpu.spec_decode.utils import (
     DraftTokensHandler,
     get_drafter_hidden_states,
@@ -579,7 +582,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 if self.pp_handler is not None:
                     self.pp_handler.configure_aux_hidden_state_relay(self.model)
-            if isinstance(self.speculator, DraftModelSpeculator):
+            if isinstance(self.speculator,
+                          (DraftModelSpeculator, KSDraftSpeculator)):
                 with use_workspace_lane(self._draft_workspace_lane):
                     self.speculator.load_model(self.model)
                     eplb_models_added = self.eplb.maybe_register_speculator(
@@ -977,7 +981,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.cudagraph_manager, self.max_num_tokens
             )
         check_attention_cp_compatibility(self.vllm_config, target_attn_layer_names)
-        if isinstance(self.speculator, DraftModelSpeculator):
+        if isinstance(self.speculator,
+                      (DraftModelSpeculator, KSDraftSpeculator)):
             # HACK(woosuk)
             self.speculator.set_attn(
                 self.model_state,
