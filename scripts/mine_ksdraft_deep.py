@@ -167,7 +167,8 @@ def join_pack(pack_dir: Path, out_root: Path, rows: int, world: int,
         "source": meta_src.get("source"), "corpus": meta_src.get("corpus"),
         "tokens": int(rows), "taps": [t[0] for t in TAPS], "topk": TOPK,
         "format": "ksdraft-kv-int8-v2",
-        "kv_grid": "int8_block_g128 codes+scales (fork kernel semantics)",
+        "kv_grid": "int8_block_g128 codes+scales (cache-resident: post "
+                   "short-conv, K clip, V RMSNorm)",
         "codes_dtype": "int8", "scales_dtype": "fp16", "group": 128,
         "depth": "engine prefill at full pack length",
     }, indent=2))
