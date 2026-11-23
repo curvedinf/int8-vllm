@@ -59,7 +59,7 @@ serve() {
     "${cpu_bind_args[@]}"
     --host "${HOST:-127.0.0.1}" --port "${PORT:-8020}" --tensor-parallel-size "${TPS:-4}"
     --dtype float16 --load-format "${LOAD_FORMAT:-ais}" --kv-cache-dtype int8_block_g128
-    --max-model-len "${MAXLEN:-262144}" --max-num-seqs "${C:-12}"
+    --max-model-len "${MAXLEN:-1048576}" --max-num-seqs "${C:-12}"
     --block-size "${BLOCK_SIZE:-16}" --max-num-batched-tokens "${MNBT:-1024}"
     --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.92}"
     --tokenizer-mode inkling --reasoning-parser inkling
