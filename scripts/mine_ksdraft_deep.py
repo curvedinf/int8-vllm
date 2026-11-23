@@ -78,18 +78,30 @@ def join_pack(pack_dir: Path, out_root: Path, rows: int, world: int,
     kc_all, ks_all, vc_all, vs_all = [], [], [], []
     for tap in TAPS:
         # rank files: tap{li}_{pi}_rank{r}_{kc,ks,vc,vs}.bin
+        heads = heads_total // world
+        row_bytes = {"kc": heads * 128, "vc": heads * 128,
+                     "ks": heads * 2, "vs": heads * 2}
         shard = {}
         for r in range(world):
             base = pack_dir / f"tap{tap[0]}_{tap[1]}_rank{r}"
-            shard[r] = {
-                s: np.fromfile(str(base) + f"_{s}.bin",
-                               dtype=np.int8 if s in ("kc", "vc") else np.float16)
-                for s in ("kc", "ks", "vc", "vs")
-            }
-        # rows per rank: heads-per-rank x 128 codes / (heads, 1) scales
-        heads = heads_total // world
-        n = shard[0]["kc"].size // (heads * 128)
-        assert n == rows, (n, rows)
+            shard[r] = {}
+            for st in ("kc", "ks", "vc", "vs"):
+                path = str(base) + f"_{st}.bin"
+                want = rows * row_bytes[st]
+                have = os.path.getsize(path)
+                if have < want:
+                    raise RuntimeError(
+                        f"{path}: {have} bytes < expected {want}")
+                if have > want:
+                    # the engine can re-forward trailing chunks; capture is
+                    # append-only in token order, so extras are a tail
+                    # duplication to truncate, never a positional shift
+                    with open(path, "r+b") as fh:
+                        fh.truncate(want)
+                shard[r][st] = np.fromfile(
+                    path,
+                    dtype=np.int8 if st in ("kc", "vc") else np.float16)
+        n = rows
         kc = np.concatenate(
             [shard[r]["kc"].reshape(n, heads, 128) for r in range(world)],
             axis=1).reshape(n, heads_total * 128)
@@ -120,11 +132,23 @@ def join_pack(pack_dir: Path, out_root: Path, rows: int, world: int,
     ids_r, val_r, lse = [], [], None
     for r in range(world):
         base = pack_dir / f"topk_rank{r}"
-        ids_r.append(np.fromfile(str(base) + "_ids.bin", dtype=np.int32)
+        ids_path = str(base) + "_ids.bin"
+        val_path = str(base) + "_vals.bin"
+        lse_path = str(base) + "_lse.bin"
+        for path, want in ((ids_path, rows * TOPK * 4),
+                           (val_path, rows * TOPK * 4),
+                           (lse_path, rows * 4)):
+            have = os.path.getsize(path)
+            if have < want:
+                raise RuntimeError(f"{path}: {have} < {want}")
+            if have > want:
+                with open(path, "r+b") as fh:
+                    fh.truncate(want)
+        ids_r.append(np.fromfile(ids_path, dtype=np.int32)
                      .reshape(-1, TOPK))
-        val_r.append(np.fromfile(str(base) + "_vals.bin", dtype=np.float32)
+        val_r.append(np.fromfile(val_path, dtype=np.float32)
                      .reshape(-1, TOPK))
-        lse_r = np.fromfile(str(base) + "_lse.bin", dtype=np.float32)
+        lse_r = np.fromfile(lse_path, dtype=np.float32)
         # full-vocab logsumexp = log(sum_r exp(lse_r))
         lse = lse_r if lse is None else np.logaddexp(lse, lse_r)
     assert all(len(x) == rows for x in ids_r), [len(x) for x in ids_r]
@@ -156,6 +180,7 @@ def main() -> int:
     ap.add_argument("--corpus", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--packs", type=int, default=5)
+    ap.add_argument("--start-pack", type=int, default=0)
     ap.add_argument("--tp", type=int, default=4)
     ap.add_argument("--mnbt", type=int, default=8192)
     ap.add_argument("--max-model-len", type=int, default=1_048_576)
@@ -174,10 +199,13 @@ def main() -> int:
     out = Path(args.out)
     packs_root = out / "_packs"
     packs_root.mkdir(parents=True, exist_ok=True)
-    total = min(tokens.numel(), args.packs * args.pack_len)
-    for i in range(args.packs):
-        lo = i * args.pack_len
-        hi = min(lo + args.pack_len, total)
+    # prompt + 1 sampled token must fit max_model_len; the engine caps the
+    # deployment at the model card's 1,048,576, so each pack mines that-1 rows
+    pack_rows = min(args.pack_len, args.max_model_len - 1)
+    total = min(tokens.numel(), args.packs * pack_rows)
+    for i in range(args.start_pack, args.packs):
+        lo = i * pack_rows
+        hi = min(lo + pack_rows, total)
         if hi - lo < 1024:
             break
         rows = hi - lo
