@@ -1,6 +1,6 @@
 # Serve HY4-Flash on MI100
 
-Run Tencent’s HY4-Flash as a chat API with text, image and video input. Use four 32 GiB MI100s on one Linux host and allow about 113 GiB of SSD space for the [INT4 target and its n-gram tables](https://huggingface.co/voodooquant/Hy4-flash-NeUQI-INT4) and the [INT8 DFly2 draft](https://huggingface.co/voodooquant/Hy4-flash-DFly2-NeUQI-INT8-PTQR). The optional startup weight cache takes another 82 GiB.
+Run Tencent’s HY4-Flash as a chat API with text, image and video input. Use four 32 GiB MI100s on one Linux host and allow about 113 GiB of SSD space for the [INT4 target and its n-gram tables](https://huggingface.co/voodooquant/Hy4-flash-INT4-NeUQI) and the [INT8 DFly2 draft](https://huggingface.co/voodooquant/Hy4-flash-DFly2-INT8-PTQR). The optional startup weight cache takes another 82 GiB.
 
 ## Docker Compose
 
