@@ -46,6 +46,14 @@ MI100_CARDS=4 MI100_XGMI=on MI100_RECIPE=qwen38 \
 
 Choose `qwen38`, `flint`, `bolt` or `hy4`. The launcher selects the target, draft and recipe defaults. See [Docker and native installation](docs/recipes/mi100-install.md) for supported layouts, API access and overrides. For GPU visibility, topology or startup errors, see [common issues](docs/recipes/mi100-install.md#common-issues).
 
+For Inkling 2 Mini, install the linked target and DSpark checkpoints, then run the native launcher from this checkout.
+
+```bash
+scripts/serve_recipe_inkling2mini.sh start
+```
+
+The API model name is `inkling-2-mini`. On four MI100s with XGMI, the recipe allows 1,048,576 tokens per stream. Up to 12 active streams share a GPU KV cache measured at 3,793,923 tokens.
+
 For a native installation managed by systemd, see [service installation and selection](docs/recipes/services.md).
 
 ## Quality control
