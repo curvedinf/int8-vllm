@@ -22,7 +22,7 @@ from vllm.models.hy_v4_flash.engram_q4 import (
     table_path,
 )
 
-DRAFT_ID = "voodooquant/Hy4-flash-DFly2-PTQR-INT8-W8A8-GS128"
+DRAFT_ID = "voodooquant/Hy4-flash-DFly2-NeUQI-INT8-PTQR"
 MODIFICATION = "Modified by voodooquant from Tencent Hy4-flash. See NOTICE and LICENSE."
 
 

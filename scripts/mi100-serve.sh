@@ -110,9 +110,9 @@ case "$recipe" in
     fi
     target=Hy4-flash-NeUQI-W4A8
     draft=Hy4-flash-DFly2-PTQR-INT8
-    target_repo=voodooquant/Hy4-flash-NeUQI-INT4-W4A8-GS128
+    target_repo=voodooquant/Hy4-flash-NeUQI-INT4
     target_rev=6bcd3e95f31ff6a23201e99273ddf5ab134faec0
-    draft_repo=voodooquant/Hy4-flash-DFly2-PTQR-INT8-W8A8-GS128
+    draft_repo=voodooquant/Hy4-flash-DFly2-NeUQI-INT8-PTQR
     draft_rev=026c6c08dc582c7dca03b4db4c14dcf85a9d006a
     ;;
   inkling2mini)
