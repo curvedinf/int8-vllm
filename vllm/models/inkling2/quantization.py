@@ -11,8 +11,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
 
 class Inkling2PTQRConfig(QuantizationConfig):
-    def __init__(self, weights):
+    def __init__(self, weights, vision_bits=4):
         super().__init__()
+        if vision_bits not in (4, 8):
+            raise ValueError("Inkling vision weights require 4 or 8 bits")
+        self.vision_bits = vision_bits
         self.weights = frozenset(weights)
         if not self.weights:
             raise ValueError("Inkling PTQR checkpoint has no quantized weights")
@@ -36,7 +39,7 @@ class Inkling2PTQRConfig(QuantizationConfig):
     def from_config(cls, config):
         if (config.get("bits"), config.get("group_size")) != (4, 128):
             raise ValueError("Inkling PTQR requires INT4 weights with group_size=128")
-        return cls(config["quantized_modules"])
+        return cls(config["quantized_modules"], config.get("vision_bits", 4))
 
     def get_quant_method(self, layer, prefix):
         if isinstance(layer, ParallelLMHead):
@@ -63,8 +66,10 @@ class Inkling2PTQRConfig(QuantizationConfig):
                 base + name + ".weight" in self.weights
                 for name in ("q_proj", "k_proj", "v_proj")
             ):
-                return HY4Linear(4)
+                return HY4Linear(self.vision_bits)
             raise ValueError(f"Missing packed vision QKV weights for {prefix}")
         if prefix + ".weight" in self.weights:
-            return HY4Linear(4)
+            return HY4Linear(
+                self.vision_bits if prefix.startswith("model.visual.") else 4
+            )
         return UnquantizedLinearMethod()

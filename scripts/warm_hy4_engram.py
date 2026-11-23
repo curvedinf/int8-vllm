@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Populate bcache's SSD read cache for the packed HY4 Engram tables."""
+"""Populate bcache's SSD read cache for packed Engram tables or checkpoint shards."""
 
 import argparse
 import math
@@ -49,8 +49,14 @@ def is_bcache(path):
     return (sysdev / "bcache").is_dir()
 
 
-def warm(path, force, probe_only, threshold):
+def warm(path, force, probe_only, threshold, *, checkpoint=False):
     size = path.stat().st_size
+    if checkpoint:
+        # O_DIRECT reads complete pages. A safetensors shard can end in a
+        # partial page, left to the ordinary weight read at startup.
+        size -= size % PAGE
+        if not size:
+            return
     if not size or size % PAGE:
         raise ValueError(f"Expected a nonempty page-aligned table: {path.name}")
     median, p90 = probe(path)
@@ -138,6 +144,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
     parser.add_argument(
+        "--checkpoint",
+        action="store_true",
+        help="Warm model safetensors shards instead of Engram tables.",
+    )
+    parser.add_argument(
         "--auto", action="store_true", help="Skip filesystems outside bcache."
     )
     parser.add_argument(
@@ -171,14 +182,24 @@ def main():
         return
     if args.workers < 1 or args.threshold_ms <= 0:
         parser.error("Workers and the probe threshold must be positive")
-    files = sorted(args.directory.glob("engram-*.q4_0"))
+    if args.checkpoint:
+        files = sorted(args.directory.glob("model-*-of-*.safetensors"))
+        single = args.directory / "model.safetensors"
+        if not files and single.is_file():
+            files = [single]
+    else:
+        files = sorted(args.directory.glob("engram-*.q4_0"))
     if not files:
-        parser.error(f"No packed Engram tables in {args.directory}")
+        kind = "checkpoint shards" if args.checkpoint else "packed Engram tables"
+        parser.error(f"No {kind} in {args.directory}")
     if args.auto and not is_bcache(files[0]):
         return
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         calls = [
-            pool.submit(warm, path, args.force, args.probe_only, args.threshold_ms)
+            pool.submit(
+                warm, path, args.force, args.probe_only, args.threshold_ms,
+                checkpoint=args.checkpoint,
+            )
             for path in files
         ]
         for call in calls:

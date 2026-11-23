@@ -174,9 +174,12 @@ class Inkling2VisionEncoder(nn.Module):
         # The native encoder keeps fused QKV. All three projection payloads
         # load into consecutive row slices of each packed checkpoint field.
         for name, layer in list(self.named_modules()):
-            if (
-                isinstance(layer, nn.Linear)
-                and name != "backbone.embeddings.patch_embedding"
+            if isinstance(layer, nn.Linear) and (
+                name != "backbone.embeddings.patch_embedding"
+                or (
+                    quant_config is not None
+                    and f"model.visual.{name}.weight" in quant_config.weights
+                )
             ):
                 parent, _, leaf = name.rpartition(".")
                 packed = ReplicatedLinear(

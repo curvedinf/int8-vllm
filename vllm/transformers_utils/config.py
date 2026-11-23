@@ -177,6 +177,7 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     flint="FlintConfig",
     inkling_mm_model="InklingMMConfig",
     inkling_model="InklingModelConfig",
+    inkling2_dspark="Inkling2DSparkConfig",
     inkling2_loop="Inkling2LoopMMConfig",
 )
 

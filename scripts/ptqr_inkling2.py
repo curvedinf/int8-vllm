@@ -8,18 +8,18 @@ import torch
 from torch.nn import functional as F
 
 from scripts.ptqr_train_target import PTQRLinear, _weight_integer, anneal_tau
-from vllm.models.hy_v4_flash.neuqi import AffineInt4
 
 
 @dataclass
 class FitResult:
-    grid: AffineInt4
+    codes: torch.Tensor
+    scales: torch.Tensor
     initial_error: float
     trained_error: float
 
 
 @torch.no_grad()
-def initialize_group_scales(weights, activations, full_range):
+def initialize_group_scales(weights, activations, full_range, bounds=(-8, 7)):
     """Fit deployed FP16 scales to the training activation second moments.
 
     A diagonal approximation to input covariance regularizes rarely visited
@@ -33,19 +33,19 @@ def initialize_group_scales(weights, activations, full_range):
     best_scale = full_range
     for fraction in (1.0, 0.96, 0.92, 0.88, 0.84, 0.80, 0.74):
         step = (full_range * fraction).clamp_min(2**-24).half().float()
-        codes = (grouped / step.unsqueeze(-1)).round().clamp_(-8, 7)
+        codes = (grouped / step.unsqueeze(-1)).round().clamp_(*bounds)
         # Solve for the scale with fixed codes and reassign to the new grid.
         denom = (codes.square() * moment).sum(-1)
         fitted = (grouped * codes * moment).sum(-1) / denom.clamp_min(1e-30)
         step = torch.where(denom > 0, fitted, step).clamp_min(2**-24).half().float()
-        codes = (grouped / step.unsqueeze(-1)).round().clamp_(-8, 7)
+        codes = (grouped / step.unsqueeze(-1)).round().clamp_(*bounds)
         loss = ((grouped - codes * step.unsqueeze(-1)).square() * moment).sum(-1)
         best_scale = torch.where(loss < best_loss, step, best_scale)
         best_loss = torch.minimum(loss, best_loss)
     return best_scale
 
 
-def fit_rows(weights, training, validation, *, steps, batch_size, generator):
+def fit_rows(weights, training, validation, *, steps, batch_size, generator, bits=4):
     """Learn weights and group scales against unquantized teacher projections.
 
     A row tile is independent of the other output rows. Keep masters and the
@@ -58,7 +58,7 @@ def fit_rows(weights, training, validation, *, steps, batch_size, generator):
     x = training.to(device=weights.device, dtype=torch.float32)
     valid = validation.to(device=weights.device, dtype=torch.float32)
     target = weights.float()
-    student = PTQRLinear(target, group=128, act_group=128, weight_bits=4)
+    student = PTQRLinear(target, group=128, act_group=128, weight_bits=bits)
     with torch.no_grad():
         y = F.linear(x, target)
         y_valid = F.linear(valid, target)
@@ -66,7 +66,9 @@ def fit_rows(weights, training, validation, *, steps, batch_size, generator):
 
         # Scale the independent updates by the step of each G128 weight grid.
         full_range = student.scale.detach().clone()
-        start_scale = initialize_group_scales(target, x, full_range)
+        start_scale = initialize_group_scales(
+            target, x, full_range, student.weight_bounds
+        )
         train_normalizer = y.square().mean().clamp_min(1e-10)
 
     # Optimize in units of the original grid step. Adam's moments then see
@@ -137,17 +139,17 @@ def fit_rows(weights, training, validation, *, steps, batch_size, generator):
         student.scale.copy_((ratio * start_scale).clamp_min(2**-24))
         error = (project(valid, 0.0) - y_valid).square().mean() / normalizer
         if not torch.isfinite(error):
-            raise ValueError("Nonfinite held-out W4A8 projection error")
+            raise ValueError("Nonfinite held-out projection error")
         codes = _weight_integer(
             student.weight, student.scale, 128, student.weight_bounds
         )
-        codes = (codes + 8).to(torch.uint8)
-        packed = codes[..., ::2] | (codes[..., 1::2] << 4)
-        scale = student.scale.half()
+        if bits == 4:
+            codes = (codes + 8).to(torch.uint8)
+            codes = codes[..., ::2] | (codes[..., 1::2] << 4)
+        else:
+            codes = codes.to(torch.int8)
         return FitResult(
-            AffineInt4(packed, scale, torch.full_like(scale, 8)),
-            initial_error.item(),
-            error.item(),
+            codes, student.scale.half(), initial_error.item(), error.item()
         )
 
 
@@ -184,7 +186,7 @@ def source_weight(name):
     )
 
 
-def fit_projection(weights, training, validation, options, generator):
+def fit_projection(weights, training, validation, options, generator, *, bits=4):
     packed = []
     scales = []
     errors = []
@@ -196,12 +198,16 @@ def fit_projection(weights, training, validation, options, generator):
             steps=options.steps,
             batch_size=options.batch,
             generator=generator,
+            bits=bits,
         )
-        packed.append(fit.grid.codes)
-        scales.append(fit.grid.scales)
+        packed.append(fit.codes)
+        scales.append(fit.scales)
         errors.append([fit.initial_error, fit.trained_error])
     scale = torch.cat(scales)
-    return (torch.cat(packed), scale, torch.full_like(scale, 8)), errors
+    fields = (torch.cat(packed), scale)
+    if bits == 4:
+        fields += (torch.full_like(scale, 8),)
+    return fields, errors
 
 
 def load_inputs(directory, split, name, device):

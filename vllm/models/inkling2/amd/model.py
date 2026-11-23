@@ -25,7 +25,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
+    EagleModelMixin,
     MultiModalEmbeddings,
+    SupportsEagle3,
     SupportsEncoderCudaGraph,
     SupportsMultiModal,
 )
@@ -183,15 +185,12 @@ class Inkling2DecoderLayer(nn.Module):
             prefix=f"{prefix}.attn",
             quant_config=quant_config,
         )
+        self.controllers = nn.ModuleDict()
         if visits > 1:
-            self.controllers = nn.ModuleDict(
-                {
-                    stream: MessageController(
-                        config.hidden_size, config.loop_config["gate_rank"]
-                    )
-                    for stream in ("attn", "k", "v", "mlp")
-                }
-            )
+            for stream in ("attn", "k", "v", "mlp"):
+                self.controllers[stream] = MessageController(
+                    config.hidden_size, config.loop_config["gate_rank"]
+                )
         eps = config.rms_norm_eps
         # Local layers: attn_norm; full layers: q/k/v_input_norm, stacked.
         self.num_attn_inputs = 1 if self.is_local else 3
@@ -211,7 +210,7 @@ class Inkling2DecoderLayer(nn.Module):
         )
 
 
-class Inkling2Model(nn.Module):
+class Inkling2Model(nn.Module, EagleModelMixin):
     def __init__(
         self,
         config: Inkling2ModelConfig,
@@ -297,7 +296,8 @@ class Inkling2Model(nn.Module):
             positions, self.config.log_scaling_n_floor, self.config.log_scaling_alpha
         )
         prelude = bank = pass_messages = None
-        for i, visit in self.visits:
+        aux = []
+        for visit_id, (i, visit) in enumerate(self.visits):
             if i == core.start:
                 if not visit:
                     prelude = stack[count].clone()
@@ -315,6 +315,8 @@ class Inkling2Model(nn.Module):
             layer = self.layers[i]
             owner = layer.conv_states[visit]
             partial = stack[count]
+            if visit_id in self.aux_hidden_state_layers:
+                aux.append(partial.clone())
             messages = None
             if visit:
                 messages = (
@@ -371,9 +373,14 @@ class Inkling2Model(nn.Module):
                 out=stack[count],
                 owner=owner,
             )
-        return self._mix(
+        output = self._mix(
             stack[:count], stack[count], self.attn_res.output_query, self.norm
         )[0]
+        if self.aux_hidden_state_layers:
+            if len(self.visits) in self.aux_hidden_state_layers:
+                aux.append(output)
+            return output, aux
+        return output
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -385,6 +392,7 @@ class Inkling2LoopForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
     SupportsEncoderCudaGraph,
+    SupportsEagle3,
 ):
     # Weights mirror the checkpoint names after these substitutions, except for
     # the fused per-layer weights in ``_shards``.
@@ -453,6 +461,12 @@ class Inkling2LoopForConditionalGeneration(
         for layer in self.model.layers:
             layer.attn.process_weights_after_loading()
             layer.mlp.experts.process_weights_after_loading()
+            for controller in layer.controllers.values():
+                if not controller.fused:
+                    # The reference gates multiply in FP32 on every loop visit.
+                    # Cast once after loading into the checkpoint's serving dtype.
+                    for weight in (controller.forget_weight, controller.gain_weight):
+                        weight.data = weight.data.float()
 
     def get_language_model(self) -> nn.Module:
         return self

@@ -723,6 +723,12 @@ class SpeculativeConfig:
             # target's config, so it needs none of the rewrites below
             hf_config.update(transformers_mtp_overrides)
             return hf_config
+        if hf_config.model_type in ("inkling2", "inkling2_loop") and getattr(
+            hf_config, "mtp_config", None
+        ):
+            from vllm.models.inkling2.configs import Inkling2DSparkConfig
+
+            return Inkling2DSparkConfig.from_target(hf_config)
         initial_architecture = hf_config.architectures[0]
         if initial_architecture == "RadioMBartPrefixForCausalLM" and getattr(
             getattr(hf_config, "decoder", None), "causal_vision_prefix", False
@@ -1512,6 +1518,7 @@ class SpeculativeConfig:
                     in self.draft_model_config.architectures
                     or _MUSE_SPARK_DSPARK_ARCHITECTURE
                     in self.draft_model_config.architectures
+                    or "Inkling2DSparkModel" in self.draft_model_config.architectures
                     or "Gemma4DSparkModel" in self.draft_model_config.architectures
                     or (
                         "DSparkDraftModel" in self.draft_model_config.architectures
@@ -1612,6 +1619,8 @@ class SpeculativeConfig:
                     not in self.draft_model_config.architectures
                     and "Gemma4DSparkModel" not in self.draft_model_config.architectures
                     and "K3DSparkModel" not in self.draft_model_config.architectures
+                    and "Inkling2DSparkModel"
+                    not in self.draft_model_config.architectures
                 ):
                     # DeepSeek-V4(.1) DSpark reuses the full target config
                     # and its weights ship in the target checkpoint.

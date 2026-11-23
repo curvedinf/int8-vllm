@@ -509,7 +509,9 @@ class AisModelLoader(DefaultModelLoader):
         return plan
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
-        self._packed_windowed = model_config.quantization in ("hy4_neuqi", "inkling2_ptqr")
+        self._packed_windowed = model_config.quantization in (
+            "hy4_neuqi", "inkling2_ptqr"
+        ) or "Inkling2DSparkModel" in model_config.architectures
         if self._packed_windowed:
             from vllm.model_executor.model_loader.hy4_rank_cache import HY4RankCache
 
@@ -518,7 +520,7 @@ class AisModelLoader(DefaultModelLoader):
                 return
             logger.info(
                 "Loading %s with contiguous GPU windows and GPU-local TP sharding",
-                model_config.quantization,
+                model_config.quantization or model_config.architectures[0],
             )
             super().load_weights(model, model_config)
             if cache is not None:

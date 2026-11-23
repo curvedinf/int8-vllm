@@ -69,9 +69,7 @@ class HY4RankCache:
         if (
             config is None
             or recipe is None
-            or not config.additional_config.get(
-                f"{recipe}_rank_cache", recipe == "inkling2"
-            )
+            or not config.additional_config.get(f"{recipe}_rank_cache", False)
         ):
             return None
         parallel = config.parallel_config
@@ -80,7 +78,13 @@ class HY4RankCache:
             or parallel.pipeline_parallel_size != 1
             or parallel.data_parallel_size != 1
             or parallel.enable_expert_parallel
-            or model_config.get_multimodal_config().mm_encoder_tp_mode != "data"
+        ):
+            return None
+        # HY4's cache assumes a data-parallel vision encoder. Inkling keys its
+        # rank cache on the actual local parameter layout, including vision.
+        if (
+            recipe == "hy4"
+            and model_config.get_multimodal_config().mm_encoder_tp_mode != "data"
         ):
             return None
         directory = Path(model_config.model_weights or model_config.model)

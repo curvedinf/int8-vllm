@@ -236,3 +236,74 @@ class Inkling2LoopMMConfig(Inkling2MMConfig):
     # Explicit, or transformers generates one that keeps a dict text_config.
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
+
+
+class Inkling2DSparkConfig(PreTrainedConfig):
+    """The DSpark draft of an Inkling2 checkpoint, from its `mtp_config`."""
+
+    model_type = "inkling2_dspark"
+
+    def __init__(
+        self,
+        *,
+        block_size: int = 8,
+        target_layer_ids: list[int] | None = None,
+        **kwargs,
+    ) -> None:
+        # Not stored as ``block_size``: vLLM DSpark would take that as the
+        # number of speculative tokens, but the block holds an anchor plus
+        # block_size - 1 masks, each predicting the token at its own position.
+        self.draft_block_size = block_size
+        self.dspark_block_size = block_size - 1
+        self.sample_from_anchor = False
+        self.is_causal = False
+        self.mask_token_id = 0
+        # Target layer visits (loop passes counted) whose input (the AttnRes
+        # partial block) is captured; the last id, the target's
+        # num_layer_visits, is its final-norm output.
+        self.target_layer_ids = list(target_layer_ids or [])
+        self.eagle_aux_hidden_state_layer_ids = self.target_layer_ids
+        kwargs.setdefault("architectures", ["Inkling2DSparkModel"])
+        super().__init__(tie_word_embeddings=False, **kwargs)
+
+    @classmethod
+    def from_target(cls, config: Inkling2MMConfig) -> Inkling2DSparkConfig:
+        mtp_config = getattr(config, "mtp_config", None)
+        if not mtp_config:
+            raise ValueError("The Inkling2 checkpoint has no mtp_config")
+        text = config.text_config
+        loop = text.loop_config
+        if loop is not None and text.num_loop_passes != loop["num_passes"]:
+            raise ValueError(
+                "Inkling2 DSpark drafts read hidden states at fixed layer visits; "
+                f"serve them at the checkpoint's {loop['num_passes']} loop passes"
+            )
+        draft = {
+            k: v
+            for k, v in mtp_config.items()
+            if k not in ("torch_dtype", "dtype", "architectures")
+        }
+        features = draft.get("target_layer_ids", [])
+        if (
+            len(features) < 2
+            or features != sorted(set(features))
+            or features[-1] != text.num_layer_visits
+        ):
+            raise ValueError(
+                "Inkling2 MTP target_layer_ids must be sorted target layer visits "
+                "followed by num_layer_visits (the final-norm output)"
+            )
+        if (
+            draft["hidden_size"] != text.hidden_size
+            or draft.get("markov_head_type") != "rnn_hidden"
+            or draft.get("q_bias")
+            or draft.get("o_bias")
+        ):
+            raise ValueError("Unsupported Inkling2 mtp_config")
+        return cls(
+            **draft,
+            vocab_size=text.vocab_size,
+            padded_vocab_size=text.padded_vocab_size,
+            final_logit_softcapping=text.final_logit_softcapping,
+            torch_dtype="bfloat16",
+        )

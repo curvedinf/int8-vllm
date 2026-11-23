@@ -343,8 +343,11 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                       f"off={self._g8_k.storage_offset()} "
                       f"strides={self._g8_k.stride()} n_f16={_n_f16}",
                       flush=True)
-            self._g8_k.fill_(1.0)
-            self._g8_v.fill_(1.0)
+            # Cache groups can alias this allocation while owning disjoint
+            # block IDs. Binding a new layer must not initialize scale bytes
+            # in another group's live blocks. The writer sets each live scale.
+            self._g8_k[:1].fill_(1.0)
+            self._g8_v[:1].fill_(1.0)
 
             key_cache, value_cache = self._split_kv_cache(kv_cache)
             self._k_data_cache = key_cache[..., :hs]
@@ -387,7 +390,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             stride=(block_f32, slot_f32, head_f32),
             storage_offset=k_scale_off_f32,
         )
-        self._k_scale_cache.fill_(1.0)
+        self._k_scale_cache[:1].fill_(1.0)
 
         # V scales (second content half)
         self._v_scale_cache = torch.as_strided(
@@ -396,7 +399,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             stride=(block_f32, slot_f32, head_f32),
             storage_offset=v_scale_off_f32,
         )
-        self._v_scale_cache.fill_(1.0)
+        self._v_scale_cache[:1].fill_(1.0)
 
         key_cache, value_cache = self._split_kv_cache(kv_cache)
         self._k_data_cache = key_cache[..., :hs]

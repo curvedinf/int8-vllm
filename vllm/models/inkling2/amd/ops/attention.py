@@ -67,6 +67,7 @@ def _rel_attention_kernel(
     Sink=None,
     stride_gate=0,
     stride_sink=0,
+    DRAFT: tl.constexpr = False,
 ):
     # `WINDOW` is the largest visible query-key distance (-1 for full attention).
     # `SPLIT`: program `s` of `num_splits` holds all queries of the request,
@@ -103,9 +104,15 @@ def _rel_attention_kernel(
         row_valid[:, None],
         other=0.0,
     )
-    pos = past + q_idx
-    first_pos = past + q0
-    hi = tl.minimum(past + q0 + BLOCK_Q, seq_len)
+    if DRAFT:
+        # All queries in the draft block see all block keys and the same history.
+        pos = tl.full([BLOCK_M], 0, tl.int32) + seq_len - 1
+        first_pos = seq_len - 1
+        hi = seq_len
+    else:
+        pos = past + q_idx
+        first_pos = past + q0
+        hi = tl.minimum(past + q0 + BLOCK_Q, seq_len)
     # Sheared column of key j is j - key0: key0 starts the E_PAD keys
     # ending at the key blocks of the token's 128-token query tile.
     tile_end = tl.minimum((q_idx // 128 + 1) * 128, q_len)
@@ -140,16 +147,17 @@ def _rel_attention_kernel(
             ).to(tl.pointer_type(tl.float16))
             scale = tl.load(scale_addr, key_valid, other=0.0)
             k = (k.to(tl.float32) * scale[:, None]).to(q.dtype)
-        s = tl.dot(q, tl.trans(k)) * scale_log2
+        s = tl.dot(q, tl.trans(k.to(q.dtype))) * scale_log2
         dist = pos[:, None] - keys[None, :]
         valid = row_valid[:, None] & key_valid[None, :] & (dist >= 0)
         if WINDOW >= 0:
             valid &= dist <= WINDOW
         # Keys before key0 are past the extent: no bias (full layers) or
         # out of the window.
-        in_table = valid & (keys[None, :] >= key0[:, None])
-        bias = tl.load(bias_rows[:, None] + keys[None, :], in_table, other=0.0)
-        s = s + bias.to(tl.float32) * 1.4426950408889634
+        if not DRAFT:
+            in_table = valid & (keys[None, :] >= key0[:, None])
+            bias = tl.load(bias_rows[:, None] + keys[None, :], in_table, other=0.0)
+            s = s + bias.to(tl.float32) * 1.4426950408889634
         s = tl.where(valid, s, float("-inf"))
         m_new = tl.maximum(m_i, tl.max(s, 1))
         # Rows without a live key so far keep m = -inf: no -inf - -inf.
@@ -395,6 +403,40 @@ def rel_decode_attention(
     _combine(o_part, lse_part, gate, sinks, out, cu_seqlens_q, num_splits)
 
 
+def block_decode_attention(
+    q,
+    key_cache,
+    value_cache,
+    out,
+    *,
+    block_table,
+    cache_seqlens,
+    cu_seqlens_q,
+    block,
+    window,
+    num_splits,
+):
+    """DSpark block attention with a common bidirectional window."""
+    partial, lse = _launch(
+        q,
+        key_cache,
+        value_cache,
+        q,
+        None,
+        None,
+        block_table,
+        cache_seqlens,
+        cu_seqlens_q,
+        block,
+        q.shape[-1] ** -0.5,
+        window - 1 if window else -1,
+        num_splits=num_splits,
+        draft=True,
+    )
+    assert lse is not None
+    _combine(partial, lse, None, None, out, cu_seqlens_q, num_splits)
+
+
 def _check_sheared_bias(sheared_bias: torch.Tensor, q: torch.Tensor) -> None:
     assert sheared_bias.shape[1] == q.shape[1] and sheared_bias.stride(2) == 1
     assert sheared_bias.shape[2] % 128 == 0
@@ -419,6 +461,7 @@ def _launch(
     sinks: torch.Tensor | None = None,
     key_tile: int = _BLOCK_N,
     max_rows: int = 128,
+    draft: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Launch `_rel_attention_kernel` and return `(out, lse)`.
 
@@ -480,6 +523,7 @@ def _launch(
         E_PAD=bias.shape[2],
         WINDOW=window,
         SPLIT=split,
+        DRAFT=draft,
         BLOCK_Q=block_q,
         BLOCK_H=block_h,
         BLOCK_N=key_tile,
@@ -546,21 +590,22 @@ def _split_combine_kernel(
     # Requests without keys come out zero.
     has_keys = l_i > 0.0
     y = acc / tl.where(has_keys, l_i, 1.0)
-    gate = tl.load(Gate + row * stride_gate + head * D + offs_d).to(tl.float32)
-    sink = tl.load(Sink + row * stride_sink + head).to(tl.float32)
-    lse_e = tl.where(
-        has_keys, (m_i + tl.math.log2(l_i)) * 0.6931471805599453, float("-inf")
-    )
-    y = y * _sigmoid(gate)
-    y = y * _sigmoid(lse_e - sink)
+    if Gate is not None:
+        gate = tl.load(Gate + row * stride_gate + head * D + offs_d).to(tl.float32)
+        sink = tl.load(Sink + row * stride_sink + head).to(tl.float32)
+        lse_e = tl.where(
+            has_keys, (m_i + tl.math.log2(l_i)) * 0.6931471805599453, float("-inf")
+        )
+        y = y * _sigmoid(gate)
+        y = y * _sigmoid(lse_e - sink)
     tl.store(y_ptrs, y.to(Y.dtype.element_ty))
 
 
 def _combine(
     o_part: torch.Tensor,
     lse_part: torch.Tensor,
-    gate: torch.Tensor,
-    sinks: torch.Tensor,
+    gate: torch.Tensor | None,
+    sinks: torch.Tensor | None,
     out: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     num_splits: int,
@@ -581,8 +626,8 @@ def _combine(
         num_splits,
         num_tokens,
         lse_part.stride(0),
-        gate.stride(0),
-        sinks.stride(0),
+        gate.stride(0) if gate is not None else 0,
+        sinks.stride(0) if sinks is not None else 0,
         H=num_heads,
         D=head_dim,
         # Splits merged per iteration: few splits come with large batches.

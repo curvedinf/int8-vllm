@@ -28,6 +28,7 @@ def _run_prepare(
     cp_size: int = 1,
     cp_interleave: int = 1,
     draft_dcp_size: int | None = None,
+    windows: tuple[int, ...] = (0,),
 ):
     device = torch.device(current_platform.device_type)
     max_num_reqs = 4
@@ -53,13 +54,14 @@ def _run_prepare(
         idx_mapping=torch.tensor([2], dtype=torch.int32, device=device),
     )
     query_slot_mapping = torch.full(
-        (max_num_tokens,), -2, dtype=torch.int64, device=device
+        (len(windows), max_num_tokens), -2, dtype=torch.int64, device=device
     )
+    target_slots = query_slot_mapping.clone()
     context_positions = torch.full(
         (max_num_tokens,), -1, dtype=torch.int64, device=device
     )
     context_slot_mapping = torch.full(
-        (max_num_tokens,), -2, dtype=torch.int64, device=device
+        (len(windows), max_num_tokens), -2, dtype=torch.int64, device=device
     )
     sample_indices = torch.full(
         (max_num_reqs * num_speculative_steps,),
@@ -87,7 +89,9 @@ def _run_prepare(
     draft = SimpleNamespace(
         input_buffers=input_buffers,
         context_positions=context_positions,
-        _context_slot_mappings=context_slot_mapping.unsqueeze(0),
+        _context_slot_mappings=context_slot_mapping,
+        _draft_slot_rows=query_slot_mapping,
+        _draft_windows=dict(enumerate(windows)),
         sample_indices=sample_indices,
         sample_pos=sample_pos,
         sample_idx_mapping=sample_idx_mapping,
@@ -100,12 +104,12 @@ def _run_prepare(
         dp_rank=0,
         pcp_manager=None,
         draft_kv_cache_group_id=0,
-        draft_kv_cache_group_ids=[0],
+        draft_kv_cache_group_ids=list(range(len(windows))),
         _layer_group_idx=None,
         block_tables=SimpleNamespace(
-            slot_mappings=query_slot_mapping.unsqueeze(0),
-            input_block_tables=[block_table],
-            block_sizes=[4],
+            slot_mappings=target_slots,
+            input_block_tables=[block_table] * len(windows),
+            block_sizes=[4] * len(windows),
             cp_rank=cp_rank,
             cp_size=cp_size,
             cp_interleave=cp_interleave,
@@ -141,17 +145,31 @@ def _run_prepare(
             input_seeds,
         )
     torch.accelerator.synchronize()
+    assert (target_slots == -2).all()
     return SimpleNamespace(
         input_buffers=input_buffers,
-        query_slot_mapping=query_slot_mapping.cpu(),
+        query_slot_mapping=query_slot_mapping[0].cpu(),
         context_positions=context_positions.cpu(),
-        context_slot_mapping=context_slot_mapping.cpu(),
+        context_slot_mapping=context_slot_mapping[0].cpu(),
+        context_by_group=context_slot_mapping.cpu(),
         sample_indices=sample_indices.cpu(),
         sample_pos=sample_pos.cpu(),
         sample_idx_mapping=sample_idx_mapping.cpu(),
         temperature=temperature.cpu(),
         seeds=seeds.cpu(),
     )
+
+
+def test_full_draft_group_retains_context_outside_local_window():
+    out = _run_prepare(
+        target_positions=[10, 11, 12, 13],
+        block_table_values=[0, 0, 7, 8, 9, 10, 11, 12],
+        windows=(1, 0),
+    )
+    assert out.context_by_group[:, :4].tolist() == [
+        [PAD_SLOT_ID, 31, PAD_SLOT_ID, PAD_SLOT_ID],
+        [30, 31, PAD_SLOT_ID, PAD_SLOT_ID],
+    ]
 
 
 @pytest.mark.parametrize("cp_rank,cp_size", [(0, 1), (0, 2), (1, 2)])

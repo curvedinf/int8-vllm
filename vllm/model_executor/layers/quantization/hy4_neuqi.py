@@ -180,6 +180,7 @@ class HY4Linear(LinearMethodBase):
         self.wave = False
         self.tune = bool(options.get("hy4_split_gemm", True))
         self.packet = bool(options.get("hy4_packet_gemm", True))
+        self.direct_fp16 = bool(options.get("hy4_direct_fp16_output", False))
         self.fly = bool(options.get("hy4_flydsl_gemm", False))
         self.fly_splits = {}
         self.fly_swiglu_rows = ()
@@ -361,6 +362,15 @@ class HY4Linear(LinearMethodBase):
                 fly_split,
             )
         else:
+            # Unsplit packet GEMMs can round the accumulator at the store.
+            # Bias and split-K reduction must still see the FP32 accumulator.
+            direct_fp16 = (
+                self.direct_fp16
+                and x.dtype == torch.float16
+                and tiles is not None
+                and split == 1
+                and bias is None
+            )
             out = affine_g128(
                 q,
                 s,
@@ -373,6 +383,7 @@ class HY4Linear(LinearMethodBase):
                 wave_format=self.wave,
                 triton_tiles=tiles,
                 packet_load=True,
+                output_dtype=torch.float16 if direct_fp16 else torch.float32,
             )
         if bias is not None:
             out += bias

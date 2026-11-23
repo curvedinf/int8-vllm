@@ -20,15 +20,25 @@ def _rms_norm_kernel(
     N: tl.constexpr,
     eps,
     BLOCK: tl.constexpr,
+    RESIDUAL=None,
+    stride_r=0,
+    stride_y=0,
 ):
     row = tl.program_id(0).to(tl.int64)
     cols = tl.arange(0, BLOCK)
     mask = cols < N
     x = tl.load(X + row * stride_x + cols, mask, other=0).to(tl.float32)
+    if RESIDUAL is not None:
+        residual = RESIDUAL + row * stride_r + cols
+        x += tl.load(residual, mask, other=0).to(tl.float32)
+        tl.store(residual, x, mask)
     rstd = tl.rsqrt(tl.div_rn(tl.sum(x * x), N) + eps)
     y = x * rstd
     y = y * tl.load(W + cols, mask, other=0).to(tl.float32)
-    tl.store(Y + row * N + cols, y.to(Y.dtype.element_ty), mask)
+    if RESIDUAL is None:
+        tl.store(Y + row * N + cols, y.to(Y.dtype.element_ty), mask)
+    else:
+        tl.store(Y + row * stride_y + cols, y.to(Y.dtype.element_ty), mask)
 
 
 def rms_norm(
@@ -58,10 +68,35 @@ def rms_norm(
 
 
 def fused_add_rms_norm(
-    x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, eps: float
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    *,
+    single_kernel: bool = False,
 ) -> None:
     """In place: `residual += x; x = rms_norm(residual)`, normalizing the
     unrounded fp32 sum (as flashinfer's `fused_add_rmsnorm`)."""
+    if single_kernel:
+        assert x.ndim == 2 and x.shape == residual.shape
+        assert x.stride(-1) == residual.stride(-1) == 1
+        rows, width = x.shape
+        if rows:
+            block = triton.next_power_of_2(width)
+            _rms_norm_kernel[(rows,)](
+                x,
+                weight,
+                x,
+                x.stride(0),
+                width,
+                eps,
+                block,
+                residual,
+                residual.stride(0),
+                x.stride(0),
+                num_warps=min(max(block // 512, 1), 16),
+            )
+        return
     total = x.float() + residual
     residual.copy_(total)
     x.copy_(rms_norm(total, weight, eps, x.dtype))

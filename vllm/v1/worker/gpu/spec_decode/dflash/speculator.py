@@ -290,13 +290,15 @@ class DFlashSpeculator(DraftModelSpeculator):
         # Live-window bound for ctx-KV selection (see the kernel guard): the
         # worker-side block table is append-only, so evicted entries hold
         # stale nonzero ids that the !=0 guard cannot detect.
-        _win = 0
-        for _grp_list in self.attn_groups:
-            for _g in _grp_list or []:
-                _sw = getattr(_g.kv_cache_spec, "sliding_window", None)
-                if _sw is not None:
-                    _win = max(_win, int(_sw))
-        self._draft_window_tokens = _win
+        # A windowed layer only owns its live pages. A full-attention group
+        # in the same draft must still receive the entire prefill chunk.
+        self._draft_windows = {}
+        for gid in self.draft_kv_cache_group_ids:
+            windows = [
+                get_kv_cache_spec_sliding_window(group.kv_cache_spec) or 0
+                for group in self.attn_groups[gid]
+            ]
+            self._draft_windows[gid] = max(windows) if all(windows) else 0
 
         # Per-group context slot buffers for the precompute (one row per group).
         self._context_slot_mappings = torch.zeros(
@@ -651,7 +653,7 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.max_num_reqs,
                 self.max_num_tokens,
                 self.max_model_len,
-                getattr(self, "_draft_window_tokens", 0),
+                self._draft_windows[gid],
                 self.sample_from_anchor,
                 num_reqs,
             )
