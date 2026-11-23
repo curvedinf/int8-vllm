@@ -121,7 +121,7 @@ case "$recipe" in
     if [[ -r "${MODELS_DIR:-$HOME/models}/$mixed/model.safetensors.index.json" ]]; then
       target=$mixed
     fi
-    target_repo=voodooquant/Inkling-2-Mini-PTQR-W4A8-G128
+    target_repo=voodooquant/Inkling-2-Mini-INT4-PTQR
     target_rev=main
     draft="" ;;
   *) echo "MI100_RECIPE must be qwen38, flint, bolt, hy4 or inkling2mini." >&2; exit 2 ;;
