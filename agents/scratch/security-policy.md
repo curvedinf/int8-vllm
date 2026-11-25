@@ -26,3 +26,11 @@ or other disclosures. No identifying values are recorded here.
 On 2026-11-25, the user directed that the empty-API-key change for issue #3
 be committed and pushed to main when complete. This approves the configured
 Git name and email as author and committer attribution for that commit only.
+
+On 2026-11-25, the user directed that Inkling be configured with the best
+configuration, its Dockerfile tested, and the result pushed ("push it"). This
+approves the configured Git name and email as author and committer attribution
+for the commits carrying that work, in int8-vllm and in the sibling int8-aiter
+repository (the routed-expert and tabulated-SwiGLU kernels the recipe loads),
+only. It does not approve contact details in file content, local account paths,
+or any other disclosure.

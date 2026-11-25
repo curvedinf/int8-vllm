@@ -13,3 +13,4 @@
 - [Flint int8 recipe](flint-int8-recipe.md): active goal design map and measurements.
 - [Upstream v0.33.0 merge](upstream-v0330-merge.md): merge state, resolutions and gates.
 - [Flint startup diagnostics](flint-server-recovery-20261112.md) records the compiler disk-quota failure.
+- [Inkling C12 optimization](inkling-c12-optimization.md) records the 2k and 40k workload trials, the frozen numerics and where the paused goal stands.
