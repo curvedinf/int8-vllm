@@ -88,6 +88,16 @@ serve() {
     --enable-auto-tool-choice --tool-call-parser inkling
     --override-generation-config '{"temperature":1.0,"top_p":0.95,"top_k":20}'
   )
+  # Images longer than this side are scaled down before encoding, so none is
+  # refused for exceeding the encoder budget (0 keeps every original size).
+  local image_max_side="${INKLING_IMAGE_MAX_SIDE:-2048}"
+  if [[ ! "$image_max_side" =~ ^[0-9]+$ ]]; then
+    echo "INKLING_IMAGE_MAX_SIDE must be a number of pixels, 0 to disable; got '$image_max_side'" >&2
+    return 1
+  fi
+  if [[ "$image_max_side" != 0 ]]; then
+    args+=(--mm-processor-kwargs "{\"max_side\": $image_max_side}")
+  fi
   local capture_sizes='[1,2,4,8,12]'
   if [[ "${SPEC:-$use_draft}" == 1 ]]; then
     if [[ ! -r "$draft/mtp.safetensors" || ! -r "$draft/config.json" ]]; then

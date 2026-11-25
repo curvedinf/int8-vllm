@@ -48,6 +48,10 @@ IMAGE_PAD_ID = 200054
 PATCH_SIZE = 40
 # Dummy (profiling) images are at most this many pixels per side.
 MAX_DUMMY_IMAGE_SIDE = 2048
+# Processor kwarg (``--mm-processor-kwargs '{"max_side": 2048}'``): the longest
+# side an image keeps. A longer image is scaled down to it first, so one image
+# never outgrows the encoder budget.
+MAX_IMAGE_SIDE_KWARG = "max_side"
 
 ImageInput: TypeAlias = bytes | Image.Image | MediaWithBytes | np.ndarray
 
@@ -92,6 +96,9 @@ def decode_image(image: ImageInput) -> np.ndarray:
 class Inkling2ImageProcessor:
     """Pads each image to a 40-pixel grid and emits one patch per cell.
 
+    An image with a side longer than `max_side` is scaled down to that side
+    first, aspect ratio kept, so the encoder budget bounds every image.
+
     Returns `vision_pixels` (fp16 `[sum(rows*cols), 40, 40, 3]` raw RGB
     values, padding pixels at -1; the encoder normalizes them) and
     `vision_grid_thw`.
@@ -101,8 +108,35 @@ class Inkling2ImageProcessor:
     def get_grid(width: int, height: int) -> tuple[int, int]:
         return math.ceil(height / PATCH_SIZE), math.ceil(width / PATCH_SIZE)
 
-    def preprocess(self, images: Sequence[ImageInput]) -> dict[str, torch.Tensor]:
-        decoded = [torch.from_numpy(decode_image(image)) for image in images]
+    @staticmethod
+    def _fit(pixels: np.ndarray, max_side: int | None) -> np.ndarray:
+        if max_side is None:
+            return pixels
+        height, width = pixels.shape[:2]
+        longest = max(height, width)
+        if longest <= max_side:
+            return pixels
+        scale = max_side / longest
+        size = (max(1, round(width * scale)), max(1, round(height * scale)))
+        with Image.fromarray(pixels) as image:
+            return np.array(image.resize(size, Image.Resampling.LANCZOS))
+
+    def preprocess(
+        self, images: Sequence[ImageInput], max_side: int | None = None
+    ) -> dict[str, torch.Tensor]:
+        if max_side is not None and (
+            not isinstance(max_side, int)
+            or isinstance(max_side, bool)
+            or max_side < PATCH_SIZE
+        ):
+            raise ValueError(
+                f"max_side must be an integer of at least {PATCH_SIZE}, "
+                f"got {max_side!r}"
+            )
+        decoded = [
+            torch.from_numpy(self._fit(decode_image(image), max_side))
+            for image in images
+        ]
         grids = [self.get_grid(pixels.shape[1], pixels.shape[0]) for pixels in decoded]
         out = torch.empty(
             (sum(rows * cols for rows, cols in grids), PATCH_SIZE, PATCH_SIZE, 3),
@@ -160,7 +194,7 @@ class Inkling2ProcessingInfo(BaseProcessingInfo):
         return {"image": None}
 
     def get_supported_mm_processor_kwargs(self) -> dict[str, set[str]]:
-        return {}
+        return {"images_kwargs": {MAX_IMAGE_SIDE_KWARG}}
 
 
 class Inkling2DummyInputsBuilder(BaseDummyInputsBuilder[Inkling2ProcessingInfo]):
@@ -214,10 +248,32 @@ class Inkling2MultiModalProcessor(BaseMultiModalProcessor[Inkling2ProcessingInfo
         processed = None
         if isinstance(images, ImageProcessorItems) and images.get_count():
             # Raw items keep MediaWithBytes.original_bytes for exact decoding.
-            processed = BatchFeature(self.info.image_processor.preprocess(images.data))
+            processed = BatchFeature(
+                self.info.image_processor.preprocess(
+                    images.data, max_side=self._max_image_side(hf_kwargs)
+                )
+            )
         return self._finalize_hf_mm_data(
             hf_data, hf_kwargs, passthrough_data, processed
         )
+
+    def _max_image_side(self, hf_kwargs: Mapping[str, object]) -> int | None:
+        """The longest image side from the engine and the request settings combined."""
+        merged = self.info.ctx.get_merged_mm_kwargs(
+            hf_kwargs,
+            supported_mm_processor_kwargs=self.info.supported_mm_processor_kwargs,
+        )
+        images_kwargs = merged.get("images_kwargs")
+        value = (
+            images_kwargs.get(MAX_IMAGE_SIDE_KWARG)
+            if isinstance(images_kwargs, Mapping)
+            else None
+        )
+        if value is None:
+            value = merged.get(MAX_IMAGE_SIDE_KWARG)
+        if value is None or isinstance(value, int):
+            return value
+        raise ValueError(f"{MAX_IMAGE_SIDE_KWARG} must be an integer, got {value!r}")
 
     def _get_mm_fields_config(
         self,

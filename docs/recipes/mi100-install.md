@@ -46,6 +46,7 @@ Set Compose variables in your shell before running `up`. Use a container env fil
 | Host shell or container env file | `MI100_CPU_MAP` | Optional. Set one space-separated CPU list per GPU, in `MI100_DEVICES` order. |
 | Container env file | `VLLM_API_KEY` | Use your own API key. Keep the env file private. |
 | Container env file | `C`, `MAXLEN` (Qwen, Flint, HY4, Inkling 2 Mini), `MAX_MODEL_LEN` (Bolt) | Set concurrency and the per-request context limit. |
+| Container env file | `INKLING_IMAGE_MAX_SIDE` (Inkling 2 Mini) | Longest image side in pixels; larger images are scaled down. Defaults to 2048. Set 0 to keep original sizes, which refuses images above the encoder budget. |
 
 With automatic downloads the checkpoints live in the cache volume. Mounting `MODELS_DIR` supplies an alternative source for existing files. For HY4, put the actual n-gram files on SSD. [HY4 storage options](hy4-flash.md#n-gram-storage)
 
