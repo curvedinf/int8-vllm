@@ -20,6 +20,9 @@
 !scripts/serve_recipe_flint.sh
 !scripts/serve_recipe_bolt.sh
 !scripts/serve_recipe_hy4.sh
+!scripts/serve_recipe_inkling2mini.sh
+!scripts/mi100_host_kv.py
+!scripts/mi100-recipe-lifecycle.sh
 !scripts/warm_hy4_engram.py
 !scripts/build_residual_g128.sh
 !scripts/fs_gpu_probe.py

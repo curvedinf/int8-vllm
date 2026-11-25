@@ -14,7 +14,14 @@ pp=1
 tp=$cards
 case "$cards" in
   2) devices=0,1 ;;
-  3) devices=0,1,2; if [[ "$recipe" != hy4 && "$recipe" != inkling2mini ]]; then tp=1; pp=3; fi ;;
+  3) devices=0,1,2
+     if [[ "$recipe" == inkling2mini ]]; then
+       # Inkling-2-Mini has 8 KV heads, so TP=3 cannot shard attention, and
+       # its launcher has no pipeline mode.
+       echo "MI100_CARDS=3 is not supported for inkling2mini: use 2 or 4 cards." >&2
+       exit 2
+     fi
+     if [[ "$recipe" != hy4 ]]; then tp=1; pp=3; fi ;;
   4) devices=0,1,2,3 ;;
   *) echo "MI100_CARDS must be 2, 3 or 4." >&2; exit 2 ;;
 esac
@@ -116,10 +123,22 @@ case "$recipe" in
     draft_rev=026c6c08dc582c7dca03b4db4c14dcf85a9d006a
     ;;
   inkling2mini)
+    if [[ "${MI100_CONTAINER:-0}" == 1 ]]; then
+      # Same RCCL staging bound as hy4: with the defaults each worker's
+      # communicators held about 4 GiB and failed the 92% startup memory check.
+      export NCCL_BUFFSIZE="${NCCL_BUFFSIZE:-1048576}"
+      export NCCL_MAX_NCHANNELS="${NCCL_MAX_NCHANNELS:-4}"
+    fi
     target=Inkling-2-Mini-PTQR-W4A8-G128
     mixed=Inkling-2-Mini-PTQR-W4A8-Vision-PTQR-INT8
     if [[ -r "${MODELS_DIR:-$HOME/models}/$mixed/model.safetensors.index.json" ]]; then
       target=$mixed
+    fi
+    # The PTQR-retrained export is the recipe default; it pairs with the
+    # retrained DSpark draft the launcher selects by default.
+    retrained=Inkling-2-Mini-PTQR-W4A8-Vision-PTQR-INT8-r2
+    if [[ -r "${MODELS_DIR:-$HOME/models}/$retrained/model.safetensors.index.json" ]]; then
+      target=$retrained
     fi
     target_repo=voodooquant/Inkling-2-Mini-INT4-PTQR
     target_rev=main

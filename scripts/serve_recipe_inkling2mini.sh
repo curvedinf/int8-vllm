@@ -8,7 +8,7 @@ served_name=inkling-2-mini
 recipe_label=Inkling-2-Mini
 python="${VLLM_PYTHON:-$root/.venv/bin/python}"
 models="${MODELS_DIR:-$HOME/models}"
-model="${MODEL_DIR:-$models/Inkling-2-Mini-PTQR-W4A8-Vision-PTQR-INT8}"
+model="${MODEL_DIR:-$models/Inkling-2-Mini-PTQR-W4A8-Vision-PTQR-INT8-r2}"
 if [[ -z "${MODEL_DIR:-}" && ! -r "$model/model.safetensors.index.json" ]]; then
   model="$models/Inkling-2-Mini-PTQR-W4A8-G128"
 fi
@@ -31,7 +31,9 @@ serve() {
   export GPU_ARCHS=gfx908 PYTORCH_ROCM_ARCH=gfx908 VLLM_TARGET_DEVICE=rocm
   export HIP_VISIBLE_DEVICES="${MI100_DEVICES:-0,1,2,3}" CUDA_VISIBLE_DEVICES="${MI100_DEVICES:-0,1,2,3}"
   export FLYDSL_GPU_ARCH=gfx908 VLLM_USE_V2_MODEL_RUNNER=1
+  export VLLM_GFX908_MIXED_PREFILL_TOKENS="${VLLM_GFX908_MIXED_PREFILL_TOKENS:-1024}"
   export VLLM_AIS_REPACK_WINDOW_MB="${VLLM_AIS_REPACK_WINDOW_MB:-2}"
+  export VLLM_OFFLOAD_ASYNC_CLASSIC_STORES="${VLLM_OFFLOAD_ASYNC_CLASSIC_STORES:-1}"
   export VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1
   export VLLM_ROCM_USE_AITER_CUSTOM_AR="${VLLM_ROCM_USE_AITER_CUSTOM_AR:-0}"
   # A set-but-empty VLLM_API_KEY serves without authentication; the key
@@ -43,7 +45,23 @@ serve() {
     export VLLM_API_KEY
   fi
   source "$root/scripts/mi100-cpu-map.sh"
-  local draft="${DRAFT_MODEL_DIR:-$models/Inkling-2-Mini-DSpark-PTQR-W8A8-G128}"
+  if [[ -n "${MI100_CPU_MAP:-}" ]]; then
+    # Workers are bound through --numa-bind. Once they exist, the API server
+    # and engine core move to the first free cores (numa_utils.apply_cpu_affinity);
+    # left to the scheduler they share a rank's cores and slow its launches.
+    # Disjoint sets, eight for the API server and twelve for the engine core:
+    # the API server tokenizes long prompts while the engine core schedules,
+    # and sharing four cores slowed admission.
+    local api_cpus="${MI100_PARENT_CPUS:-$("$python" -S "$root/scripts/mi100_cpu_map.py" --parent 8 0 2>/dev/null || true)}"
+    local core_cpus="${MI100_ENGINE_CORE_CPUS:-$("$python" -S "$root/scripts/mi100_cpu_map.py" --parent 12 8 2>/dev/null || true)}"
+    if [[ -n "$api_cpus" && "$api_cpus" != none ]]; then
+      export VLLM_API_SERVER_CPUS="${VLLM_API_SERVER_CPUS:-$api_cpus}"
+      export VLLM_ENGINE_CORE_CPUS="${VLLM_ENGINE_CORE_CPUS:-$core_cpus}"
+    elif [[ "$api_cpus" == none ]]; then
+      export MI100_PARENT_CPUS=none
+    fi
+  fi
+  local draft="${DRAFT_MODEL_DIR:-$models/Inkling-2-Mini-DSpark-PTQR-W8A8-G128-r2}"
   if [[ -z "${DRAFT_MODEL_DIR:-}" && ! -r "$draft/mtp.safetensors" ]]; then
     draft="$models/Inkling-2-Mini-source"
   fi
@@ -64,7 +82,7 @@ serve() {
     --host "${HOST:-127.0.0.1}" --port "${PORT:-8020}" --tensor-parallel-size "${TPS:-4}"
     --dtype float16 --load-format "${LOAD_FORMAT:-ais}" --kv-cache-dtype int8_block_g128
     --max-model-len "${MAXLEN:-1048576}" --max-num-seqs "${C:-12}"
-    --block-size "${BLOCK_SIZE:-16}" --max-num-batched-tokens "${MNBT:-1024}"
+    --block-size "${BLOCK_SIZE:-16}" --max-num-batched-tokens "${MNBT:-4096}"
     --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.92}"
     --tokenizer-mode inkling --reasoning-parser inkling
     --enable-auto-tool-choice --tool-call-parser inkling
@@ -100,17 +118,42 @@ config = dict(
     inkling_share_attention_input=True,
     inkling_dspark_fused_residual=True,
     inkling_fused_prefill_epilogue=False,
-    inkling_fused_expert_activation=False,
+    inkling_fused_expert_activation=True,
     inkling_fused_router=False,
-    inkling_fused_loop_mix=False,
+    inkling_fused_loop_mix=True,
     inkling_fused_message_gate=False,
     inkling_batch_message_max_tokens=0,
     hy4_direct_fp16_output=True,
+    hy4_wide_head_tiles=[32, 128, 4],
+    inkling_direct_weighted_sum=True,
+    inkling_skip_past_bias=True,
+    inkling_mi100_attention_tiles=True,
+    inkling_fused_expert_combine=True,
+    inkling_tabulate_swiglu=True,
+    inkling_controller_epilogue="tanh",
+    inkling_stable_top8=True,
+    inkling_mi100_expert_tiles=True,
+    mixed_prefill_new_arrivals_only=True,
+    trace_prefill_shapes=True,
+    inkling_dspark_tiled_argmax=True,
+    inkling_attention_quant_output=True,
+    inkling_residual_normalization=True,
+    inkling_dspark_argmax_gather="car",
+    inkling_parallel_controllers=True,
+    inkling_parallel_projections=True,
+    inkling_parallel_router_quant=True,
+    inkling_router_kernel="triton",
+    inkling_rel_proj_kernel="triton",
 )
 config.update(json.loads(sys.argv[1] or "{}"))
 print(json.dumps(config))
 ' "${ADDITIONAL_CONFIG:-}")"
   args+=(--additional-config "$additional")
+  # The uneven expert split is a four-rank layout (one count per EP rank);
+  # other tensor-parallel sizes keep the model's even split.
+  if [[ "${TPS:-4}" == 4 ]]; then
+    args+=(--expert-rank-counts 36 36 20 36)
+  fi
   [[ -z "${PROFILER_CONFIG:-}" ]] || args+=(--profiler-config "$PROFILER_CONFIG")
   if (( host_kv_gib > 0 )); then
     # Inkling's host KV has several large tensors per rank. Power-of-two

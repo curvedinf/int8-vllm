@@ -8,8 +8,9 @@ These recipes run an OpenAI-compatible API on a single Linux host with 32 GiB AM
 | [Flint](flint.md) | `flint` | 2, 3 or 4 | `flint` | About 39 GiB |
 | [Nemotron Bolt](nemotron_bolt.md) | `bolt` | 2, 3 or 4 | `nemotron-bolt` | About 24 GiB |
 | [HY4-Flash](hy4-flash.md) | `hy4` | 4 | `hy4-flash` | About 113 GiB including the n-gram tables |
+| Inkling 2 Mini | `inkling2mini` | 2 or 4 | `inkling-2-mini` | About 15 GiB |
 
-Run `rocm-smi --showtopotype` on the host. Use `MI100_XGMI=on` for a full XGMI mesh among the selected cards and `off` for PCIe. With two or four cards the launcher splits the model using tensor parallelism. With three it uses three pipeline stages.
+Run `rocm-smi --showtopotype` on the host. Use `MI100_XGMI=on` for a full XGMI mesh among the selected cards and `off` for PCIe. With two or four cards the launcher splits the model using tensor parallelism. With three it uses three pipeline stages. Inkling 2 Mini takes two or four cards only: its 8 KV heads cannot be split three ways.
 
 ## Docker
 
@@ -44,7 +45,7 @@ Set Compose variables in your shell before running `up`. Use a container env fil
 | Container env file | `MI100_DEVICES` | Select the ordered HIP device IDs, for example `1,3` with `MI100_CARDS=2`. |
 | Host shell or container env file | `MI100_CPU_MAP` | Optional. Set one space-separated CPU list per GPU, in `MI100_DEVICES` order. |
 | Container env file | `VLLM_API_KEY` | Use your own API key. Keep the env file private. |
-| Container env file | `C`, `MAXLEN` (Qwen, Flint, HY4), `MAX_MODEL_LEN` (Bolt) | Set concurrency and the per-request context limit. |
+| Container env file | `C`, `MAXLEN` (Qwen, Flint, HY4, Inkling 2 Mini), `MAX_MODEL_LEN` (Bolt) | Set concurrency and the per-request context limit. |
 
 With automatic downloads the checkpoints live in the cache volume. Mounting `MODELS_DIR` supplies an alternative source for existing files. For HY4, put the actual n-gram files on SSD. [HY4 storage options](hy4-flash.md#n-gram-storage)
 
@@ -64,6 +65,12 @@ CPU list, NUMA node and shared L3 CPU lists for each rank. For Docker use
 `docker compose -f docker/mi100/compose.yaml run --rm serve check` with the
 same Compose file and environment as your server. Omit `MI100_CPU_MAP` to
 use the recipe's normal CPU scheduling.
+
+The Inkling 2 Mini launcher also moves the API server and the engine core
+onto the next free cores once the workers are bound (eight for the API server,
+twelve for the engine core), so tokenization and scheduling never share a
+rank's cores. Set
+`MI100_PARENT_CPUS=none` to leave them to the normal CPU scheduling.
 
 ## Native
 

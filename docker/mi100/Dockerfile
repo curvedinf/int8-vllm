@@ -37,7 +37,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     && .venv/bin/python -m pip install 'flydsl==0.5.0' \
     && .venv/bin/python -c 'import flydsl.compiler'
 # AITER builds its kernels at runtime from this pinned checkout.
-ARG AITER_REV=bbc57fe793043748ac15ae7309a66b28a425cea4
+ARG AITER_REV=5eed5119074de10b1d437fa1cae47e70f0e3f9dd
 RUN git init /opt/int8-aiter && cd /opt/int8-aiter && git remote add origin https://github.com/curvedinf/int8-aiter.git \
     && git fetch --depth=1 origin "$AITER_REV" && git checkout --detach FETCH_HEAD \
     && git submodule update --init --recursive --depth=1
