@@ -45,6 +45,9 @@ from .ops.attention import (
     rel_decode_attention,
 )
 from .ops.sconv import attention_prologue, shift_rel_proj
+from .ops.skinny_gemm import DECODE_TOKENS, fp16_gemm
+from .ops.streams import side_stream
+from .ops.timeline import mark as timeline_mark
 from .sconv import K_STREAM, V_STREAM, Inkling2ShortConv, conv_metadata
 
 
@@ -180,6 +183,26 @@ class Inkling2Attention(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.rel_sink",
             )
+        self.skip_past_bias = options.get("inkling_skip_past_bias", False)
+        # One launch for the query/gate pair and for the k/v pair when they
+        # share a quantized input; bit-identical to the separate calls.
+        self.join_projections = options.get("inkling_join_attention_projections", False)
+        # "triton": decode batches project the unquantized relative positions
+        # with a tiled kernel instead of the single-CTA rocBLAS GEMM. The
+        # accumulation order differs from rocBLAS in the last FP32 bits.
+        self.rel_kernel = options.get("inkling_rel_proj_kernel", "rocblas")
+        # The relative-position and sink projections only read `x_q`; on a
+        # side stream they execute beside the query/gate and k/v projections
+        # with the same kernels and results.
+        self._side_stream = (
+            side_stream(0)
+            if options.get("inkling_parallel_projections", False)
+            else None
+        )
+        if self.rel_kernel not in ("rocblas", "triton"):
+            raise ValueError(f"inkling_rel_proj_kernel={self.rel_kernel!r}")
+        self.mi100_tiles = options.get("inkling_mi100_attention_tiles", False)
+        self.prefill_splits = options.get("inkling_prefill_kv_splits", 0)
         self.fused_prefill = options.get("inkling_fused_prefill_epilogue", False)
         self.share_input = options.get("inkling_share_attention_input", False) and all(
             isinstance(projection.quant_method, HY4Linear)
@@ -192,6 +215,12 @@ class Inkling2Attention(nn.Module):
             reduce_results=False,
             quant_config=quant_config,
             prefix=f"{prefix}.wo_ud",
+        )
+        self.quantize_output = (
+            options.get("inkling_attention_quant_output", False)
+            and not self.fused_prefill
+            and self.head_dim == 128
+            and isinstance(self.wo_ud.quant_method, HY4Linear)
         )
         self.rel_logits_proj = nn.Parameter(
             torch.empty(self.d_rel, self.rel_extent), requires_grad=False
@@ -238,27 +267,56 @@ class Inkling2Attention(nn.Module):
     def process_weights_after_loading(self) -> None:
         self.rel_proj_shifted = shift_rel_proj(self.rel_logits_proj, self.is_local)
 
+    def _rel_projection(self, x_q):
+        """Relative-position projection; rocBLAS keeps the larger batches."""
+        weight = self.wr_du.weight
+        if (
+            self.rel_kernel == "triton"
+            and weight.dtype == torch.float16
+            and len(x_q) <= DECODE_TOKENS
+            and weight.shape[1] % 64 == 0
+        ):
+            return fp16_gemm(x_q, weight)
+        return self.wr_du(x_q)[0]
+
     def _project(self, x_q, x_k, x_v):
         q_input = G128ProjectionInput.from_rows(x_q) if self.share_input else x_q
+        joined = self.join_projections and self.share_input
+        side = self._side_stream if not self.merge_rel_sink else None
+        if side is not None:
+            main = torch.cuda.current_stream()
+            side.wait_stream(main)
+            with torch.cuda.stream(side):
+                rel, sink = self._rel_projection(x_q), self.attn_sink_proj(x_q)[0]
         if self.merge_query:
             q, gate = self.query_gate(q_input)[0].chunk(2, dim=-1)
+        elif joined:
+            q, gate = self.wq_du.quant_method.apply_joined(
+                [self.wq_du, self.gate_attn], q_input
+            )
         else:
             q = self.wq_du(q_input)[0]
             gate = self.gate_attn(q_input)[0]
+        timeline_mark("a_qg")
         if self.merge_rel_sink:
             rel, sink = self.rel_sink(x_q)[0].split(
                 (self.num_heads * self.d_rel, self.num_heads), dim=-1
             )
+        elif side is None:
+            rel, sink = self._rel_projection(x_q), self.attn_sink_proj(x_q)[0]
+        k_input = q_input if x_k is x_q else x_k
+        v_input = q_input if x_v is x_q else x_v
+        if joined and k_input is v_input:
+            k, v = self.wk_dv.quant_method.apply_joined(
+                [self.wk_dv, self.wv_dv], k_input
+            )
         else:
-            rel, sink = self.wr_du(x_q)[0], self.attn_sink_proj(x_q)[0]
-        return (
-            q,
-            rel,
-            gate,
-            sink,
-            self.wk_dv(q_input if x_k is x_q else x_k)[0],
-            self.wv_dv(q_input if x_v is x_q else x_v)[0],
-        )
+            k = self.wk_dv(k_input)[0]
+            v = self.wv_dv(v_input)[0]
+        timeline_mark("a_kv")
+        if side is not None:
+            torch.cuda.current_stream().wait_stream(side)
+        return q, rel, gate, sink, k, v
 
     def _split_kv_cache(self, cache):
         key, value = cache.transpose(1, 2).chunk(2, dim=-1)
@@ -284,7 +342,15 @@ class Inkling2Attention(nn.Module):
             x_k = x_v = x_q
         assert x_k is not None and x_v is not None
         q, r, gate, sinks, k, v = self._project(x_q, x_k, x_v)
-        output = torch.empty(gate.shape, dtype=q.dtype, device=q.device)
+        timeline_mark("proj")
+        quant_output = self.quantize_output and q.dtype == torch.float16
+        output = gate.new_empty(
+            gate.shape, dtype=torch.int8 if quant_output else q.dtype
+        )
+        scales = sums = None
+        if quant_output:
+            scales = q.new_empty((len(q), self.num_heads), dtype=torch.float32)
+            sums = torch.empty_like(scales, dtype=torch.int32)
         self._attention(
             positions,
             q,
@@ -298,8 +364,18 @@ class Inkling2Attention(nn.Module):
             tau,
             output,
             pass_idx,
+            scales,
+            sums,
         )
-        return self.wo_ud(output)[0]
+        timeline_mark("attnk")
+        projection_input = (
+            G128ProjectionInput(output, scales, sums, q.dtype)
+            if quant_output
+            else output
+        )
+        output = self.wo_ud(projection_input)[0]
+        timeline_mark("wo")
+        return output
 
     @eager_break_during_capture
     def _attention(
@@ -316,6 +392,8 @@ class Inkling2Attention(nn.Module):
         tau: torch.Tensor | None,
         output: torch.Tensor,
         pass_idx: int,
+        output_scales=None,
+        output_sums=None,
     ) -> None:
         """Write the gated attention output to `output`.
 
@@ -329,6 +407,9 @@ class Inkling2Attention(nn.Module):
         owner = self.conv_states[pass_idx]
         if not isinstance(attn_metadata, dict) or cache.kv_cache.numel() == 0:
             output.zero_()
+            if output_scales is not None:
+                output_scales.fill_(1e-30)
+                output_sums.zero_()
             return
         md = cast(RocmAttentionMetadata, attn_metadata[cache.prefix])
         conv_md = conv_metadata(owner)
@@ -371,6 +452,7 @@ class Inkling2Attention(nn.Module):
             rel_threshold=self.rel_clip,
             norm_eps=self.eps,
         )
+        timeline_mark("prol")
         # Decode and verify batches split the keys; the split count follows
         # the batch alone, so it holds for every replay of a CUDA graph.
         num_splits = plan_decode_attention(
@@ -398,6 +480,10 @@ class Inkling2Attention(nn.Module):
                 softmax_scale=self.scaling,
                 is_local=self.is_local,
                 num_splits=num_splits,
+                skip_past_bias=self.skip_past_bias,
+                mi100_tiles=self.mi100_tiles,
+                output_scales=output_scales,
+                output_sums=output_sums,
             )
             return
         gated_rel_attention(
@@ -416,4 +502,9 @@ class Inkling2Attention(nn.Module):
             softmax_scale=self.scaling,
             window=self.window,
             fused_epilogue=self.fused_prefill,
+            output_scales=output_scales,
+            output_sums=output_sums,
+            num_splits=self.prefill_splits if self.window < 0 else 0,
+            skip_past_bias=self.skip_past_bias,
+            mi100_tiles=self.mi100_tiles,
         )

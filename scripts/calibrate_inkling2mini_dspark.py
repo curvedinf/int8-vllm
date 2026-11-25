@@ -72,6 +72,15 @@ def main():
     parser.add_argument("--validation", type=int, default=8)
     parser.add_argument("--context", type=int, default=2048)
     parser.add_argument("--output-tokens", type=int, default=80)
+    parser.add_argument(
+        "--additional-config",
+        default="{}",
+        help=(
+            "Serving additional-config overlay, so the capture runs under the "
+            "deployed numerics"
+        ),
+    )
+    parser.add_argument("--expert-rank-counts", type=int, nargs="+")
     args = parser.parse_args()
     # Dispatch the capture functions directly from the local driver to its TP
     # workers. No callable needs to traverse the engine's frontend socket.
@@ -101,7 +110,15 @@ def main():
         dtype="float16",
         tokenizer_mode="inkling",
         limit_mm_per_prompt={"image": 0},
-        additional_config={"inkling2_rank_cache": False},
+        additional_config={
+            "inkling2_rank_cache": False,
+            **json.loads(args.additional_config),
+        },
+        **(
+            {"expert_rank_counts": args.expert_rank_counts}
+            if args.expert_rank_counts
+            else {}
+        ),
     )
     llm.collective_rpc(enable_capture, args=(args.output.resolve(),))
     for i in range(count):

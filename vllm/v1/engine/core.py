@@ -43,13 +43,14 @@ from vllm.outputs import RequestError
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
-from vllm.utils import numa_utils
+from vllm.utils import numa_utils, profile_window
 from vllm.utils.gc_utils import (
     freeze_gc_heap,
     maybe_attach_gc_debug_callback,
 )
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.network_utils import make_zmq_socket
+from vllm.utils.phase_trace import PhaseTrace
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.utils.torch_utils import release_host_cache
 from vllm.utils.watch_dog import get_watch_dog, start_watch_dog
@@ -111,7 +112,26 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import compute_iteration_details
 from vllm.version import __version__ as VLLM_VERSION
 
+
+def _engine_trace(mark: str) -> None:
+    """VLLM_RPCTRACE_FILE=<path>: per-iteration engine timestamps."""
+    import os as _os
+    import time as _time
+    path = _os.environ.get("VLLM_RPCTRACE_FILE")
+    if not path:
+        return
+    try:
+        with open(f"{path}.engine.{_os.getpid()}", "a") as f:
+            f.write(f"{mark} {_time.monotonic():.6f}\n")
+    except OSError:
+        pass
+
+
 logger = init_logger(__name__)
+
+
+def _steptrace_every() -> int:
+    return int(os.environ.get("VLLM_STEPTRACE_EVERY", "50"))
 
 # Interval between CUDA caching-host-allocator releases in the EngineCore
 # busy loop (see run_busy_loop).
@@ -242,6 +262,9 @@ class EngineCore:
         self.aborts_queue = queue.Queue[list[str]]()
 
         self._idle_state_callbacks: list[Callable] = []
+
+        # The workers are bound now; keep this process off their cores.
+        numa_utils.apply_cpu_affinity("VLLM_ENGINE_CORE_CPUS", "EngineCore")
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
@@ -747,7 +770,7 @@ class EngineCore:
             _t3 = _time.perf_counter()
             _st_box["out"] += _t3 - _t2
             _st_box["n"] += 1
-            if _st_box["n"] % 50 == 0:
+            if _st_box["n"] % _steptrace_every() == 0:
                 n = _st_box["n"]
                 print(f"[steptrace] n={n} | sched {1000*_st_box['sched']/n:7.2f}ms "
                       f"| exec {1000*_st_box['exec']/n:7.2f}ms "
@@ -785,6 +808,14 @@ class EngineCore:
         """
         batch_queue = self.batch_queue
         assert batch_queue is not None
+        _engine_trace(f"iter-start q{len(batch_queue)}")
+        _pt = self.__dict__.get("_engout_trace")
+        if _pt is None:
+            _pt = self.__dict__["_engout_trace"] = PhaseTrace("engout")
+        _pt_on = _pt.enabled
+        _pt_t = time.perf_counter() if _pt_on else 0.0
+        # VLLM_CP_PROFILE=<dir>: cProfile schedule() and update_from_output().
+        _pr = profile_window.step("engine") if profile_window.ENABLED else None
 
         # Try to schedule a new batch if the batch queue is not full, but
         # the scheduler may return an empty batch if all requests are scheduled.
@@ -803,7 +834,16 @@ class EngineCore:
         _t0 = _time.perf_counter() if _st_box is not None else 0.0
         _t1 = _t0
         if self.scheduler.has_requests():
-            scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+            if _pr is None:
+                scheduler_output = self.scheduler.schedule(
+                    self._should_throttle_prefills()
+                )
+            else:
+                with _pr:
+                    scheduler_output = self.scheduler.schedule(
+                        self._should_throttle_prefills()
+                    )
+            _engine_trace("scheduled")
             if _st_box is not None:
                 _t1 = _time.perf_counter()
                 _st_box["sched"] += _t1 - _t0
@@ -845,6 +885,10 @@ class EngineCore:
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
                 )
+            if _pt_on:
+                _pt_now = time.perf_counter()
+                _pt.add("send_exec", _pt_now - _pt_t)
+                _pt_t = _pt_now
             if not self.is_mm_encoder_only:
                 model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
@@ -861,6 +905,10 @@ class EngineCore:
                     future = self.model_executor.sample_tokens(
                         grammar_output, non_block=True
                     )
+                    if _pt_on:
+                        _pt_now = time.perf_counter()
+                        _pt.add("send_sample", _pt_now - _pt_t)
+                        _pt_t = _pt_now
                 else:
                     # We need to defer sampling until we have processed the model output
                     # from the prior step.
@@ -884,11 +932,13 @@ class EngineCore:
 
         # Block until the next result is available.
         future, scheduler_output, exec_model_fut = batch_queue.pop()
+        _engine_trace("pop-wait")
         with (
             self.capture_iteration_details(scheduler_output) as iteration_details,
             self.log_error_detail(scheduler_output),
         ):
             model_output = future.result()
+            _engine_trace("output-ready")
             if model_output is None:
                 # None from sample_tokens() implies that the original execute_model()
                 # call failed - raise that exception.
@@ -901,14 +951,25 @@ class EngineCore:
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, model_output
-        )
+        if _pt_on:
+            _pt_t = time.perf_counter()
+        if _pr is None:
+            engine_core_outputs = self.scheduler.update_from_output(
+                scheduler_output, model_output
+            )
+        else:
+            with _pr:
+                engine_core_outputs = self.scheduler.update_from_output(
+                    scheduler_output, model_output
+                )
+        _engine_trace("updated")
+        if _pt_on:
+            _pt.add("update", time.perf_counter() - _pt_t)
         if _st_box is not None:
             _t3 = _time.perf_counter()
             _st_box["out"] += _t3 - _t2
             _st_box["n"] += 1
-            if _st_box["n"] % 50 == 0:
+            if _st_box["n"] % _steptrace_every() == 0:
                 n = _st_box["n"]
                 print(f"[steptrace-bq] n={n} | sched {1000*_st_box['sched']/n:7.2f}ms "
                       f"| send {1000*_st_box.get('send', 0.0)/n:7.2f}ms "
@@ -943,6 +1004,7 @@ class EngineCore:
             future = self.model_executor.sample_tokens(grammar_output, non_block=True)
             batch_queue.appendleft((future, deferred_scheduler_output, exec_future))
 
+        _pt.tick()
         return engine_core_outputs, model_executed
 
     def _process_aborts_queue(self):
@@ -1683,6 +1745,8 @@ class EngineCoreProc(EngineCore):
                 # the original DP rank.
                 parallel_config.reconfigure_for_independent_dp_rank()
                 engine_core = EngineCoreProc(*args, engine_index=dp_rank, **kwargs)
+                # The workers are bound; keep the engine core off their cores.
+                numa_utils.apply_cpu_affinity("VLLM_ENGINE_CORE_CPUS", "EngineCore")
 
             assert engine_core is not None
 

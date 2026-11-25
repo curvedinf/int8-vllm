@@ -7,6 +7,9 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
+from vllm.models.inkling2.amd.ops.timeline import ENABLED as _GRAPH_TIMELINE
+from vllm.models.inkling2.amd.ops.timeline import TimelineSink, set_sink
+from vllm.models.inkling2.amd.ops.timeline import mark as timeline_mark
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
 
@@ -34,6 +37,16 @@ class Inkling2DSparkSpeculator(DSparkSpeculator):
         self.f_rnn = torch.zeros(
             self.max_num_reqs, config.hidden_size, dtype=self.dtype, device=device
         )
+        self.timeline_sink = TimelineSink() if _GRAPH_TIMELINE else None
+
+    def _run_model(self, *args, **kwargs) -> torch.Tensor:
+        set_sink(self.timeline_sink)
+        if self.timeline_sink is not None:
+            self.timeline_sink.begin()
+            timeline_mark("draft_start")
+        hidden = super()._run_model(*args, **kwargs)
+        timeline_mark("draft_backbone")
+        return hidden
 
     def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
         # Draft base logits come from a bf16 GEMM, unlike the target's fp32 head.
@@ -63,15 +76,21 @@ class Inkling2DSparkSpeculator(DSparkSpeculator):
         hidden = head_hidden[self.sample_indices[:num_sample]]
         base_logits = self.model.compute_base_logits(hidden).view(num_reqs, n_spec, -1)
         context = self.model.model.markov_head.context(hidden, self.f_rnn[:num_reqs])
+        timeline_mark("draft_base_logits")
         idx_map = self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
         sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)
         state = hidden.new_zeros(num_reqs, self.model.config.markov_rank)
         prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
+        timeline_mark("draft_context")
         for i in range(n_spec):
             state, bias = self.model.markov_step(state, prev, context[i])
+            timeline_mark("markov_step")
             if self.draft_logits is None:
                 prev = self.model.markov_argmax(base_logits[:, i], bias)
             else:
                 logits = self.model.markov_logits(base_logits[:, i], bias)
                 prev = self._sample_logits(logits, idx_map[:, i], sample_pos[:, i], i)
             self.draft_tokens[:num_reqs, i] = prev
+            timeline_mark("markov_argmax")
+        if self.timeline_sink is not None:
+            self.timeline_sink.finish()

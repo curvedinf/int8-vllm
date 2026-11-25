@@ -299,6 +299,7 @@ def FusedMoEFactory(
         enable_eplb=eplb_state is not None,
         num_fused_shared_experts=num_fused_shared_experts,
         rocm_aiter_enabled=rocm_aiter_ops.is_fused_moe_enabled() and is_act_and_mul,
+        expert_rank_counts=vllm_config.parallel_config.expert_rank_counts,
     )
 
     # TODO(bnell): we should not have to create a router if the kernel is

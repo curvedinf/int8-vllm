@@ -367,11 +367,22 @@ def main():
     if options.corpus:
         collect_splits(model, options)
     destination = options.output
-    options.output = Path(mkdtemp(prefix=".inkling2-pieces-", dir=destination.parent))
+    pieces = os.environ.get("INKLING_PTQR_PIECES_DIR")
+    if pieces:
+        # Keep the per-group pieces for a later vision assembly.
+        options.output = Path(pieces)
+        if options.output.exists() and any(options.output.iterdir()):
+            parser.error("Use an empty INKLING_PTQR_PIECES_DIR")
+        options.output.mkdir(parents=True, exist_ok=True)
+    else:
+        options.output = Path(
+            mkdtemp(prefix=".inkling2-pieces-", dir=destination.parent)
+        )
     print(f"Writing GPU-exported pieces to {options.output}", flush=True)
     train_loaded(model, raw, options)
     assemble(options.output, destination)
-    shutil.rmtree(options.output)
+    if not pieces:
+        shutil.rmtree(options.output)
 
 
 def train_loaded(model, raw, options):

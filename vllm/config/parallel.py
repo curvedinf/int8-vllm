@@ -217,6 +217,16 @@ class ParallelConfig:
       with 4 experts and 2 ranks, rank 0 will have experts [0, 2] and rank 1
       will have experts [1, 3]. This strategy can help improve load balancing
       for grouped expert models with no redundant experts."""
+    expert_rank_counts: list[int] | None = None
+    """Expert counts per expert-parallel rank, overriding the even split.
+
+    One positive count per EP rank in rank order, summing to the model's expert
+    count; each rank then owns one contiguous range of experts. Use it when a
+    rank's device is slower (for example power-throttled) so the others carry
+    more of the expert work inside the time they would otherwise wait at the
+    all-reduce. Requires the "linear" placement strategy and excludes EPLB.
+    Expert outputs are summed in a different grouping, so results can differ
+    at the rounding level from the even split."""
     all2all_backend: All2AllBackend = "allgather_reducescatter"
     """All2All backend for MoE expert parallel communication. Available options:
 
@@ -1185,6 +1195,24 @@ class ParallelConfig:
                 "dbo_decode_token_threshold and dbo_prefill_token_threshold must "
                 f"be at least the number of microbatches ({self.num_ubatches})."
             )
+
+        if self.expert_rank_counts is not None:
+            counts = self.expert_rank_counts
+            if any(not isinstance(c, int) or c <= 0 for c in counts):
+                raise ValueError(
+                    "expert_rank_counts must contain positive integers, got "
+                    f"{counts}."
+                )
+            if self.expert_placement_strategy != "linear":
+                raise ValueError(
+                    "expert_rank_counts requires the linear expert placement "
+                    "strategy."
+                )
+            if self.enable_eplb:
+                raise ValueError(
+                    "expert_rank_counts fixes expert ownership and cannot be "
+                    "combined with EPLB."
+                )
 
         return self
 

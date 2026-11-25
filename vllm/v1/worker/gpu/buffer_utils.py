@@ -297,7 +297,10 @@ class FusedStagedWriter:
         indices_uva = self.indices.copy_to_uva(indices)
         starts_uva = self.starts.copy_to_uva(starts)
         cu_lens_uva = self.cu_lens.copy_to_uva(cu_lens)
-        contents_gpu = async_tensor_h2d(contents, device=self.device, dtype=torch.int32)
+        # A numpy array skips torch.tensor's per-element Python path.
+        contents_gpu = async_tensor_h2d(
+            np.asarray(contents, dtype=np.int32), device=self.device, dtype=torch.int32
+        )
 
         _apply_write_kernel[(len(group_ids), _num_write_chunks(max_len))](
             output_ptrs,

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
@@ -18,6 +19,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
+from vllm.utils.phase_trace import PhaseTrace
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
@@ -458,6 +460,9 @@ def build_slot_mappings_by_layer(
     return slot_mappings_by_layer
 
 
+_META_TRACE: PhaseTrace | None = None
+
+
 def build_attn_metadata(
     attn_groups: list[list[AttentionGroup]],
     num_reqs: int,
@@ -484,6 +489,12 @@ def build_attn_metadata(
     fast_prefill: FastPrefillBatchMetadata | None = None,
     req_idx: np.ndarray | None = None,
 ) -> dict[str, Any]:
+    global _META_TRACE
+    if _META_TRACE is None:
+        _META_TRACE = PhaseTrace("attmeta")
+    _pt = _META_TRACE
+    _pt_on = _pt.enabled
+    _pt_t = time.perf_counter() if _pt_on else 0.0
     seq_lens = seq_lens[:num_reqs]
     if dcp_local_seq_lens is not None:
         dcp_local_seq_lens = dcp_local_seq_lens[:num_reqs]
@@ -549,6 +560,10 @@ def build_attn_metadata(
             _token_to_req_indices_cache=token_to_req_indices,
             **common_attn_metadata_extra_kwargs,
         )
+        if _pt_on:
+            _pt_now = time.perf_counter()
+            _pt.add("common", _pt_now - _pt_t)
+            _pt_t = _pt_now
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(ubatch_idx)
@@ -581,5 +596,10 @@ def build_attn_metadata(
                 cached_metadata[reuse_key] = metadata
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
+            if _pt_on:
+                _pt_now = time.perf_counter()
+                _pt.add(f"g{i}.{type(attn_metadata_builder).__name__}", _pt_now - _pt_t)
+                _pt_t = _pt_now
         token_to_req_indices = common_attn_metadata._token_to_req_indices_cache
+    _pt.tick()
     return attn_metadata

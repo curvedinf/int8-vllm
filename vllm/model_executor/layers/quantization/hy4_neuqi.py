@@ -182,8 +182,18 @@ class HY4Linear(LinearMethodBase):
         self.packet = bool(options.get("hy4_packet_gemm", True))
         self.direct_fp16 = bool(options.get("hy4_direct_fp16_output", False))
         self.fly = bool(options.get("hy4_flydsl_gemm", False))
+        self.mid_tiles = bool(options.get("inkling_dense_mid_tiles", False))
+        # (BM, BN, warps) for narrow batches and very wide outputs (the LM head);
+        # the launch rules otherwise pick (16, 32, 2) there.
+        self.wide_tiles = options.get("hy4_wide_head_tiles")
+        if self.wide_tiles is not None and (
+            len(self.wide_tiles) != 3
+            or any(not isinstance(v, int) for v in self.wide_tiles)
+        ):
+            raise ValueError(f"hy4_wide_head_tiles={self.wide_tiles!r}")
         self.fly_splits = {}
         self.fly_swiglu_rows = ()
+        self._joined = {}
         self.dfly_pair_norm = bits == 8 and bool(
             options.get("hy4_flydsl_dfly_norm", False)
         )
@@ -324,14 +334,10 @@ class HY4Linear(LinearMethodBase):
         )
         return weight[:, : -self.padding] if self.padding else weight
 
-    def apply(self, layer, x, bias=None):
+    def _launch(self, weight, scale, zero, q, s, sums, m, n, k, x, bias):
+        """One GEMM launch; `n` selects the launch rules (see apply_joined)."""
         from aiter.ops.gemm_packed_native import affine_g128
 
-        if self.padding and not isinstance(x, G128ProjectionInput):
-            x = torch.nn.functional.pad(x, (0, self.padding))
-        q, s, sums = _activation(x, self.bits)
-        m, k = q.shape
-        n = layer.weight.shape[0]
         dot8 = self.tune and self.bits == 4 and m == 1 and n >= 512
         split = _dense_split(m, n, k) if self.tune and not dot8 else 1
         tiles = None
@@ -339,9 +345,12 @@ class HY4Linear(LinearMethodBase):
             if m <= 16:
                 tiles = (16, 64 if n <= 1024 else 128, 4)
             elif m <= 128 and n >= 2048:
-                tiles = (16, 32, 2)
+                tiles = tuple(self.wide_tiles or (16, 32, 2))
             elif m <= 512:
                 tiles = (32, 64 if n <= 1536 else 128, 4)
+            elif self.mid_tiles and self.bits == 4 and n <= 768:
+                # Narrow W4 outputs at mid rows: short tiles fill the compute units.
+                tiles = (16, 32, 2) if n <= 256 and m <= 1024 else (32, 64, 4)
             else:
                 tiles = (64, 32, 2) if n <= 768 else (64, 128, 4)
             split = (
@@ -353,13 +362,7 @@ class HY4Linear(LinearMethodBase):
         fly_split = self.fly_splits.get(m, 0)
         if fly_split:
             out = torch.ops.aiter.gfx908_g128_overlap(
-                q,
-                s,
-                sums,
-                layer.weight,
-                layer.weight_scale,
-                getattr(layer, "weight_zero", None),
-                fly_split,
+                q, s, sums, weight, scale, zero, fly_split
             )
         else:
             # Unsplit packet GEMMs can round the accumulator at the store.
@@ -375,9 +378,9 @@ class HY4Linear(LinearMethodBase):
                 q,
                 s,
                 sums,
-                layer.weight,
-                layer.weight_scale,
-                getattr(layer, "weight_zero", None),
+                weight,
+                scale,
+                zero,
                 split=split,
                 dot8=dot8,
                 wave_format=self.wave,
@@ -387,7 +390,77 @@ class HY4Linear(LinearMethodBase):
             )
         if bias is not None:
             out += bias
-        return out.to(x.dtype).view(*x.shape[:-1], layer.weight.shape[0])
+        return out
+
+    def apply(self, layer, x, bias=None):
+        if self.padding and not isinstance(x, G128ProjectionInput):
+            x = torch.nn.functional.pad(x, (0, self.padding))
+        q, s, sums = _activation(x, self.bits)
+        m, k = q.shape
+        n = layer.weight.shape[0]
+        out = self._launch(
+            layer.weight,
+            layer.weight_scale,
+            getattr(layer, "weight_zero", None),
+            q,
+            s,
+            sums,
+            m,
+            n,
+            k,
+            x,
+            bias,
+        )
+        return out.to(x.dtype).view(*x.shape[:-1], n)
+
+    def apply_joined(self, layers, x):
+        """Outputs of column-parallel `layers` that share this quantized input.
+
+        Equal-shaped parts launch as one GEMM on their concatenated weights.
+        The launch rules stay those of a part, so every output column
+        accumulates exactly as it would in separate calls; shapes that select
+        a per-part kernel (single-row dot product, FlyDSL split) keep the
+        separate calls.
+        """
+        if self.padding and not isinstance(x, G128ProjectionInput):
+            x = torch.nn.functional.pad(x, (0, self.padding))
+        q, s, sums = _activation(x, self.bits)
+        m, k = q.shape
+        n = layers[0].weight.shape[0]
+        separate = (
+            (self.tune and self.bits == 4 and m == 1 and n >= 512)
+            or self.fly_splits.get(m, 0)
+            or not (self.packet and self.wave)
+        )
+        if separate:
+            return [
+                self._launch(
+                    layer.weight,
+                    layer.weight_scale,
+                    getattr(layer, "weight_zero", None),
+                    q,
+                    s,
+                    sums,
+                    m,
+                    n,
+                    k,
+                    x,
+                    None,
+                ).to(x.dtype)
+                for layer in layers
+            ]
+        key = tuple(id(layer) for layer in layers)
+        parts = self._joined.get(key)
+        if parts is None:
+            zeros = [getattr(layer, "weight_zero", None) for layer in layers]
+            parts = (
+                torch.cat([layer.weight for layer in layers], 0),
+                torch.cat([layer.weight_scale for layer in layers], 0),
+                None if zeros[0] is None else torch.cat(zeros, 0),
+            )
+            self._joined[key] = parts
+        out = self._launch(*parts, q, s, sums, m, n, k, x, None).to(x.dtype)
+        return list(out.chunk(len(layers), dim=-1))
 
 
 class HY4Experts(FusedMoEMethodBase):

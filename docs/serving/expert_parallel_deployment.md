@@ -46,6 +46,29 @@ Where:
 - `DP_SIZE`: Data parallel size
 - `EP_SIZE`: Expert parallel size (computed automatically)
 
+### Uneven expert ownership
+
+By default every EP rank owns the same number of experts (any remainder goes
+to the lowest ranks). When one rank's device is slower than the others, for
+example a card that is power-throttled, the faster ranks spend that gap
+waiting at every all-reduce. `--expert-rank-counts` moves expert work toward
+the faster ranks by giving one expert count per EP rank in rank order:
+
+```bash
+--expert-rank-counts 36 36 20 36
+```
+
+The counts must be positive and sum to the model's expert count; each rank
+then owns one contiguous range of experts, so kernels, remote-row masking and
+weight loading keep their shape and only the grouping of the expert sum
+changes (outputs can differ from the even split at the rounding level). The
+option requires the `linear` placement strategy and excludes EPLB, which
+re-places experts dynamically. Models that place experts through
+`determine_expert_map` or `expert_range` honor it; the Inkling 2 Mini expert
+layer does. Measure the split on the target hardware: the slow rank's expert
+share bounds the gain, and a hot-expert distribution that shifts toward the
+smaller range can erase it.
+
 ### Layer Behavior with EP Enabled
 
 When EP is enabled, different layers in MoE models behave differently:

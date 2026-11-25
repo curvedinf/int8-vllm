@@ -8503,6 +8503,35 @@ def test_short_prefill_cohort_page_and_speculative_horizon(
     assert Scheduler._short_prefill_cohort_eligible(policy, request) is expected
 
 
+def test_new_arrivals_share_prefill_budget_after_initial_requests():
+    from vllm.v1.core.sched.request_queue import FCFSRequestQueue
+
+    decoder, original, later = create_requests(num_requests=3, num_tokens=64)
+    policy = SimpleNamespace(
+        mixed_prefill_tokens=16,
+        mixed_prefill_new_arrivals_only=True,
+        _mixed_decode_since=None,
+        running=[decoder],
+        waiting=FCFSRequestQueue([original]),
+        kv_holding_waiting=FCFSRequestQueue(),
+    )
+    assert Scheduler._mixed_prefill_limit(policy) == 0
+    decoder.num_computed_tokens = decoder.num_prompt_tokens
+    # A queued request from the initial burst still uses the full step.
+    assert Scheduler._mixed_prefill_limit(policy) == 0
+    policy.running.append(policy.waiting.pop_request())
+    later.arrival_time = policy._mixed_decode_since + 1
+    policy.waiting.add_request(later)
+    # The initial request still has another chunk to prefill.
+    assert Scheduler._mixed_prefill_limit(policy) == 0
+    original.num_computed_tokens = original.num_prompt_tokens
+    assert Scheduler._mixed_prefill_limit(policy) == 16
+    # With no decoder left, a fresh burst starts again at the bulk rate.
+    policy.running.clear()
+    assert Scheduler._mixed_prefill_limit(policy) == 0
+    assert policy._mixed_decode_since is None
+
+
 class _RecordingGrammar:
     """Records what reaches ``validate_tokens`` and raises on a negative id.
 

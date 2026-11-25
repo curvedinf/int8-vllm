@@ -18,6 +18,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.common.cli_args import init_parser_plugin
 from vllm.logger import configure_logging_from_args, init_logger
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils.numa_utils import apply_cpu_affinity
 from vllm.utils.system_utils import decorate_logs
 
 from ..app import build_app
@@ -105,6 +106,9 @@ async def build_async_engine_client_from_engine_args(
         # Don't keep the dummy data in memory
         assert async_llm is not None
         await async_llm.reset_mm_cache()
+        # The workers are bound now; keep tokenization and request handling
+        # off their cores.
+        apply_cpu_affinity("VLLM_API_SERVER_CPUS", "API server")
 
         yield async_llm
     finally:

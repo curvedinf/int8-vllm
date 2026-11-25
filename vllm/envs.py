@@ -169,6 +169,7 @@ if TYPE_CHECKING:
     # median (0.0966 -> 0.0153) and lifted greedy agreement 24 -> 38/52 vs
     # the aiter trunc path. "aiter" retains the legacy trunc kernel.
     VLLM_GFX908_ACT_QUANT: str = "round"
+    VLLM_SWA_RESTAGE_PREFIX: str = "0"
     # Routed-expert dtype: 1 (default) = GPTQ int8-group experts on the AITER
     # grouped a8w8-blockscale kernel (true W8A8). 0 = legacy WNA16 experts
     # (diagnostic only; not a production configuration).
@@ -982,6 +983,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_WORKER_MULTIPROC_METHOD": env_with_choices(
         "VLLM_WORKER_MULTIPROC_METHOD", "fork", ["spawn", "fork"]
     ),
+    # numactl-style CPU lists for the API server and the EngineCore once the
+    # workers are bound (vllm.utils.numa_utils.apply_cpu_affinity).
+    "VLLM_API_SERVER_CPUS": lambda: os.getenv("VLLM_API_SERVER_CPUS", ""),
+    "VLLM_ENGINE_CORE_CPUS": lambda: os.getenv("VLLM_ENGINE_CORE_CPUS", ""),
     # Path to the cache for storing downloaded assets
     "VLLM_ASSETS_CACHE": lambda: os.path.expanduser(
         os.getenv(
@@ -1452,6 +1457,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_GFX908_FUSED_NORM_QUANT", "False").lower() in ("true", "1")
     ),
     "VLLM_GFX908_ACT_QUANT": lambda: os.getenv("VLLM_GFX908_ACT_QUANT", "round"),
+    "VLLM_SWA_RESTAGE_PREFIX": lambda: os.getenv("VLLM_SWA_RESTAGE_PREFIX", "0"),
     "VLLM_GFX908_MOE_A8W8": lambda: os.getenv("VLLM_GFX908_MOE_A8W8", "1") == "1",
     # This switch changes the traced GDN graph. Include it in compile/AOT
     # cache factors so a rollback cannot silently reuse the optimized graph.

@@ -4,7 +4,12 @@
 
 import torch
 
-from vllm.distributed import tensor_model_parallel_all_gather
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.triton_utils import tl, tldevice, triton
 
 
@@ -187,17 +192,19 @@ def silu_and_mul(x: torch.Tensor) -> torch.Tensor:
 
 
 @triton.jit
+def _softcapped_sum(a, b, softcap):
+    x = (a + b).to(tl.bfloat16)
+    return (tldevice.tanh(x / softcap) * softcap).to(tl.bfloat16)
+
+
+@triton.jit
 def _add_softcap_kernel(A, B, OUT, stride_a, stride_b, softcap, N, BLOCK: tl.constexpr):
     row = tl.program_id(1).to(tl.int64)
     cols = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mask = cols < N
     a = tl.load(A + row * stride_a + cols, mask, other=0).to(tl.float32)
     b = tl.load(B + row * stride_b + cols, mask, other=0).to(tl.float32)
-    x = (a + b).to(tl.bfloat16)
-    x = x / softcap
-    x = tldevice.tanh(x)
-    x = x * softcap
-    tl.store(OUT + row * N + cols, x.to(tl.bfloat16), mask)
+    tl.store(OUT + row * N + cols, _softcapped_sum(a, b, softcap), mask)
 
 
 def add_softcap(a: torch.Tensor, b: torch.Tensor, softcap: float) -> torch.Tensor:
@@ -255,13 +262,145 @@ def markov_gate(
     return out, latent
 
 
+@triton.jit
+def _vocab_tile_winners(
+    BASE,
+    BIAS,
+    WINNERS,
+    stride_base,
+    stride_bias,
+    softcap,
+    WIDTH: tl.constexpr,
+    VALID: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    tile, row = tl.program_id(0), tl.program_id(1)
+    col = tile * BLOCK + tl.arange(0, BLOCK)
+    active = col < VALID
+    a = tl.load(BASE + row * stride_base + col, active, 0).to(tl.float32)
+    b = tl.load(BIAS + row * stride_bias + col, active, 0).to(tl.float32)
+    score = _softcapped_sum(a, b, softcap)
+    bits = score.to(tl.uint16, bitcast=True).to(tl.uint32)
+    # Unsigned order of bf16 values, with both signed zeros tied.
+    key = tl.where((bits & 0x8000) != 0, 0xFFFF - bits, bits ^ 0x8000)
+    key = tl.where(score == 0, 0x8000, key)
+    key = tl.where(active & (score == score), key, 0x007F)  # -inf
+    pair = (key << 16) | (0xFFFF - tl.minimum(col, 0xFFFF)).to(tl.uint32)
+    tl.store(WINNERS + row * tl.cdiv(WIDTH, BLOCK) + tile, tl.max(pair, 0))
+
+
+@triton.jit
+def _first_vocab_winner(
+    WINNERS,
+    TOKENS,
+    PER_RANK: tl.constexpr,
+    COUNT: tl.constexpr,
+    WIDTH: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    col = tl.arange(0, BLOCK)
+    pair = tl.load(WINNERS + row * COUNT + col, col < COUNT, 0).to(tl.uint32)
+    token = (col // PER_RANK) * WIDTH + (0xFFFF - (pair & 0xFFFF))
+    key = ((pair >> 16).to(tl.uint64) << 32) | (0xFFFFFFFF - token).to(tl.uint32).to(
+        tl.uint64
+    )
+    winner = tl.max(tl.where(col < COUNT, key, 0), 0)
+    tl.store(TOKENS + row, 0xFFFFFFFF - (winner & 0xFFFFFFFF))
+
+
+_zero_padded: dict[tuple, torch.Tensor] = {}
+
+
+def _exchange_codes(local: torch.Tensor, world: int, rank: int) -> torch.Tensor:
+    """Rank-ordered winner table through an all-reduce of zero-padded slots.
+
+    Each code travels as its two int16 halves, converted to integer-valued
+    FP32, in this rank's slot of a zero-filled buffer; the other slots stay
+    zero, so the sum returns every rank's table exactly. The buffer is cloned
+    so the sum never writes back into it.
+    """
+    halves = local.view(torch.int16)
+    key = (tuple(halves.shape), halves.device)
+    pad = _zero_padded.get(key)
+    if pad is None:
+        pad = torch.zeros(
+            (world, *halves.shape), dtype=torch.float32, device=halves.device
+        )
+        _zero_padded[key] = pad
+    pad[rank].copy_(halves.to(torch.float32))
+    reduced = tensor_model_parallel_all_reduce(pad.clone())
+    return (
+        reduced.to(torch.int16)
+        .view(torch.int32)
+        .transpose(0, 1)
+        .reshape(local.shape[0], world * local.shape[1])
+    )
+
+
+def _winners_through_all_reduce(local: torch.Tensor) -> torch.Tensor:
+    """Winner table without the all-gather, for captured graphs only: inside
+    the capture context the warm-up run gets an uninitialized placeholder
+    from the all-reduce, so eager calls keep the all-gather."""
+    if not torch.cuda.is_current_stream_capturing():
+        return tensor_model_parallel_all_gather(local)
+    return _exchange_codes(
+        local, get_tensor_model_parallel_world_size(), get_tensor_model_parallel_rank()
+    )
+
+
 def dspark_argmax(
-    base: torch.Tensor, bias: torch.Tensor, softcap: float, valid: int
+    base: torch.Tensor,
+    bias: torch.Tensor,
+    softcap: float,
+    valid: int,
+    *,
+    tiled: bool = False,
+    gather: str = "allgather",
 ) -> torch.Tensor:
     """First argmax (NaN as -inf) of every TP rank's `add_softcap(base, bias,
-    softcap)[:, :valid]` (its vocabulary shard, in rank order), from the
-    all-gathered logits."""
+    softcap)[:, :valid]` (its vocabulary shard, in rank order).
+
+    `gather="car"` exchanges the per-tile winners through the custom
+    all-reduce instead of the collective all-gather.
+    """
+    if gather not in ("allgather", "car"):
+        raise ValueError(f"gather={gather!r}")
     assert base.dtype == bias.dtype == torch.bfloat16 and base.shape == bias.shape
+    rows, width = base.shape
+    if tiled and rows and 0 < width <= 65536:
+        assert base.stride(1) == bias.stride(1) == 1
+        block = 1024
+        tiles = triton.cdiv(width, block)
+        local = base.new_empty((rows, tiles), dtype=torch.int32)
+        _vocab_tile_winners[(tiles, rows)](
+            base,
+            bias,
+            local,
+            base.stride(0),
+            bias.stride(0),
+            softcap,
+            width,
+            valid,
+            block,
+            num_warps=4,
+        )
+        if gather == "car":
+            winners = _winners_through_all_reduce(local)
+        else:
+            winners = tensor_model_parallel_all_gather(local)
+        tokens = base.new_empty(rows, dtype=torch.int64)
+        count = winners.shape[1]
+        _first_vocab_winner[(rows,)](
+            winners,
+            tokens,
+            tiles,
+            count,
+            width,
+            triton.next_power_of_2(count),
+            num_warps=4,
+        )
+        return tokens
     logits = add_softcap(base, bias, softcap)
     logits[:, valid:] = float("-inf")
     logits = tensor_model_parallel_all_gather(logits)

@@ -241,3 +241,114 @@ def test_determine_expert_map_comprehensive():
                 f"expert_placement_strategy={expert_placement_strategy}: "
                 f"expected map {expected_map_pattern}, got {actual_map}"
             )
+
+
+@pytest.mark.parametrize(
+    "counts", [[36, 36, 20, 36], [1, 1, 1, 125], [50, 26, 26, 26], [32, 32, 32, 32]]
+)
+def test_expert_rank_counts_partition(counts):
+    """Configured counts give each rank one contiguous range covering every
+    expert exactly once; the map agrees with expert_range."""
+    from vllm.model_executor.layers.fused_moe.expert_map_manager import expert_range
+
+    ep_size = len(counts)
+    seen = []
+    for ep_rank in range(ep_size):
+        start, local = expert_range(ep_size, ep_rank, 128, counts)
+        assert local == counts[ep_rank]
+        local_map, expert_map, _ = determine_expert_map(
+            ep_size=ep_size,
+            ep_rank=ep_rank,
+            global_num_experts=128,
+            expert_rank_counts=counts,
+        )
+        assert local_map == local
+        owned = expert_map.tolist()
+        assert owned[:start] == [-1] * start
+        assert owned[start : start + local] == list(range(local))
+        assert owned[start + local :] == [-1] * (128 - start - local)
+        seen.extend(range(start, start + local))
+    assert seen == list(range(128))
+
+
+def test_expert_range_even_split_matches_determine_expert_map():
+    """Without counts, expert_range is the range determine_expert_map maps."""
+    from vllm.model_executor.layers.fused_moe.expert_map_manager import expert_range
+
+    for global_num_experts in (8, 10, 128, 130):
+        for ep_size in (1, 2, 3, 4):
+            for ep_rank in range(ep_size):
+                start, local = expert_range(ep_size, ep_rank, global_num_experts)
+                _, expert_map, _ = determine_expert_map(
+                    ep_size=ep_size,
+                    ep_rank=ep_rank,
+                    global_num_experts=global_num_experts,
+                )
+                if expert_map is None:
+                    assert (start, local) == (0, global_num_experts)
+                    continue
+                owned = expert_map.tolist()
+                assert owned[:start] == [-1] * start
+                assert owned[start : start + local] == list(range(local))
+                assert owned[start + local :] == [-1] * (
+                    global_num_experts - start - local
+                )
+
+
+@pytest.mark.parametrize(
+    "counts",
+    [
+        [32, 32, 32],
+        [32, 32, 32, 33],
+        [32, 32, 0, 32],
+        [32, 32, -1, 33],
+        [32, 32, 32, 32.0],
+    ],
+)
+def test_expert_rank_counts_validation(counts):
+    from vllm.model_executor.layers.fused_moe.expert_map_manager import (
+        expert_range,
+    )
+
+    with pytest.raises(ValueError, match="expert_rank_counts"):
+        expert_range(4, 1, 128, counts)
+    with pytest.raises(ValueError, match="expert_rank_counts"):
+        determine_expert_map(
+            ep_size=4, ep_rank=1, global_num_experts=128, expert_rank_counts=counts
+        )
+    with pytest.raises(ValueError, match="linear"):
+        determine_expert_map(
+            ep_size=4,
+            ep_rank=1,
+            global_num_experts=128,
+            expert_placement_strategy="round_robin",
+            expert_rank_counts=[36, 36, 20, 36],
+        )
+    with pytest.raises(AssertionError):
+        expert_range(4, 4, 128)
+
+
+def test_parallel_config_expert_rank_counts_rules():
+    """The option is off by default and rejects combinations it cannot honor."""
+    from vllm.config.parallel import ParallelConfig
+
+    assert ParallelConfig().expert_rank_counts is None
+    assert ParallelConfig(expert_rank_counts=[36, 36, 20, 36]).expert_rank_counts == [
+        36,
+        36,
+        20,
+        36,
+    ]
+    with pytest.raises(ValueError, match="positive integers"):
+        ParallelConfig(expert_rank_counts=[36, 36, 0, 56])
+    with pytest.raises(ValueError, match="linear"):
+        ParallelConfig(
+            expert_rank_counts=[36, 36, 20, 36],
+            expert_placement_strategy="round_robin",
+        )
+    with pytest.raises(ValueError, match="EPLB"):
+        ParallelConfig(
+            expert_rank_counts=[36, 36, 20, 36],
+            enable_expert_parallel=True,
+            enable_eplb=True,
+        )

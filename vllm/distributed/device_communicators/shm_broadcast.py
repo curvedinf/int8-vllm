@@ -874,7 +874,7 @@ class MessageQueue:
         # if this block is not ready,
         # we need to wait until it is written
         import os as _os
-        _dbg = _os.environ.get("VLLM_RPCTRACE") == "1"
+        _dbg = _os.environ.get("VLLM_MQTRACE") == "1"
         if _dbg:
             import time as _t
             _w0 = _t.perf_counter()

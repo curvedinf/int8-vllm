@@ -42,8 +42,10 @@ def test_binding_draft_cache_preserves_other_groups_live_scales(grouped):
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="requires ROCm")
-@pytest.mark.parametrize("is_local", [False, True])
-def test_paged_decode_with_empty_splits_and_padding(is_local):
+@pytest.mark.parametrize(
+    "is_local,skip_past_bias", [(False, False), (False, True), (True, False)]
+)
+def test_paged_decode_with_empty_splits_and_padding(is_local, skip_past_bias):
     from vllm.models.inkling2.amd.ops.attention import (
         gated_rel_attention,
         rel_decode_attention,
@@ -51,12 +53,12 @@ def test_paged_decode_with_empty_splits_and_padding(is_local):
 
     device = torch.device("cuda")
     generator = torch.Generator(device=device).manual_seed(94)
-    lengths = [1105, 35]
+    lengths = [1489, 35]
     queries = [3, 1]
     block_size = 16
     # Each request has its own nonmonotonic block table.
-    table = torch.randperm(140, device=device, generator=generator).view(2, 70).int()
-    cache = torch.zeros((140, 2, block_size, 288), device=device, dtype=torch.int8)
+    table = torch.randperm(192, device=device, generator=generator).view(2, 96).int()
+    cache = torch.zeros((192, 2, block_size, 288), device=device, dtype=torch.int8)
     key, value = cache.transpose(1, 2).chunk(2, -1)
     decoded = []
     for tensor in (key, value):
@@ -99,7 +101,10 @@ def test_paged_decode_with_empty_splits_and_padding(is_local):
         )
         logits = torch.einsum("thd,lhd->thl", q[start:stop].float(), k) * 128**-0.5
         key0 = ((length + 127) // 128) * 128 - bias.shape[-1]
-        logits += bias[start:stop, :, -key0 : length - key0].float()
+        first_bias_key = max(0, key0)
+        logits[..., first_bias_key:] += bias[
+            start:stop, :, first_bias_key - key0 : length - key0
+        ].float()
         keys = torch.arange(length, device=device)
         distance = keys[-query_len:, None] - keys[None, :]
         invalid = distance < 0
@@ -131,6 +136,7 @@ def test_paged_decode_with_empty_splits_and_padding(is_local):
             softmax_scale=128**-0.5,
             is_local=is_local,
             num_splits=splits,
+            skip_past_bias=skip_past_bias,
         )
         torch.testing.assert_close(output.view_as(ref), ref, atol=0.003, rtol=0.005)
     for fused in (False, True):
@@ -150,6 +156,7 @@ def test_paged_decode_with_empty_splits_and_padding(is_local):
             softmax_scale=128**-0.5,
             window=1023 if is_local else -1,
             fused_epilogue=fused,
+            skip_past_bias=skip_past_bias,
         )
         torch.testing.assert_close(output.view_as(ref), ref, atol=0.003, rtol=0.005)
 
@@ -201,3 +208,68 @@ def test_dspark_block_shares_window_across_all_queries(window):
         torch.testing.assert_close(
             out[segment].view_as(expected).float(), expected, rtol=0.035, atol=0.018
         )
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="requires ROCm")
+@pytest.mark.parametrize("window", [-1, 1023])
+def test_mixed_mi100_tiles_preserve_gated_attention(window):
+    from vllm.models.inkling2.amd.ops.attention import gated_rel_attention
+    from vllm.platforms.rocm import on_gfx908
+
+    if not on_gfx908():
+        pytest.skip("MI100 tile specialization")
+    device = torch.device("cuda")
+    generator = torch.Generator(device=device).manual_seed(9417)
+    tokens = 73  # one 8-token verify and one 65-token prefill chunk
+    physical = 80
+    pages = 146
+    table = torch.randperm(pages * 2, device=device, generator=generator)
+    table = table.view(2, pages).int()
+    cache = torch.randint(
+        -95,
+        96,
+        (pages * 2, 2, 16, 288),
+        device=device,
+        dtype=torch.int8,
+        generator=generator,
+    )
+    key, value = cache.transpose(1, 2).chunk(2, dim=-1)
+    for kv in (key, value):
+        scale = torch.rand((*kv.shape[:-1], 1), device=device, generator=generator)
+        kv[..., 128:130].copy_((scale * 0.012 + 0.001).half().view(torch.int8))
+
+    def random(*shape):
+        return torch.randn(
+            *shape, device=device, generator=generator, dtype=torch.float16
+        )
+
+    q = random(physical, 6, 128)
+    bias = random(physical + 128, 6, 1280)
+    gate = random(physical, 768)
+    sinks = random(physical, 6)
+    cu = torch.tensor([0, 8, tokens], device=device, dtype=torch.int32)
+    lengths = torch.tensor([2113, 2305], device=device, dtype=torch.int32)
+
+    def run(optimized):
+        result = torch.empty_like(gate)
+        gated_rel_attention(
+            q,
+            key[..., :128],
+            value[..., :128],
+            bias,
+            gate,
+            sinks,
+            result,
+            block_table=table,
+            cache_seqlens=lengths,
+            cu_seqlens_q=cu,
+            max_seqlen_q=65,
+            num_actual_tokens=tokens,
+            softmax_scale=128**-0.5,
+            window=window,
+            skip_past_bias=optimized,
+            mi100_tiles=optimized,
+        )
+        return result
+
+    assert torch.equal(run(False).view(torch.int16), run(True).view(torch.int16))

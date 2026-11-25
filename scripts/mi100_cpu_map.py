@@ -10,6 +10,57 @@ from pathlib import Path
 SYS_CPU = Path("/sys/devices/system/cpu")
 
 
+def _cpu_range(spec: str) -> set[int]:
+    cpus: set[int] = set()
+    for entry in spec.split(","):
+        bounds = entry.strip().split("-")
+        cpus.update(range(int(bounds[0]), int(bounds[-1]) + 1))
+    return cpus
+
+
+def _compress(cpus: set[int]) -> str:
+    runs: list[str] = []
+    start = prev = None
+    for cpu in sorted(cpus):
+        if prev is not None and cpu == prev + 1:
+            prev = cpu
+            continue
+        if prev is not None:
+            runs.append(f"{start}-{prev}" if prev > start else f"{start}")
+        start = prev = cpu
+    if prev is not None:
+        runs.append(f"{start}-{prev}" if prev > start else f"{start}")
+    return ",".join(runs)
+
+
+def parent_group(groups: list[str], count: int = 8, skip: int = 0) -> str:
+    """The first ``count`` physical cores (with SMT siblings) past the groups.
+
+    The API server and EngineCore run there once the workers are bound; the
+    search starts after the worker groups to stay clear of kernel housekeeping
+    on the lowest cores.
+    """
+    used: set[int] = set()
+    for group in groups:
+        used |= _cpu_range(group)
+    allowed = sorted(os.sched_getaffinity(0))
+    cores: list[set[int]] = []
+    last_physical = -1
+    for cpu in allowed:
+        siblings = _cpu_range(
+            (SYS_CPU / f"cpu{cpu}/topology/thread_siblings_list").read_text()
+        )
+        first = min(siblings)
+        if first in used:
+            last_physical = max(last_physical, first)
+        if first != cpu or siblings & used:
+            continue
+        cores.append(siblings)
+    cores.sort(key=lambda siblings: (min(siblings) <= last_physical, min(siblings)))
+    chosen: set[int] = set().union(*cores[skip : skip + count]) if cores else set()
+    return _compress(chosen)
+
+
 def resolve(devices: list[str], groups: list[str]) -> list[str]:
     if len(groups) != len(devices):
         raise ValueError(f"expected one CPU list for each of {len(devices)} GPUs")
@@ -53,6 +104,11 @@ def resolve(devices: list[str], groups: list[str]) -> list[str]:
 
 if __name__ == "__main__":
     try:
+        if sys.argv[1:] and sys.argv[1] == "--parent":
+            count = int(sys.argv[2]) if len(sys.argv) > 2 else 8
+            skip = int(sys.argv[3]) if len(sys.argv) > 3 else 0
+            print(parent_group(os.environ["MI100_CPU_MAP"].split(), count, skip))
+            raise SystemExit(0)
         devices = os.environ.get("MI100_DEVICES", "0,1,2,3").split(",")
         ranks = int(os.environ.get("TPS", "4")) * int(
             os.environ.get("MI100_PP_SIZE", "1")

@@ -45,7 +45,7 @@ from vllm.envs import enable_envs_cache
 from vllm.logger import configure_logging, init_logger
 from vllm.platforms import current_platform
 from vllm.tracing import instrument, maybe_init_worker_tracer
-from vllm.utils import numa_utils
+from vllm.utils import numa_utils, profile_window
 from vllm.utils.network_utils import (
     aiter_requires_tcp_store,
     get_distributed_init_method,
@@ -77,6 +77,20 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.worker.worker_base import WorkerWrapperBase
+
+
+def _emit_trace(rank: int, line: str) -> None:
+    """VLLM_RPCTRACE_FILE=<path>: per-rank file instead of stdout."""
+    path = os.environ.get("VLLM_RPCTRACE_FILE")
+    if not path:
+        print(line, flush=True)
+        return
+    try:
+        with open(f"{path}.{rank}", "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
 
 logger = init_logger(__name__)
 
@@ -128,9 +142,9 @@ class FutureWrapper(Future):
                 _box["a"] += _r2 - _r1
                 _box["n"] += 1
                 if _box["n"] % 50 == 0:
-                    print(f"[rpctrace] n={_box['n']} | resp "
-                          f"{1000*_box['r']/_box['n']:7.2f}ms | agg "
-                          f"{1000*_box['a']/_box['n']:7.2f}ms", flush=True)
+                    _emit_trace(-1, f"[rpctrace] n={_box['n']} | resp "
+                               f"{1000*_box['r']/_box['n']:7.2f}ms | agg "
+                               f"{1000*_box['a']/_box['n']:7.2f}ms")
                     _box.update(r=0.0, a=0.0, n=0)
             else:
                 response = self.aggregate(self.get_response())
@@ -509,7 +523,16 @@ class MultiprocExecutor(Executor):
         else:
             send_method = cloudpickle.dumps(method, protocol=pickle.HIGHEST_PROTOCOL)
         self.rpc_broadcast_mq.enqueue((send_method, args, kwargs, output_rank))
-
+        if os.environ.get("VLLM_RPCTRACE_FILE") and isinstance(method, str):
+            # Engine-side send timestamp (monotonic, comparable with the
+            # worker's dequeue timestamps in the same file family).
+            try:
+                with open(
+                    f"{os.environ['VLLM_RPCTRACE_FILE']}.send.{os.getpid()}", "a"
+                ) as _f:
+                    _f.write(f"send {method} {time.monotonic():.6f}\n")
+            except OSError:
+                pass
         response_mqs: Sequence[MessageQueue] = self.response_mqs
         if output_rank is not None:
             response_mqs = (response_mqs[output_rank],)
@@ -1193,9 +1216,18 @@ class WorkerProc:
                 _box["d"] += _dq
                 _box["n"] += 1
                 if _box["n"] % 50 == 0:
-                    print(f"[rpctrace] n={_box['n']} | dequeue "
-                          f"{1000*_box['d']/_box['n']:7.2f}ms", flush=True)
+                    _emit_trace(self.rank, f"[rpctrace] n={_box['n']} | dequeue "
+                               f"{1000*_box['d']/_box['n']:7.2f}ms")
                     _box.update(d=0.0, n=0)
+            if os.environ.get("VLLM_RPCTRACE_FILE"):
+                _m = rpc_request[0] if isinstance(rpc_request[0], str) else "callable"
+                try:
+                    with open(
+                        f"{os.environ['VLLM_RPCTRACE_FILE']}.dq.{self.rank}", "a"
+                    ) as _f:
+                        _f.write(f"dq {_m} {time.monotonic():.6f}\n")
+                except OSError:
+                    pass
             self._execute_worker_rpc(rpc_request)
             del rpc_request
 
@@ -1213,7 +1245,20 @@ class WorkerProc:
 
             watchdog = get_watch_dog()
             watchdog.feed()
-            output = func(*args, **kwargs)
+            # VLLM_CP_PROFILE=<dir>: cProfile a window of execute_model calls.
+            _pr = (
+                profile_window.step("worker")
+                if profile_window.ENABLED and method == "execute_model"
+                else None
+            )
+            if _pr is None:
+                output = func(*args, **kwargs)
+            else:
+                _pr.enable()
+                try:
+                    output = func(*args, **kwargs)
+                finally:
+                    _pr.disable()
             # Feed again: the RPC itself may run close to the watchdog
             # timeout, so the pre-call feed can go stale while the result
             # is serialized/enqueued in handle_output().
@@ -1231,8 +1276,8 @@ class WorkerProc:
                     _box["h"] += _dt
                     _box["n"] += 1
                     if _box["n"] % 50 == 0:
-                        print(f"[rpctrace] n={_box['n']} | handle "
-                              f"{1000*_box['h']/_box['n']:7.2f}ms", flush=True)
+                        _emit_trace(self.rank, f"[rpctrace] n={_box['n']} | handle "
+                                   f"{1000*_box['h']/_box['n']:7.2f}ms")
                         _box.update(h=0.0, n=0)
                 else:
                     self.handle_output(output)

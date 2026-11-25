@@ -19,6 +19,51 @@ from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
 logger = init_logger(__name__)
 
 
+def expert_range(
+    ep_size: int,
+    ep_rank: int,
+    global_num_experts: int,
+    expert_rank_counts: list[int] | None = None,
+) -> tuple[int, int]:
+    """The contiguous ``(start, local)`` expert range a rank owns under linear
+    placement.
+
+    Without `expert_rank_counts` the experts split as evenly as possible and
+    the remainder goes to the lowest ranks, matching `determine_expert_map`.
+    With counts, rank `r` owns `counts[r]` experts after the sum of the
+    preceding counts. Models that load or mask experts by global id use this
+    with the expert map.
+    """
+    assert ep_size > 0, "expert group size must be positive"
+    assert 0 <= ep_rank < ep_size, f"expert rank {ep_rank} outside {ep_size}"
+    if expert_rank_counts is None:
+        base = global_num_experts // ep_size
+        remainder = global_num_experts % ep_size
+        local = base + (1 if ep_rank < remainder else 0)
+        return ep_rank * base + min(ep_rank, remainder), local
+    counts = validate_expert_rank_counts(
+        expert_rank_counts, ep_size, global_num_experts
+    )
+    return sum(counts[:ep_rank]), counts[ep_rank]
+
+
+def validate_expert_rank_counts(
+    counts: list[int], ep_size: int, global_num_experts: int
+) -> list[int]:
+    """Check per-rank expert counts against the group; return them as ints."""
+    if (
+        len(counts) != ep_size
+        or any(not isinstance(c, int) or c <= 0 for c in counts)
+        or sum(counts) != global_num_experts
+    ):
+        raise ValueError(
+            "expert_rank_counts must give one positive expert count for each "
+            f"of the {ep_size} expert-parallel ranks, summing to "
+            f"{global_num_experts} experts; got {counts}."
+        )
+    return list(counts)
+
+
 def determine_expert_map(
     ep_size: int,
     ep_rank: int,
@@ -26,6 +71,7 @@ def determine_expert_map(
     expert_placement_strategy: ExpertPlacementStrategy = "linear",
     num_fused_shared_experts: int = 0,
     return_expert_mask: bool = False,
+    expert_rank_counts: list[int] | None = None,
 ) -> tuple[int, torch.Tensor | None, torch.Tensor | None]:
     """Calculates how many experts should be assigned to each rank for EP and
     creates a mapping from global to local expert index. Experts are
@@ -40,6 +86,8 @@ def determine_expert_map(
         expert_placement_strategy: The expert placement strategy.
         num_fused_shared_experts: Number of fused shared experts (for AITER)
         return_expert_mask: Whether to return expert mask for AITER
+        expert_rank_counts: Optional per-rank expert counts (linear placement
+            only); see `expert_range`.
 
     Returns:
         tuple[int, Optional[torch.Tensor], Optional[torch.Tensor]]: A tuple containing:
@@ -63,17 +111,22 @@ def determine_expert_map(
     if ep_size == 1:
         return (global_num_experts, None, None)
 
-    # Distribute experts as evenly as possible to each rank.
-    base_experts = global_num_experts // ep_size
-    remainder = global_num_experts % ep_size
-    local_num_experts = base_experts + 1 if ep_rank < remainder else base_experts
+    if expert_rank_counts is not None and expert_placement_strategy != "linear":
+        raise ValueError(
+            "expert_rank_counts requires the linear expert placement strategy, "
+            f"got '{expert_placement_strategy}'."
+        )
+    # Distribute experts as evenly as possible to each rank unless the
+    # configuration fixes the count each rank owns.
+    start_idx, local_num_experts = expert_range(
+        ep_size, ep_rank, global_num_experts, expert_rank_counts
+    )
 
     # Create a tensor of size num_experts filled with -1
     expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32)
 
     # Create an expert map for the local experts
     if expert_placement_strategy == "linear":
-        start_idx = ep_rank * base_experts + min(ep_rank, remainder)
         expert_map[start_idx : start_idx + local_num_experts] = torch.arange(
             0, local_num_experts, dtype=torch.int32
         )
@@ -191,6 +244,7 @@ class ExpertMapManager:
         enable_eplb: bool,
         num_fused_shared_experts: int = 0,
         rocm_aiter_enabled: bool = False,
+        expert_rank_counts: list[int] | None = None,
     ):
         """Initialize expert map manager.
 
@@ -207,12 +261,15 @@ class ExpertMapManager:
             num_fused_shared_experts: Number of fused shared experts (for AITER)
             rocm_aiter_enabled: Whether ROCm AITER fusion is enabled
             enable_eplb: Whether expert-parallel load balancing is enabled
+            expert_rank_counts: Optional per-rank expert counts for linear
+                placement; see `expert_range`.
 
         """
         self.global_num_experts = global_num_experts
         self.moe_parallel_config = moe_parallel_config
         self.num_fused_shared_experts = num_fused_shared_experts
         self.rocm_aiter_enabled = rocm_aiter_enabled
+        self.expert_rank_counts = expert_rank_counts
         self.top_k = top_k
         self.max_num_batched_tokens = max_num_batched_tokens
 
@@ -230,6 +287,19 @@ class ExpertMapManager:
         self._placement_strategy = self._determine_placement_strategy(
             placement_strategy
         )
+        if expert_rank_counts is not None:
+            if enable_eplb:
+                raise ValueError(
+                    "expert_rank_counts fixes expert ownership and cannot be "
+                    "combined with EPLB."
+                )
+            if self._placement_strategy != "linear":
+                raise ValueError(
+                    "expert_rank_counts requires the linear expert placement strategy."
+                )
+            validate_expert_rank_counts(
+                expert_rank_counts, self.ep_size, global_num_experts
+            )
 
         # Calculate expert mappings
         self._calculate_expert_maps()
@@ -447,6 +517,7 @@ class ExpertMapManager:
                 expert_placement_strategy=self._placement_strategy,
                 num_fused_shared_experts=self.num_fused_shared_experts,
                 return_expert_mask=self.rocm_aiter_enabled,
+                expert_rank_counts=self.expert_rank_counts,
             )
 
         self._local_num_experts += self.num_fused_shared_experts

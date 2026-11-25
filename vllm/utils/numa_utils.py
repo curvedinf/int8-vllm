@@ -441,6 +441,53 @@ def log_current_affinity_state(label: str) -> None:
     _log_numactl_show(label)
 
 
+def _parse_cpu_list(spec: str) -> set[int]:
+    cpus: set[int] = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        first, _, last = part.partition("-")
+        lo, hi = int(first), int(last or first)
+        if lo > hi:
+            raise ValueError(f"descending CPU range '{part}'")
+        cpus.update(range(lo, hi + 1))
+    return cpus
+
+
+def apply_cpu_affinity(env_var: str, label: str) -> bool:
+    """Pin this process to the CPUs named by ``env_var`` (numactl syntax).
+
+    The EngineCore spawns workers through ``numactl --physcpubind``, which
+    refuses CPUs outside the inherited mask, so neither it nor the API server
+    may be narrowed before the workers exist. Callers apply this once the
+    engine is up: left to the scheduler, these processes land on a rank's
+    cores and slow that rank's kernel launches. A list the process may not
+    use is ignored with a warning.
+    """
+    spec = os.environ.get(env_var)
+    if not spec:
+        logger.info(
+            "%s (pid %d) left unpinned: %s is %r; %d CPUs allowed",
+            label,
+            os.getpid(),
+            env_var,
+            spec,
+            len(os.sched_getaffinity(0)),
+        )
+        return False
+    try:
+        cpus = _parse_cpu_list(spec)
+        if not cpus:
+            raise ValueError("empty CPU list")
+        os.sched_setaffinity(0, cpus)
+    except (OSError, ValueError) as exc:
+        logger.warning("%s: ignoring %s=%r (%s)", label, env_var, spec, exc)
+        return False
+    logger.info("%s (pid %d) pinned to CPUs %s", label, os.getpid(), spec)
+    return True
+
+
 def _probe_numactl_args(numactl_args: str) -> bool:
     """Whether ``numactl <args> true`` succeeds in this (parent) environment."""
     try:

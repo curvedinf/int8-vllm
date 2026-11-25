@@ -18,7 +18,11 @@ class DirectStorage:
     def __init__(
         self, device: torch.device, window: int = 16 << 20, *, require_fastpath=True
     ):
-        if require_fastpath and not get_ais().fastpath_only:
+        # VLLM_FS_GPU_ALLOW_FALLBACK=1: accept hipFile's host-bounce backend
+        # (same bytes, host-read speed). The physical P2P path is unavailable
+        # for files whose block device has no PCI parent (e.g. bcache).
+        allow_fallback = os.environ.get("VLLM_FS_GPU_ALLOW_FALLBACK") == "1"
+        if require_fastpath and not get_ais().fastpath_only and not allow_fallback:
             raise RuntimeError(
                 "Set HIPFILE_ALLOW_COMPAT_MODE=false and "
                 "HIPFILE_FORCE_COMPAT_MODE=false before starting the process."

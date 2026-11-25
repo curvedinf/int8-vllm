@@ -52,9 +52,12 @@ from ..quantization import Inkling2PTQRConfig
 from .attention import Inkling2Attention, inkling_kv_spec
 from .moe import Inkling2MoE
 from .ops.attention import compute_log_scaling_tau
-from .ops.attn_res import attn_res
-from .ops.linear import mix_message
+from .ops.attn_res import attn_res, normalize_residual_rows, weighted_values
+from .ops.linear import controller_output, mix_message
 from .ops.norm import rms_norm
+from .ops.streams import side_stream
+from .ops.timeline import ENABLED as _GRAPH_TIMELINE
+from .ops.timeline import TimelineSink, set_sink
 from .sconv import ATTN_STREAM, MLP_STREAM, Inkling2ConvState, Inkling2ShortConv
 from .vision import Inkling2VisionEncoder, VisionMetadata
 
@@ -122,12 +125,12 @@ class Inkling2AttnRes(nn.Module):
 class MessageController(nn.Module):
     def __init__(self, width: int, rank: int):
         super().__init__()
-        self.fused = rank in (
-            32,
-            64,
-        ) and get_current_vllm_config().additional_config.get(
+        options = get_current_vllm_config().additional_config
+        self.fused = rank in (32, 64) and options.get(
             "inkling_fused_message_gate", False
         )
+        self.fused_normalization = options.get("inkling_residual_normalization", False)
+        self.epilogue = options.get("inkling_controller_epilogue")
         self.down_weight = nn.Parameter(torch.empty(rank, 2 * width), False)
         self.forget_weight = nn.Parameter(torch.empty(width, rank), False)
         self.gain_weight = nn.Parameter(torch.empty(width, rank), False)
@@ -137,11 +140,21 @@ class MessageController(nn.Module):
             return mix_message(
                 dest, message, self.down_weight, self.forget_weight, self.gain_weight
             )
-        pair = torch.stack((dest, message), dim=-2).float()
-        pair = pair * torch.rsqrt(pair.square().mean(-1, keepdim=True) + 1e-6)
+        if self.fused_normalization and self.down_weight.dtype == torch.float16:
+            pair = normalize_residual_rows(dest.unsqueeze(0), message, controller=True)
+        else:
+            pair = torch.stack((dest, message), dim=-2).float()
+            pair = pair * torch.rsqrt(pair.square().mean(-1, keepdim=True) + 1e-6)
         h = nn.functional.linear(
             pair.flatten(-2).to(self.down_weight.dtype), self.down_weight
         )
+        if self.epilogue:
+            h = h.float()
+            gain = nn.functional.linear(h, self.gain_weight.float())
+            forget = nn.functional.linear(h, self.forget_weight.float())
+            return controller_output(
+                dest, message, forget, gain, fuse_tanh=self.epilogue == "tanh"
+            )
         gain = nn.functional.linear(h.float(), self.gain_weight.float()).tanh()
         forget = nn.functional.linear(h.float(), self.forget_weight.float()).tanh()
         return dest * (1 - forget) + message * gain
@@ -222,10 +235,33 @@ class Inkling2Model(nn.Module, EagleModelMixin):
         self.block_size = config.n_layers_per_attn_res_block
         self.normalize_values = config.attn_res_normalize_values
         options = get_current_vllm_config().additional_config
-        self.fused_loop_mix = options.get("inkling_fused_loop_mix", False)
+        _mix_mode = options.get("inkling_fused_loop_mix", False)
+        # True fuses every residual mix; "decode" keeps the unfused path for
+        # prefill-sized batches (more than 128 rows).
+        self.fused_loop_mix = _mix_mode in (True, "decode")
+        self.fused_loop_mix_decode_only = _mix_mode == "decode"
+        self.fused_normalization = options.get("inkling_residual_normalization", False)
+        self.direct_weighted_sum = options.get("inkling_direct_weighted_sum", False)
+        # The attention-side message controllers only read `inputs` and
+        # `messages`; on side streams they execute concurrently in the
+        # captured graph with the same kernels and results.
+        self._side_streams = (
+            [side_stream(j) for j in range(3)]
+            if options.get("inkling_parallel_controllers", False)
+            else []
+        )
+        # In a second pass the bank and stack mixes are independent; the bank
+        # mix (the messages) can run on the shared side stream beside the
+        # stack mix (the attention inputs) with the same kernels and results.
+        self._message_stream = (
+            side_stream(0) if options.get("inkling_parallel_messages", False) else None
+        )
+        self.cache_message_values = options.get("inkling_cache_message_values", False)
         self.batch_message_max_tokens = options.get(
             "inkling_batch_message_max_tokens", 0
         )
+        self.timeline = _GRAPH_TIMELINE
+        self.timeline_sink = TimelineSink() if _GRAPH_TIMELINE else None
         self.embed_tokens = VocabParallelEmbedding(
             config.padded_vocab_size, config.hidden_size
         )
@@ -267,8 +303,25 @@ class Inkling2Model(nn.Module, EagleModelMixin):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_norm(self.embed_tokens(input_ids))
 
+    def _mark(self, label: str, visit: int) -> None:
+        if self.timeline_sink is not None:
+            self.timeline_sink.mark(label, visit)
+
+    @staticmethod
+    def _control_inputs(layer, inputs, messages, j, partial):
+        """Attention input `j` after its message controller and norm."""
+        return layer.attn_norm(
+            layer.controllers[("attn", "k", "v")[j]](
+                inputs[0 if layer.is_local else j], messages[j]
+            ),
+            0 if layer.is_local else j,
+        ).to(partial.dtype)
+
     def _mix(self, blocks, partial, query, norm=None, addend=None):
-        if norm is not None or self.fused_loop_mix:
+        if norm is not None or (
+            self.fused_loop_mix
+            and not (self.fused_loop_mix_decode_only and len(partial) > 128)
+        ):
             return attn_res(
                 blocks,
                 partial,
@@ -278,13 +331,22 @@ class Inkling2Model(nn.Module, EagleModelMixin):
                 norm.eps if norm is not None else self.config.rms_norm_eps,
                 self.normalize_values,
             )
+        if self.fused_normalization:
+            values = normalize_residual_rows(blocks, partial, addend)
+            return self._query_values(values, query)
         last = partial.float()
         if addend is not None:
             last = last + addend.float()
         values = torch.cat((blocks.float(), last.unsqueeze(0)))
         values = values * torch.rsqrt(values.square().mean(-1, keepdim=True) + 1e-6)
+        return self._query_values(values, query)
+
+    def _query_values(self, values, query):
         scores = torch.einsum("std,qd->qts", values, query)
-        return torch.einsum("qts,std->qtd", scores.softmax(-1), values)
+        weights = scores.softmax(-1)
+        if self.direct_weighted_sum:
+            return weighted_values(weights, values)
+        return torch.einsum("qts,std->qtd", weights, values)
 
     def forward(self, positions, inputs_embeds):
         core = self.config.loop_core_layers
@@ -295,21 +357,39 @@ class Inkling2Model(nn.Module, EagleModelMixin):
         tau = compute_log_scaling_tau(
             positions, self.config.log_scaling_n_floor, self.config.log_scaling_alpha
         )
-        prelude = bank = pass_messages = None
+        prelude = bank = pass_messages = message_values = None
         aux = []
+        set_sink(self.timeline_sink)
+        if self.timeline_sink is not None:
+            self.timeline_sink.begin()
+            self._mark("start", -1)
         for visit_id, (i, visit) in enumerate(self.visits):
             if i == core.start:
                 if not visit:
                     prelude = stack[count].clone()
                     prelude_count = count
                 else:
-                    bank = stack[prelude_count + 1 : count + 1].clone()
+                    previous_pass = stack[prelude_count + 1 : count + 1]
+                    if (
+                        self.cache_message_values
+                        and not self.fused_loop_mix
+                        and len(inputs_embeds) > self.batch_message_max_tokens
+                    ):
+                        # Each core layer queries the same previous-pass values.
+                        # Materialize them before the stack is reused for this pass.
+                        values = previous_pass.float()
+                        message_values = values * torch.rsqrt(
+                            values.square().mean(-1, keepdim=True) + 1e-6
+                        )
+                    else:
+                        bank = previous_pass.clone()
                     if len(inputs_embeds) <= self.batch_message_max_tokens:
                         # Every layer in this pass reads the same previous-pass
                         # states. Batch its four message queries on small batches.
                         pass_messages = self._mix(
                             bank[:-1], bank[-1], self.message_queries.flatten(0, 1)
                         ).unflatten(0, (len(core), 4))
+                        self._mark("passmsg", -1)
                     count = prelude_count
                     stack[count].copy_(prelude)
             layer = self.layers[i]
@@ -318,14 +398,22 @@ class Inkling2Model(nn.Module, EagleModelMixin):
             if visit_id in self.aux_hidden_state_layers:
                 aux.append(partial.clone())
             messages = None
+            side = None
             if visit:
-                messages = (
-                    pass_messages[i - core.start]
-                    if pass_messages is not None
-                    else self._mix(
-                        bank[:-1], bank[-1], self.message_queries[i - core.start]
-                    )
-                )
+                queries = self.message_queries[i - core.start]
+                if pass_messages is not None:
+                    messages = pass_messages[i - core.start]
+                elif message_values is not None:
+                    messages = self._query_values(message_values, queries)
+                elif self._message_stream is not None:
+                    side = self._message_stream
+                    main = torch.cuda.current_stream()
+                    side.wait_stream(main)
+                    with torch.cuda.stream(side):
+                        messages = self._mix(bank[:-1], bank[-1], queries)
+                else:
+                    messages = self._mix(bank[:-1], bank[-1], queries)
+                self._mark("msg", visit_id)
             if count:
                 query = self.attn_res.attn_queries[i - 1]
                 inputs = self._mix(
@@ -335,23 +423,47 @@ class Inkling2Model(nn.Module, EagleModelMixin):
                 inputs = [
                     layer.attn_norm(partial, j) for j in range(layer.num_attn_inputs)
                 ]
+            self._mark("inmix", visit_id)
+            if side is not None:
+                torch.cuda.current_stream().wait_stream(side)
+                self._mark("msgjoin", visit_id)
             if messages is not None:
-                inputs = [
-                    layer.attn_norm(
-                        layer.controllers[key](
-                            inputs[0 if layer.is_local else j], messages[j]
-                        ),
-                        0 if layer.is_local else j,
-                    ).to(partial.dtype)
-                    for j, key in enumerate(("attn", "k", "v"))
-                ]
+                sources = inputs
+                if self._side_streams:
+                    main = torch.cuda.current_stream()
+                    for stream in self._side_streams:
+                        stream.wait_stream(main)
+                    controlled = []
+                    for j, stream in enumerate(self._side_streams):
+                        with torch.cuda.stream(stream):
+                            controlled.append(
+                                self._control_inputs(
+                                    layer, sources, messages, j, partial
+                                )
+                            )
+                    for stream in self._side_streams:
+                        main.wait_stream(stream)
+                    inputs = controlled
+                else:
+                    inputs = [
+                        self._control_inputs(layer, sources, messages, j, partial)
+                        for j in range(3)
+                    ]
             q, k, v = (inputs[0],) * 3 if layer.is_local and not visit else inputs
+            self._mark("a_mix", visit_id)
             projected = layer.attn(
                 positions, q, k, v, None if layer.is_local else tau, pass_idx=visit
             )
-            attention = layer.attn_sconv(
-                tensor_model_parallel_all_reduce(projected), positions, owner=owner
-            )
+            self._mark("attn", visit_id)
+            if self.timeline:
+                projected = tensor_model_parallel_all_reduce(projected)
+                self._mark("ar", visit_id)
+                attention = layer.attn_sconv(projected, positions, owner=owner)
+            else:
+                attention = layer.attn_sconv(
+                    tensor_model_parallel_all_reduce(projected), positions, owner=owner
+                )
+            self._mark("ar_sconv", visit_id)
             first = i % self.block_size == 0
             mixed = self._mix(
                 stack[: count + first],
@@ -364,23 +476,35 @@ class Inkling2Model(nn.Module, EagleModelMixin):
                 mixed = layer.mlp_norm(layer.controllers["mlp"](mixed, messages[3])).to(
                     partial.dtype
                 )
+            self._mark("mix", visit_id)
             count += first
+            moe_out = layer.mlp(mixed)
+            self._mark("moe", visit_id)
             layer.mlp_sconv(
-                layer.mlp(mixed),
+                moe_out,
                 positions,
                 addend=attention,
                 residual=None if first else partial,
                 out=stack[count],
                 owner=owner,
             )
+            self._mark("moe_sconv", visit_id)
         output = self._mix(
             stack[:count], stack[count], self.attn_res.output_query, self.norm
         )[0]
         if self.aux_hidden_state_layers:
             if len(self.visits) in self.aux_hidden_state_layers:
                 aux.append(output)
+            self._mark("output", len(self.visits))
+            self._finish_timeline()
             return output, aux
+        self._mark("output", len(self.visits))
+        self._finish_timeline()
         return output
+
+    def _finish_timeline(self) -> None:
+        if self.timeline_sink is not None:
+            self.timeline_sink.finish()
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -422,6 +546,9 @@ class Inkling2LoopForConditionalGeneration(
             raise ValueError("Inkling2 does not support prompt embeddings")
         self.config = config
         self.text_config = text_config = config.text_config
+        self.tabulate_swiglu = vllm_config.additional_config.get(
+            "inkling_tabulate_swiglu", False
+        )
         if vllm_config.additional_config.get("inkling_merge_query_gate", False):
             self._shards = {
                 **self._shards,
@@ -458,7 +585,18 @@ class Inkling2LoopForConditionalGeneration(
 
     def process_weights_after_loading(self):
         self.model.process_weights_after_loading()
+        factors = None
+        if self.tabulate_swiglu:
+            from aiter.ops.triton.gemm.basic.gemm_packed_g128 import (
+                routed_swiglu_factors,
+            )
+
+            experts = self.model.layers[0].mlp.experts
+            factors = routed_swiglu_factors(
+                experts.w13_weight.device, experts.gate_cap, experts.up_cap
+            )
         for layer in self.model.layers:
+            layer.mlp.experts.activation_factors = factors
             layer.attn.process_weights_after_loading()
             layer.mlp.experts.process_weights_after_loading()
             for controller in layer.controllers.values():
@@ -634,7 +772,14 @@ class Inkling2LoopForConditionalGeneration(
         return self.model(positions, inputs_embeds)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
-        return self.logits_processor(self.lm_head, hidden_states)
+        logits = self.logits_processor(self.lm_head, hidden_states)
+        if (
+            self.model.timeline_sink is not None
+            and torch.cuda.is_current_stream_capturing()
+        ):
+            self.model._mark("logits", -1)
+            self.model._finish_timeline()
+        return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         params = dict(self.named_parameters())

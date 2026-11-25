@@ -340,6 +340,15 @@ _STATE_DIGEST = None
 if __import__("os").environ.get("VLLM_STATE_DIGEST"):
     _STATE_DIGEST = _state_digest
 
+def _phase_mark(trace: Any, key: str, start: float) -> float:
+    now = time.perf_counter()
+    trace.add(key, now - start)
+    return now
+
+
+_EXEC_TRACE: Any = None
+
+
 class GPUModelRunner(LoRAModelRunnerMixin):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
@@ -2073,24 +2082,45 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # VLLM_GRAPH_SYNC: additionally sync and time the target graph replay.
         _gsync = os.environ.get("VLLM_GRAPH_SYNC") == "1"
         _t0 = time.perf_counter() if _pph else 0.0
+        global _EXEC_TRACE
+        if _EXEC_TRACE is None:
+            from vllm.utils.phase_trace import PhaseTrace
+
+            _EXEC_TRACE = (PhaseTrace("wreqs"), PhaseTrace("wstate"))
+        _wr, _ws = _EXEC_TRACE
+        _wr_on, _ws_on = _wr.enabled, _ws.enabled
+        _wr_t = _ws_t = time.perf_counter()
         if not dummy_run:
             # Update the request states.
             self.update_pp_decode_requests()
+            if _wr_on:
+                _wr_t = _phase_mark(_wr, "pp_decode", _wr_t)
             self.finish_requests(scheduler_output)
+            if _wr_on:
+                _wr_t = _phase_mark(_wr, "finish", _wr_t)
             self.free_states(scheduler_output)
+            if _wr_on:
+                _wr_t = _phase_mark(_wr, "free", _wr_t)
             self.add_requests(scheduler_output)
+            if _wr_on:
+                _wr_t = _phase_mark(_wr, "add", _wr_t)
             self.update_requests(scheduler_output)
+            if _wr_on:
+                _wr_t = _phase_mark(_wr, "update", _wr_t)
             if self.encoder_cache is not None:
                 # add_requests initializes RoPE positions from CPU metadata first.
                 for req_id, updates in scheduler_output.encoder_input_updates.items():
                     self.encoder_cache.update_encoder_inputs(req_id, updates)
             self.block_tables.apply_staged_writes()
+            if _wr_on:
+                _wr_t = _phase_mark(_wr, "staged", _wr_t)
             if self.aux_output_connector is not None:
                 # Register this step before the GPU forward.
                 self.aux_output_connector.begin_step(
                     scheduler_output.aux_output_connector_metadata
                 )
-            if scheduler_output.total_num_scheduled_tokens == 0:
+        _wr.tick()
+        if scheduler_output.total_num_scheduled_tokens == 0:
                 # No need to run the model.
                 empty_output = self.kv_connector.no_forward(scheduler_output)
                 return self._merge_ec_connector_no_forward(
@@ -2194,6 +2224,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if _pph:
                 self._pphase["p_attn"] += time.perf_counter() - _t0
                 _t0 = time.perf_counter()
+            _ws_t = time.perf_counter()
             # Mamba "align" pre-copy: migrate recurrent state across block
             # boundaries before the forward. Runs only on real batches, and
             # before model_state.prepare_attn gathers num_accepted_tokens so the
@@ -2204,6 +2235,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.kv_cache_config,
                 self.req_states.num_computed_tokens.gpu,
             )
+            if _ws_on:
+                _ws_t = _phase_mark(_ws, "preprocess", _ws_t)
             # TOKFEED v2 (pass 104): BEFORE the forward, last_sampled_tokens
             # still holds the previous round's commit — the anchor token this
             # round's verify is about to be fed at row 0. Compare against the
@@ -2369,6 +2402,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             slot_mappings_by_layer = build_slot_mappings_by_layer(
                 slot_mappings, self.kv_cache_config
             )
+            if _ws_on:
+                _ws_t = _phase_mark(_ws, "slot_mappings", _ws_t)
             assert block_tables is not None
             attn_groups = self.attn_groups
             if dummy_run and is_profile and not valid_dummy_state_slots:
@@ -2392,6 +2427,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # indices from the previous real batch.
                 for_capture=dummy_run and batch_desc.cg_mode == CUDAGraphMode.FULL,
             )
+            if _ws_on:
+                _ws_t = _phase_mark(_ws, "prepare_attn", _ws_t)
 
         input_ids = input_batch.input_ids
         inputs_embeds = None
@@ -2433,6 +2470,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # values above.
             **self.model_state.prepare_inputs(input_batch, self.req_states),
         }
+        if _ws_on:
+            _ws_t = _phase_mark(_ws, "model_inputs", _ws_t)
         if not self.is_first_pp_rank:
             # Update for non-first PP ranks.
             if not requires_raw_input_tokens(self.model):
@@ -2466,6 +2505,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             _t = self._pphase
             _t["p_state"] += time.perf_counter() - _t0
             _t0 = time.perf_counter()
+        _ws.tick()
 
         # Run model.
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
@@ -2665,6 +2705,34 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if _pph:
             self._pphase["s_tail"] += time.perf_counter() - _t0
             _t0 = time.perf_counter()
+        _rd = os.environ.get("VLLM_INKLING_RING_DUMP")
+        if _rd and self.speculator is not None:
+            # VLLM_INKLING_RING_DUMP=<prefix>: target and draft clock rings every
+            # VLLM_INKLING_RING_DUMP_EVERY steps. The sample sync above already
+            # flushed the previous step's draft, so the counters are settled.
+            _rb = getattr(self, "_ring_dump", None)
+            if _rb is None:
+                _target = next(
+                    (
+                        m
+                        for m in self.model.modules()
+                        if getattr(m, "timeline_sink", None) is not None
+                    ),
+                    None,
+                )
+                _rb = self._ring_dump = [
+                    0,
+                    [
+                        ("target", getattr(_target, "timeline_sink", None)),
+                        ("draft", getattr(self.speculator, "timeline_sink", None)),
+                    ],
+                    int(os.environ.get("VLLM_INKLING_RING_DUMP_EVERY", "300")),
+                ]
+            _rb[0] += 1
+            if _rb[0] % _rb[2] == 0:
+                from vllm.models.inkling2.amd.ops.timeline import dump_rings
+
+                dump_rings(_rb[1], _rd, _rb[0], torch.cuda.current_device())
 
         if self.pp_handler is not None:
             # Broadcast to non-last PP ranks (handles spec decode multi-token).
@@ -2924,9 +2992,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             _v["last"] = _now
         _pph_every = int(os.environ.get("VLLM_STEPPHASE_EVERY", "200"))
         if _pph and _t["n"] % _pph_every == 0:
-            n = _t["n"]
+            # The sums are reset after every print: average over the window,
+            # not over the cumulative step count.
+            n, window = _t["n"], _pph_every
             parts = " | ".join(
-                f"{k} {1000 * v / n:6.2f}ms"
+                f"{k} {1000 * v / window:6.2f}ms"
                 for k, v in _t.items()
                 if k != "n"
             )
@@ -2935,7 +3005,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 parts += f" | period {1000 * _pw['sum'] / _pw['n']:6.2f}ms"
                 _pw["sum"] = 0.0
                 _pw["n"] = 0
-            print(f"[pphase] n={n} | {parts}", flush=True)
+            _line = f"[pphase] n={n} | {parts}"
+            _pf = os.environ.get("VLLM_PPHASE_FILE")
+            if _pf:
+                # VLLM_PPHASE_FILE=<path>: per-rank file instead of stdout
+                # (journald rate-limits a busy service and drops lines).
+                try:
+                    with open(f"{_pf}.{torch.cuda.current_device()}", "a") as _f:
+                        _f.write(_line + "\n")
+                except OSError:
+                    pass
+            else:
+                print(_line, flush=True)
             for k in _t:
                 if k != "n":
                     _t[k] = 0.0

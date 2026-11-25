@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+import os
+import time
 from typing import Any
 
-import os
 import torch
 import torch.nn as nn
 
@@ -12,6 +13,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
+from vllm.utils.phase_trace import PhaseTrace
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import (
@@ -34,6 +36,9 @@ from vllm.v1.worker.gpu.spec_decode.utils import get_parallel_drafting_token_id
 from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
+
+
+_PROPOSE_TRACE: PhaseTrace | None = None
 
 
 class DFlashSpeculator(DraftModelSpeculator):
@@ -516,12 +521,22 @@ class DFlashSpeculator(DraftModelSpeculator):
         is_profile: bool = False,
         num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
+        global _PROPOSE_TRACE
+        if _PROPOSE_TRACE is None:
+            _PROPOSE_TRACE = PhaseTrace("propose")
+        _pt = _PROPOSE_TRACE
+        _pt_on = _pt.enabled
+        _pt_t = time.perf_counter() if _pt_on else 0.0
         num_reqs = input_batch.num_reqs
         if dummy_run and dp_sync_state is not None:
             num_reqs = min(num_reqs, dp_sync_state.num_reqs)
         num_target_tokens = input_batch.num_tokens
         num_query_tokens = num_reqs * self.num_query_per_req
         max_seq_len = input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
+        if _pt_on:
+            _pt_now = time.perf_counter()
+            _pt.add("head", _pt_now - _pt_t)
+            _pt_t = _pt_now
         self.draft_max_seq_len = min(
             max_seq_len + self.num_query_per_req, self.max_model_len
         )
@@ -657,6 +672,10 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.sample_from_anchor,
                 num_reqs,
             )
+        if _pt_on:
+            _pt_now = time.perf_counter()
+            _pt.add("inputs", _pt_now - _pt_t)
+            _pt_t = _pt_now
 
         if os.environ.get("VLLM_STEP_STATE_DUMP") and not dummy_run:
             # Per-step state dump for the composition hunt: the values the
@@ -721,6 +740,10 @@ class DFlashSpeculator(DraftModelSpeculator):
         num_tokens_across_dp = (
             batch_sync.num_tokens_across_dp if batch_sync is not None else None
         )
+        if _pt_on:
+            _pt_now = time.perf_counter()
+            _pt.add("dispatch", _pt_now - _pt_t)
+            _pt_t = _pt_now
 
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
             assert batch_desc.num_reqs is not None
@@ -740,6 +763,10 @@ class DFlashSpeculator(DraftModelSpeculator):
                 num_reqs, input_batch.query_start_loc, num_rejected
             )
             self._precompute_context_kv(0, num_target_tokens, dummy_run)
+        if _pt_on:
+            _pt_now = time.perf_counter()
+            _pt.add("replayprep", _pt_now - _pt_t)
+            _pt_t = _pt_now
 
         is_full_cudagraph = batch_desc.cg_mode == CUDAGraphMode.FULL
         # During FULL cudagraph with a model that supports decode metadata updates,
@@ -757,7 +784,15 @@ class DFlashSpeculator(DraftModelSpeculator):
 
         # DFlash processes all speculative tokens in one forward pass,
         # so the real token count is num_query_tokens.
+        if _pt_on:
+            _pt_now = time.perf_counter()
+            _pt.add("meta", _pt_now - _pt_t)
+            _pt_t = _pt_now
         self._prepare_eplb_forward(num_query_tokens)
+        if _pt_on:
+            _pt_now = time.perf_counter()
+            _pt.add("eplb", _pt_now - _pt_t)
+            _pt_t = _pt_now
 
         if is_full_cudagraph:
             assert self.query_cudagraph_manager is not None
@@ -768,6 +803,10 @@ class DFlashSpeculator(DraftModelSpeculator):
                 _e0 = torch.cuda.Event(enable_timing=True)
                 _e0.record()
             self.query_cudagraph_manager.run_fullgraph(batch_desc)
+            if _pt_on:
+                _pt_now = time.perf_counter()
+                _pt.add("launch", _pt_now - _pt_t)
+                _pt_t = _pt_now
             if _dgt:
                 _e1 = torch.cuda.Event(enable_timing=True)
                 _e1.record()
@@ -813,6 +852,9 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.draft_tokens[:num_reqs] = torch.remainder(
                 self.draft_tokens[:num_reqs] + 12345, self.vocab_size
             )
+        if _pt_on:
+            _pt.add("rest", time.perf_counter() - _pt_t)
+        _pt.tick()
         return self.draft_tokens[:num_reqs]
 
 

@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from collections.abc import Iterable
 
+import numpy as np
 import torch
 
 from vllm.triton_utils import tl, triton
@@ -73,6 +75,11 @@ class BlockTables:
         self.num_blocks = UvaBackedTensor(
             (self.num_kv_cache_groups, self.max_num_reqs), dtype=torch.int32
         )
+        # Leading slots already zeroed per (group, request) by sliding-window
+        # eviction; the scheduler reports cumulative counts every step.
+        self.nulled_prefix = np.zeros(
+            (self.num_kv_cache_groups, self.max_num_reqs), dtype=np.int64
+        )
         self.fused_writer: FusedStagedWriter | None = None
         if self.num_kv_cache_groups > 1:
             # Only the multi-group path uses the fused writer.
@@ -134,6 +141,8 @@ class BlockTables:
             block_ids = new_block_ids[i]
             if self.redirect_writes_to_null_block:
                 block_ids = [0] * len(block_ids)
+            if overwrite:
+                self.nulled_prefix[i, req_index] = 0
             end = start + len(block_ids)
             row_capacity = self.block_tables[i].gpu.shape[1]
             if end > row_capacity:
@@ -165,10 +174,21 @@ class BlockTables:
         live pages owned by other requests. ``nulled_counts[i]`` is the count
         for group ``i``.
         """
+        restage = os.environ.get("VLLM_SWA_RESTAGE_PREFIX") == "1"
         for i, count in enumerate(nulled_counts):
-            if count <= 0:
+            if restage:
+                if count > 0:
+                    self.block_tables[i].stage_write(req_index, 0, [0] * count)
                 continue
-            self.block_tables[i].stage_write(req_index, 0, [0] * count)
+            previous = int(self.nulled_prefix[i, req_index])
+            if count <= previous:
+                continue
+            self.nulled_prefix[i, req_index] = count
+            # Only the newly nulled slots are written: zeros persist in the
+            # table, and re-staging the whole prefix costs O(context) per step.
+            self.block_tables[i].stage_write(
+                req_index, previous, [0] * (count - previous)
+            )
 
     def apply_staged_writes(self) -> None:
         if self.num_kv_cache_groups == 0:

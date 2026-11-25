@@ -36,13 +36,14 @@ from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.outputs import RequestError
 from vllm.profiler.lifecycle import lifecycle
 from vllm.utils.math_utils import cdiv
+from vllm.utils.phase_trace import PhaseTrace
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.kv_cache_utils import KVCacheBlock, null_head_len
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -96,6 +97,9 @@ def _spec_step_trace(req_id, draft, accepted, rejected, computed, gen_len):
 _SPEC_STEP_TRACE = None
 if __import__("os").environ.get("VLLM_SPEC_STEP_TRACE"):
     _SPEC_STEP_TRACE = _spec_step_trace
+
+
+_SCHED_TRACE: PhaseTrace | None = None
 
 
 class Scheduler(SchedulerInterface):
@@ -518,11 +522,10 @@ class Scheduler(SchedulerInterface):
         # fence_seq.
         self.deferred_loads: dict[str, tuple[int, int, int, int]] = {}
 
-        self.trace_prefill_shapes = bool(
-            vllm_config.additional_config.get("trace_prefill_shapes", False)
-            if isinstance(vllm_config.additional_config, dict)
-            else False
-        )
+        options = vllm_config.additional_config
+        if not isinstance(options, dict):
+            options = {}
+        self.trace_prefill_shapes = bool(options.get("trace_prefill_shapes", False))
         self._last_traced_decode_shape: tuple[int, int] | None = None
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
@@ -558,6 +561,10 @@ class Scheduler(SchedulerInterface):
                 self.mixed_prefill_interval,
                 self.max_num_scheduled_tokens,
             )
+        self.mixed_prefill_new_arrivals_only = options.get(
+            "mixed_prefill_new_arrivals_only", False
+        )
+        self._mixed_decode_since: float | None = None
         self._step_prefill_limit = 0
         self.short_prefill_cohort = (
             os.environ.get("VLLM_BOLT_SHORT_PREFILL_COHORT", "0") == "1"
@@ -572,6 +579,28 @@ class Scheduler(SchedulerInterface):
             os.environ.get("VLLM_GFX908_PREFIX_FAIR_ADMISSION", "0") == "1"
         )
         self._prefix_bypassed_heads: set[str] = set()
+
+    def _mixed_prefill_limit(self) -> int:
+        if not self.mixed_prefill_tokens:
+            return 0
+        if not any(r.num_computed_tokens >= r.num_prompt_tokens for r in self.running):
+            self._mixed_decode_since = None
+            return 0
+        if self.mixed_prefill_new_arrivals_only:
+            # Finish prefilling a burst that arrived together at the bulk rate.
+            # Apply the shared mixed budget to arrivals during established decode.
+            if self._mixed_decode_since is None:
+                self._mixed_decode_since = time.time()  # Request.arrival_time's clock
+            cutoff = self._mixed_decode_since
+            if any(
+                r.num_computed_tokens < r.num_prompt_tokens and r.arrival_time <= cutoff
+                for r in self.running
+            ):
+                return 0
+            queue = self.kv_holding_waiting or self.waiting
+            if queue and queue.peek_request().arrival_time <= cutoff:
+                return 0
+        return self.mixed_prefill_tokens
 
     def _select_waiting_queue_for_scheduling(self) -> RequestQueue | None:
         """Waiting queue to draw an initial short-prefill cohort from.
@@ -876,6 +905,12 @@ class Scheduler(SchedulerInterface):
 
     @lifecycle("scheduler.schedule")
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
+        global _SCHED_TRACE
+        if _SCHED_TRACE is None:
+            _SCHED_TRACE = PhaseTrace("sched")
+        _pt = _SCHED_TRACE
+        _pt_on = _pt.enabled
+        _pt_t = time.perf_counter() if _pt_on else 0.0
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -896,11 +931,7 @@ class Scheduler(SchedulerInterface):
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
-        self._step_prefill_limit = (
-            self.mixed_prefill_tokens
-            if any(r.num_computed_tokens >= r.num_prompt_tokens for r in self.running)
-            else 0
-        )
+        self._step_prefill_limit = self._mixed_prefill_limit()
         prefill_budget = self._step_prefill_limit or token_budget
         short_cohort_step = False
         if (
@@ -1269,6 +1300,10 @@ class Scheduler(SchedulerInterface):
                     (encoder_inputs_to_schedule or []) + external_load_encoder_input,
                     duplicate_encoder_inputs,
                 )
+        if _pt_on:
+            _pt_now = time.perf_counter()
+            _pt.add("running", _pt_now - _pt_t)
+            _pt_t = _pt_now
 
         # Record the LoRAs of all running requests, including those not
         # scheduled in this step, which can join a later batch.
@@ -1905,6 +1940,10 @@ class Scheduler(SchedulerInterface):
         ) <= len(self.running)
 
         # Construct the scheduler output.
+        if _pt_on:
+            _pt_now = time.perf_counter()
+            _pt.add("tail", _pt_now - _pt_t)
+            _pt_t = _pt_now
         if self.use_v2_model_runner:
             scheduled_new_reqs.extend(scheduled_resumed_reqs)
             scheduled_resumed_reqs.clear()
@@ -1936,6 +1975,10 @@ class Scheduler(SchedulerInterface):
                 req_to_new_blocks,
             )
 
+        if _pt_on:
+            _pt_now = time.perf_counter()
+            _pt.add("cached", _pt_now - _pt_t)
+            _pt_t = _pt_now
         # Record the request ids that were scheduled in this step (MRV1-only).
         if not self.use_v2_model_runner:
             self.prev_step_scheduled_req_ids.clear()
@@ -2015,6 +2058,10 @@ class Scheduler(SchedulerInterface):
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
         )
 
+        if _pt_on:
+            _pt_now = time.perf_counter()
+            _pt.add("output", _pt_now - _pt_t)
+            _pt_t = _pt_now
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
         # 2. Wrap up all the KV cache load / save ops into an opaque object
@@ -2038,6 +2085,10 @@ class Scheduler(SchedulerInterface):
             scheduler_output.ec_connector_metadata = ec_meta
 
         # Connector-only block state must not be dispatched to workers.
+        if _pt_on:
+            _pt_now = time.perf_counter()
+            _pt.add("conn_meta", _pt_now - _pt_t)
+            _pt_t = _pt_now
         scheduler_output.kv_connector_block_state = None
 
         # Advance the fence only for non-empty steps (those that actually
@@ -2047,6 +2098,9 @@ class Scheduler(SchedulerInterface):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
+        if _pt_on:
+            _pt.add("after", time.perf_counter() - _pt_t)
+        _pt.tick()
         return scheduler_output
 
     def _build_kv_connector_meta(
@@ -2237,15 +2291,7 @@ class Scheduler(SchedulerInterface):
             nulled_counts: tuple[int, ...] | None = None
             group_blocks = self.kv_cache_manager.get_blocks(req_id).blocks
             if group_blocks:
-                counts = []
-                for blocks in group_blocks:
-                    n = 0
-                    for blk in blocks:
-                        if getattr(blk, "is_null", False):
-                            n += 1
-                        else:
-                            break
-                    counts.append(n)
+                counts = [null_head_len(blocks) for blocks in group_blocks]
                 if any(counts):
                     nulled_counts = tuple(counts)
             nulled_prefix_blocks.append(nulled_counts)

@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 import os
+import threading
 import time
 from collections import deque
 from collections.abc import Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
@@ -458,6 +460,26 @@ class SingleDirectionOffloadingHandler:
         self._swap_blocks_batch = _select_swap_blocks_fn(
             layer_refs_per_group, gpu_to_cpu, host_memory_is_pinned
         )
+        # The classic per-descriptor executor spends its time on the host in
+        # the enqueue loop. VLLM_OFFLOAD_ASYNC_CLASSIC_STORES=1 runs that loop
+        # (same copies, order and completion events) on one background thread
+        # so the worker step does not wait for it.
+        self._classic_async = (
+            gpu_to_cpu
+            and self._swap_blocks_batch is swap_blocks_classic
+            and os.environ.get("VLLM_OFFLOAD_ASYNC_CLASSIC_STORES") == "1"
+        )
+        self._classic_thread: ThreadPoolExecutor | None = (
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="classic-store")
+            if self._classic_async
+            else None
+        )
+        self._classic_error: BaseException | None = None
+        # Set once the thread has recorded the job's end event: an event that
+        # is not recorded yet queries as complete.
+        self._classic_done: dict[int, threading.Event] = {}
+        if self._classic_async:
+            logger.info("Offload stores: classic executor on background thread")
 
         # GPU blocks may be smaller
         # cpu_page_size = gpu_page_size * blocks_per_chunk.
@@ -882,6 +904,7 @@ class SingleDirectionOffloadingHandler:
             # VLLM_OFFLOAD_NOEVENTS=1: also skip hipEventRecord — the last
             # GPU-side common denominator of the store path (bisection knife
             # for the gfx908 event-record disturbance hypothesis).
+            deferred = False
             if op_idx > 0 and not _offload_knife("FAKESTORES"):
                 if self._swap_is_triton:
                     self._swap_blocks_batch(
@@ -891,6 +914,27 @@ class SingleDirectionOffloadingHandler:
                         is_src_access_order_any=is_src_access_order_any,
                         device_buffers=self._device_desc_buffers(op_idx),
                     )
+                elif self._classic_async and not serialize_on_compute and not _noev:
+                    deferred = True
+                    done = threading.Event()
+                    self._classic_done[job_id] = done
+
+                    def _enqueue(done: threading.Event = done) -> None:
+                        try:
+                            with current_platform.stream(copy_stream):
+                                self._swap_blocks_batch(
+                                    src,
+                                    dst,
+                                    sizes,
+                                    is_src_access_order_any=is_src_access_order_any,
+                                )
+                            end_event.record(copy_stream)
+                        except BaseException as e:  # surfaced by wait/get_finished
+                            self._classic_error = e
+                        finally:
+                            done.set()
+
+                    self._classic_thread.submit(_enqueue)
                 else:
                     self._swap_blocks_batch(
                         src,
@@ -898,7 +942,7 @@ class SingleDirectionOffloadingHandler:
                         sizes,
                         is_src_access_order_any=is_src_access_order_any,
                     )
-            if not _noev:
+            if not _noev and not deferred:
                 end_event.record(copy_stream)
                 if serialize_on_compute and classic_default_stream_copy:
                     # Preserve the diagnostic knob's promised serialization.
@@ -926,11 +970,15 @@ class SingleDirectionOffloadingHandler:
 
     def get_finished(self) -> list[TransferResult]:
         results: list[TransferResult] = []
+        if self._classic_error is not None:
+            raise RuntimeError("classic store copy failed") from self._classic_error
         _noev = _offload_knife("NOEVENTS")
         while self._transfers and (
-            _noev or self._transfers[0].end_event.query()
+            self._transfers[0].job_id not in self._classic_done
+            and (_noev or self._transfers[0].end_event.query())
         ):
             transfer = self._transfers.popleft()
+            self._classic_done.pop(transfer.job_id, None)
             transfer_time = 0.0 if _noev else (
                 transfer.start_event.elapsed_time(transfer.end_event) * 1e-3
             )  # elapsed_time is in milliseconds
@@ -954,12 +1002,19 @@ class SingleDirectionOffloadingHandler:
 
     def wait(self, job_ids: set[int]):
         for job_id in job_ids:
+            done = self._classic_done.get(job_id)
+            if done is not None:
+                done.wait()
             event = self._transfer_events.get(job_id)
             if event is not None:
                 event.synchronize()
+        if self._classic_error is not None:
+            raise RuntimeError("classic store copy failed") from self._classic_error
 
     def shutdown(self) -> None:
         """Drain this direction and release its transfer-side resources."""
+        if self._classic_thread is not None:
+            self._classic_thread.shutdown(wait=True)
         sync_error: Exception | None = None
         while self._transfers:
             transfer = self._transfers[0]

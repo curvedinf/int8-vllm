@@ -26,6 +26,15 @@ _SPLIT_PROGRAMS_PER_CU = 2
 _MAX_SPLITS = 128
 
 
+@triton.jit
+def _dequantize_kv(codes, scale, query_dtype: tl.constexpr, half_product: tl.constexpr):
+    if half_product:
+        # Signed bytes are exactly representable in FP16. The product with
+        # an FP16 scale fits in FP32 before the original single FP16 rounding.
+        return codes.to(tl.float16) * scale[:, None]
+    return (codes.to(tl.float32) * scale[:, None]).to(query_dtype)
+
+
 @triton.jit(do_not_specialize=["num_splits", "num_tokens"])
 def _rel_attention_kernel(
     Q,
@@ -68,22 +77,26 @@ def _rel_attention_kernel(
     stride_gate=0,
     stride_sink=0,
     DRAFT: tl.constexpr = False,
+    SKIP_PAST_BIAS: tl.constexpr = False,
+    HALF_PRODUCT: tl.constexpr = False,
+    SINGLE_HEAD: tl.constexpr = False,
 ):
     # `WINDOW` is the largest visible query-key distance (-1 for full attention).
-    # `SPLIT`: program `s` of `num_splits` holds all queries of the request,
-    # takes key blocks `s, s + num_splits, ...` and writes row
-    # `s * num_tokens + token` of the partial output and its log2 LSE
-    # (-inf without keys). Otherwise programs tile the queries, and write the
-    # output and its natural-log LSE.
+    # `SPLIT`: program `p` of `num_splits * tiles` takes key blocks
+    # `s, s + num_splits, ...` of query tile `p // num_splits`, where
+    # `s = p % num_splits`, and writes rows `s * num_tokens + token` of the
+    # partial output and its log2 LSE (-inf without keys). Otherwise programs
+    # tile the queries, and write the output and its natural-log LSE.
     BLOCK_M: tl.constexpr = BLOCK_Q * BLOCK_H
-    kv_head = tl.program_id(1)
+    program_head = tl.program_id(1)
+    kv_head = program_head // GROUP if SINGLE_HEAD else program_head
     req = tl.program_id(2)
     q_start = tl.load(CuSeqlensQ + req)
     q_len = tl.load(CuSeqlensQ + req + 1) - q_start
     if SPLIT:
-        split = tl.program_id(0)
+        split = tl.program_id(0) % num_splits
         step = num_splits
-        q0 = 0
+        q0 = (tl.program_id(0) // num_splits) * BLOCK_Q
     else:
         split = 0
         step = 1
@@ -95,7 +108,11 @@ def _rel_attention_kernel(
 
     rows = tl.arange(0, BLOCK_M)
     q_idx = q0 + rows // BLOCK_H
-    head = kv_head * GROUP + rows % BLOCK_H
+    head = (
+        program_head + rows % BLOCK_H
+        if SINGLE_HEAD
+        else kv_head * GROUP + rows % BLOCK_H
+    )
     row_valid = (q_idx < q_len) & (rows % BLOCK_H < GROUP)
     token = (q_start + q_idx).to(tl.int64)
     d = tl.arange(0, D)
@@ -125,6 +142,13 @@ def _rel_attention_kernel(
     m_i = tl.full([BLOCK_M], float("-inf"), tl.float32)
     l_i = tl.zeros([BLOCK_M], tl.float32)
     acc = tl.zeros([BLOCK_M, D], tl.float32)
+    if SKIP_PAST_BIAS:
+        # For a full-attention tile, older key blocks have zero relative bias
+        # and every live query sees every key. This bound uses its first row.
+        first_tile_end = tl.minimum((q0 // 128 + 1) * 128, q_len)
+        bias_start = tl.cdiv(past + first_tile_end, 128) * 128 - E_PAD
+        if E_PAD < 256:
+            bias_start = tl.minimum(bias_start, first_pos + 1)
     n_first = lo // BLOCK_N + split
     num_iters = tl.maximum(tl.cdiv(tl.cdiv(hi, BLOCK_N) - n_first, step), 0)
     for i in range(num_iters):
@@ -146,19 +170,30 @@ def _rel_attention_kernel(
                 K + page * stride_kb + slot * stride_kp + kv_head * stride_kh + D
             ).to(tl.pointer_type(tl.float16))
             scale = tl.load(scale_addr, key_valid, other=0.0)
-            k = (k.to(tl.float32) * scale[:, None]).to(q.dtype)
-        s = tl.dot(q, tl.trans(k.to(q.dtype))) * scale_log2
-        dist = pos[:, None] - keys[None, :]
-        valid = row_valid[:, None] & key_valid[None, :] & (dist >= 0)
-        if WINDOW >= 0:
-            valid &= dist <= WINDOW
-        # Keys before key0 are past the extent: no bias (full layers) or
-        # out of the window.
-        if not DRAFT:
-            in_table = valid & (keys[None, :] >= key0[:, None])
-            bias = tl.load(bias_rows[:, None] + keys[None, :], in_table, other=0.0)
-            s = s + bias.to(tl.float32) * 1.4426950408889634
-        s = tl.where(valid, s, float("-inf"))
+            k = _dequantize_kv(k, scale, q.dtype, HALF_PRODUCT)
+        dots = tl.dot(q, tl.trans(k.to(q.dtype)))
+        s = dots * scale_log2
+        if SKIP_PAST_BIAS:
+            needs_mask = (n_first + i * step + 1) * BLOCK_N > bias_start
+        else:
+            needs_mask = True
+        if needs_mask:
+            dist = pos[:, None] - keys[None, :]
+            valid = row_valid[:, None] & key_valid[None, :] & (dist >= 0)
+            if WINDOW >= 0:
+                valid &= dist <= WINDOW
+            # Keys before key0 are past the extent: no bias (full layers) or
+            # out of the window.
+            if not DRAFT:
+                in_table = valid & (keys[None, :] >= key0[:, None])
+                bias = tl.load(bias_rows[:, None] + keys[None, :], in_table, other=0.0)
+                scaled_bias = bias.to(tl.float32) * 1.4426950408889634
+                if SKIP_PAST_BIAS:
+                    # Match the FMA used by the unpartitioned gfx908 kernel.
+                    s = tl.fma(dots, scale_log2, scaled_bias)
+                else:
+                    s = s + scaled_bias
+            s = tl.where(valid, s, float("-inf"))
         m_new = tl.maximum(m_i, tl.max(s, 1))
         # Rows without a live key so far keep m = -inf: no -inf - -inf.
         m_ref = tl.where(m_new == float("-inf"), 0.0, m_new)
@@ -179,7 +214,7 @@ def _rel_attention_kernel(
                 V + page * stride_vb + slot * stride_vp + kv_head * stride_vh + D
             ).to(tl.pointer_type(tl.float16))
             scale = tl.load(scale_addr, key_valid, other=0.0)
-            v = (v.to(tl.float32) * scale[:, None]).to(q.dtype)
+            v = _dequantize_kv(v, scale, q.dtype, HALF_PRODUCT)
         acc = acc * alpha[:, None] + tl.dot(p.to(v.dtype), v)
         m_i = m_new
 
@@ -266,15 +301,59 @@ def gated_rel_attention(
     softmax_scale: float,
     window: int,
     fused_epilogue: bool = False,
+    skip_past_bias: bool = False,
+    mi100_tiles: bool = False,
+    output_scales=None,
+    output_sums=None,
+    num_splits: int = 0,
     key_tile: int = _BLOCK_N,
     max_rows: int = 128,
 ) -> None:
     """Write the gated `(T, H * D)` attention output (`gate_sink` of
     `rel_attention`) to `result`. Tokens from `num_actual_tokens` on are
-    zeroed."""
+    zeroed. `num_splits` > 0 splits every query tile's keys over that many
+    programs and merges the fp32 partials."""
     num_tokens, num_heads = q.shape[:2]
     nt = num_actual_tokens
+    if num_splits > 0:
+        assert not fused_epilogue
+        assert result.is_contiguous() and result.shape == gate.shape
+        assert gate.stride(1) == sinks.stride(1) == 1
+        _check_sheared_bias(sheared_bias, q)
+        o_part, lse_part = _launch(
+            q[:nt],
+            key_cache,
+            value_cache,
+            sheared_bias[: nt + 128],
+            None,
+            None,
+            block_table,
+            cache_seqlens,
+            cu_seqlens_q,
+            max_seqlen_q,
+            softmax_scale,
+            window,
+            num_splits=num_splits,
+            key_tile=key_tile,
+            skip_past_bias=skip_past_bias,
+            mi100_tiles=mi100_tiles,
+            max_rows=max_rows,
+        )
+        assert lse_part is not None
+        _combine(
+            o_part,
+            lse_part,
+            gate,
+            sinks,
+            result,
+            cu_seqlens_q,
+            num_splits,
+            output_scales,
+            output_sums,
+        )
+        return
     if fused_epilogue:
+        assert output_scales is None and output_sums is None
         assert result.is_contiguous() and result.shape == gate.shape
         assert gate.stride(1) == sinks.stride(1) == 1
         _check_sheared_bias(sheared_bias, q)
@@ -294,6 +373,8 @@ def gated_rel_attention(
             gate=gate,
             sinks=sinks,
             key_tile=key_tile,
+            skip_past_bias=skip_past_bias,
+            mi100_tiles=mi100_tiles,
             max_rows=max_rows,
         )
         result[nt:].zero_()
@@ -315,11 +396,13 @@ def gated_rel_attention(
         softmax_scale,
         window,
         key_tile=key_tile,
+        skip_past_bias=skip_past_bias,
+        mi100_tiles=mi100_tiles,
         max_rows=max_rows,
     )
     out[nt:].zero_()
     lse[:, nt:].zero_()
-    gate_sink(out, gate, lse.t(), sinks, result)
+    gate_sink(out, gate, lse.t(), sinks, result, scales=output_scales, sums=output_sums)
 
 
 def plan_decode_attention(
@@ -368,6 +451,10 @@ def rel_decode_attention(
     is_local: bool,
     num_splits: int,
     key_tile: int = _BLOCK_N,
+    skip_past_bias: bool = False,
+    mi100_tiles: bool = False,
+    output_scales=None,
+    output_sums=None,
 ) -> None:
     """Write the gated `(T, H * D)` attention output for small batches.
 
@@ -398,9 +485,21 @@ def rel_decode_attention(
         extent - 1 if is_local else -1,
         num_splits=num_splits,
         key_tile=key_tile,
+        skip_past_bias=skip_past_bias,
+        mi100_tiles=mi100_tiles,
     )
     assert lse_part is not None
-    _combine(o_part, lse_part, gate, sinks, out, cu_seqlens_q, num_splits)
+    _combine(
+        o_part,
+        lse_part,
+        gate,
+        sinks,
+        out,
+        cu_seqlens_q,
+        num_splits,
+        output_scales,
+        output_sums,
+    )
 
 
 def block_decode_attention(
@@ -462,6 +561,8 @@ def _launch(
     key_tile: int = _BLOCK_N,
     max_rows: int = 128,
     draft: bool = False,
+    skip_past_bias: bool = False,
+    mi100_tiles: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Launch `_rel_attention_kernel` and return `(out, lse)`.
 
@@ -474,18 +575,37 @@ def _launch(
     group = num_heads // num_kv_heads
     assert q.stride(2) == key_cache.stride(3) == value_cache.stride(3) == 1
     block_h = triton.next_power_of_2(group)
+    launch_options = {}
+    single_head = False
+    if mi100_tiles and not draft and group == 3 and head_dim == 128:
+        # A smaller query tile avoids idle MFMA rows in mixed decode/prefill.
+        # Keep the 64-key tile and per-request split count to preserve reductions.
+        if out is not None and max_seqlen_q >= 32:
+            max_rows = 32 if window >= 0 and cache_seqlens.shape[0] > 1 else 64
+            if max_seqlen_q >= 128 and (window >= 0 or cache_seqlens.shape[0] == 1):
+                # A full tile of queries per head gives long chunks more active
+                # wavefronts without changing the per-row key reduction order.
+                single_head = True
+                block_h = 1
+                max_rows = 64
+        if out is None or window < 0:
+            launch_options["waves_per_eu"] = 2
     # Rows (tokens x heads) per program: at least one 16-row MFMA tile.
     block_m = min(max_rows, max(16, triton.next_power_of_2(max_seqlen_q * block_h)))
     block_q = max(1, block_m // block_h)
     num_reqs = cache_seqlens.shape[0]
     split = out is None
     if split:
-        assert max_seqlen_q <= block_q and num_splits > 0
+        assert num_splits > 0
         out = q.new_empty((num_splits * num_tokens, *q.shape[1:]), dtype=torch.float32)
         lse = q.new_empty((num_heads, num_splits * num_tokens), dtype=torch.float32)
-        grid = (num_splits, num_kv_heads, num_reqs)
+        grid = (num_splits * triton.cdiv(max_seqlen_q, block_q), num_kv_heads, num_reqs)
     else:
-        grid = (triton.cdiv(max_seqlen_q, block_q), num_kv_heads, num_reqs)
+        grid = (
+            triton.cdiv(max_seqlen_q, block_q),
+            num_heads if single_head else num_kv_heads,
+            num_reqs,
+        )
     assert out is not None and (lse is not None or gate is not None)
     assert out.stride(2) == 1
     if num_tokens == 0:
@@ -524,6 +644,17 @@ def _launch(
         WINDOW=window,
         SPLIT=split,
         DRAFT=draft,
+        SKIP_PAST_BIAS=skip_past_bias and window < 0 and not draft,
+        SINGLE_HEAD=single_head,
+        HALF_PRODUCT=(
+            mi100_tiles
+            and split
+            and window >= 0
+            and q.dtype == torch.float16
+            and group == 3
+            and head_dim == 128
+            and not draft
+        ),
         BLOCK_Q=block_q,
         BLOCK_H=block_h,
         BLOCK_N=key_tile,
@@ -533,8 +664,22 @@ def _launch(
         stride_sink=sinks.stride(0) if sinks is not None else 0,
         num_warps=4 if block_m <= 64 else 8,
         num_stages=1,
+        **launch_options,
     )
     return out, lse
+
+
+@triton.jit
+def _store_g128(Y, Scales, Sums, value, group_id, LIVE):
+    # Preserve the FP16 attention output at the input of the W4A8 projection.
+    rounded = value.to(tl.float16).to(tl.float32)
+    scale = tl.maximum(tl.div_rn(tl.max(tl.abs(rounded), -1), 127.0), 1e-30)
+    codes = tldevice.nearbyint(tl.div_rn(rounded, scale[:, None])).to(tl.int8)
+    tl.store(
+        Y + group_id[:, None] * 128 + tl.arange(0, 128)[None, :], codes, LIVE[:, None]
+    )
+    tl.store(Scales + group_id, scale, LIVE)
+    tl.store(Sums + group_id, tl.sum(codes.to(tl.int32), -1), LIVE)
 
 
 @triton.jit(do_not_specialize=["num_reqs", "num_splits", "num_tokens"])
@@ -554,6 +699,8 @@ def _split_combine_kernel(
     H: tl.constexpr,
     D: tl.constexpr,
     BLOCK_S: tl.constexpr,
+    Scales=None,
+    Sums=None,
 ):
     """Merge the split partials of one token and head, then apply the output
     gate and attention sink."""
@@ -564,6 +711,9 @@ def _split_combine_kernel(
     # Tokens of no request (padding) have no partials.
     if row >= tl.load(CuSeqlensQ + num_reqs):
         tl.store(y_ptrs, tl.zeros([D], Y.dtype.element_ty))
+        if Scales is not None:
+            tl.store(Scales + row * H + head, 1e-30)
+            tl.store(Sums + row * H + head, 0)
         return
     m_i = tl.full([1], float("-inf"), tl.float32)
     l_i = tl.zeros([1], tl.float32)
@@ -598,7 +748,18 @@ def _split_combine_kernel(
         )
         y = y * _sigmoid(gate)
         y = y * _sigmoid(lse_e - sink)
-    tl.store(y_ptrs, y.to(Y.dtype.element_ty))
+    if Scales is None:
+        tl.store(y_ptrs, y.to(Y.dtype.element_ty))
+    else:
+        tl.static_assert(D == 128)
+        _store_g128(
+            Y,
+            Scales,
+            Sums,
+            tl.reshape(y, (1, D)),
+            (row * H + head) + tl.arange(0, 1),
+            tl.full((1,), True, tl.int1),
+        )
 
 
 def _combine(
@@ -609,6 +770,8 @@ def _combine(
     out: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     num_splits: int,
+    scales=None,
+    sums=None,
 ) -> None:
     num_heads, head_dim = o_part.shape[1:]
     num_tokens = o_part.shape[0] // num_splits
@@ -632,6 +795,8 @@ def _combine(
         D=head_dim,
         # Splits merged per iteration: few splits come with large batches.
         BLOCK_S=4 if num_splits <= 4 else 64,
+        Scales=scales,
+        Sums=sums,
         num_warps=1,
         enable_fp_fusion=False,
     )
@@ -657,6 +822,8 @@ def _gate_sink_kernel(
     H: tl.constexpr,
     D: tl.constexpr,
     BLOCK: tl.constexpr,
+    Scales=None,
+    Sums=None,
 ):
     row = tl.program_id(0).to(tl.int64)
     col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
@@ -668,7 +835,14 @@ def _gate_sink_kernel(
     sink = tl.load(Sink + row * stride_sink + head, mask, other=0).to(tl.float32)
     result = x.to(tl.float32) * _sigmoid(gate)
     result = result * _sigmoid(lse.to(tl.float32) - sink)
-    tl.store(Y + row * H * D + col, result, mask)
+    if Scales is None:
+        tl.store(Y + row * H * D + col, result, mask)
+    else:
+        tl.static_assert(D == 128)
+        heads = tl.program_id(1) * (BLOCK // D) + tl.arange(0, BLOCK // D)
+        _store_g128(
+            Y, Scales, Sums, result.reshape((BLOCK // D, D)), row * H + heads, heads < H
+        )
 
 
 def gate_sink(
@@ -677,6 +851,9 @@ def gate_sink(
     lse: torch.Tensor,
     sinks: torch.Tensor,
     result: torch.Tensor,
+    *,
+    scales=None,
+    sums=None,
 ) -> None:
     """Write `output * sigmoid(gate) * sigmoid(lse - sink)` per head to
     `result`.
@@ -690,7 +867,8 @@ def gate_sink(
     assert gate.stride(1) == sinks.stride(1) == 1
     assert result.shape == gate.shape and result.is_contiguous()
     width = gate.shape[1]
-    _gate_sink_kernel[(num_tokens, triton.cdiv(width, 512))](
+    block = 256 if scales is not None else 512
+    _gate_sink_kernel[(num_tokens, triton.cdiv(width, block))](
         output,
         gate,
         lse,
@@ -703,7 +881,10 @@ def gate_sink(
         sinks.stride(0),
         num_heads,
         width // num_heads,
-        512,
+        block,
+        Scales=scales,
+        Sums=sums,
+        num_warps=1 if scales is not None else 4,
         enable_fp_fusion=False,
     )
 

@@ -15,6 +15,203 @@ from vllm.triton_utils import tl, tldevice, triton
 
 
 @triton.jit
+def _residual_source(
+    Blocks,
+    Last,
+    Addend,
+    state,
+    row,
+    col,
+    mask,
+    stride_bs,
+    stride_bt,
+    stride_lt,
+    stride_at,
+    STACK: tl.constexpr,
+    ADD: tl.constexpr,
+):
+    if state < STACK:
+        value = tl.load(Blocks + state * stride_bs + row * stride_bt + col, mask, 0).to(
+            tl.float32
+        )
+    else:
+        value = tl.load(Last + row * stride_lt + col, mask, 0).to(tl.float32)
+        if ADD:
+            value += tl.load(Addend + row * stride_at + col, mask, 0).to(tl.float32)
+    return value
+
+
+@triton.jit
+def _normalize_residual_rows(
+    Blocks,
+    Last,
+    Addend,
+    Out,
+    stride_bs,
+    stride_bt,
+    stride_lt,
+    stride_at,
+    stride_os,
+    stride_ot,
+    STACK: tl.constexpr,
+    ADD: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    state = tl.program_id(1)
+    source = (Blocks, Last, Addend, state, row)
+    strides = (stride_bs, stride_bt, stride_lt, stride_at)
+    # Preserve the FP32 mean reduction order used by ATen on gfx908 for
+    # contiguous 2304-element rows. Each lane reduces four columns.
+    offset = tl.arange(0, 256)
+    partial = tl.full((256,), 0.0, tl.float32)
+    for chunk in tl.static_range(9):
+        x = _residual_source(*source, chunk * 256 + offset, True, *strides, STACK, ADD)
+        partial += x * x
+    lanes = tl.arange(0, 64)
+    total = tl.gather(partial, lanes * 4, 0)
+    for i in tl.static_range(1, 4):
+        total += tl.gather(partial, lanes * 4 + i, 0)
+    for i in tl.static_range(6):
+        total += tl.gather(total, lanes ^ (1 << i), 0)
+    sum_squares = tl.sum(tl.where(lanes == 0, total, 0.0), 0)
+    mean_eps = sum_squares * (1.0 / 2304) + 1e-6
+    inv = tl.rsqrt(mean_eps.to(tl.float64)).to(tl.float32)
+
+    cols = tl.arange(0, 4096)
+    value = _residual_source(*source, cols, cols < 2304, *strides, STACK, ADD)
+    if Out.dtype.element_ty == tl.float16:
+        # Prevent a direct-to-half multiply with different tie rounding.
+        norm = tl.inline_asm_elementwise(
+            "v_mul_f32 $0, $1, $2",
+            "=v,v,v",
+            [value, inv],
+            dtype=tl.float32,
+            is_pure=True,
+            pack=1,
+        )
+    else:
+        norm = value * inv
+    tl.store(Out + state * stride_os + row * stride_ot + cols, norm, cols < 2304)
+
+
+def normalize_residual_rows(
+    blocks, last, addend=None, *, controller=False, dtype=None
+):
+    """Normalize residual sources along width; a controller takes FP16 rows.
+
+    `dtype` rounds the normalized stack rows (FP16 halves the bytes the
+    residual query reads); the normalization itself stays FP32.
+    """
+    tokens, width = last.shape
+    if (
+        width != 2304
+        or tokens < 8
+        or blocks.stride(-1) != 1
+        or last.stride(-1) != 1
+        or (addend is not None and addend.stride(-1) != 1)
+    ):
+        tail = last.float()
+        if addend is not None:
+            tail = tail + addend.float()
+        values = torch.cat((blocks.float(), tail.unsqueeze(0)))
+        values = values * torch.rsqrt(values.square().mean(-1, keepdim=True) + 1e-6)
+        if controller:
+            return values.transpose(0, 1).contiguous().half()
+        return values.to(dtype) if dtype is not None else values
+    states = blocks.shape[0] + 1
+    if controller:
+        out = last.new_empty((tokens, states, width), dtype=torch.float16)
+        state_stride, token_stride = out.stride(1), out.stride(0)
+    else:
+        out = last.new_empty((states, tokens, width), dtype=dtype or torch.float32)
+        state_stride, token_stride = out.stride(0), out.stride(1)
+    _normalize_residual_rows[(tokens, states)](
+        blocks,
+        last,
+        addend,
+        out,
+        blocks.stride(0),
+        blocks.stride(1),
+        last.stride(0),
+        addend.stride(0) if addend is not None else 0,
+        state_stride,
+        token_stride,
+        states - 1,
+        addend is not None,
+        num_warps=4,
+        enable_fp_fusion=False,
+    )
+    return out
+
+
+@triton.jit
+def _weighted_values(
+    Values,
+    Weights,
+    Out,
+    stride_vs,
+    stride_vt,
+    stride_wq,
+    stride_wt,
+    stride_ot,
+    stride_oq,
+    H: tl.constexpr,
+    S: tl.constexpr,
+    B: tl.constexpr,
+):
+    token = tl.program_id(0).to(tl.int64)
+    q = tl.program_id(1)
+    col = tl.program_id(2) * B + tl.arange(0, B)
+    values = Values + token * stride_vt + col
+    weights = Weights + q * stride_wq + token * stride_wt
+    result = tl.full((B,), 0, tl.float32)
+    for state in tl.static_range(S):
+        value = tl.load(values + state * stride_vs, col < H, other=0)
+        # rocBLAS uses eight split-K lanes for this skinny product. With
+        # at most eight states each lane contributes one rounded product.
+        result = result + value * tl.load(weights + state)
+    tl.store(Out + token * stride_ot + q * stride_oq + col, result, col < H)
+
+
+def weighted_values(weights, values):
+    """Sum the few residual states in their original FP32 accumulation order."""
+    states, tokens, hidden = values.shape
+    queries = weights.shape[0]
+    # The reference selects a different contraction for small batches. Use
+    # this specialization only for the Inkling 2 Mini shapes checked on MI100.
+    if (
+        tokens < 16
+        or hidden != 2304
+        or not 2 <= states <= 5
+        or queries not in (1, 3, 4)
+        or values.dtype != torch.float32
+        or weights.dtype != torch.float32
+        or values.stride(-1) != 1
+        or weights.stride(-1) != 1
+    ):
+        return torch.einsum("qts,std->qtd", weights, values)
+    out = values.new_empty((tokens, queries, hidden)).transpose(0, 1)
+    block = 256
+    _weighted_values[(tokens, queries, triton.cdiv(hidden, block))](
+        values,
+        weights,
+        out,
+        values.stride(0),
+        values.stride(1),
+        weights.stride(0),
+        weights.stride(1),
+        out.stride(1),
+        out.stride(0),
+        hidden,
+        states,
+        block,
+        num_warps=4,
+        enable_fp_fusion=False,
+    )
+    return out
+
+
+@triton.jit
 def _load_source(
     Stack, stride_s, Last, Addend, row_off, offs, mask, n, N_STACK, HAS_ADDEND
 ):

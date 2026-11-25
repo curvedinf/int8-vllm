@@ -34,6 +34,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_down
+from vllm.utils.phase_trace import PhaseTrace
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import eagle_proof_margin
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -510,6 +511,7 @@ class RequestOffloadState:
         group_config: "GroupOffloadConfig",
         group_state: RequestGroupState,
         num_offloadable_tokens: int,
+        knives: tuple[bool, bool] | None = None,
     ) -> int:
         """Number of allocated and keyed leading chunks eligible for store.
 
@@ -529,22 +531,17 @@ class RequestOffloadState:
         """
         num_chunks = num_offloadable_tokens // group_config.tokens_per_chunk
         is_decoding = num_offloadable_tokens > self.req.num_prompt_tokens
-        if (
-            os.environ.get("VLLM_OFFLOAD_NOSTORE_DECODE") == "1"
-            and is_decoding
-        ):
+        nostore_decode, nostore_mamba = (
+            knives if knives is not None else _store_knives()
+        )
+        if nostore_decode and is_decoding:
             # Diagnostic knife: no decode-phase stores at all (prefill-phase
             # stores remain). If decode-phase legs turn clean with the tier
             # otherwise ON, the STORE MACHINERY itself (UVA D2H copy path /
             # staging buffers / fencing) corrupts GPU state episodically —
             # not the stored content.
             num_chunks = 0
-        if group_config.requires_cow_source and (
-            os.environ.get("VLLM_OFFLOAD_NOSTORE_MAMBA") == "1"
-            or os.path.exists(
-                "/home/curved/vllm-gfx908/logs/serve_recipe_qwen38/NOSTORE_MAMBA"
-            )
-        ):
+        if group_config.requires_cow_source and nostore_mamba:
             # G1 knife (gs_301 evidence): mamba-align stores arm the
             # BlockStored -> shared/cached mamba block -> mid-decode CoW
             # migration chain. gs_301 showed ALL 48 GDN layers migrating the
@@ -574,7 +571,9 @@ class RequestOffloadState:
         num_keyed_chunks = len(group_state.offload_keys)
         return min(num_chunks, num_allocated_chunks, num_keyed_chunks)
 
-    def advance_stored_idx(self, num_offloadable_tokens: int) -> None:
+    def advance_stored_idx(
+        self, num_offloadable_tokens: int, knives: tuple[bool, bool] | None = None
+    ) -> None:
         # max(): at the prefill->decode transition of a chunk-aligned prompt,
         # storable_chunks drops by one (the eagle exclusion kicks in), and the
         # index must not move backwards past already-stored chunks.
@@ -583,7 +582,9 @@ class RequestOffloadState:
         ):
             group_state.next_stored_chunk_idx = max(
                 group_state.next_stored_chunk_idx,
-                self.storable_chunks(group_config, group_state, num_offloadable_tokens),
+                self.storable_chunks(
+                    group_config, group_state, num_offloadable_tokens, knives
+                ),
             )
 
     def update_num_hit_chunks(self, num_cached_tokens: int) -> None:
@@ -651,6 +652,28 @@ def _create_req_context(req: Request) -> ReqContext:
         kv_transfer_params=params,
         kv_hints=req.kv_hints,
         load_tier_filter=load_filter,
+    )
+
+
+_CONN_TRACE: PhaseTrace | None = None
+
+
+# VLLM_OFFLOAD_VERIFY_FASTPATH=1: run the store-bookkeeping slow path even for
+# settled requests and assert it stores nothing and moves no index.
+_VERIFY_FASTPATH = os.environ.get("VLLM_OFFLOAD_VERIFY_FASTPATH") == "1"
+
+
+def _store_knives() -> tuple[bool, bool]:
+    """(nostore_decode, nostore_mamba): the store knives, constant within a step.
+
+    Read once per step by the caller instead of once per request and group.
+    """
+    return (
+        os.environ.get("VLLM_OFFLOAD_NOSTORE_DECODE") == "1",
+        os.environ.get("VLLM_OFFLOAD_NOSTORE_MAMBA") == "1"
+        or os.path.exists(
+            "/home/curved/vllm-gfx908/logs/serve_recipe_qwen38/NOSTORE_MAMBA"
+        ),
     )
 
 
@@ -1991,6 +2014,7 @@ class OffloadingConnectorScheduler:
         scheduler_output: SchedulerOutput,
     ) -> dict[int, TransferJob]:
         blocks_per_chunk = self.config.blocks_per_chunk
+        knives = _store_knives()
         store_jobs: dict[int, TransferJob] = {}
         for req_id in chain(
             scheduler_output.num_scheduled_tokens,
@@ -2019,6 +2043,24 @@ class OffloadingConnectorScheduler:
                 req_status, req.num_prompt_tokens
             )
 
+            # A running request whose frontier still lies inside every group's
+            # already-considered chunks stores nothing and moves no index:
+            # storable_chunks never exceeds tokens // tokens_per_chunk.
+            settled = not req.is_finished() and all(
+                num_offloadable_tokens // group_config.tokens_per_chunk
+                <= group_state.next_stored_chunk_idx
+                for group_config, group_state in zip(
+                    self.config.kv_group_configs, req_status.group_states
+                )
+            )
+            if settled and not _VERIFY_FASTPATH:
+                continue
+            settled_indices = (
+                [gs.next_stored_chunk_idx for gs in req_status.group_states]
+                if settled
+                else None
+            )
+
             # Filter out chunks skipped due to sliding window attention / SSM
             # or unreachable by the load path's alignment constraints.
             new_offload_keys: list[OffloadKey] = []
@@ -2034,7 +2076,7 @@ class OffloadingConnectorScheduler:
                 self.config.kv_group_configs, req_status.group_states
             ):
                 num_chunks = req_status.storable_chunks(
-                    group_config, group_state, num_offloadable_tokens
+                    group_config, group_state, num_offloadable_tokens, knives
                 )
 
                 start_chunk_idx = group_state.next_stored_chunk_idx
@@ -2174,9 +2216,19 @@ class OffloadingConnectorScheduler:
                     new_offload_keys.append(offload_key)
 
             if not new_offload_keys:
-                req_status.advance_stored_idx(num_offloadable_tokens)
+                req_status.advance_stored_idx(num_offloadable_tokens, knives)
+                if settled_indices is not None and [
+                    gs.next_stored_chunk_idx for gs in req_status.group_states
+                ] != settled_indices:
+                    raise AssertionError(
+                        "offload store fast path: a settled request moved an index"
+                    )
                 continue
 
+            if settled_indices is not None:
+                raise AssertionError(
+                    "offload store fast path: a settled request produced store keys"
+                )
             store_output = self.manager.prepare_store(
                 new_offload_keys, req_status.req_context
             )
@@ -2323,7 +2375,17 @@ class OffloadingConnectorScheduler:
                 len(self._reset_fence),
                 _RESET_FENCE_WARN_S,
             )
+        global _CONN_TRACE
+        if _CONN_TRACE is None:
+            _CONN_TRACE = PhaseTrace("connmeta")
+        _pt = _CONN_TRACE
+        _pt_on = _pt.enabled
+        _pt_t = time.perf_counter() if _pt_on else 0.0
         self._update_req_states(scheduler_output)
+        if _pt_on:
+            _pt_now = time.perf_counter()
+            _pt.add("req_states", _pt_now - _pt_t)
+            _pt_t = _pt_now
         schedule_end_context = ScheduleEndContext(
             new_req_ids=[req.req_id for req in scheduler_output.scheduled_new_reqs],
             preempted_req_ids=scheduler_output.preempted_req_ids or (),
@@ -2361,7 +2423,15 @@ class OffloadingConnectorScheduler:
             )
 
         partial_store_jobs = self._build_partial_tail_store_jobs(scheduler_output)
+        if _pt_on:
+            _pt_now = time.perf_counter()
+            _pt.add("partial", _pt_now - _pt_t)
+            _pt_t = _pt_now
         normal_store_jobs = self._build_store_jobs(scheduler_output)
+        if _pt_on:
+            _pt_now = time.perf_counter()
+            _pt.add("stores", _pt_now - _pt_t)
+            _pt_t = _pt_now
         meta = OffloadingConnectorMetadata(
             load_jobs=self._current_batch_load_jobs,
             store_jobs=partial_store_jobs | normal_store_jobs,
@@ -2389,6 +2459,9 @@ class OffloadingConnectorScheduler:
         # the end of the step, and callers rely on that to bound the step's
         # exclusive access to the manager.
         self.manager.on_schedule_end(schedule_end_context)
+        if _pt_on:
+            _pt.add("rest", time.perf_counter() - _pt_t)
+        _pt.tick()
         return meta
 
     def has_pending_push_work(self) -> bool:

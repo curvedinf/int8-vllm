@@ -589,6 +589,7 @@ class EngineArgs:
     expert_placement_strategy: ExpertPlacementStrategy = (
         ParallelConfig.expert_placement_strategy
     )
+    expert_rank_counts: list[int] | None = ParallelConfig.expert_rank_counts
     _api_process_count: int = ParallelConfig._api_process_count
     _api_process_rank: int = ParallelConfig._api_process_rank
     max_parallel_loading_workers: int | None = (
@@ -1357,6 +1358,9 @@ class EngineArgs:
         parallel_group.add_argument(
             "--expert-placement-strategy",
             **parallel_kwargs["expert_placement_strategy"],
+        )
+        parallel_group.add_argument(
+            "--expert-rank-counts", **parallel_kwargs["expert_rank_counts"]
         )
 
         parallel_group.add_argument(
@@ -2631,6 +2635,7 @@ class EngineArgs:
             enable_eplb=self.enable_eplb,
             eplb_config=self.eplb_config,
             expert_placement_strategy=self.expert_placement_strategy,
+            expert_rank_counts=self.expert_rank_counts,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             ray_workers_use_nsight=self.ray_workers_use_nsight,

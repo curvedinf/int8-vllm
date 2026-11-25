@@ -466,6 +466,16 @@ class Inkling2DSparkModel(nn.Module):
             config, vllm_config.model_config.max_model_len, f"{prefix}model"
         )
         self.lm_head: nn.Module | None = None
+        self.tiled_argmax = vllm_config.additional_config.get(
+            "inkling_dspark_tiled_argmax", False
+        )
+        # "car": exchange the per-tile winners through the custom all-reduce
+        # instead of the all-gather that graph capture routes to pynccl.
+        self.argmax_gather = vllm_config.additional_config.get(
+            "inkling_dspark_argmax_gather", "allgather"
+        )
+        if self.argmax_gather not in ("allgather", "car"):
+            raise ValueError(f"inkling_dspark_argmax_gather={self.argmax_gather!r}")
         self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
 
     @torch.no_grad()
@@ -552,7 +562,12 @@ class Inkling2DSparkModel(nn.Module):
     ) -> torch.Tensor:
         """`markov_logits(...).argmax(-1)`, NaN as -inf."""
         return dspark_argmax(
-            base_logits, bias, self.config.final_logit_softcapping, self.valid_vocab
+            base_logits,
+            bias,
+            self.config.final_logit_softcapping,
+            self.valid_vocab,
+            tiled=self.tiled_argmax,
+            gather=self.argmax_gather,
         )
 
     def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:

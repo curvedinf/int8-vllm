@@ -58,6 +58,58 @@ def _message_mix(
     )
 
 
+@triton.jit
+def _controller_output(
+    Dest,
+    Message,
+    Forget,
+    Gain,
+    Out,
+    sd,
+    sm,
+    sf,
+    sg,
+    H: tl.constexpr,
+    TILE: tl.constexpr,
+    TANH: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    col = tl.program_id(1) * TILE + tl.arange(0, TILE)
+    valid = col < H
+    dest = tl.load(Dest + row * sd + col, valid, 0).to(tl.float32)
+    message = tl.load(Message + row * sm + col, valid, 0).to(tl.float32)
+    forget = tl.load(Forget + row * sf + col, valid, 0)
+    gain = tl.load(Gain + row * sg + col, valid, 0)
+    if TANH:
+        forget = tldevice.tanh(forget)
+        gain = tldevice.tanh(gain)
+    tl.store(Out + row * H + col, dest * (1.0 - forget) + message * gain, valid)
+
+
+def controller_output(dest, message, forget, gain, *, fuse_tanh, tile=256):
+    """Apply the two FP32 gates while preserving separate product rounding."""
+    if not fuse_tanh:
+        forget, gain = forget.tanh(), gain.tanh()
+    tokens, width = dest.shape
+    out = gain.new_empty((tokens, width))
+    _controller_output[(tokens, triton.cdiv(width, tile))](
+        dest,
+        message,
+        forget,
+        gain,
+        out,
+        dest.stride(0),
+        message.stride(0),
+        forget.stride(0),
+        gain.stride(0),
+        width,
+        tile,
+        fuse_tanh,
+        enable_fp_fusion=False,
+    )
+    return out
+
+
 def mix_message(dest, message, down_weight, forget_weight, gain_weight):
     """Normalize a pair of residuals and apply the loop's learned message gates."""
     m, h = dest.shape
