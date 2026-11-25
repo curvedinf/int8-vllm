@@ -34,8 +34,12 @@ serve() {
   export VLLM_AIS_REPACK_WINDOW_MB="${VLLM_AIS_REPACK_WINDOW_MB:-2}"
   export VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1
   export VLLM_ROCM_USE_AITER_CUSTOM_AR="${VLLM_ROCM_USE_AITER_CUSTOM_AR:-0}"
-  if [[ -z "${VLLM_API_KEY:-}" && -n "${API_KEY_FILE:-}" ]]; then
+  # A set-but-empty VLLM_API_KEY serves without authentication; the key
+  # file is only read when the variable is unset.
+  if [[ ! ${VLLM_API_KEY+x} && -n "${API_KEY_FILE:-}" ]]; then
     VLLM_API_KEY="$(tr -d '\r\n' <"$API_KEY_FILE")"
+    export VLLM_API_KEY
+  else
     export VLLM_API_KEY
   fi
   source "$root/scripts/mi100-cpu-map.sh"

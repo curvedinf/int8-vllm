@@ -127,7 +127,12 @@ case "$recipe" in
   *) echo "MI100_RECIPE must be qwen38, flint, bolt, hy4 or inkling2mini." >&2; exit 2 ;;
 esac
 if [[ "$recipe" == hy4 || "$recipe" == inkling2mini ]]; then
-  export VLLM_API_KEY="${VLLM_API_KEY:-${LLAMA_API_KEY:-}}"
+  # Leave VLLM_API_KEY alone when set (an empty value means no
+  # authentication); export LLAMA_API_KEY only when nothing is set, so the
+  # recipe script still reads its key file when no credential exists.
+  if [[ -z "${VLLM_API_KEY+x}" && -n "${LLAMA_API_KEY:-}" ]]; then
+    export VLLM_API_KEY="$LLAMA_API_KEY"
+  fi
   if [[ -z "${API_KEY_FILE:-}" && -r /etc/llama/llama-api.key ]]; then
     export API_KEY_FILE=/etc/llama/llama-api.key
   fi
@@ -241,7 +246,7 @@ if [[ -n "$draft" ]]; then
   DRAFT_MODEL_DIR=$(resolve_model "${DRAFT_MODEL_DIR:-$models/$draft}" "$draft_repo" "${DRAFT_MODEL_DIR:-}" "${DRAFT_MODEL_REVISION:-$draft_rev}")
   export DRAFT_MODEL_DIR
 fi
-if [[ -z "${VLLM_API_KEY:-}${LLAMA_API_KEY:-}" && ! -r "${API_KEY_FILE:-/etc/llama/llama-api.key}" ]]; then
+if [[ -z "${VLLM_API_KEY+x}" && -z "${LLAMA_API_KEY:-}" && ! -r "${API_KEY_FILE:-/etc/llama/llama-api.key}" ]]; then
   key_dir="${XDG_CACHE_HOME:-$HOME/.cache}/mi100"
   mkdir -p "$key_dir"
   export API_KEY_FILE="$key_dir/api.key"

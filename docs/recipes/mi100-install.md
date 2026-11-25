@@ -101,6 +101,8 @@ Use the native start command on your [Qwen](README.md#native-serving), [Flint](f
 
 Set your client’s base URL to `http://127.0.0.1:8020/v1` and use the model ID from the table above. If you supplied `VLLM_API_KEY`, use that value in your client. Otherwise the launcher uses the configured key file or generates a key on first start.
 
+To serve without authentication, for example behind a reverse proxy that checks the bearer token itself, set the key to an empty string (`VLLM_API_KEY=""`). An empty key is used as is: the launcher neither reads nor generates a key file, and the server accepts requests without an `Authorization` header.
+
 For Docker, read the generated key from the running container. Use the same Compose file you used to start it.
 
 ```bash

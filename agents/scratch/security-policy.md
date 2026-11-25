@@ -22,3 +22,7 @@ and email as author and committer attribution for the decoder INT8 changes
 being committed and pushed in int8-vllm and the sibling int8-aiter repository.
 This approval covers these commits only, not contact details in file content
 or other disclosures. No identifying values are recorded here.
+
+On 2026-11-25, the user directed that the empty-API-key change for issue #3
+be committed and pushed to main when complete. This approves the configured
+Git name and email as author and committer attribution for that commit only.

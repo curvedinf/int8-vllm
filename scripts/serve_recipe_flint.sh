@@ -51,13 +51,18 @@ alive() {
 }
 
 serve() {
-  export VLLM_API_KEY="${VLLM_API_KEY:-${LLAMA_API_KEY:-}}"
-  if [[ -z "${VLLM_API_KEY}" ]]; then
-    local key_file="${API_KEY_FILE:-/etc/llama/llama-api.key}"
-    [[ -r "$key_file" ]] || { echo "Cannot read API key file: $key_file" >&2; return 1; }
-    VLLM_API_KEY="$(tr -d '\r\n' < "$key_file")"
+  # A set-but-empty VLLM_API_KEY serves without authentication; only an
+  # unset variable falls back to LLAMA_API_KEY or the key file.
+  if [[ -z "${VLLM_API_KEY+x}" ]]; then
+    export VLLM_API_KEY="${LLAMA_API_KEY:-}"
+    if [[ -z "${VLLM_API_KEY}" ]]; then
+      local key_file="${API_KEY_FILE:-/etc/llama/llama-api.key}"
+      [[ -r "$key_file" ]] || { echo "Cannot read API key file: $key_file" >&2; return 1; }
+      VLLM_API_KEY="$(tr -d '\r\n' < "$key_file")"
+      [[ -n "${VLLM_API_KEY}" ]] || { echo 'API key is empty' >&2; return 1; }
+    fi
   fi
-  [[ -n "${VLLM_API_KEY}" ]] || { echo 'API key is empty' >&2; return 1; }
+  export VLLM_API_KEY
   export PATH="/opt/rocm/bin:${ROOT_DIR}/.venv/bin:${PATH}"
   export PYTHONPATH="${ROOT_DIR}/python_startup:${ROOT_DIR}:${ROOT_DIR}/../int8-aiter:${PYTHONPATH:-}"
   export ROCM_PATH=/opt/rocm HIP_PATH=/opt/rocm LD_LIBRARY_PATH="/opt/rocm/lib:${LD_LIBRARY_PATH:-}"

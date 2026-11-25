@@ -611,7 +611,9 @@ is_running() {
 }
 
 read_api_key() {
-  if [[ -n "${VLLM_API_KEY:-}" ]]; then
+  # A set VLLM_API_KEY is used verbatim, even when empty: an empty key
+  # serves without authentication (vLLM drops empty tokens).
+  if [[ -n "${VLLM_API_KEY+x}" ]]; then
     printf '%s' "${VLLM_API_KEY}"
     return 0
   fi
