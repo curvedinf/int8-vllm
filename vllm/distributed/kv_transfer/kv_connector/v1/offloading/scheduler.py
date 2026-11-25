@@ -441,6 +441,9 @@ class RequestOffloadState:
     load_key_ranges: list[tuple[int, int, OffloadKey]] = field(default_factory=list)
     # True once on_request_finished has been signaled to the manager.
     finished_signaled: bool = False
+    # True once a failed store allocation was logged for this request, so a
+    # tier with nothing evictable logs once per request, not once per step.
+    store_allocation_warned: bool = False
 
     def __post_init__(self) -> None:
         self.group_states = tuple(
@@ -2236,7 +2239,9 @@ class OffloadingConnectorScheduler:
                 self._connector_stats.increase_counter(
                     _ConnectorMetricName.ALLOCATION_FAILURE
                 )
-                logger.warning("Request %s: cannot store chunks", req_id)
+                if not req_status.store_allocation_warned:
+                    req_status.store_allocation_warned = True
+                    logger.warning("Request %s: cannot store chunks", req_id)
                 continue
 
             if not store_output.keys_to_store:

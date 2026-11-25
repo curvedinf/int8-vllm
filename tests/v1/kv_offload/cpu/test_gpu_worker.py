@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
 import random
+import threading
 import time
 import uuid
 from unittest.mock import MagicMock
@@ -175,6 +176,8 @@ def test_handler_shutdown_skips_transfers_after_event_sync_failure() -> None:
     handler = gpu_worker.SingleDirectionOffloadingHandler.__new__(
         gpu_worker.SingleDirectionOffloadingHandler
     )
+    # shutdown() drains the background store thread when one exists.
+    handler._classic_thread = None
     failed_event = MagicMock()
     failed_event.synchronize.side_effect = RuntimeError("device lost")
     skipped_event = MagicMock()
@@ -202,6 +205,81 @@ def test_handler_shutdown_skips_transfers_after_event_sync_failure() -> None:
     assert not handler._buffer_pool
     assert not handler.src_tensors
     assert not handler.dst_tensors
+
+
+def _queued_transfer(job_id: int, complete: bool) -> MagicMock:
+    event = MagicMock()
+    event.query.return_value = complete
+    event.elapsed_time.return_value = 1000.0
+    return MagicMock(
+        job_id=job_id, end_event=event, start_event=event, on_compute_stream=False
+    )
+
+
+def _store_handler(
+    transfers: list[MagicMock],
+) -> gpu_worker.SingleDirectionOffloadingHandler:
+    handler = gpu_worker.SingleDirectionOffloadingHandler.__new__(
+        gpu_worker.SingleDirectionOffloadingHandler
+    )
+    handler._classic_error = None
+    handler._classic_done = {}
+    handler._transfers = gpu_worker.deque(transfers)
+    handler._transfer_events = {t.job_id: t.end_event for t in transfers}
+    handler._stream_pool = []
+    handler._event_pool = []
+    handler._buffer_pool = []
+    return handler
+
+
+def test_background_store_is_reported_once_its_thread_signals() -> None:
+    """A background copy's end event queries as complete until the copy
+    thread has recorded it, so completion waits for the thread's signal."""
+    handler = _store_handler([_queued_transfer(1, complete=True)])
+    done = threading.Event()
+    handler._classic_done[1] = done
+
+    assert handler.get_finished() == []
+    done.set()
+    finished = handler.get_finished()
+    assert [result.job_id for result in finished] == [1]
+    assert all(result.success for result in finished)
+    assert not handler._transfers
+    assert not handler._classic_done
+    assert not handler._transfer_events
+
+
+def test_background_store_does_not_block_later_finished_jobs() -> None:
+    """Jobs complete in queue order: one waiting on its copy thread holds
+    the queue only until that thread signals."""
+    handler = _store_handler(
+        [_queued_transfer(1, complete=True), _queued_transfer(2, complete=True)]
+    )
+    done = threading.Event()
+    handler._classic_done[1] = done
+
+    assert handler.get_finished() == []
+    done.set()
+    assert [result.job_id for result in handler.get_finished()] == [1, 2]
+
+
+def test_background_store_waits_for_the_copy_after_the_thread_signals() -> None:
+    handler = _store_handler([_queued_transfer(1, complete=False)])
+    done = threading.Event()
+    done.set()
+    handler._classic_done[1] = done
+
+    assert handler.get_finished() == []
+    handler._transfers[0].end_event.query.return_value = True
+    assert [result.job_id for result in handler.get_finished()] == [1]
+
+
+def test_copy_thread_error_surfaces_from_get_finished() -> None:
+    handler = _store_handler([])
+    handler._classic_error = RuntimeError("copy failed")
+
+    with pytest.raises(RuntimeError, match="classic store copy failed"):
+        handler.get_finished()
 
 
 @pytest.mark.parametrize("device_sync_fails", [False, True])

@@ -973,10 +973,15 @@ class SingleDirectionOffloadingHandler:
         if self._classic_error is not None:
             raise RuntimeError("classic store copy failed") from self._classic_error
         _noev = _offload_knife("NOEVENTS")
-        while self._transfers and (
-            self._transfers[0].job_id not in self._classic_done
-            and (_noev or self._transfers[0].end_event.query())
-        ):
+        while self._transfers:
+            head = self._transfers[0]
+            done = self._classic_done.get(head.job_id)
+            # A background copy records its end event last: until the thread
+            # signals, an unrecorded event would query as complete.
+            if done is not None and not done.is_set():
+                break
+            if not (_noev or head.end_event.query()):
+                break
             transfer = self._transfers.popleft()
             self._classic_done.pop(transfer.job_id, None)
             transfer_time = 0.0 if _noev else (
