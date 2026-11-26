@@ -34,3 +34,7 @@ for the commits carrying that work, in int8-vllm and in the sibling int8-aiter
 repository (the routed-expert and tabulated-SwiGLU kernels the recipe loads),
 only. It does not approve contact details in file content, local account paths,
 or any other disclosure.
+
+On 2026-11-26, the user approved the configured Git name and email for
+attribution on the Inkling service recovery commit and publication to main
+with the two preceding Inkling fixes. This permission covers Git metadata.
