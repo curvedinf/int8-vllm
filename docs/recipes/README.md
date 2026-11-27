@@ -1,6 +1,6 @@
 # Serve Qwen3.8-27B on MI100
 
-This recipe serves Qwen3.8-27B as a text chat API on two, three or four 32 GiB MI100s. Allow about 32 GiB of disk for the [INT8 target](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128-PTQR) and its [DFlash2 draft](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128-PTQR).
+This recipe serves Qwen3.8-27B on two, three or four 32 GiB MI100s. Each chat request can include text, up to one image and up to one video. The processor resizes images to at most 1,048,576 pixels and samples up to 32 frames per video with a 4,194,304-pixel video budget. Allow about 32 GiB of disk for the [INT8 target](https://huggingface.co/curvedinf/Qwen3.8-27B-GPTQ-INT8-W8A8-GS128-PTQR) and its [DFlash2 draft](https://huggingface.co/curvedinf/Qwen3.8-27B-DFlash2-GPTQ-INT8-W8A8-GS128-PTQR).
 
 ## Docker Compose
 

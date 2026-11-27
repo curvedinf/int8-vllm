@@ -153,8 +153,8 @@ ARGS=(
   # --kv-cache-memory overrides --gpu-memory-utilization; leave headroom
   # for transient runtime allocations. ${LOG_DIR}/KVMEM overrides the env.
   --compilation-config '{"mode":'"${CMODE:-3}"',"cudagraph_mode":"'"${CGMODE:-FULL_AND_PIECEWISE}"'","cudagraph_capture_sizes":'"${CGSIZES:-null}"',"custom_ops":["+gemma_rms_norm","+silu_and_mul","+rms_norm_gated","+rotary_embedding","+apply_rotary_emb","none"],"pass_config":{"fuse_allreduce_rms":'"${ARFUSE:-false}"'}}'
-  --language-model-only
-  --skip-mm-profiling
+  --limit-mm-per-prompt '{"image":1,"video":1}'
+  --mm-processor-kwargs '{"images_kwargs":{"max_pixels":1048576},"videos_kwargs":{"max_pixels":4194304,"max_frames":32}}'
   --disable-uvicorn-access-log
   --enable-auto-tool-choice
   --tool-call-parser qwen3_coder
@@ -330,14 +330,12 @@ if [[ -n "${LPT:-}" ]]; then
   ARGS+=(--long-prefill-token-threshold "${LPT}")
 fi
 # KVMEM: optional pinned KV cache size in bytes (flag file or env).
-# Default 19.0 GB per GPU (2026-09-28): return 1.2 GB per GPU from the
-# previous 20.2 GB arena after recurrent ROCm OOMs at low KV occupancy.
-# Keep max-model-len 262144, C6, and the CPU KV offload tier (CPUTIER).
+# By default, size KV from the memory profile including the vision encoder.
 _kvmem_flag="${LOG_DIR}/KVMEM"
 if [[ -f "${_kvmem_flag}" ]]; then
   KVMEM="$(tr -d '[:space:]' < "${_kvmem_flag}")"
 fi
-KVMEM="${KVMEM:-19000000000}"
+KVMEM="${KVMEM:-auto}"
 if [[ "$KVMEM" != auto ]]; then ARGS+=(--kv-cache-memory "$KVMEM"); fi
 # EAGERALL flag file: --enforce-eager (diagnostic; target python-side
 # instrumentation like the GDN state ring needs non-replayed rounds).

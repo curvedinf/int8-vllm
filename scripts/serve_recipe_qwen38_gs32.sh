@@ -119,13 +119,9 @@ ARGS=(
   --max-model-len 262144
   --max-num-seqs 6
   --gpu-memory-utilization 0.92
-  # KVMEM flag file / env: pin the KV arena size in bytes (gpu_worker reports
-  # ~1.4GiB/GPU unused headroom at 0.92 util; a pinned --kv-cache-memory
-  # both recovers it and makes the pool deterministic across boots).
-  # ${LOG_DIR}/KVMEM (e.g. "19000000000") overrides the env for systemd boots.
   --compilation-config '{"mode":'"${CMODE:-3}"',"cudagraph_mode":"'"${CGMODE:-FULL_AND_PIECEWISE}"'","custom_ops":["+gemma_rms_norm","+silu_and_mul","+rms_norm_gated","+rotary_embedding","+apply_rotary_emb","none"],"pass_config":{"fuse_allreduce_rms":'"${ARFUSE:-false}"'}}'
-  --language-model-only
-  --skip-mm-profiling
+  --limit-mm-per-prompt '{"image":1,"video":1}'
+  --mm-processor-kwargs '{"images_kwargs":{"max_pixels":1048576},"videos_kwargs":{"max_pixels":4194304,"max_frames":32}}'
   --disable-uvicorn-access-log
   --enable-auto-tool-choice
   --tool-call-parser qwen3_coder
@@ -247,15 +243,13 @@ fi
 MNBT="${MNBT:-2048}"
 ARGS+=(--max-num-batched-tokens "${MNBT}")
 # KVMEM: optional pinned KV cache size in bytes (flag file or env).
-# Default 20.2 GiB (2026-08-30): recovers the ~1.4 GiB/GPU the 0.92-util
-# profiler leaves unused -> 1,031,145-token arena (was 982,523; +4.9%
-# capacity, 3.93x max-len). Concurrent-round stable, 0 collapse windows.
+# By default, size KV from the memory profile including the vision encoder.
 _kvmem_flag="${LOG_DIR}/KVMEM"
 if [[ -f "${_kvmem_flag}" ]]; then
   KVMEM="$(tr -d '[:space:]' < "${_kvmem_flag}")"
 fi
-KVMEM="${KVMEM:-20200000000}"
-ARGS+=(--kv-cache-memory "${KVMEM}")
+KVMEM="${KVMEM:-auto}"
+if [[ "$KVMEM" != auto ]]; then ARGS+=(--kv-cache-memory "$KVMEM"); fi
 # EAGERALL flag file: --enforce-eager (diagnostic; target python-side
 # instrumentation like the GDN state ring needs non-replayed rounds).
 if [[ -f "${LOG_DIR}/EAGERALL" ]]; then

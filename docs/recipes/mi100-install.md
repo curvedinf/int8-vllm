@@ -2,13 +2,13 @@
 
 These recipes run an OpenAI-compatible API on a single Linux host with 32 GiB AMD Instinct MI100 cards. Choose a model and the connection between your GPUs. The launcher downloads the matching target and draft together.
 
-| Model | `MI100_RECIPE` | Cards | API model ID | Disk for checkpoints |
-| --- | --- | --- | --- | --- |
-| [Qwen3.8-27B](README.md) | `qwen38` | 2, 3 or 4 | `qwen3.8-27b-gptq8` | About 32 GiB |
-| [Flint](flint.md) | `flint` | 2, 3 or 4 | `flint` | About 39 GiB |
-| [Nemotron Bolt](nemotron_bolt.md) | `bolt` | 2, 3 or 4 | `nemotron-bolt` | About 24 GiB |
-| [HY4-Flash](hy4-flash.md) | `hy4` | 4 | `hy4-flash` | About 113 GiB including the n-gram tables |
-| Inkling 2 Mini | `inkling2mini` | 2 or 4 | `inkling-2-mini` | About 15 GiB |
+| Model | Inputs | `MI100_RECIPE` | Cards | API model ID | Disk for checkpoints |
+| --- | --- | --- | --- | --- | --- |
+| [Qwen3.8-27B](README.md) | Text, image, video | `qwen38` | 2, 3 or 4 | `qwen3.8-27b-gptq8` | About 32 GiB |
+| [Flint](flint.md) | Text | `flint` | 2, 3 or 4 | `flint` | About 39 GiB |
+| [Nemotron Bolt](nemotron_bolt.md) | Text, image, video | `bolt` | 2, 3 or 4 | `nemotron-bolt` | About 24 GiB |
+| [HY4-Flash](hy4-flash.md) | Text, image, video | `hy4` | 4 | `hy4-flash` | About 113 GiB including the n-gram tables |
+| Inkling 2 Mini | Text, image | `inkling2mini` | 2 or 4 | `inkling-2-mini` | About 15 GiB |
 
 Run `rocm-smi --showtopotype` on the host. Use `MI100_XGMI=on` for a full XGMI mesh among the selected cards and `off` for PCIe. With two or four cards the launcher splits the model using tensor parallelism. With three it uses three pipeline stages. Inkling 2 Mini takes two or four cards only: its 8 KV heads cannot be split three ways.
 
